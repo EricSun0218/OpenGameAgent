@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/skill-manifest.schema.json",
+  "title": "SkillManifest",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "skillId",
+    "version",
+    "digest",
+    "description",
+    "promptFragments",
+    "requiredToolRefs",
+    "optionalToolRefs",
+    "contextProviderRefs",
+    "resourceRefs",
+    "capabilityRequirements",
+    "trust",
+    "activationPolicy"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "skillId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "promptFragments": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requiredToolRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "optionalToolRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "contextProviderRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "resourceRefs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/resourceRef"
+      }
+    },
+    "capabilityRequirements": {
+      "type": "object"
+    },
+    "trust": {
+      "enum": [
+        "builtin",
+        "trusted",
+        "untrusted"
+      ]
+    },
+    "activationPolicy": {
+      "type": "object"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

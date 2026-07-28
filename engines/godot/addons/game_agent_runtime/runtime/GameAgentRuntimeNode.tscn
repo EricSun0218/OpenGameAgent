@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/game_agent_runtime/runtime/GameAgentRuntimeNode.cs" id="1_runtime"]
+
+[node name="GameAgentRuntime" type="Node"]
+process_mode = 3
+script = ExtResource("1_runtime")

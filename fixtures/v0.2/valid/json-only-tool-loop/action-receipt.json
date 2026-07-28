@@ -1,0 +1,20 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "operationId": "operation-0001",
+  "revision": 1,
+  "status": "succeeded",
+  "result": {
+    "resource": "berries",
+    "gathered": 1
+  },
+  "stateDiff": {
+    "inventory": {
+      "foodDelta": 1
+    }
+  },
+  "authoritativeObservations": [],
+  "retryable": false,
+  "committedAt": "2026-07-28T00:00:01.100Z",
+  "receivedAt": "2026-07-28T00:00:01.101Z"
+}

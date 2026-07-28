@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0-alpha.1",
+  "FriendlyName": "Game Agent Runtime",
+  "Description": "Unreal Engine host bridge for the Game Agent Runtime wire protocol.",
+  "Category": "AI",
+  "CreatedBy": "Eric Sun",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "GameAgentRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}

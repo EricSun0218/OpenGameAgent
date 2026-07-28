@@ -1,0 +1,9 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "operationId": "operation-invalid",
+  "revision": -1,
+  "status": "succeeded",
+  "retryable": false,
+  "receivedAt": "2026-07-28T00:00:00Z"
+}

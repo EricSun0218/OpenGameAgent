@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>GameAgent.Core</RootNamespace>
+    <Description>Durable streaming agent loop, tools, skills, context, control, scheduling, and recovery.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/action-request.schema.json",
+  "title": "ActionRequest",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "operationId",
+    "runId",
+    "turnId",
+    "toolCallId",
+    "agentId",
+    "worldId",
+    "actionName",
+    "actionVersion",
+    "arguments",
+    "requestedAt"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "operationId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "turnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "toolCallId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "agentId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "worldId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "actionName": {
+      "$ref": "common.schema.json#/$defs/name"
+    },
+    "actionVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "arguments": {},
+    "basedOnStateVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "expectedEffects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "maxItems": 32
+    },
+    "reasonCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "requestedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "deadline": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

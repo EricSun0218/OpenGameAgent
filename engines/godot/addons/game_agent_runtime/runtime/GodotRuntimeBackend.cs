@@ -1,0 +1,606 @@
+using GameAgent.Core;
+using GameAgent.Protocol;
+using GameAgent.Runtime;
+
+namespace GameAgent.Godot;
+
+// Kept for source compatibility with the v0 headless adapter.
+public interface IGodotRuntimeBackend
+{
+    ValueTask<HeadlessRunOutcome> RunAsync(
+        HeadlessRunRequest request,
+        CancellationToken cancellationToken);
+
+    ValueTask StopAsync(CancellationToken cancellationToken);
+}
+
+public interface IGodotDurableRuntimeBackend
+{
+    ValueTask<DurableRunOutcome> RunAsync(
+        DurableRunRequest request,
+        CancellationToken cancellationToken);
+
+    ValueTask<DurableRunOutcome> ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken);
+
+    bool TryPostControl(string runId, RunControlCommand command);
+
+    ValueTask StopAsync(CancellationToken cancellationToken);
+}
+
+internal static class GodotShutdownWait
+{
+    public static ValueTask WaitAsync(
+        Task shutdown,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        return new ValueTask(
+            AwaitWithTimeoutAsync(
+                shutdown,
+                timeout,
+                cancellationToken));
+    }
+
+    public static ValueTask WaitAsync(
+        Task shutdown,
+        CancellationToken cancellationToken)
+    {
+        return cancellationToken.CanBeCanceled
+            ? new ValueTask(
+                AwaitWithCancellationAsync(shutdown, cancellationToken))
+            : new ValueTask(shutdown);
+    }
+
+    private static async Task AwaitWithCancellationAsync(
+        Task shutdown,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (shutdown.IsCompleted)
+        {
+            await shutdown.ConfigureAwait(false);
+            return;
+        }
+
+        var cancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            () => cancelled.TrySetCanceled(cancellationToken));
+        var completed = await Task.WhenAny(shutdown, cancelled.Task)
+            .ConfigureAwait(false);
+        await completed.ConfigureAwait(false);
+    }
+
+    private static async Task AwaitWithTimeoutAsync(
+        Task shutdown,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (shutdown.IsCompleted)
+        {
+            await shutdown.ConfigureAwait(false);
+            return;
+        }
+
+        using var timeoutCancellation = new CancellationTokenSource();
+        var timedOut = Task.Delay(timeout, timeoutCancellation.Token);
+        var cancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            () => cancelled.TrySetCanceled(cancellationToken));
+        var completed = await Task
+            .WhenAny(shutdown, timedOut, cancelled.Task)
+            .ConfigureAwait(false);
+
+        if (ReferenceEquals(completed, shutdown))
+        {
+            timeoutCancellation.Cancel();
+            await shutdown.ConfigureAwait(false);
+            return;
+        }
+
+        if (ReferenceEquals(completed, cancelled.Task))
+        {
+            await cancelled.Task.ConfigureAwait(false);
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        throw new TimeoutException(
+            "Timed out while waiting for the Godot runtime to stop.");
+    }
+}
+
+internal sealed class HeadlessGodotRuntimeBackend : IGodotRuntimeBackend
+{
+    private readonly HeadlessAgentRuntime _runtime;
+    private readonly IDurableSessionStore? _durableStore;
+    private readonly bool _disposeStoreOnShutdown;
+    private readonly object _stopGate = new();
+    private Task? _stopTask;
+
+    public HeadlessGodotRuntimeBackend(
+        HeadlessAgentRuntime runtime,
+        ISessionStore store,
+        bool disposeStoreOnShutdown)
+    {
+        _runtime = runtime;
+        _durableStore = store as IDurableSessionStore;
+        _disposeStoreOnShutdown = disposeStoreOnShutdown;
+    }
+
+    public ValueTask<HeadlessRunOutcome> RunAsync(
+        HeadlessRunRequest request,
+        CancellationToken cancellationToken) =>
+        _runtime.RunAsync(request, cancellationToken);
+
+    public ValueTask StopAsync(CancellationToken cancellationToken)
+    {
+        Task shutdown;
+        lock (_stopGate)
+        {
+            _stopTask ??= StopCoreAsync();
+            shutdown = _stopTask;
+        }
+
+        return GodotShutdownWait.WaitAsync(shutdown, cancellationToken);
+    }
+
+    private async Task StopCoreAsync()
+    {
+        if (_durableStore is null)
+        {
+            return;
+        }
+
+        Exception? failure = null;
+        try
+        {
+            await _durableStore
+                .FlushAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+
+        try
+        {
+            if (_disposeStoreOnShutdown)
+            {
+                await _durableStore.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = Combine(failure, exception);
+        }
+
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    private static Exception Combine(Exception? first, Exception next) =>
+        first is null ? next : new AggregateException(first, next);
+}
+
+public sealed class GodotDurableRuntimeBackend : IGodotDurableRuntimeBackend
+{
+    private readonly IDurableAgentRuntime _runtime;
+    private readonly IDurableSessionStore _store;
+    private readonly bool _disposeRuntimeOnShutdown;
+    private readonly bool _disposeStoreOnShutdown;
+    private readonly object _stopGate = new();
+    private Task? _stopTask;
+
+    public GodotDurableRuntimeBackend(
+        IDurableAgentRuntime runtime,
+        IDurableSessionStore store,
+        bool disposeRuntimeOnShutdown = false,
+        bool disposeStoreOnShutdown = false)
+    {
+        _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
+        _store = store ?? throw new ArgumentNullException(nameof(store));
+        _disposeRuntimeOnShutdown = disposeRuntimeOnShutdown;
+        _disposeStoreOnShutdown = disposeStoreOnShutdown;
+
+        if (disposeRuntimeOnShutdown
+            && runtime is not IDisposable
+            && runtime is not IAsyncDisposable)
+        {
+            throw new ArgumentException(
+                "An owned durable runtime must implement IDisposable or IAsyncDisposable.",
+                nameof(runtime));
+        }
+    }
+
+    public ValueTask<DurableRunOutcome> RunAsync(
+        DurableRunRequest request,
+        CancellationToken cancellationToken) =>
+        _runtime.RunAsync(request, cancellationToken);
+
+    public ValueTask<DurableRunOutcome> ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken) =>
+        _runtime.ResumeAsync(
+            runId,
+            continuation,
+            reconciler,
+            cancellationToken);
+
+    public bool TryPostControl(string runId, RunControlCommand command) =>
+        _runtime.Controls.TryPost(runId, command);
+
+    public ValueTask StopAsync(CancellationToken cancellationToken)
+    {
+        Task shutdown;
+        lock (_stopGate)
+        {
+            _stopTask ??= StopCoreAsync();
+            shutdown = _stopTask;
+        }
+
+        return GodotShutdownWait.WaitAsync(shutdown, cancellationToken);
+    }
+
+    private async Task StopCoreAsync()
+    {
+        Exception? failure = null;
+        try
+        {
+            if (_disposeRuntimeOnShutdown)
+            {
+                await DisposeRuntimeAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+
+        try
+        {
+            await _store
+                .FlushAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            failure = Combine(failure, exception);
+        }
+
+        try
+        {
+            if (_disposeStoreOnShutdown)
+            {
+                await _store.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            failure = Combine(failure, exception);
+        }
+
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    private ValueTask DisposeRuntimeAsync()
+    {
+        if (_runtime is IAsyncDisposable asyncDisposable)
+        {
+            return asyncDisposable.DisposeAsync();
+        }
+
+        ((IDisposable)_runtime).Dispose();
+        return default;
+    }
+
+    private static Exception Combine(Exception? first, Exception next) =>
+        first is null ? next : new AggregateException(first, next);
+}
+
+public sealed class GodotBuiltRuntimeBackend : IGodotDurableRuntimeBackend
+{
+    private readonly BuiltGameAgentRuntime _built;
+    private readonly object _stopGate = new();
+    private Task? _stopTask;
+
+    public GodotBuiltRuntimeBackend(BuiltGameAgentRuntime built)
+    {
+        _built = built ?? throw new ArgumentNullException(nameof(built));
+    }
+
+    public ValueTask<DurableRunOutcome> RunAsync(
+        DurableRunRequest request,
+        CancellationToken cancellationToken) =>
+        _built.Runtime.RunAsync(request, cancellationToken);
+
+    public ValueTask<DurableRunOutcome> ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken) =>
+        _built.Runtime.ResumeAsync(
+            runId,
+            continuation,
+            reconciler,
+            cancellationToken);
+
+    public bool TryPostControl(string runId, RunControlCommand command) =>
+        _built.Runtime.Controls.TryPost(runId, command);
+
+    public ValueTask StopAsync(CancellationToken cancellationToken)
+    {
+        Task shutdown;
+        lock (_stopGate)
+        {
+            _stopTask ??= _built.StopAsync(CancellationToken.None).AsTask();
+            shutdown = _stopTask;
+        }
+
+        return GodotShutdownWait.WaitAsync(shutdown, cancellationToken);
+    }
+}
+
+internal sealed class GodotEventForwardingSessionStore : ISessionStore
+{
+    private readonly ISessionStore _inner;
+    private readonly GodotEventPump _eventPump;
+
+    public GodotEventForwardingSessionStore(
+        ISessionStore inner,
+        GodotEventPump eventPump)
+    {
+        _inner = inner;
+        _eventPump = eventPump;
+    }
+
+    public async ValueTask AppendAsync(
+        RuntimeEvent runtimeEvent,
+        CancellationToken cancellationToken)
+    {
+        await _inner
+            .AppendAsync(runtimeEvent, cancellationToken)
+            .ConfigureAwait(false);
+
+        _eventPump.TryPublish(new GodotEventMessage
+        {
+            Kind = GodotEventKinds.RuntimeEvent,
+            Json = ProtocolJson.Serialize(runtimeEvent)
+        });
+    }
+
+    public ValueTask<IReadOnlyList<RuntimeEvent>> ReadRunAsync(
+        string runId,
+        CancellationToken cancellationToken) =>
+        _inner.ReadRunAsync(runId, cancellationToken);
+}
+
+public sealed class GodotRuntimeEventPublisher :
+    INonBlockingRuntimeEventPublisher
+{
+    private readonly GodotEventPump _eventPump;
+
+    internal GodotRuntimeEventPublisher(GodotEventPump eventPump)
+    {
+        _eventPump = eventPump;
+    }
+
+    public void Publish(RuntimeEvent runtimeEvent)
+    {
+        if (runtimeEvent is null)
+        {
+            throw new ArgumentNullException(nameof(runtimeEvent));
+        }
+
+        _eventPump.TryPublish(new GodotEventMessage
+        {
+            Kind = GodotEventKinds.RuntimeEvent,
+            Json = ProtocolJson.Serialize(runtimeEvent)
+        });
+    }
+}
+
+public sealed class GodotRuntimeHost
+{
+    private readonly GameAgentRuntimeNode _node;
+
+    internal GodotRuntimeHost(GameAgentRuntimeNode node)
+    {
+        _node = node;
+    }
+
+    public GodotMainThreadDispatcher Dispatcher => _node.Dispatcher;
+
+    public bool IsConfigured => _node.IsBackendConfigured;
+
+    public IRuntimeEventPublisher EventPublisher => _node.RuntimeEventPublisher;
+
+    // Legacy headless backend registration.
+    public void Configure(IGodotRuntimeBackend backend)
+    {
+        if (backend is null)
+        {
+            throw new ArgumentNullException(nameof(backend));
+        }
+
+        _node.ConfigureBackend(backend);
+    }
+
+    public void ConfigureDurable(IGodotDurableRuntimeBackend backend)
+    {
+        if (backend is null)
+        {
+            throw new ArgumentNullException(nameof(backend));
+        }
+
+        _node.ConfigureDurableBackend(backend);
+    }
+
+    public void ConfigureDurable(
+        IDurableAgentRuntime runtime,
+        IDurableSessionStore store,
+        bool disposeRuntimeOnShutdown = false,
+        bool disposeStoreOnShutdown = false)
+    {
+        ConfigureDurable(
+            new GodotDurableRuntimeBackend(
+                runtime,
+                store,
+                disposeRuntimeOnShutdown,
+                disposeStoreOnShutdown));
+    }
+
+    public void ConfigureDurable(BuiltGameAgentRuntime built)
+    {
+        ConfigureDurable(new GodotBuiltRuntimeBackend(built));
+    }
+
+    public void ConfigureHeadless(
+        IModelProvider provider,
+        IGameHost gameHost,
+        ISessionStore store,
+        IRuntimeClock clock,
+        IRuntimeIdGenerator ids,
+        bool disposeStoreOnShutdown = false)
+    {
+        if (provider is null)
+        {
+            throw new ArgumentNullException(nameof(provider));
+        }
+
+        if (gameHost is null)
+        {
+            throw new ArgumentNullException(nameof(gameHost));
+        }
+
+        if (store is null)
+        {
+            throw new ArgumentNullException(nameof(store));
+        }
+
+        if (clock is null)
+        {
+            throw new ArgumentNullException(nameof(clock));
+        }
+
+        if (ids is null)
+        {
+            throw new ArgumentNullException(nameof(ids));
+        }
+
+        var forwardingStore = new GodotEventForwardingSessionStore(
+            store,
+            _node.EventPump);
+        var runtime = new HeadlessAgentRuntime(
+            provider,
+            gameHost,
+            forwardingStore,
+            clock,
+            ids);
+        Configure(
+            new HeadlessGodotRuntimeBackend(
+                runtime,
+                store,
+                disposeStoreOnShutdown));
+    }
+
+    public string StartRun(DurableRunRequest request) =>
+        _node.StartTypedDurableRun(request);
+
+    public string ResumeRun(
+        string runId,
+        DurableRunContinuation? continuation = null,
+        IGameOperationReconciler? reconciler = null) =>
+        _node.ResumeTypedDurableRun(runId, continuation, reconciler);
+
+    public bool TryPostControl(string runId, RunControlCommand command) =>
+        _node.TryPostTypedControl(runId, command);
+
+    public bool CancelRun(
+        string runId,
+        string? commandId = null,
+        DateTimeOffset? createdAt = null) =>
+        PostControl(
+            runId,
+            RunControlKinds.Cancel,
+            observation: null,
+            commandId,
+            createdAt);
+
+    public bool InterruptRun(
+        string runId,
+        string? commandId = null,
+        DateTimeOffset? createdAt = null) =>
+        PostControl(
+            runId,
+            RunControlKinds.Interrupt,
+            observation: null,
+            commandId,
+            createdAt);
+
+    public bool SteerRun(
+        string runId,
+        ObservationEnvelope observation,
+        string? commandId = null,
+        DateTimeOffset? createdAt = null) =>
+        PostControl(
+            runId,
+            RunControlKinds.Steer,
+            observation,
+            commandId,
+            createdAt);
+
+    public bool FollowUpRun(
+        string runId,
+        ObservationEnvelope observation,
+        string? commandId = null,
+        DateTimeOffset? createdAt = null) =>
+        PostControl(
+            runId,
+            RunControlKinds.FollowUp,
+            observation,
+            commandId,
+            createdAt);
+
+    public string StartRun(HeadlessRunRequest request) =>
+        _node.StartTypedRun(request);
+
+    public ValueTask StopAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        _node.StopAsync(timeout, cancellationToken);
+
+    private bool PostControl(
+        string runId,
+        string kind,
+        ObservationEnvelope? observation,
+        string? commandId,
+        DateTimeOffset? createdAt)
+    {
+        return TryPostControl(
+            runId,
+            new RunControlCommand
+            {
+                CommandId = string.IsNullOrWhiteSpace(commandId)
+                    ? Guid.NewGuid().ToString("N")
+                    : commandId,
+                Kind = kind,
+                Observation = observation,
+                CreatedAt = createdAt ?? DateTimeOffset.UtcNow
+            });
+    }
+}

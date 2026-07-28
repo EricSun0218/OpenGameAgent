@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>GameAgent.Runtime</RootNamespace>
+    <Description>Convenience composition API for building a complete durable game agent runtime.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+    <ProjectReference Include="..\GameAgent.Persistence\GameAgent.Persistence.csproj" />
+    <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+    <ProjectReference Include="..\GameAgent.Providers.OpenAICompatible\GameAgent.Providers.OpenAICompatible.csproj" />
+  </ItemGroup>
+</Project>

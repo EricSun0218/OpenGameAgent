@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/agent-run.schema.json",
+  "title": "AgentRun",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "runId",
+    "agentId",
+    "worldId",
+    "trigger",
+    "triggerObservationIds",
+    "state",
+    "revision",
+    "runtimeGeneration",
+    "budget",
+    "usage",
+    "pendingOperationIds",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "agentId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "worldId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "sessionId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "trigger": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "interaction",
+            "world_event",
+            "scheduled",
+            "manual",
+            "generation"
+          ]
+        },
+        "sourceId": {
+          "$ref": "common.schema.json#/$defs/id"
+        },
+        "scheduledFor": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "triggerObservationIds": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      },
+      "uniqueItems": true
+    },
+    "decisionKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "batchId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "state": {
+      "enum": [
+        "queued",
+        "preparing",
+        "running",
+        "cancelling",
+        "interrupting",
+        "waiting_for_action",
+        "reconciling",
+        "completed",
+        "budget_exhausted",
+        "interrupted",
+        "cancelled",
+        "failed"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "currentTurnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runtimeGeneration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "budget": {
+      "$ref": "#/$defs/budget"
+    },
+    "usage": {
+      "$ref": "#/$defs/usage"
+    },
+    "pendingOperationIds": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      },
+      "uniqueItems": true
+    },
+    "terminalReason": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "completionIntent": {
+      "enum": [
+        "cancelled",
+        "interrupted",
+        "failed"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "budget": {
+      "type": "object",
+      "required": [
+        "maxTurns",
+        "maxDurationMs",
+        "maxTokens",
+        "maxCostUsd",
+        "maxActions"
+      ],
+      "properties": {
+        "maxTurns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxDurationMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxCostUsd": {
+          "$ref": "common.schema.json#/$defs/decimal"
+        },
+        "maxActions": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "type": "object",
+      "required": [
+        "turns",
+        "durationMs",
+        "inputTokens",
+        "outputTokens",
+        "costUsd",
+        "actions",
+        "hasUnaccountedUsage",
+        "unaccountedProviderAttempts"
+      ],
+      "properties": {
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "$ref": "common.schema.json#/$defs/decimal"
+        },
+        "actions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hasUnaccountedUsage": {
+          "type": "boolean"
+        },
+        "unaccountedProviderAttempts": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

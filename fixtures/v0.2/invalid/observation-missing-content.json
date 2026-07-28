@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "observationId": "obs-invalid",
+  "worldId": "world-demo",
+  "source": "game.world",
+  "kind": "snapshot",
+  "contentType": "application/json",
+  "observedAt": "2026-07-28T00:00:00Z",
+  "trust": "authoritative",
+  "visibility": {
+    "scope": "world"
+  }
+}

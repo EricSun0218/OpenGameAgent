@@ -1,0 +1,18 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "eventId": "event-unreal-smoke-0001",
+  "runId": "run-demo-0001",
+  "turnId": "turn-0001",
+  "sequence": 7,
+  "kind": "action.requested",
+  "durability": "durable",
+  "runtimeGeneration": 1,
+  "attemptId": "attempt-0001",
+  "streamAttemptId": "stream-attempt-0001",
+  "timestamp": "2026-07-28T00:00:01Z",
+  "payload": {
+    "operationId": "operation-0001"
+  },
+  "extensions": {}
+}

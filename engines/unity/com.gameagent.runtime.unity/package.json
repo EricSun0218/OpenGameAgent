@@ -1,0 +1,25 @@
+{
+  "name": "com.gameagent.runtime.unity",
+  "version": "0.1.0-alpha.1",
+  "displayName": "Game Agent Runtime for Unity",
+  "description": "First-class Unity host for the engine-agnostic Game Agent Runtime. Provides lifecycle, main-thread dispatch, structured DTO bridges, cancellation, and durable shutdown without duplicating the agent core.",
+  "unity": "2022.3",
+  "keywords": [
+    "ai",
+    "agent",
+    "gameplay",
+    "llm",
+    "runtime"
+  ],
+  "author": {
+    "name": "Eric Sun",
+    "url": "https://github.com/EricSun0218/game-agent-runtime"
+  },
+  "samples": [
+    {
+      "displayName": "Structured Tool Loop",
+      "description": "A durable JSON context drives a streamed tool call, a journaled Unity main-thread action, and a final structured response.",
+      "path": "Samples~/StructuredToolLoop"
+    }
+  ]
+}

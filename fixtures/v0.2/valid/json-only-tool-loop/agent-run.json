@@ -1,0 +1,43 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "runId": "run-demo-0001",
+  "agentId": "agent-demo",
+  "worldId": "world-demo",
+  "sessionId": "session-demo",
+  "trigger": {
+    "type": "world_event",
+    "sourceId": "obs-world-0001"
+  },
+  "triggerObservationIds": [
+    "obs-world-0001"
+  ],
+  "state": "queued",
+  "revision": 0,
+  "runtimeGeneration": 1,
+  "budget": {
+    "maxTurns": 4,
+    "maxDurationMs": 5000,
+    "maxTokens": 2000,
+    "maxCostUsd": "0.10",
+    "maxActions": 2
+  },
+  "usage": {
+    "turns": 0,
+    "durationMs": 0,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "costUsd": "0",
+    "actions": 0,
+    "hasUnaccountedUsage": false,
+    "unaccountedProviderAttempts": 0
+  },
+  "pendingOperationIds": [],
+  "createdAt": "2026-07-28T00:00:00Z",
+  "updatedAt": "2026-07-28T00:00:00Z",
+  "extensions": {
+    "futurePolicy": {
+      "enabled": true
+    }
+  }
+}

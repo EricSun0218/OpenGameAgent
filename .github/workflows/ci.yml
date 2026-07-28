@@ -1,0 +1,228 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  RELEASE_VERSION: "0.1.0-alpha.1"
+
+jobs:
+  privacy-scanner:
+    name: Release privacy scanner self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify release version metadata
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseVersionConsistency.ps1
+      - name: Test release version gate
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseVersionConsistencySelfTest.ps1
+      - name: Test release privacy scanner
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactPrivacySelfTest.ps1
+      - name: Scan tracked source archive
+        shell: pwsh
+        env:
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "game-agent-runtime-source.zip"
+          try {
+            & git archive --format=zip --output $archive HEAD
+            if ($LASTEXITCODE -ne 0) {
+              throw "git archive failed with exit code $LASTEXITCODE."
+            }
+            ./engines/shared/Test-ReleaseArtifactPrivacy.ps1 -Path $archive
+          }
+          finally {
+            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+          }
+
+  dotnet:
+    name: .NET (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build
+        run: dotnet build GameAgentRuntime.sln -c Release --no-restore
+      - name: Test
+        run: dotnet test GameAgentRuntime.sln -c Release --no-build
+
+  quality:
+    name: Quality and packages
+    runs-on: ubuntu-latest
+    needs: privacy-scanner
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Verify formatting
+        run: dotnet format GameAgentRuntime.sln --verify-no-changes --no-restore
+      - name: Audit dependencies
+        run: dotnet list GameAgentRuntime.sln package --vulnerable --include-transitive
+      - name: Build packages
+        run: dotnet pack GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget
+      - name: Scan release artifacts
+        shell: pwsh
+        env:
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: ./engines/shared/Test-ReleaseArtifactPrivacy.ps1 -Path ./artifacts/nuget
+      - name: Upload packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: nuget-packages
+          path: artifacts/nuget/*
+          if-no-files-found: error
+
+  unity:
+    name: Unity package contract
+    runs-on: windows-latest
+    needs: privacy-scanner
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify package
+        shell: pwsh
+        env:
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: ./engines/unity/scripts/Test-UnityPackage.ps1
+      - name: Upload UPM package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: unity-upm-package
+          path: engines/unity/artifacts/com.gameagent.runtime.unity
+          if-no-files-found: error
+
+  unreal:
+    name: Unreal portable protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake -S tests/UnrealPortableSmoke -B artifacts/unreal -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build artifacts/unreal --config Release --parallel
+      - name: Test
+        run: ctest --test-dir artifacts/unreal -C Release --output-on-failure
+      - name: Test automation report parser
+        shell: pwsh
+        run: ./engines/unreal/scripts/Test-UnrealAutomationReportParser.ps1
+
+  godot:
+    name: Godot .NET package
+    runs-on: ubuntu-latest
+    needs: privacy-scanner
+    env:
+      GODOT_VERSION: 4.7.1
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Godot .NET
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64.zip"
+          archive="$RUNNER_TEMP/$asset"
+          pinned_checksum="$GITHUB_WORKSPACE/engines/godot/checksums/${asset}.sha512"
+          install_root="$RUNNER_TEMP/godot"
+          test -f "$pinned_checksum"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/$asset"
+          (
+            cd "$RUNNER_TEMP"
+            sha512sum --check "$pinned_checksum"
+          )
+          mkdir -p "$install_root"
+          unzip -q "$archive" -d "$install_root"
+          godot_bin="$(
+            find "$install_root" -maxdepth 2 -type f \
+              -name 'Godot_v*-stable_mono_linux.x86_64' -print -quit
+          )"
+          test -n "$godot_bin"
+          chmod +x "$godot_bin"
+          echo "GODOT_BIN=$godot_bin" >> "$GITHUB_ENV"
+      - name: Test addon and sample
+        shell: pwsh
+        run: ./engines/godot/tests/run-godot-tests.ps1 -Godot $env:GODOT_BIN
+      - name: Build addon archive
+        shell: pwsh
+        run: >-
+          ./engines/godot/tools/package-addon.ps1
+          -Version $env:RELEASE_VERSION
+      - name: Test isolated package
+        shell: pwsh
+        env:
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: >-
+          ./engines/godot/tests/verify-packaged-addon.ps1
+          -Archive
+          ./engines/godot/artifacts/game-agent-runtime-godot-$env:RELEASE_VERSION.zip
+          -Godot $env:GODOT_BIN
+      - name: Upload Godot addon
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: godot-addon
+          path: engines/godot/artifacts/game-agent-runtime-godot-${{ env.RELEASE_VERSION }}.zip
+          if-no-files-found: error

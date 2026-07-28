@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/agent-definition.schema.json",
+  "title": "AgentDefinition",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "agentDefinitionId",
+    "version",
+    "identity",
+    "toolsets",
+    "skills",
+    "budgets"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "agentDefinitionId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "identity": {},
+    "behaviorPolicyRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "toolsets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 96
+      },
+      "uniqueItems": true
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      },
+      "uniqueItems": true
+    },
+    "contextPolicyRef": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "memoryPolicyRef": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "providerPolicyRef": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "budgets": {
+      "type": "object"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}
