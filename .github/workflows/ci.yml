@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  RELEASE_VERSION: "0.1.0-alpha.1"
+
+jobs:
+  privacy-scanner:
+    name: Release privacy scanner self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify release version metadata
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseVersionConsistency.ps1
+      - name: Test release version gate
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseVersionConsistencySelfTest.ps1
+      - name: Test release privacy scanner
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactPrivacySelfTest.ps1
+      - name: Test release artifact protection
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactProtectionSelfTest.ps1
+      - name: Test exact tracked-source scanner
+        shell: pwsh
+        run: ./engines/shared/Test-TrackedSourcePrivacySelfTest.ps1
+      - name: Scan exact tracked source
+        shell: pwsh
+        run: |
+          $revision = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw 'The checked-out revision could not be resolved.'
+          }
+          ./engines/shared/Test-TrackedSourcePrivacy.ps1 `
+            -Repository . `
+            -Revision $revision
+
+  dotnet:
+    name: .NET (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build
+        run: dotnet build GameAgentRuntime.sln -c Release --no-restore
+      - name: Test
+        run: dotnet test GameAgentRuntime.sln -c Release --no-build
+
+  quality:
+    name: Quality and packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: privacy-scanner
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Verify formatting
+        run: dotnet format GameAgentRuntime.sln --verify-no-changes --no-restore
+      - name: Audit dependencies
+        run: dotnet list GameAgentRuntime.sln package --vulnerable --include-transitive
+      - name: Build packages
+        run: |
+          dotnet pack GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget-raw
+          dotnet pack GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget-repro-raw
+      - name: Normalize packages reproducibly
+        shell: pwsh
+        run: |
+          ./engines/shared/Write-DeterministicNuGetPackages.ps1 `
+            -SourcePath ./artifacts/nuget-raw `
+            -DestinationPath ./artifacts/nuget
+          ./engines/shared/Write-DeterministicNuGetPackages.ps1 `
+            -SourcePath ./artifacts/nuget-repro-raw `
+            -DestinationPath ./artifacts/nuget-repro
+          ./engines/shared/Test-NuGetPackageReproducibility.ps1 `
+            -FirstPath ./artifacts/nuget `
+            -SecondPath ./artifacts/nuget-repro
+      - name: Verify package manifests
+        shell: pwsh
+        run: |
+          $revision = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw 'The package source revision could not be resolved.'
+          }
+          ./engines/shared/Test-NuGetPackageManifest.ps1 `
+            -Path ./artifacts/nuget `
+            -ExpectedVersion $env:RELEASE_VERSION `
+            -ExpectedCommit $revision
+      - name: Verify package consumption
+        shell: pwsh
+        run: |
+          ./engines/shared/Test-NuGetPackageConsumer.ps1 `
+            -PackagePath ./artifacts/nuget `
+            -Version $env:RELEASE_VERSION `
+            -WorkingPath (Join-Path $env:RUNNER_TEMP 'package-consumer')
+      - name: Scan release artifacts
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactPrivacy.ps1 -Path ./artifacts/nuget
+
+  unity:
+    name: Unity package contract
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: privacy-scanner
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify package
+        shell: pwsh
+        run: ./engines/unity/scripts/Test-UnityPackage.ps1
+
+  unreal:
+    name: Unreal portable protocol (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake -S tests/UnrealPortableSmoke -B artifacts/unreal -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build artifacts/unreal --config Release --parallel
+      - name: Test
+        run: ctest --test-dir artifacts/unreal -C Release --output-on-failure
+      - name: Test automation report parser
+        shell: pwsh
+        run: ./engines/unreal/scripts/Test-UnrealAutomationReportParser.ps1
+
+  godot:
+    name: Godot .NET package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: privacy-scanner
+    env:
+      GODOT_VERSION: 4.7.1
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Godot .NET
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64.zip"
+          archive="$RUNNER_TEMP/$asset"
+          pinned_checksum="$GITHUB_WORKSPACE/engines/godot/checksums/${asset}.sha512"
+          install_root="$RUNNER_TEMP/godot"
+          test -f "$pinned_checksum"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/$asset"
+          (
+            cd "$RUNNER_TEMP"
+            sha512sum --check "$pinned_checksum"
+          )
+          mkdir -p "$install_root"
+          unzip -q "$archive" -d "$install_root"
+          godot_bin="$(
+            find "$install_root" -maxdepth 2 -type f \
+              -name 'Godot_v*-stable_mono_linux.x86_64' -print -quit
+          )"
+          test -n "$godot_bin"
+          chmod +x "$godot_bin"
+          echo "GODOT_BIN=$godot_bin" >> "$GITHUB_ENV"
+      - name: Test addon and sample
+        shell: pwsh
+        run: ./engines/godot/tests/run-godot-tests.ps1 -Godot $env:GODOT_BIN
+      - name: Build addon archive
+        shell: pwsh
+        run: >-
+          ./engines/godot/tools/package-addon.ps1
+          -Version $env:RELEASE_VERSION
+      - name: Test isolated package
+        shell: pwsh
+        run: >-
+          ./engines/godot/tests/verify-packaged-addon.ps1
+          -Archive
+          ./engines/godot/artifacts/game-agent-runtime-godot-$env:RELEASE_VERSION.zip
+          -Godot $env:GODOT_BIN

@@ -1,0 +1,22 @@
+{
+  "name": "GameAgent.Unity.EditorTests",
+  "rootNamespace": "GameAgent.Unity.Tests",
+  "references": [
+    "GameAgent.Unity",
+    "GameAgent.Unity.PlayModeTests"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}

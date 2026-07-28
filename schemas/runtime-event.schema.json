@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/runtime-event.schema.json",
+  "title": "RuntimeEvent",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "eventId",
+    "sequence",
+    "kind",
+    "durability",
+    "runtimeGeneration",
+    "timestamp",
+    "payload"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "eventId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "turnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "durability": {
+      "enum": [
+        "durable",
+        "ephemeral"
+      ]
+    },
+    "runtimeGeneration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "attemptId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "streamAttemptId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "providerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "transportDialect": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "providerCapabilityDigest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "providerRouteDigest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "reasonCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {},
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

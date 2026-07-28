@@ -1,0 +1,30 @@
+; Development, sample, and conformance project for the publishable addon.
+; Consumers copy only addons/game_agent_runtime and import its props file.
+config_version=5
+
+[application]
+
+config/name="Game Agent Runtime - Godot"
+run/main_scene="res://samples/basic/BasicSample.tscn"
+
+[autoload]
+
+GameAgentRuntime="*res://addons/game_agent_runtime/runtime/GameAgentRuntimeNode.tscn"
+
+[display]
+
+window/size/viewport_width=960
+window/size/viewport_height=540
+
+[dotnet]
+
+project/assembly_name="GameAgent.Godot"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/game_agent_runtime/plugin.cfg")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

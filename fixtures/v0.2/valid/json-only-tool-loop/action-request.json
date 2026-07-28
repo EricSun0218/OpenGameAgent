@@ -1,0 +1,22 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "operationId": "operation-0001",
+  "runId": "run-demo-0001",
+  "turnId": "turn-0001",
+  "toolCallId": "call-0001",
+  "agentId": "agent-demo",
+  "worldId": "world-demo",
+  "actionName": "gather_food",
+  "actionVersion": "1",
+  "arguments": {
+    "resource": "berries"
+  },
+  "basedOnStateVersion": "world-rev-42",
+  "expectedEffects": [
+    "inventory.food +1"
+  ],
+  "reasonCode": "agent_decision",
+  "requestedAt": "2026-07-28T00:00:01Z",
+  "deadline": "2026-07-28T00:00:02Z"
+}

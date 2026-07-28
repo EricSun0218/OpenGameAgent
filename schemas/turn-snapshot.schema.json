@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/turn-snapshot.schema.json",
+  "title": "TurnSnapshot",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "turnId",
+    "runId",
+    "runtimeGeneration",
+    "providerId",
+    "modelId",
+    "promptLayoutVersion",
+    "stablePrefixHash",
+    "skillGeneration",
+    "skillDigests",
+    "toolCatalogGeneration",
+    "directToolDigest",
+    "contextPolicyVersion",
+    "budgetPolicyVersion",
+    "createdAt"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "turnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runtimeGeneration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "providerId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "modelId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "promptLayoutVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "stablePrefixHash": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "skillGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "skillDigests": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "toolCatalogGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "directToolDigest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "deferredCatalogDigest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "contextPolicyVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "budgetPolicyVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

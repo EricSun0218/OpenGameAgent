@@ -1,0 +1,18 @@
+config_version=5
+
+[application]
+
+config/name="Game Agent Runtime Package Consumer Smoke"
+run/main_scene="res://Smoke.tscn"
+
+[autoload]
+
+GameAgentRuntime="*res://addons/game_agent_runtime/runtime/GameAgentRuntimeNode.tscn"
+
+[dotnet]
+
+project/assembly_name="PackageConsumer"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"

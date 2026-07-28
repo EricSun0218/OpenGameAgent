@@ -1,0 +1,34 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
+    <DebugType Condition="'$(Configuration)' == 'Release'">embedded</DebugType>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionSuffix>alpha.1</VersionSuffix>
+    <Authors>Eric Sun</Authors>
+    <Company>Eric Sun</Company>
+    <Copyright>Copyright © 2026 Eric Sun</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/EricSun0218/game-agent-runtime</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/EricSun0218/game-agent-runtime.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>game;ai;agent;runtime;godot;unity;unreal</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None
+      Include="$(MSBuildThisFileDirectory)docs\nuget-package-readme.md"
+      Pack="true"
+      PackagePath="README.md"
+      Visible="false" />
+  </ItemGroup>
+</Project>

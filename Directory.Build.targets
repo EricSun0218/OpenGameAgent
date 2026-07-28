@@ -1,0 +1,14 @@
+<Project>
+  <Target
+    Name="PinExactProjectPackageDependencies"
+    AfterTargets="_GetProjectReferenceVersions"
+    Condition="'$(IsPackable)' != 'false' and
+      '@(_ProjectReferencesWithVersions)' != ''">
+    <ItemGroup>
+      <_ProjectReferencesWithVersions
+        Update="@(_ProjectReferencesWithVersions)">
+        <ProjectVersion>[%(_ProjectReferencesWithVersions.ProjectVersion)]</ProjectVersion>
+      </_ProjectReferencesWithVersions>
+    </ItemGroup>
+  </Target>
+</Project>

@@ -1,0 +1,18 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "name": "unsafe_write",
+  "version": "1",
+  "description": "Invalid side effect descriptor.",
+  "parametersSchema": {
+    "type": "object"
+  },
+  "effect": "world_command",
+  "conflictScopes": [],
+  "threadAffinity": "engine_main_thread",
+  "timeoutMs": 1000,
+  "retryPolicy": "never",
+  "idempotencyPolicy": "none",
+  "toolset": "invalid",
+  "visibility": "direct"
+}

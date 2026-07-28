@@ -1,0 +1,16 @@
+{
+  "name": "GameAgent.Unity.StructuredToolLoopSample",
+  "rootNamespace": "GameAgent.Unity.Samples",
+  "references": [
+    "GameAgent.Unity"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

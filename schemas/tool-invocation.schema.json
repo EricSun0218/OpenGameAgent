@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/tool-invocation.schema.json",
+  "title": "ToolInvocation",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "toolCallId",
+    "runId",
+    "turnId",
+    "attemptId",
+    "toolName",
+    "toolVersion",
+    "arguments",
+    "effect",
+    "resolvedConflictKeys",
+    "sequence",
+    "createdAt"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "toolCallId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "turnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "attemptId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "toolName": {
+      "$ref": "common.schema.json#/$defs/name"
+    },
+    "toolVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "arguments": {},
+    "effect": {
+      "enum": [
+        "pure_read",
+        "agent_local_write",
+        "world_command",
+        "external_write"
+      ]
+    },
+    "resolvedConflictKeys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

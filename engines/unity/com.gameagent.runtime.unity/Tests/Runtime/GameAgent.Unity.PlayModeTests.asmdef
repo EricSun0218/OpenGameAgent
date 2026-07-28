@@ -1,0 +1,19 @@
+{
+  "name": "GameAgent.Unity.PlayModeTests",
+  "rootNamespace": "GameAgent.Unity.Tests",
+  "references": [
+    "GameAgent.Unity"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false,
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}
