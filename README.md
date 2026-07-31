@@ -42,8 +42,7 @@ an assistant, or a group decision without forcing games into one data model.
 - Bounded multi-actor batches and durable group interactions with isolated
   participant failures and deterministic result ordering.
 - OpenAI-compatible and native Anthropic streaming provider adapters.
-- A shared `netstandard2.1` core plus Godot, Unity, and Unreal integration
-  boundaries.
+- A shared `netstandard2.1` core plus Godot and Unity integration boundaries.
 
 ## Architecture
 
@@ -74,7 +73,6 @@ Read [architecture](docs/architecture.md), [protocol](docs/protocol.md), and
 | --- | --- |
 | Godot 4.7 .NET | Primary integration. In-process C# runtime, Autoload lifecycle, typed and GDScript bridges, bounded main-thread/event pumps, multi-actor support, packaging, and Windows desktop/headless verification. |
 | Unity 2022.3+ | In-process C# host and UPM package with managed compile, package, artifact-load, lifecycle, and conformance gates. A licensed Editor/Player gate is provided but is not claimed as executed for this alpha. |
-| Unreal Engine 5 | Portable C++ protocol, C ABI, GameThread boundary, and automation probe, including a Visual Studio-independent Zig/Ninja verification path. A complete in-process native backend or supervised sidecar transport is not implemented yet. |
 
 The engine SDK is only an adapter. Agent behavior, persistence semantics, and
 provider logic remain in the shared runtime.
@@ -93,7 +91,6 @@ Then follow:
 - [Getting started](docs/getting-started.md)
 - [Godot integration](engines/godot/README.md)
 - [Unity integration](engines/unity/README.md)
-- [Unreal compatibility probe](engines/unreal/README.md)
 - [Tools, skills, and memory](docs/tools-skills-memory.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
 - [Durable workflows](docs/durable-workflows.md)
@@ -114,6 +111,5 @@ persist operation receipts before assuming a write can be retried.
 ## Release verification
 
 The repository includes deterministic package, privacy, version consistency,
-managed consumer, Godot, Unity, portable Unreal, performance, and live-provider
-gates. See [pre-public release](docs/pre-public-release.md) before publishing an
-artifact.
+managed consumer, Godot, Unity, performance, and live-provider gates. See
+[pre-public release](docs/pre-public-release.md) before publishing an artifact.

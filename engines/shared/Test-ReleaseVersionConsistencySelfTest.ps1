@@ -134,9 +134,6 @@ dotnet add package GameAgent.Runtime --version $fixtureVersion
 
 ## [0.0.1] - 2026-01-01
 "@
-        'engines\unreal\GameAgentRuntime.uplugin' = @"
-{"FileVersion":3,"Version":1,"VersionName":"$fixtureVersion"}
-"@
         'engines\godot\addons\game_agent_runtime\plugin.cfg' = @"
 [plugin]
 version="$fixtureVersion"
@@ -273,13 +270,6 @@ try {
         -Content (
             "## [$driftVersion] - 2026-07-29`n`n" +
             "## [$expectedVersion] - 2026-01-01")
-    Assert-FixtureRejected `
-        -Name 'Unreal plugin manifest' `
-        -RelativePath 'engines\unreal\GameAgentRuntime.uplugin' `
-        -Content (
-            '{"FileVersion":3,"Version":1,"VersionName":"' +
-            $driftVersion +
-            '"}')
     Assert-FixtureRejected `
         -Name 'Godot plugin manifest' `
         -RelativePath (

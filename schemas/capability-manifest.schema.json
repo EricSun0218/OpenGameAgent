@@ -44,8 +44,7 @@
       "enum": [
         "headless",
         "godot",
-        "unity",
-        "unreal"
+        "unity"
       ]
     },
     "engineVersion": {

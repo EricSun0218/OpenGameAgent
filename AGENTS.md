@@ -20,7 +20,6 @@ inventory, combat, event, or save schema to the shared runtime.
 - `src/GameAgent.Providers.*`: provider transports only.
 - `engines/godot`: primary engine adapter.
 - `engines/unity`: Unity lifecycle and UPM adapter.
-- `engines/unreal`: portable C++ wire/ABI boundary; not a complete backend.
 
 The game owns state, rules, permissions, legality, tools, save data, and final
 mutations. A successful `ActionReceipt` must come from game code.
@@ -77,8 +76,6 @@ For a machine-readable repository check:
 - Persistence change: add restart/corruption/atomicity tests.
 - Godot change: `engines/godot/tests/run-godot-tests.ps1`.
 - Unity change: `engines/unity/scripts/Test-UnityPackage.ps1`.
-- Unreal wire change:
-  `engines/unreal/scripts/Test-PortableWire.ps1 -RequireToolchain`.
 - Packaging change: build the affected artifact, run its artifact verifier,
   and run tracked-source privacy checks.
 

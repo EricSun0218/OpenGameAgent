@@ -431,7 +431,6 @@ public sealed class RuntimeMetricsEmitter
             null => null,
             "godot" => "godot",
             "unity" => "unity",
-            "unreal" => "unreal",
             _ => "core"
         };
     }

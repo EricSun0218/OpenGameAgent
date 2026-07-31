@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("fast", "godot", "unity", "unreal", "all")]
+    [ValidateSet("fast", "godot", "unity", "all")]
     [string]$Profile = "fast",
 
     [string]$JsonPath,
@@ -104,14 +104,6 @@ try {
         Invoke-Check "unity-package" `
             "engines/unity/scripts/Test-UnityPackage.ps1" {
                 & .\engines\unity\scripts\Test-UnityPackage.ps1
-            }
-    }
-    if ($Profile -in @("unreal", "all") `
-        -and -not ($failed -and $FailFast)) {
-        Invoke-Check "unreal-portable" `
-            "engines/unreal/scripts/Test-PortableWire.ps1 -RequireToolchain" {
-                & .\engines\unreal\scripts\Test-PortableWire.ps1 `
-                    -RequireToolchain
             }
     }
 }

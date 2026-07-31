@@ -17,7 +17,7 @@
     <PackageProjectUrl>https://github.com/EricSun0218/game-agent-runtime</PackageProjectUrl>
     <RepositoryUrl>https://github.com/EricSun0218/game-agent-runtime.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>game;ai;agent;runtime;godot;unity;unreal</PackageTags>
+    <PackageTags>game;ai;agent;runtime;godot;unity</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <NuGetAudit>true</NuGetAudit>

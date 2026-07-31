@@ -68,6 +68,7 @@ public partial class HeadlessAddonTest : global::Godot.Node
 
         var fixture = SampleRuntimeFactory.Configure(runtime);
         VerifyGodotJsonNumberCompatibility(fixture);
+        VerifyFractionalPayloadRoundTrip();
         VerifyHeadlessMapperCollectionBounds(fixture);
         VerifyVariantIngressBounds(fixture);
         runtime.RuntimeEventPublished += OnRuntimeEvent;
@@ -2668,6 +2669,44 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             mapped.Context[0].Required && !mapped.Context[0].CanDefer,
             "Observation-to-context mapping lost its required boundary.");
+    }
+
+    private static void VerifyFractionalPayloadRoundTrip()
+    {
+        var observation = new ObservationEnvelope
+        {
+            ObservationId = "fractional-payload",
+            WorldId = "world",
+            Source = "game.state",
+            Kind = ObservationKinds.Snapshot,
+            ContentType = "application/json",
+            Payload = ProtocolJson.ParseElement(
+                """
+                {
+                  "temperature": 36.625,
+                  "position": [1.25, -3.5],
+                  "nested": { "weight": 0.125 }
+                }
+                """),
+            ObservedAt = DateTimeOffset.UnixEpoch,
+            Trust = ObservationTrustLevels.Authoritative,
+            Visibility = new VisibilityRule
+            {
+                Scope = ObservationVisibilityScopes.World
+            }
+        };
+
+        using var mapped =
+            GodotProtocolVariantMapper.ToDictionary(observation);
+        var roundTrip = GodotProtocolVariantMapper.ToObservation(mapped);
+        var payload = roundTrip.Payload!.Value;
+        Assert(
+            payload.GetProperty("temperature").GetDouble() == 36.625
+            && payload.GetProperty("position")[0].GetDouble() == 1.25
+            && payload.GetProperty("position")[1].GetDouble() == -3.5
+            && payload.GetProperty("nested")
+                .GetProperty("weight").GetDouble() == 0.125,
+            "Godot lost a finite fractional JSON value.");
     }
 
     private static void VerifyHeadlessMapperCollectionBounds(

@@ -24,7 +24,7 @@ Changes to wire DTOs must include:
 - semantic validation;
 - positive and negative fixtures;
 - generated serialization metadata;
-- compatibility tests for Godot, Unity, and the Unreal protocol module.
+- compatibility tests for Godot and Unity.
 
 Changes to side-effect execution must include a crash, cancellation, or
 reconciliation test. A successful demo is not a substitute for these tests.

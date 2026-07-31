@@ -8,11 +8,9 @@ until its real engine or toolchain gate has passed.
 | Shared libraries | .NET Standard 2.1 | Windows CI runs the repository build, test, package, and performance smoke; Linux builds and tests the complete portable solution |
 | Godot host | Godot 4.7.1 .NET on Windows desktop and headless | Real Godot executable, isolated addon package, C# build, scene startup, signals, structured context, durable run/resume/control, main-thread action dispatch, and shutdown are exercised |
 | Unity host | Unity 2022.3 LTS or newer, Mono or IL2CPP | Package source and samples compile as .NET Standard 2.1; host conformance and package assembly gates pass without an Editor |
-| Unreal module | Unreal Engine 5 compatibility probe | Portable C++17 wire/ABI tests pass with warnings as errors; the module includes Editor automation tests but has not yet passed an Unreal Build Tool or Editor run |
 
 macOS is not a supported or CI target. Linux validates the portable .NET
-solution and the portable Unreal boundary; it is not a second full
-engine-release matrix.
+solution; it is not a second full engine-release matrix.
 
 ## Unity validation boundary
 
@@ -23,24 +21,14 @@ The current claim therefore covers the package contract and host implementation,
 not verified Player compatibility. Mobile, WebGL, and console targets are not
 claimed.
 
-Unity DTO conversion and the Unreal closed-world wire parser preserve the
-optional `decisionKey` and `batchId` fields used to stage simultaneous actor
-actions.
+Unity DTO conversion preserves the optional `decisionKey` and `batchId`
+fields used to stage simultaneous actor actions.
 
 Godot and Unity expose optional guarded durable resume. A semantic extension
 digest is validated after journal recovery and before ownership, provider,
 reconciler, or host work. Custom engine backends must advertise and implement
 the guarded capability end to end; requesting it through an older backend
 fails closed.
-
-## Unreal validation boundary
-
-The module defines strict bounded wire parsing, a GameThread dispatcher, host
-routing, and a versioned C ABI surface. Portable tests validate the wire parser
-and C ABI outside the engine. The dispatcher and host router are covered by
-automation test source but still require an Unreal Build Tool build and Editor
-run. Packaging against a named Unreal Engine version and implementing a
-production transport also remain future work.
 
 ## Provider compatibility
 

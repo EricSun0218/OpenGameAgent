@@ -148,8 +148,7 @@ public static class ProtocolValidator
         {
             "headless",
             "godot",
-            "unity",
-            "unreal"
+            "unity"
         };
 
     private static readonly HashSet<string> PersistenceLevelValues =

@@ -143,9 +143,6 @@ change the tool and receipt boundary.
 - Unity: host the shared runtime through `GameAgentRuntimeBehaviour` and the
   durable backend; use Unity's main-thread dispatcher only for engine API
   access.
-- Unreal: keep observations, actions, receipts, and semantic coordinates on
-  the portable JSON/wire boundary. The current alpha supplies the C++/C ABI and
-  GameThread compatibility surface, not a complete native backend.
 
 ## Capability acceptance matrix
 

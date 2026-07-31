@@ -330,24 +330,6 @@ $upmChangelogVersion = Get-FirstMatch `
     -Label 'Unity changelog'
 Assert-ReleaseVersion 'Unity changelog' $upmChangelogVersion
 
-$unrealManifestText = Read-RequiredText (
-    'engines\unreal\GameAgentRuntime.uplugin')
-try {
-    $unrealManifest = $unrealManifestText | ConvertFrom-Json
-}
-catch {
-    throw 'The Unreal plugin manifest is not valid JSON.'
-}
-$unrealProperties = @($unrealManifest.PSObject.Properties.Name)
-if ($unrealProperties -cnotcontains 'VersionName' `
-    -or [string]::IsNullOrWhiteSpace(
-        [string]$unrealManifest.VersionName)) {
-    throw 'The Unreal plugin manifest has no VersionName.'
-}
-Assert-ReleaseVersion `
-    'Unreal plugin manifest' `
-    ([string]$unrealManifest.VersionName)
-
 $godotPluginVersion = Get-RequiredMatch `
     -Text (Read-RequiredText (
         'engines\godot\addons\game_agent_runtime\plugin.cfg')) `

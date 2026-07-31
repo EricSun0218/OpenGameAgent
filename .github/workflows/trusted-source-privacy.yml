@@ -375,40 +375,6 @@ jobs:
           path: artifacts/sealed-unity
           if-no-files-found: error
 
-  unreal:
-    name: Trusted portable protocol (${{ matrix.os }})
-    needs:
-      - identity
-      - source_privacy
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-    steps:
-      - name: Check out exact candidate
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          repository: ${{ needs.identity.outputs.head_repository }}
-          ref: ${{ needs.identity.outputs.head_sha }}
-          persist-credentials: false
-      - name: Configure
-        run: >-
-          cmake -S tests/UnrealPortableSmoke -B artifacts/unreal
-          -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build artifacts/unreal --config Release --parallel
-      - name: Test
-        run: ctest --test-dir artifacts/unreal -C Release --output-on-failure
-      - name: Test automation report parser
-        shell: pwsh
-        run: ./engines/unreal/scripts/Test-UnrealAutomationReportParser.ps1
-
   godot:
     name: Trusted Godot .NET package
     needs:
@@ -495,7 +461,6 @@ jobs:
       - linux_portability
       - quality
       - unity
-      - unreal
       - godot
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -865,7 +830,6 @@ jobs:
       - linux_portability
       - quality
       - unity
-      - unreal
       - godot
       - privacy
       - validate_nuget
@@ -887,7 +851,6 @@ jobs:
           LINUX_PORTABILITY_RESULT: ${{ needs.linux_portability.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           UNITY_RESULT: ${{ needs.unity.result }}
-          UNREAL_RESULT: ${{ needs.unreal.result }}
           GODOT_RESULT: ${{ needs.godot.result }}
           PRIVACY_RESULT: ${{ needs.privacy.result }}
           NUGET_VALIDATION_RESULT: ${{ needs.validate_nuget.result }}
@@ -907,7 +870,6 @@ jobs:
             $env:LINUX_PORTABILITY_RESULT,
             $env:QUALITY_RESULT,
             $env:UNITY_RESULT,
-            $env:UNREAL_RESULT,
             $env:GODOT_RESULT,
             $env:PRIVACY_RESULT,
             $env:NUGET_VALIDATION_RESULT,

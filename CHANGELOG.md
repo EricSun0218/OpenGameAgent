@@ -36,29 +36,9 @@
 - Added a repeatable 64-actor coordination allocation and latency smoke gate.
 - Added bounded, paged presentation-chunk replay with explicit expired and
   ahead cursor outcomes for reconnecting engine UI consumers.
-- Added receipt-gated durable world presentations with typed localization and
-  media cues, audience-incarnation privacy, revision CAS, paged export, and
-  crash recovery.
-- Added a receipt-gated durable world-settlement outbox for idempotent memory,
-  group, and presentation delivery, with exact authority/audience fences,
-  per-sink reconciliation, bounded file recovery, and no world-action replay.
 - Restricted pluggable conversation compactors to audited, low-authority
   summary data; the runtime owns the normalized envelope and verifies every
   referenced source-message ID.
-- Added an engine-neutral interactive-world framework with native package and
-  save import/export, deterministic fixed events, typed interactions, scaled
-  fixed-point values, game-defined clocks, schedules, history, timeline forks,
-  and authoritative atomic transactions.
-- Added deterministic settled interactive-world bundles for atomic
-  capture/import/fork of authoritative saves with bounded memory, stable open
-  or closed group interactions, and verified presentation sidecars, including
-  fail-closed public redaction and fork isolation.
-- Added character-card and lore-book import diagnostics, bounded keyword
-  activation, immutable agent profiles, and explicit untrusted-content
-  admission.
-- Added durable agent-driven world evolution for concurrent NPC proposals,
-  deterministic game-owned reduction, exact policy and coordinate fencing,
-  recovery, reconciliation, and exactly-once settlement.
 - Added durable group interactions, membership and incarnation fences,
   private/shared memory boundaries, and bounded multi-actor lifecycle
   coordination.
@@ -72,4 +52,3 @@
   only to new agent-loop invocations and cannot change tools, skills, routes,
   or model identity midway through a decision.
 - Added Godot and Unity engine packages.
-- Added an Unreal compatibility module and protocol probe.

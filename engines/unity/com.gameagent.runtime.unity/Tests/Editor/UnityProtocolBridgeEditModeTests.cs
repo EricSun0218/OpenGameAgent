@@ -18,7 +18,10 @@ namespace GameAgent.Unity.Tests
                     kind = "snapshot",
                     contentType = "application/json",
                     contentSchemaVersion = "1",
-                    payloadJson = "{\"hunger\":70}",
+                    payloadJson =
+                        "{\"hunger\":70,\"temperature\":36.625,"
+                        + "\"position\":[1.25,-3.5],"
+                        + "\"nested\":{\"weight\":0.125}}",
                     hasObservedAtUnixMilliseconds = true,
                     observedAtUnixMilliseconds = 0,
                     trust = "authoritative",
@@ -42,6 +45,19 @@ namespace GameAgent.Unity.Tests
             Assert.That(
                 roundTrip.Payload.Value.GetProperty("hunger").GetInt32(),
                 Is.EqualTo(70));
+            Assert.That(
+                roundTrip.Payload.Value.GetProperty("temperature").GetDouble(),
+                Is.EqualTo(36.625));
+            Assert.That(
+                roundTrip.Payload.Value.GetProperty("position")[0].GetDouble(),
+                Is.EqualTo(1.25));
+            Assert.That(
+                roundTrip.Payload.Value.GetProperty("position")[1].GetDouble(),
+                Is.EqualTo(-3.5));
+            Assert.That(
+                roundTrip.Payload.Value.GetProperty("nested")
+                    .GetProperty("weight").GetDouble(),
+                Is.EqualTo(0.125));
             Assert.That(roundTrip.ContentSchemaVersion, Is.EqualTo("1"));
             Assert.That(
                 roundTrip.Extensions.ContainsKey(
