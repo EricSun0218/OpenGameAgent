@@ -2157,20 +2157,16 @@ public sealed class FinalOutputAdmissionRuntimeTests
             new BoundedCancellationDispatcher(1));
         var fallback = policy.ReleaseAfterAsync(
             TimeSpan.FromSeconds(1));
-        var watch = Stopwatch.StartNew();
 
         var timedOut = await evaluator.EvaluateAsync(
             PolicyRequest(),
             default);
 
-        watch.Stop();
         Assert.False(timedOut.Accepted);
         Assert.Equal(
             "final_output_admission_policy_timeout",
             timedOut.ReasonCode);
-        Assert.True(
-            watch.Elapsed < TimeSpan.FromMilliseconds(750),
-            $"Policy timeout took {watch.Elapsed}.");
+        Assert.False(policy.Completed.IsCompleted);
 
         var capacity = await evaluator.EvaluateAsync(
             PolicyRequest(),
@@ -2205,20 +2201,16 @@ public sealed class FinalOutputAdmissionRuntimeTests
             new BoundedCancellationDispatcher(1));
         var fallback = policy.ReleaseAfterAsync(
             TimeSpan.FromSeconds(1));
-        var watch = Stopwatch.StartNew();
 
         var timedOut = await evaluator.EvaluateAsync(
             PolicyRequest(),
             default);
 
-        watch.Stop();
         Assert.False(timedOut.Accepted);
         Assert.Equal(
             "final_output_admission_policy_timeout",
             timedOut.ReasonCode);
-        Assert.True(
-            watch.Elapsed < TimeSpan.FromMilliseconds(750),
-            $"Policy timeout took {watch.Elapsed}.");
+        Assert.False(policy.Completed.IsCompleted);
         await policy.CallbackStarted.WaitAsync(TestWaitTimeout);
 
         var capacity = await evaluator.EvaluateAsync(
