@@ -162,6 +162,14 @@ Only two cases accumulate:
 - the same terminal failure or rejection for the same call signature;
 - the same successful result from a captured `pure_read` tool.
 
+The guard also detects argument churn: the same versioned tool repeatedly
+receiving different arguments while producing the same non-progress outcome.
+This path is deliberately slower than exact-call detection. By default it
+warns after four argument changes following the baseline and stops after
+eight. `DetectArgumentChurn`, `ArgumentChurnWarningRepetitions`, and
+`ArgumentChurnHardStopRepetitions` configure or disable it. A changed outcome
+resets the churn pattern.
+
 A successful write, a non-null state diff, authoritative observations, a
 revision change, or a changed read result is progress and resets accumulated
 patterns. Unknown, pending, malformed, oversized, or legacy successful results
@@ -169,10 +177,11 @@ without captured effect evidence fail open and never cause a semantic stop.
 Normal `AgentBudget.MaxTurns`, `MaxActions`, token, cost, and duration limits
 still bound those fail-open paths.
 
-Warnings are durable user messages added to the next provider turn. They contain
-only the tool name, canonical digests, repetition count, and stable reason code;
-they never copy tool arguments or results. At the hard threshold the runtime
-commits the failed run before charging or dispatching another provider turn.
+Warnings are durable user messages added to the next provider turn. They
+contain only the tool name, pattern kind, canonical digests, repetition count,
+and stable reason code; they never copy tool arguments or results. At the hard
+threshold the runtime commits the failed run before charging or dispatching
+another provider turn.
 After a process loss at the preceding clean turn boundary, the guard rebuilds
 from the bounded durable transcript and reaches the same decision without
 replaying the action.
@@ -513,6 +522,58 @@ prefetch consumption, and bounded shutdown. Runtime-managed writes require
 committed provenance. Memory is still derived and untrusted: it cannot settle
 an action request or replace a host receipt.
 
+Multi-provider ranking defaults to the historical raw-score comparison. That
+is appropriate when providers share one score scale. Set
+`MemoryLifecycleOptions.RankingMode` to
+`MemoryRankingModes.ReciprocalRankFusion` when combining lexical, vector,
+graph, or remote providers whose raw scores are not comparable. The lifecycle
+then uses only each provider's bounded deterministic rank, sums repeated memory
+IDs, and preserves partial-provider diagnostics.
+
+Every recall report also contains bounded, content-free candidate evidence:
+the final score plus provider ID, provider-local rank, and raw score. Runtime
+recall events retain this evidence for at most 32 selected candidates and eight
+provider contributions per candidate, along with truncation and total-count
+fields. Memory content is not copied into the diagnostic payload.
+
+`VectorMemoryStore` is the optional semantic path. It accepts a game-supplied
+`IMemoryEmbeddingProvider`, bounds dimensions, resident vector values,
+concurrent embedding calls, embedding time, and search comparisons, validates
+every returned float, and ranks normalized cosine similarity. It supports
+atomic and idempotent atomic batches, so it can be the runtime write store.
+Nothing creates or downloads an embedding model automatically.
+
+An embedding provider declares a stable provider ID, model ID, version, and
+dimension count. The store captures that identity at construction and checks
+it before and after every embedding call. A hot-swapped model or changed
+dimension therefore fails closed instead of silently mixing incompatible
+vectors. Rebuild the derived vector index explicitly when upgrading an
+embedding model.
+
+```csharp
+var semantic = new VectorMemoryStore(
+    gameEmbeddingProvider,
+    capacity: 10_000,
+    options: new VectorMemoryStoreOptions(
+        maxVectorValues: 20_000_000,
+        minimumSimilarity: 0.15));
+
+await using var memory = new RuntimeMemoryLifecycle(
+    new IMemoryProvider[] { lexicalMemory, semantic },
+    writeStore: semantic,
+    options: new MemoryLifecycleOptions
+    {
+        RankingMode = MemoryRankingModes.ReciprocalRankFusion
+    });
+```
+
+All providers in a hybrid set must observe the same committed derived-memory
+feed. The lifecycle has one configured write store and does not silently mirror
+writes into unrelated indexes. A game that also persists lexical memory should
+rebuild the in-memory vector index from application-authoritative derived data
+on load, or provide one store that updates both indexes under its own recovery
+contract.
+
 Custom providers should honor query bounds to avoid wasted I/O. The lifecycle
 also enforces a hard result count per provider and retains only a bounded,
 deterministically ranked candidate set, so a misbehaving provider cannot make
@@ -520,8 +581,8 @@ the runtime materialize an unbounded merge. Before recalled records enter an
 agent turn, runtime integration independently reapplies the bound query and
 rejects records from another session.
 
-Games can replace it with vector, full-text, graph, database, or hosted memory
-without changing the agent loop. `IRuntimeMemoryPolicy` is the explicit game
+Games can replace or combine it with full-text, graph, database, or hosted
+memory without changing the agent loop. `IRuntimeMemoryPolicy` is the explicit game
 boundary that selects a query and derives writes:
 
 ```csharp

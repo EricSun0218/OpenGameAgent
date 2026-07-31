@@ -111,21 +111,15 @@ $required = @(
     'Runtime/GameAgent.Unity.asmdef',
     'Runtime/Plugins/GameAgent.Protocol.dll',
     'Runtime/Plugins/GameAgent.Core.dll',
-    'Runtime/Plugins/GameAgent.Compatibility.dll',
     'Runtime/Plugins/GameAgent.Persistence.dll',
     'Runtime/Plugins/GameAgent.Providers.Anthropic.dll',
     'Runtime/Plugins/GameAgent.Providers.OpenAICompatible.dll',
     'Runtime/Plugins/GameAgent.Runtime.dll',
     'Runtime/Plugins/GameAgent.Workflow.dll',
-    'Runtime/Plugins/GameAgent.World.dll',
     'Runtime/Plugins/System.Text.Json.dll',
     'Tests/Runtime/UnityDurableGateScenario.cs',
     'Samples~/StructuredToolLoop/StructuredToolLoopSample.cs',
-    'Samples~/InteractiveWorld/World/world.json',
-    'Samples~/InteractiveWorld/World/interactions.json',
     'Documentation~/index.md',
-    'Documentation~/Schemas/world-v1/world.schema.json',
-    'Documentation~/Schemas/world-v1/interactions.schema.json',
     'SHA256SUMS')
 foreach ($relativePath in $required) {
     $nativePath = $relativePath.Replace(
@@ -135,89 +129,6 @@ foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "The Unity package artifact is missing '$relativePath'."
     }
-}
-
-$expectedWorldSchemaNames = @(
-    'agents.schema.json',
-    'clocks.schema.json',
-    'events.schema.json',
-    'interactions.schema.json',
-    'knowledge.schema.json',
-    'native-world-common.schema.json',
-    'numerics.schema.json',
-    'world.schema.json') | Sort-Object
-$worldSchemaPath = Join-Path $artifact.FullName `
-    'Documentation~\Schemas\world-v1'
-$actualWorldSchemaNames = @(
-    Get-ChildItem `
-        -LiteralPath $worldSchemaPath `
-        -Filter '*.json' `
-        -File `
-        -Recurse |
-        ForEach-Object {
-            $_.FullName.Substring($worldSchemaPath.Length + 1).Replace(
-                '\',
-                '/')
-        } |
-        Sort-Object)
-if ([string]::Join("`n", $actualWorldSchemaNames) -cne
-    [string]::Join("`n", $expectedWorldSchemaNames)) {
-    throw 'The Unity package native-world schema set is incomplete or unexpected.'
-}
-$unexpectedWorldSchemaFiles = @(
-    Get-ChildItem -LiteralPath $worldSchemaPath -File -Recurse |
-        Where-Object {
-            $relative = $_.FullName.Substring(
-                $worldSchemaPath.Length + 1).Replace(
-                    '\',
-                    '/')
-            $relative -cnotin $expectedWorldSchemaNames -and
-            $relative -cne 'README.md'
-        })
-if ($unexpectedWorldSchemaFiles.Count -ne 0) {
-    throw 'The Unity package native-world schema directory contains unexpected files.'
-}
-
-$expectedWorldExampleNames = @(
-    'agents.json',
-    'clocks.json',
-    'events.json',
-    'interactions.json',
-    'knowledge.json',
-    'numerics.json',
-    'world.json') | Sort-Object
-$worldExamplePath = Join-Path $artifact.FullName `
-    'Samples~\InteractiveWorld\World'
-$actualWorldExampleNames = @(
-    Get-ChildItem `
-        -LiteralPath $worldExamplePath `
-        -Filter '*.json' `
-        -File `
-        -Recurse |
-        ForEach-Object {
-            $_.FullName.Substring($worldExamplePath.Length + 1).Replace(
-                '\',
-                '/')
-        } |
-        Sort-Object)
-if ([string]::Join("`n", $actualWorldExampleNames) -cne
-    [string]::Join("`n", $expectedWorldExampleNames)) {
-    throw 'The Unity package native-world example set is incomplete or unexpected.'
-}
-$unexpectedWorldExampleFiles = @(
-    Get-ChildItem -LiteralPath $worldExamplePath -File -Recurse |
-        Where-Object {
-            $relative = $_.FullName.Substring(
-                $worldExamplePath.Length + 1).Replace(
-                    '\',
-                    '/')
-            $relative -cnotin $expectedWorldExampleNames -and
-            $relative -cnotin @(
-                $expectedWorldExampleNames |
-                    ForEach-Object { $_ + '.meta' })
-        })
-if ($unexpectedWorldExampleFiles.Count -ne 0) {
-    throw 'The Unity package native-world example directory contains unexpected files.'
 }
 
 $package = Get-Content -LiteralPath (
@@ -271,7 +182,6 @@ foreach ($line in Get-Content -LiteralPath $checksumPath) {
 $plugins = Join-Path $artifact.FullName (
     'Runtime' + [IO.Path]::DirectorySeparatorChar + 'Plugins')
 $expectedPluginNames = @(
-    'GameAgent.Compatibility.dll',
     'GameAgent.Core.dll',
     'GameAgent.Persistence.dll',
     'GameAgent.Protocol.dll',
@@ -279,7 +189,6 @@ $expectedPluginNames = @(
     'GameAgent.Providers.OpenAICompatible.dll',
     'GameAgent.Runtime.dll',
     'GameAgent.Workflow.dll',
-    'GameAgent.World.dll',
     'Microsoft.Bcl.AsyncInterfaces.dll',
     'System.Buffers.dll',
     'System.Memory.dll',
@@ -313,15 +222,13 @@ if ([string]::Join("`n", $actualPluginPaths) -cne
 }
 
 $expectedSymbolNames = @(
-    'GameAgent.Compatibility.pdb',
     'GameAgent.Core.pdb',
     'GameAgent.Persistence.pdb',
     'GameAgent.Protocol.pdb',
     'GameAgent.Providers.Anthropic.pdb',
     'GameAgent.Providers.OpenAICompatible.pdb',
     'GameAgent.Runtime.pdb',
-    'GameAgent.Workflow.pdb',
-    'GameAgent.World.pdb')
+    'GameAgent.Workflow.pdb')
 $expectedSymbolPaths = @()
 if ($ExpectSymbols) {
     $expectedSymbolPaths = @(

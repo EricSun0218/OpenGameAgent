@@ -40,18 +40,6 @@ public sealed class AgentProfileBuilder
         _baseDefinition.Skills = new List<string>();
     }
 
-    public static AgentProfileBuilder FromImported(
-        ImportedAgentActivation activation)
-    {
-        if (activation is null)
-        {
-            throw new ArgumentNullException(nameof(activation));
-        }
-
-        return new AgentProfileBuilder(activation.AgentDefinition)
-            .AddContext(activation.PersonaContext);
-    }
-
     public AgentProfileBuilder AddProvider(
         IStreamingModelProvider provider)
     {
@@ -120,7 +108,7 @@ public sealed class AgentProfileBuilder
     }
 
     /// <summary>
-    /// Selects only the named toolsets from a trusted host catalog. Imported
+    /// Selects only the named toolsets from a trusted host catalog. Untrusted
     /// content cannot call this method or manufacture permissions.
     /// </summary>
     public AgentProfileBuilder AllowToolsets(

@@ -61,14 +61,15 @@ prove that historical authors and audiences were exact members when their
 messages committed.
 
 The generic stores continue to admit legacy sessions without a world binding
-so applications can open and migrate existing files. Authoritative settlement
-delivery and complete interactive-world bundle capture fail closed for such a
-session: they never infer a world scope from a file path, session ID, member
-ID, or caller promise. New world-backed sessions should pass
+so applications can open and migrate existing files. A game that requires
+world-scoped persistence should fail closed for such a session and never infer
+scope from a file path, session ID, member ID, or caller promise. New
+world-backed sessions should pass
 `GroupInteractionWorldBinding` to `GroupInteractionCreateRequest`.
 `GroupInteractionStateMachine.RebindWorld` is the explicit derivation used
-when a complete bundle forks to a new timeline; it preserves the transcript
-and revision history while recomputing the bound create-operation evidence.
+when game code forks the session to a new timeline; it preserves the
+transcript and revision history while recomputing the bound create-operation
+evidence.
 
 `GroupInteractionWriteResult` has a public validated constructor so a store in
 another assembly can report all interface-defined outcomes. Successful writes

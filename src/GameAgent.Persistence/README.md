@@ -8,23 +8,6 @@ in-process Godot and Unity runtimes. It has no native database dependency.
 `DeterministicMemoryStore` while recovering committed memories after a process
 restart.
 
-`FileWorldPresentationStore` provides an append-only presentation ledger for
-typed, non-authoritative world output. It retains exact world/save/catalog and
-audience-incarnation bindings, supports idempotent content-revision CAS and
-audience-safe paged export with query-bound opaque cursors, truncates torn tail
-frames, and rejects committed corruption. Exact viewer/class postings keep
-sparse reads bounded without exposing physical record gaps. Recovery bounds raw
-JSON before DTO allocation and enforces a separate resident-memory estimate. See
-[durable world presentations](../../docs/durable-presentations.md).
-
-`InteractiveWorldBundle` is the settled copy/import/fork boundary that carries
-the native authoritative save together with bounded memory, closed-group, and
-verified-presentation snapshots. It restores all four stores into a new
-directory and publishes that directory only after complete admission, seed
-write, reopen, and parity verification. Public export uses a fixed fail-closed
-sidecar redaction policy and accepts no caller audience grant. See
-[interactive world bundles](../../docs/interactive-world-bundles.md).
-
 ## Commit boundary
 
 Each append is one length-delimited frame:
@@ -197,13 +180,6 @@ If an I/O error occurs after writing begins, the instance fails closed because
 the caller cannot know whether the commit marker reached disk. Dispose and
 reopen it; recovery exposes either the complete mutation or the prior revision,
 never a partially applied record.
-
-`FileWorldSettlementStore` is the local durable outbox for
-`WorldSettlementCoordinator`. It persists the complete caller-authored
-delivery plan and every per-sink transition, uses exact plan-digest CAS, and
-recovers only a committed frame prefix. See
-[durable world settlements](../../docs/world-settlements.md) for receipt,
-authority, privacy, lifecycle-owner, and multi-process responsibilities.
 
 Use a separate memory file for each save/profile boundary whose memories must
 be deleted, copied, or rolled back together. The file is not encrypted and

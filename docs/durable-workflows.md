@@ -1,7 +1,7 @@
 # Durable workflows
 
 `GameAgent.Workflow` is an optional composition plane for bounded, recoverable
-jobs. The agent runtime and interactive-world evaluator do not depend on it.
+jobs. The Agent Runtime core does not depend on it.
 Games can use it for multi-stage authoring pipelines, background NPC jobs,
 parallel independent decisions, reductions, or bounded iterative work without
 making workflow order part of frame timing.

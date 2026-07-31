@@ -82,6 +82,27 @@ public sealed class RuntimeMemoryIntegrationTests
             var events = await built.SessionStore.ReadRunAsync(
                 outcome.Run.RunId,
                 CancellationToken.None);
+            var turnStarted = Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.TurnSnapshot);
+            var turnSnapshot = ProtocolJson.DeserializeTurnSnapshot(
+                turnStarted.Payload.GetRawText());
+            var recallEvidence = turnSnapshot.Extensions["memoryRecall"];
+            Assert.Equal(
+                MemoryRankingModes.RawScore,
+                recallEvidence.GetProperty("rankingMode").GetString());
+            var candidateEvidence = Assert.Single(
+                recallEvidence.GetProperty("candidateEvidence")
+                    .EnumerateArray());
+            Assert.Equal(
+                recallEvidence.GetProperty("selectedIds")[0].GetString(),
+                candidateEvidence.GetProperty("candidateId").GetString());
+            Assert.Equal(
+                1,
+                candidateEvidence.GetProperty("providerCount").GetInt32());
+            Assert.False(
+                recallEvidence.GetProperty("candidateEvidenceTruncated")
+                    .GetBoolean());
             Assert.Contains(
                 events,
                 item => item.Kind

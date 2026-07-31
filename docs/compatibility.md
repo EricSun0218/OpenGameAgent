@@ -51,6 +51,16 @@ reporting. Each configured provider must be exercised before shipping a game. A
 provider token belongs in a server relay or a short-lived scoped credential for
 consumer builds.
 
+The OpenAI-compatible adapter exposes the wire differences that commonly break
+tool loops instead of guessing them from a provider name. Configuration selects
+`max_tokens` versus `max_completion_tokens`, whether reasoning effort requires
+the vendor-specific thinking toggle, optional `tool_choice`, optional
+`parallel_tool_calls`, strict function schemas, and reasoning-content replay.
+Every selection is covered by the durable route-policy digest. The default
+profile remains the repository's verified DeepSeek V4 Pro route; other
+endpoints should set every dialect option explicitly and pass a live smoke gate
+before release.
+
 `GameAgent.Providers.Anthropic` implements the named Messages SSE flow with
 client `tool_use` and `tool_result` blocks and pins the verified `2023-06-01`
 API version. Its current dialect is deliberately limited to text and client

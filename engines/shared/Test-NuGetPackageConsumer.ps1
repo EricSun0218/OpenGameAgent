@@ -94,7 +94,6 @@ Invoke-Dotnet -Arguments @(
 
 $consumerSource = @'
 using GameAgent.Core;
-using GameAgent.Compatibility;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
 using GameAgent.Providers.Anthropic;
@@ -102,12 +101,10 @@ using GameAgent.Providers.OpenAICompatible;
 using GameAgent.Runtime;
 using GameAgent.Testing;
 using GameAgent.Workflow;
-using GameAgent.World;
 
 Type[] shippedTypes =
 [
     typeof(AgentRun),
-    typeof(CompatibilityImporter),
     typeof(HeadlessAgentRuntimeLimits),
     typeof(FileJournalOptions),
     typeof(AnthropicProviderOptions),
@@ -116,8 +113,7 @@ Type[] shippedTypes =
     typeof(ConsumerRequestAdapter),
     typeof(GameAgentRuntimeBuilder),
     typeof(FakeRuntimeClock),
-    typeof(WorkflowCompiler),
-    typeof(WorldPackageDefinition)
+    typeof(WorkflowCompiler)
 ];
 Console.WriteLine(string.Join(Environment.NewLine, shippedTypes.Select(
     static type => type.Assembly.FullName)));

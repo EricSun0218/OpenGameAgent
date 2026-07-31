@@ -1,5 +1,9 @@
 # Getting started
 
+For architectural recipes covering conversational characters, group scenes,
+periodic NPC simulation, traditional game AI, memory, generated content, and
+multiplayer authority, read [game integration patterns](game-integration-patterns.md).
+
 ## Requirements
 
 - .NET SDK 8 to build and test this repository.
@@ -11,12 +15,6 @@
 
 The protocol, core, persistence, provider adapter, and composition package
 compile against `netstandard2.1`.
-
-For the Godot-first layer that imports authored characters and
-world-book content, exposes typed interactions and portable numeric state,
-advances fixed events at discrete clock boundaries, and keeps native packages
-separate from saves, see
-[Interactive world v1](interactive-world-v1.md).
 
 ## 1. Define typed tools
 
@@ -257,38 +255,6 @@ DurableRunOutcome resumed = await built.Runtime.ResumeAsync(
     reconciler: gameOperationReconciler,
     cancellationToken: cancellationToken);
 ```
-
-## 6. Author an interactive world in Godot
-
-Enable the packaged Godot plugin and open the **Agent World** dock. Create a
-starter in an empty source directory, edit its seven inert JSON files, validate
-them, and build a deterministic `.gaworld` archive. The addon includes the
-world-v1 JSON Schemas and an interactive example in its `authoring` directory.
-
-Activate that package through the high-level engine session:
-
-```csharp
-var world = GetNode<GodotInteractiveWorldNode>(
-    "/root/GameAgentRuntime/InteractiveWorld");
-world.ConfigureNative();
-
-var loaded = await world.LoadNativePackageFileAsync(
-    "res://build/world.gaworld");
-if (!loaded.Activated)
-{
-    throw new InvalidOperationException(
-        string.Join(" | ", loaded.Diagnostics.Select(
-            item => $"{item.Code} {item.Path}: {item.Message}")));
-}
-
-var snapshot = await world.Native.ReadSnapshotAsync();
-byte[] save = await world.CaptureNativeSaveAsync();
-```
-
-Queries and mutations use the exact world/timeline/epoch/save/state coordinate
-from `snapshot`. Structured interaction parameters can be JSON objects,
-numbers, booleans, arrays, or strings; they do not need to be prose. The game
-defines all fields and business rules in its package or trusted extension.
 
 An unresolved operation remains paused. It is never automatically repeated.
 

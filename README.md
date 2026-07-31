@@ -1,180 +1,119 @@
 # Game Agent Runtime
 
-An in-engine agent runtime for AI-native games.
+An in-engine Agent Runtime for AI-native games.
 
-Game Agent Runtime accepts typed game context, runs a streaming model/tool loop,
-dispatches actions through the game engine, and persists enough state to recover
-without blindly repeating side effects. Input can be text, JSON, numbers, event
-payloads, or resource references.
+Game Agent Runtime accepts typed game context, runs a streaming model/tool
+loop, dispatches actions through the game engine, and records enough evidence
+to recover without blindly repeating side effects. Inputs may be text, JSON,
+numbers, game events, or references to game-owned resources.
 
-> Status: `0.1.0-alpha.1`. The wire protocol and public APIs may still change
-> before `1.0`.
+> Status: `0.1.0-alpha.1`. Public APIs and the wire protocol may change before
+> `1.0`.
 
-## What it provides
+## Product boundary
 
-- Durable multi-turn agent loops with streaming, retry, route-scoped fallback,
-  bounded cross-run cooldown, single half-open probes, and stale-attempt
-  fencing.
-- Request-only long-conversation pruning and typed, audited derived compaction
-  that preserve the authoritative transcript, semantic anchors, and unresolved
-  tool state.
+This repository is an Agent Runtime, not a game, world editor, content format,
+or end-user host. The game owns its state, rules, permissions, UI, save format,
+and final mutations. The runtime owns the reusable Agent Loop and its safety,
+durability, scheduling, memory, and provider boundaries.
+
+That split lets the same runtime drive an NPC, a director, a simulation worker,
+an assistant, or a group decision without forcing games into one data model.
+
+## Capabilities
+
+- Durable streaming model/tool loops with retries, route fallback, stale-stream
+  fencing, crash recovery, and explicit reconciliation of uncertain writes.
 - Typed observations and structured tool results; natural language is optional.
-- Explicit game-time, timeline, entity-incarnation, perspective, spatial,
-  state-version, and causal coordinates.
-- Bounded multi-actor decision batches with isolated failures, deterministic
-  result ordering, aggregate hard-budget reservation, and host-visible
-  simultaneous-action metadata.
-- Optional provider workload quotas that reserve capacity for interactive play
-  while background simulations and NPC batches remain bounded.
-- Script-aware prompt budgeting, provider/model-owned token estimators, and
-  bounded upward calibration from accounted input usage.
 - Immutable tool and skill snapshots with bounded progressive disclosure.
-- Build-time skill import diagnostics without online code installation.
-- Strict tool argument validation and deterministic conflict-key resolution.
-- Safe parallel reads, serialized writes, engine-main-thread affinity, and
-  world/external side-effect barriers.
-- Optional per-model-turn side-effect admission, with atomic write rejection
-  and continued pure-read execution when a response exceeds the policy.
-- Optional strict final-output admission with structured contracts, exact
-  durable action evidence, provisional streaming, and fail-closed recovery.
-- Cancel, interrupt, steer, and follow-up controls.
-- Turn, token, duration, cost, and action budgets.
-- Durable provider usage accounting across retries, with explicit incomplete
-  accounting when cancellation prevents a final usage report.
-- Provider capability profiles and request adapters for wire-only sanitation,
-  tool-pair repair, and transport-specific limits.
-- Native streaming adapters for OpenAI-compatible chat completions and
-  Anthropic Messages, with provider-specific tool and usage semantics.
-- Versioned provider dialects, exact-byte evidence for built-in prepared
-  transports, stable-prefix cache diagnostics, and route-bound continuation
-  state that is ephemeral unless both application and provider opt in.
-- Append-only local journals, write-ahead action requests, crash recovery, and
-  explicit reconciliation of uncertain operations.
-- Exact derived-conversation checkpoints for safe pre-provider crash replay,
-  plus bounded Stop and ownership-aware Dispose semantics. Runtime-owned calls
-  fully drain; non-cooperative host tool callbacks stay quarantined and fenced.
-- In-memory and crash-tolerant file-backed lexical memory with no embedding
-  model requirement, atomic mixed-write batches, committed world/save
-  provenance, multi-provider recall, prefetch, policy-driven in-loop context,
-  and recoverable idempotent atomic writeback.
-- Engine-neutral native world packages with closed JSON contracts, typed
-  interactions, portable fixed-point numerics, named game clocks, fixed event
-  evolution, durable schedules, exact state fences, and settled save/fork
-  restore.
-- Frame-friendly stream coalescing with bounded reconnect cursors, redacted
-  JSONL trace export, journal projection, and scenario evaluation.
-- Receipt-gated durable world presentations with typed localization and media
-  cues, content-revision CAS, host-authorized incarnation-aware projections,
-  privacy-safe paged export, and crash-tolerant local persistence.
-- Durable settlement outboxes that project only terminal authoritative world
-  evidence into private memories, group sessions, and presentation frames,
-  plus deterministic settled-world bundles with privacy-aware import/export.
-- Engine packages for Godot and Unity, with an Unreal compatibility module and
-  protocol probe.
+- Strict tool input validation, deterministic conflict scopes, parallel reads,
+  serialized conflicting writes, and engine-main-thread dispatch.
+- Turn, token, duration, cost, action, queue, and provider-workload budgets.
+- Request preparation, context pruning, audited derived compaction, and durable
+  usage accounting without rewriting the authoritative transcript.
+- Pluggable memory with local BM25, an optional bounded vector store,
+  reciprocal-rank hybrid fusion, and crash-tolerant file storage.
+- Exact-call and argument-churn loop guards that stop repeated tool work while
+  allowing deterministic recovery after real progress.
+- Cancel, interrupt, steering, and follow-up controls.
+- Durable workflows for deterministic orchestration around Agent steps.
+- Game-specific coordinates for named clocks, timelines, perspectives, entity
+  incarnations, state versions, spatial context, and causal provenance.
+- Bounded multi-actor batches and durable group interactions with isolated
+  participant failures and deterministic result ordering.
+- OpenAI-compatible and native Anthropic streaming provider adapters.
+- A shared `netstandard2.1` core plus Godot, Unity, and Unreal integration
+  boundaries.
 
-The runtime does not decide game legality or mutate world state itself. The game
-owns business rules and returns an authoritative `ActionReceipt`.
+## Architecture
 
-Run requests and continuations are deep-snapshotted before the first asynchronous
-wait. Callers can reuse or mutate their DTOs after `RunAsync` or `ResumeAsync`
-returns a pending operation without changing the admitted run.
+```text
+game code
+  observations -> Agent Runtime -> action requests
+       ^                              |
+       |                         game handlers
+       +------- authoritative receipts
 
-On resume, an omitted or empty `ActiveSkills` list inherits the latest durable
-skill activation. A non-empty list replaces it; set `ReplaceActiveSkills = true`
-with an empty list to clear every active skill explicitly.
-
-## Runtime boundary
-
-```mermaid
-flowchart LR
-    G["Game code<br/>rules and world state"]
-    H["Engine host<br/>main-thread dispatch"]
-    R["Agent runtime<br/>loop, tools, skills, budgets"]
-    P["Model provider"]
-    J["Durable journal"]
-
-    G <--> H
-    H <--> R
-    R <--> P
-    R <--> J
+Agent Runtime
+  context + memory + skills + tools
+  -> provider stream
+  -> validated/scheduled tool calls
+  -> journals + checkpoints + metrics
 ```
 
-The agent loop runs locally in the game process. Model inference may be local or
-remote. A shipped consumer game should not embed a permanent provider key; use a
-server relay or short-lived scoped credential. Developer BYOK workflows can keep
-credentials in platform-protected local storage.
+An `ActionReceipt` is the authority boundary. Only the game can report that a
+mutation succeeded, was rejected, failed, or has an unknown outcome. The
+runtime never invents a successful game-state change.
 
-## Quick start
+Read [architecture](docs/architecture.md), [protocol](docs/protocol.md), and
+[game semantics](docs/game-semantics.md) for the detailed contracts.
 
-The protocol, core, persistence, provider, and composition libraries target
-`netstandard2.1`. Windows is the primary release/package target and the real
-Godot engine-test target. Linux builds and tests the complete portable .NET
-solution and the portable Unreal wire/ABI boundary. Unity Editor/Player and
-Unreal Build Tool/Editor validation remain separate compatibility gates. macOS
-is not in the supported or CI matrix.
+## Engine support
 
-```csharp
-var journalPath = Path.Combine(
-    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-    "YourGame",
-    "agent-runtime.journal");
-await using var built = new GameAgentRuntimeBuilder(gameHost)
-    .UseFileJournal(journalPath)
-    .UseOpenAiCompatibleProvider(
-        new OpenAiCompatibleProviderOptions
-        {
-            BaseUri = new Uri("https://api.deepseek.com"),
-            Model = "deepseek-v4-pro"
-        },
-        new StaticBearerTokenSource(apiKey))
-    .WithTools(toolDescriptors)
-    .WithSkills(skillManifests)
-    .Build();
+| Target | Current scope |
+| --- | --- |
+| Godot 4.7 .NET | Primary integration. In-process C# runtime, Autoload lifecycle, typed and GDScript bridges, bounded main-thread/event pumps, multi-actor support, packaging, and Windows desktop/headless verification. |
+| Unity 2022.3+ | In-process C# host and UPM package with managed compile, package, artifact-load, lifecycle, and conformance gates. A licensed Editor/Player gate is provided but is not claimed as executed for this alpha. |
+| Unreal Engine 5 | Portable C++ protocol, C ABI, GameThread boundary, and automation probe, including a Visual Studio-independent Zig/Ninja verification path. A complete in-process native backend or supervised sidecar transport is not implemented yet. |
 
-DurableRunOutcome outcome = await built.Runtime.RunAsync(request, cancellationToken);
+The engine SDK is only an adapter. Agent behavior, persistence semantics, and
+provider logic remain in the shared runtime.
+
+## Start here
+
+For a repository checkout:
+
+```powershell
+dotnet build GameAgentRuntime.sln -c Release
+dotnet test GameAgentRuntime.sln -c Release --no-build
 ```
 
-See:
+Then follow:
 
 - [Getting started](docs/getting-started.md)
-- [Architecture](docs/architecture.md)
-- [Game semantics and multi-actor coordination](docs/game-semantics.md)
-- [Durable agent-driven world evolution](docs/agent-world-evolution.md)
-- [Durable game-time schedules](docs/game-time-schedules.md)
-- [Group interactions](docs/group-interactions.md)
-- [Durable world presentations](docs/durable-presentations.md)
-- [Durable world settlements](docs/world-settlements.md)
-- [Durable workflows](docs/durable-workflows.md)
-- [Interactive world framework](docs/interactive-world-v1.md)
-- [Settled interactive world bundles](docs/interactive-world-bundles.md)
-- [Protocol](docs/protocol.md)
+- [Godot integration](engines/godot/README.md)
+- [Unity integration](engines/unity/README.md)
+- [Unreal compatibility probe](engines/unreal/README.md)
 - [Tools, skills, and memory](docs/tools-skills-memory.md)
-- [Final-output admission](docs/final-output-admission.md)
-- [Runtime metrics](docs/metrics.md)
-- [Security](SECURITY.md)
-- [Compatibility](docs/compatibility.md)
-- [Imported character and lore activation](docs/imported-content-activation.md)
-- [Godot package](engines/godot/README.md)
-- [Unity package](engines/unity/README.md)
-- [Unreal module](engines/unreal/README.md)
+- [Game integration patterns](docs/game-integration-patterns.md)
+- [Durable workflows](docs/durable-workflows.md)
+- [Group interactions](docs/group-interactions.md)
 
-## Verify
+## Security and deployment
 
-```powershell
-dotnet restore GameAgentRuntime.sln
-dotnet test GameAgentRuntime.sln -c Release --no-restore
-dotnet run --project tests/GameAgent.PerformanceSmoke -c Release --no-restore
-dotnet format GameAgentRuntime.sln --verify-no-changes --no-restore
-```
+Run the Agent Runtime in the game process when low latency and direct engine
+integration matter. Do not ship a provider secret that grants access to your
+commercial account inside a client build. Use player-supplied credentials for
+BYOK deployments or exchange game authentication for short-lived, scoped
+access through a service you control.
 
-The live provider smoke test is opt-in and never prints model content:
+Tools and skills are capabilities, not prompt text. Keep authoritative
+validation and mutations in game code, expose the narrowest tool surface, and
+persist operation receipts before assuming a write can be retried.
 
-```powershell
-$env:DEEPSEEK_API_KEY = "<developer credential>"
-dotnet run --project tests/GameAgent.LiveSmoke -c Release
-Remove-Item Env:DEEPSEEK_API_KEY
-```
+## Release verification
 
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
+The repository includes deterministic package, privacy, version consistency,
+managed consumer, Godot, Unity, portable Unreal, performance, and live-provider
+gates. See [pre-public release](docs/pre-public-release.md) before publishing an
+artifact.

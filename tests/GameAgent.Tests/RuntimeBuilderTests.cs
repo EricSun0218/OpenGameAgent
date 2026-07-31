@@ -10,27 +10,6 @@ namespace GameAgent.Tests;
 public sealed class RuntimeBuilderTests
 {
     [Fact]
-    public void WorldAgentJobsRemainStrictWhenRuntimeOptionsAreSetLater()
-    {
-        var builder = new GameAgentRuntimeBuilder(new RejectingHost())
-            .EnableWorldAgentJobs(
-                new FinalOutputAdmissionOptions
-                {
-                    MaxAttempts = 3
-                })
-            .WithRuntimeOptions(new DurableAgentRuntimeOptions());
-        var options = Assert.IsType<DurableAgentRuntimeOptions>(
-            typeof(GameAgentRuntimeBuilder)
-                .GetField(
-                    "_runtimeOptions",
-                    BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(builder));
-
-        Assert.True(options.FinalOutputAdmission.Enabled);
-        Assert.Equal(3, options.FinalOutputAdmission.MaxAttempts);
-    }
-
-    [Fact]
     public void BuilderRejectsNullRecoveryOptions()
     {
         var builder = new GameAgentRuntimeBuilder(new RejectingHost());

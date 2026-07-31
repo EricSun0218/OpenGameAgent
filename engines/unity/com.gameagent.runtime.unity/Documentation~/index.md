@@ -4,289 +4,97 @@
 
 ```text
 UnityAgentRuntimeHost (MonoBehaviour)
-  ├─ action dispatcher (bounded, authoritative)
-  ├─ runtime-event dispatcher (bounded, best effort)
-  └─ UnityAgentRuntimeFacade
-       ├─ IUnityDurableAgentRuntimeBackend
-       │    └─ shared GameAgent.Core.IDurableAgentRuntime
-       └─ headless compatibility backend
-            └─ shared GameAgent.Core.HeadlessAgentRuntime
+  -> UnityAgentRuntimeFacade
+     -> IUnityDurableAgentRuntimeBackend
+        -> shared IDurableAgentRuntime
+
+validated ActionRequest
+  -> UnityMainThreadGameHost / UnityMainThreadDispatcher
+     -> game-owned handler
+        -> authoritative ActionReceipt
 ```
 
-The adapter owns engine lifecycle and thread affinity only. Protocol, Agent
-Loop, persistence semantics, budgets, operation ids, and receipts remain in the
-shared assemblies. The facade depends on backend interfaces, so a game can
-inject the shared durable runtime or another compatible backend without
-changing the Unity lifecycle layer.
+The adapter owns Unity lifecycle, queue pumping, cancellation, and thread
+affinity. Protocol, Agent Loop, persistence, tools, skills, memory, budgets,
+operation identifiers, and receipts stay in engine-neutral assemblies.
 
-The assembled artifact also carries the optional durable Workflow module and
-both built-in streaming-provider adapters. They remain engine-neutral
-libraries; installing the Unity host does not select a provider or create a
-workflow automatically.
+## Composition checklist
 
-The interactive-world adapter follows the same rule:
+1. Choose a streaming provider and credential source.
+2. Define an agent profile, typed observations, tools, and optional skills.
+3. Register game action handlers. Mark handlers that touch Unity objects for
+   main-thread execution.
+4. Choose durable session and memory stores under a game-owned data directory.
+5. Configure budgets, provider routes, retries, final-output admission, and
+   metrics.
+6. Build one `BuiltGameAgentRuntime` composition for the intended lifetime.
+7. Configure one `UnityAgentRuntimeHost` before starting runs.
+8. On shutdown, stop admission and await the host drain before destroying its
+   GameObject.
 
-```text
-UnityInteractiveWorldHost (MonoBehaviour)
-  -> UnityInteractiveWorldFacade
-     -> InteractiveWorldEngineSession
-        -> GameAgent.World package/save/interaction/event contracts
-```
+The **Structured Tool Loop** sample is the smallest runnable composition and
+uses a deterministic provider, so it is safe to run without a network key.
 
-The host pumps only completed notifications. Portable planning and validation
-run off-thread; game-owned execution must provide its own atomic state and
-history transaction boundary.
+## Threading
 
-The built-in declarative path uses a higher-level owner:
+Provider streaming and file persistence do not run on the Unity main thread.
+`UnityMainThreadDispatcher` has bounded admission and each queued operation has
+a single execution claimant. `UnityAgentRuntimeHost.Update` drains work within
+configured item and time budgets.
 
-```text
-UnityNativeWorldSessionHost (MonoBehaviour)
-  -> UnityNativeWorldSessionFacade
-     -> NativeWorldEngineSession
-        -> activated package + authoritative runtime + settled save bridge
-```
+Queued work may be cancelled before it starts. Once game code begins, the game
+must return the real outcome; cancellation does not prove that a side effect
+did not commit.
 
-`LoadPackageAsync` and `LoadSaveAsync` fully admit a candidate before they
-pause admissions, drain the old generation, and publish one atomic
-replacement. `Typed` exposes structured interactions, named clock advancement,
-schedules, state reads, and package export. The UPM artifact carries world-v1
-schemas and an inert example; all business fields and rules remain authored by
-the game.
+## Structured data
 
-## Configure the host
+`UnityProtocolBridge` converts Unity-serializable data holders and strict JSON
+payloads to engine-neutral protocol DTOs. Observations may carry arbitrary
+JSON, text, scalar values encoded in JSON, or bounded resource references.
+Natural language is not required.
 
-Add `UnityAgentRuntimeHost` to a bootstrap GameObject, or call
-`UnityAgentRuntimeHost.EnsureCreated()`. For durable runs, construct a
-`UnityMainThreadGameHost` with `host.Dispatcher`, pass
-`host.EventPublisher` to `GameAgentRuntimeBuilder.PublishEventsTo`, then call
-`host.Configure(built)`. This transfers ownership of the complete builder
-composition by default. Custom integrations may instead configure an
-`IDurableAgentRuntime` or `IUnityDurableAgentRuntimeBackend` together with its
-session store. The host exposes `RunAsync(DurableRunRequest)`, `ResumeAsync`,
-and `DurableControls`.
+Do not expose Unity objects to the provider. Project only the context an agent
+needs and enforce all permissions again inside the action handler.
 
-The facade also exposes a guarded overload:
+## Durability and recovery
 
-```csharp
-var expectation = DurableRunSemanticExpectation.FromJson(
-    GameContextEnvelope.ExtensionName,
-    GameContextEnvelope.ToJson(currentCoordinate));
-var guard = new DurableRunResumeGuard
-{
-    SemanticExtensionName = expectation.ExtensionName,
-    ExpectedSemanticExtensionSha256 = expectation.ExpectedSha256
-};
+For side effects, persist the operation request before dispatch and the
+authoritative receipt after completion. On restart, resume through the durable
+runtime. If the previous outcome is uncertain, supply an
+`IGameOperationReconciler`; do not guess or automatically replay the write.
 
-DurableRunOutcome outcome = await host.ResumeAsync(
-    runId,
-    guard,
-    continuation,
-    reconciler,
-    cancellationToken);
-```
+Use state-version, timeline, clock, perspective, and entity-incarnation
+coordinates to prevent stale observations from being applied to a different
+save, branch, or respawned entity.
 
-The call fails with `durable_resume_guard_not_supported` when a custom backend
-does not implement `IUnityGuardedDurableAgentRuntimeBackend` end to end.
+## Multi-actor work
 
-The provider/store/action-handler `Configure` overload remains available for
-the compact headless loop.
+The shared coordinator supports bounded batches with deterministic ordering and
+isolated participant failures. Each participant has its own run identity and
+budgets. The game decides whether and how completed decisions become one
+simultaneous authoritative mutation.
 
-`DontDestroyOnLoad` is enabled by default, so scene unload does not end a
-world/session. Stable game ids, not `GameObject` references or instance ids,
-belong in protocol objects and persisted state.
+## Backpressure and shutdown
 
-## Main-thread dispatch
+Bound active runs, dispatcher capacity, events per frame, and time spent per
+frame. Treat progress events as best effort; durable outcomes and stores are
+authoritative.
 
-Provider and Agent work may execute off-thread. Every game action crosses
-`UnityMainThreadGameHost`, which posts to the bounded dispatcher and begins the
-handler on the thread that created the host.
+`ShutdownAsync` stops admission, requests cancellation, drains active callbacks,
+stops owned backends, and flushes owned stores. If Unity tears down the process
+before completion, the next launch must use normal durable recovery.
 
-The authoritative action lane defaults are:
+## Deployment security
 
-- 1024 queued operations;
-- 64 dispatches per frame;
-- 2 ms pump budget per frame.
+- Do not ship a reusable provider secret in a client.
+- Prefer player-owned credentials or short-lived scoped service tokens.
+- Keep tool schemas narrow and validate again in game code.
+- Treat model output, imported text, and provider error bodies as untrusted.
+- Keep save/state mutations behind authoritative handlers.
 
-The runtime-event lane is separate, defaults to 1024 queued notifications and
-128 deliveries per frame, and may drop notifications under pressure.
-`DroppedRuntimeEventCount` exposes the cumulative count. Telemetry cannot fill
-or delay the action queue. These are serialized fields on the host. Action
-queue overflow fails the awaiting operation with
-`UnityDispatcherQueueFullException`; authoritative work is never silently
-dropped. The returned run task and durable journal remain authoritative.
+## Verification levels
 
-The facade admits at most 32 active Run/Resume calls by default. Excess
-admission fails immediately with `UnityRunCapacityExceededException`, rather
-than allocating an unbounded set of tasks behind the runtime.
-
-Do not call Unity APIs before an async handler's first await and then assume its
-continuation is still on the Unity thread. Keep Unity mutation in the
-synchronous prefix, split longer work into another dispatch, or explicitly use
-the dispatcher again. Cancellation completes queued action tasks immediately;
-the bounded queue slot is reclaimed on the next pump. Once an action handler
-has started, cancellation is cooperative: its token is signaled, and the
-runtime waits for the handler to return before durable shutdown can finish.
-
-## Structured DTO bridge
-
-Unity's serializer does not understand `JsonElement` or the full protocol
-graph. The package therefore provides Unity-serializable field DTOs:
-
-- `UnityObservationData`;
-- `UnityActionRequestData`;
-- `UnityActionReceiptData`.
-
-`UnityProtocolBridge` converts these to the authoritative protocol types and
-also provides reflection-free JSON parsing/serialization for
-`ObservationEnvelope`, `ActionRequest`, `ActionReceipt`, and `RuntimeEvent`.
-Natural language is not required: `payloadJson`, arguments, receipts, and final
-output can all be structured JSON.
-
-The bridge treats every DTO JSON string and full-object JSON entry point as an
-ingress boundary. DTO JSON values are checked before parsing or cloning at
-262,144 UTF-8 bytes, depth 32, 8,192 nodes, 65,536 UTF-8 bytes per string, and
-2,048 items per container. Nested receipt DTOs share a 32 MiB and 1,048,576-node
-aggregate budget. Full wire documents are capped at 32 MiB, depth 64, and
-1,048,576 nodes. Both DTO and full-document paths reject protocol extensions
-over 64 properties before materialization. Full documents also preflight the
-64-observation receipt limit and the 32-item expected-effects limit, while DTO
-array cardinality is checked before copying.
-
-Field DTO timestamps are deterministic inputs. Observations must provide
-`observedAtUnixMilliseconds`, and receipts must provide
-`receivedAtUnixMilliseconds`; set the matching `has...` field when the value is
-Unix epoch `0`. Optional `sequence` and `resourceSizeBytes` fields use `-1` only
-as their untouched absent default. Set `hasSequence` or
-`hasResourceSizeBytes` when supplying a value. Explicit negative values are
-rejected, and one receipt can contain at most 64 authoritative observations.
-
-`UnityObservationData.audienceIncarnations` provides a typed bridge for the
-Core `audienceIncarnations` extension. Each
-`UnityAudienceIncarnationData` links one `audienceId` to an `entityId` and
-non-negative `incarnation`; the array must exactly cover `audienceIds`. Enable
-`RequireAudienceIncarnationForRestrictedObservations` on the durable runtime to
-reject missing, stale, or malformed restricted observations before context
-compilation or a steer/follow-up interruption. Leaving the option disabled
-preserves the legacy ID-only audience behavior.
-
-The bridge calls `ProtocolValidator` for game-supplied observations, action
-requests, and action receipts. `RuntimeEvent` JSON uses the protocol's
-reflection-free serializer and is intended for runtime-produced journal data.
-Treat JSON from models, mods, saves, or networks as untrusted and apply
-game-specific schema and size limits before mutation.
-
-## Cancellation and shutdown
-
-- A caller token cancels one run.
-- `CancelActiveRuns` cancels every currently tracked run without permanently
-  shutting down the host.
-- `ShutdownAsync` prevents new runs, cancels active runs, waits for them,
-  flushes `IDurableSessionStore`, and disposes an owned store.
-- Dispatcher shutdown atomically closes work admission. Work claimed before
-  that boundary remains part of the shutdown drain; dequeued or direct work
-  that has not been claimed is cancelled without entering the game callback.
-- Obtain `EventPublisher` during bootstrap. Access after shutdown has started
-  throws `ObjectDisposedException` and never creates a replacement event lane.
-- Cancelling one `ShutdownAsync` caller only cancels that caller's wait. The
-  shared cleanup continues, and a later caller can await the same shutdown.
-- Exceptions thrown by cancellation callbacks do not skip run draining or
-  store cleanup; `ShutdownAsync` reports them after cleanup completes.
-- `IsShutdownIncomplete` is true while retryable cleanup remains or when a
-  terminal shutdown operation completed with an error. A later successful
-  retry clears it.
-- `OnApplicationQuit` performs a bounded five-second completion wait after
-  closing admission; `OnDestroy` continues the same idempotent cleanup in the
-  background when a scene object is removed without a player quit.
-
-For a controlled quit, save the game and await `ShutdownAsync` before calling
-`Application.Quit`. Mobile operating systems and WebGL can terminate without a
-reliable quit callback, so durable ActionRequest/Receipt records must be
-flushed at their normal write boundary. Do not rely on `OnDestroy` as a save
-operation.
-
-## Mono, IL2CPP, and stripping
-
-The adapter:
-
-- targets the shared `netstandard2.1` assemblies;
-- uses no `Reflection.Emit`, expression compilation, runtime code generation,
-  or reflection-based DTO discovery;
-- calls the protocol's source-generated `System.Text.Json` entry points;
-- marks the runtime assembly with `AlwaysLinkAssembly`;
-- marks public Unity bridge and lifecycle roots with `Preserve`.
-
-The artifact builder bundles the exact shared runtime assemblies and their
-composition builder, optional streaming provider adapter, and managed
-`System.Text.Json` dependencies. If a game already ships different versions of
-those assemblies, resolve the dependency versions deliberately; do not keep
-two assemblies with the same identity.
-
-Unity documents that managed stripping also processes package/plugin
-assemblies, and recommends annotations for code the static analyzer cannot see.
-Our direct call graph and generated JSON metadata minimize that surface:
-
-- https://docs.unity3d.com/6000.0/Documentation/Manual/managed-code-stripping.html
-- https://docs.unity3d.com/6000.0/Documentation/ScriptReference/RuntimeInitializeOnLoadMethodAttribute.html
-
-## Verification
-
-Without a Unity installation:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File `
-  engines/unity/scripts/Test-UnityPackage.ps1
-```
-
-This performs:
-
-1. a `netstandard2.1` compile of Runtime, Samples, and package test sources
-   using deterministic Unity API stubs;
-2. dispatcher/cancellation/DTO tests;
-3. a full durable Context → streamed ToolCall → main-thread Action →
-   journaled Receipt → final conformance loop;
-4. assembly of a complete UPM artifact;
-5. checks that Unity sources do not duplicate the Agent core.
-
-With a real Unity project that has the staged package installed and listed in
-the project's `testables`, run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File `
-  engines/unity/scripts/Invoke-UnityEditorGate.ps1 `
-  -UnityEditorPath "C:\Program Files\Unity\Hub\Editor\...\Editor\Unity.exe" `
-  -ProjectPath "C:\path\to\gate-project" `
-  -Backend Both
-```
-
-This runs EditMode and PlayMode tests, then builds and executes Windows Mono
-and IL2CPP Players. Each Player must complete the same deterministic durable
-tool loop and write a validated JSON pass marker. The IL2CPP platform module
-must be installed.
-
-## Verified support
-
-| Environment | Status |
-|---|---|
-| .NET 8 SDK stub compile of Unity-facing source as `netstandard2.1` | Passed |
-| Stubbed main-thread structured tool-loop conformance | Passed |
-| Unity 2022.3 Editor / Mono Player | Not run on this machine |
-| Unity 2022.3 Windows IL2CPP Player | Not run on this machine |
-| Unity 6 Editor / IL2CPP Player | Not run on this machine |
-| Mobile, WebGL, consoles | Not claimed |
-
-Stub compilation is a portability gate, not evidence that UnityLinker or
-IL2CPP succeeded. Do not upgrade the support claim until the real Player gates
-run in CI.
-
-## Official Unity references
-
-- Package layout and tests:
-  https://docs.unity3d.com/Manual/CustomPackages.html
-- Package manifest:
-  https://docs.unity3d.com/6000.0/Documentation/Manual/upm-manifestPkg.html
-- .NET profile support:
-  https://docs.unity3d.com/Manual/dotnet-profile-support.html
-- MonoBehaviour lifecycle:
-  https://docs.unity3d.com/ScriptReference/MonoBehaviour.html
-- Managed stripping:
-  https://docs.unity3d.com/6000.0/Documentation/Manual/managed-code-stripping.html
+The package ships gates for managed compilation, artifact contents, assembly
+loading, host lifecycle, and protocol conformance. A licensed Unity Editor is
+required for the provided Mono/IL2CPP build-and-run gate. This alpha does not
+claim that Editor gate as executed in the repository verification environment.

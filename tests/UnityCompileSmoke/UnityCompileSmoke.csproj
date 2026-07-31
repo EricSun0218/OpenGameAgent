@@ -22,7 +22,6 @@
     <ProjectReference Include="..\..\src\GameAgent.Providers.OpenAICompatible\GameAgent.Providers.OpenAICompatible.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Runtime\GameAgent.Runtime.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Workflow\GameAgent.Workflow.csproj" />
-    <ProjectReference Include="..\..\src\GameAgent.World\GameAgent.World.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UnityArtifactPath)' != ''">
     <Compile Include="$(UnityArtifactPath)\Runtime\**\*.cs"
@@ -52,9 +51,6 @@
                Private="false" />
     <Reference Include="GameAgent.Workflow"
                HintPath="$(UnityArtifactPath)\Runtime\Plugins\GameAgent.Workflow.dll"
-               Private="false" />
-    <Reference Include="GameAgent.World"
-               HintPath="$(UnityArtifactPath)\Runtime\Plugins\GameAgent.World.dll"
                Private="false" />
     <Reference Include="System.Text.Json"
                HintPath="$(UnityArtifactPath)\Runtime\Plugins\System.Text.Json.dll"

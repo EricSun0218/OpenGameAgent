@@ -16,6 +16,12 @@ public sealed class SemanticToolLoopGuardOptions
 
     public int HardStopRepetitions { get; set; } = 4;
 
+    public bool DetectArgumentChurn { get; set; } = true;
+
+    public int ArgumentChurnWarningRepetitions { get; set; } = 4;
+
+    public int ArgumentChurnHardStopRepetitions { get; set; } = 8;
+
     public int MaxTrackedSignatures { get; set; } = 128;
 
     public int MaxRebuildMessages { get; set; } = 2_048;
@@ -34,6 +40,19 @@ public sealed class SemanticToolLoopGuardOptions
         if (HardStopRepetitions <= WarningRepetitions)
         {
             throw new ArgumentOutOfRangeException(nameof(HardStopRepetitions));
+        }
+
+        if (ArgumentChurnWarningRepetitions < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ArgumentChurnWarningRepetitions));
+        }
+
+        if (ArgumentChurnHardStopRepetitions
+            <= ArgumentChurnWarningRepetitions)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ArgumentChurnHardStopRepetitions));
         }
 
         if (MaxTrackedSignatures < 1)
@@ -65,6 +84,11 @@ public sealed class SemanticToolLoopGuardOptions
             Enabled = Enabled,
             WarningRepetitions = WarningRepetitions,
             HardStopRepetitions = HardStopRepetitions,
+            DetectArgumentChurn = DetectArgumentChurn,
+            ArgumentChurnWarningRepetitions =
+                ArgumentChurnWarningRepetitions,
+            ArgumentChurnHardStopRepetitions =
+                ArgumentChurnHardStopRepetitions,
             MaxTrackedSignatures = MaxTrackedSignatures,
             MaxRebuildMessages = MaxRebuildMessages,
             MaxPendingToolCalls = MaxPendingToolCalls,
@@ -78,13 +102,19 @@ internal sealed class SemanticToolLoopGuard
     internal const string WarningContentType =
         "application/vnd.game-agent.tool-loop-warning+json";
     internal const string WarningReasonCode = "tool_no_progress_warning";
+    internal const string ArgumentChurnWarningReasonCode =
+        "tool_argument_churn_warning";
     internal const string HardStopReasonCode = "tool_no_progress";
+    internal const string ExactCallPatternKind = "exact_call";
+    internal const string ArgumentChurnPatternKind = "argument_churn";
 
     private readonly SemanticToolLoopGuardOptions _options;
     private readonly JsonValueLimits _digestLimits;
     private readonly Dictionary<string, PendingCall> _pending =
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, StablePattern> _patterns =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ArgumentChurnPattern> _churnPatterns =
         new(StringComparer.Ordinal);
     private long _sequence;
 
@@ -111,18 +141,54 @@ internal sealed class SemanticToolLoopGuard
                 .ThenByDescending(item => item.LastSequence)
                 .ThenBy(item => item.SignatureDigest, StringComparer.Ordinal)
                 .FirstOrDefault();
-            if (pattern is null)
+            var candidates = new List<SemanticToolLoopGuardDecision>(2);
+            if (pattern is not null)
             {
-                return null;
+                candidates.Add(new SemanticToolLoopGuardDecision(
+                    pattern.ToolName,
+                    ExactCallPatternKind,
+                    pattern.SignatureDigest,
+                    pattern.OutcomeDigest,
+                    pattern.RepetitionCount,
+                    pattern.LastObservedAt,
+                    pattern.LastSequence,
+                    pattern.RepetitionCount >= _options.HardStopRepetitions,
+                    WarningReasonCode,
+                    _options.HardStopRepetitions));
             }
 
-            return new SemanticToolLoopGuardDecision(
-                pattern.ToolName,
-                pattern.SignatureDigest,
-                pattern.OutcomeDigest,
-                pattern.RepetitionCount,
-                pattern.LastObservedAt,
-                pattern.RepetitionCount >= _options.HardStopRepetitions);
+            if (_options.DetectArgumentChurn)
+            {
+                var churn = _churnPatterns.Values
+                    .Where(item => item.RepetitionCount
+                        >= _options.ArgumentChurnWarningRepetitions)
+                    .OrderByDescending(item => item.RepetitionCount)
+                    .ThenByDescending(item => item.LastSequence)
+                    .ThenBy(item => item.PatternDigest, StringComparer.Ordinal)
+                    .FirstOrDefault();
+                if (churn is not null)
+                {
+                    candidates.Add(new SemanticToolLoopGuardDecision(
+                        churn.ToolName,
+                        ArgumentChurnPatternKind,
+                        churn.PatternDigest,
+                        churn.OutcomeDigest,
+                        churn.RepetitionCount,
+                        churn.LastObservedAt,
+                        churn.LastSequence,
+                        churn.RepetitionCount
+                            >= _options.ArgumentChurnHardStopRepetitions,
+                        ArgumentChurnWarningReasonCode,
+                        _options.ArgumentChurnHardStopRepetitions));
+                }
+            }
+
+            return candidates
+                .OrderByDescending(item => item.HardStop)
+                .ThenByDescending(item => item.RepetitionCount)
+                .ThenByDescending(item => item.LastSequence)
+                .ThenBy(item => item.PatternDigest, StringComparer.Ordinal)
+                .FirstOrDefault();
         }
     }
 
@@ -195,7 +261,7 @@ internal sealed class SemanticToolLoopGuard
     internal void ResetForIndeterminateOutcome()
     {
         _pending.Clear();
-        _patterns.Clear();
+        ResetPatterns();
     }
 
     internal NormalizedMessage? CreateWarningMessage()
@@ -208,18 +274,22 @@ internal sealed class SemanticToolLoopGuard
 
         var payload = JsonArrayBuilder.Object(
             ("contentType", JsonArrayBuilder.String(WarningContentType)),
-            ("reasonCode", JsonArrayBuilder.String(WarningReasonCode)),
+            ("reasonCode", JsonArrayBuilder.String(
+                decision.WarningReasonCode)),
             ("toolName", JsonArrayBuilder.String(decision.ToolName)),
+            ("patternKind", JsonArrayBuilder.String(decision.PatternKind)),
+            ("patternDigest",
+                JsonArrayBuilder.String(decision.PatternDigest)),
             ("callSignatureDigest",
                 JsonArrayBuilder.String(decision.CallSignatureDigest)),
             ("outcomeDigest", JsonArrayBuilder.String(decision.OutcomeDigest)),
             ("repetitionCount",
                 JsonArrayBuilder.Number(decision.RepetitionCount)),
             ("hardStopRepetitions",
-                JsonArrayBuilder.Number(_options.HardStopRepetitions)));
+                JsonArrayBuilder.Number(decision.HardStopRepetitions)));
         var idDigest = new CanonicalDigestBuilder();
-        idDigest.Add("kind", WarningReasonCode);
-        idDigest.Add("signature", decision.CallSignatureDigest);
+        idDigest.Add("kind", decision.WarningReasonCode);
+        idDigest.Add("pattern", decision.PatternDigest);
         idDigest.Add("outcome", decision.OutcomeDigest);
         idDigest.Add("repetitions", decision.RepetitionCount);
         return new NormalizedMessage
@@ -243,15 +313,18 @@ internal sealed class SemanticToolLoopGuard
             ("reasonCode", JsonArrayBuilder.String(
                 decision.HardStop
                     ? HardStopReasonCode
-                    : WarningReasonCode)),
+                    : decision.WarningReasonCode)),
             ("toolName", JsonArrayBuilder.String(decision.ToolName)),
+            ("patternKind", JsonArrayBuilder.String(decision.PatternKind)),
+            ("patternDigest",
+                JsonArrayBuilder.String(decision.PatternDigest)),
             ("callSignatureDigest",
                 JsonArrayBuilder.String(decision.CallSignatureDigest)),
             ("outcomeDigest", JsonArrayBuilder.String(decision.OutcomeDigest)),
             ("repetitionCount",
                 JsonArrayBuilder.Number(decision.RepetitionCount)),
             ("hardStopRepetitions",
-                JsonArrayBuilder.Number(_options.HardStopRepetitions)));
+                JsonArrayBuilder.Number(decision.HardStopRepetitions)));
     }
 
     internal static bool IsWarningMessage(NormalizedMessage message)
@@ -317,13 +390,14 @@ internal sealed class SemanticToolLoopGuard
                 return false;
             }
 
-            var signature = TryComputeSignature(part);
+            var digests = TryComputeCallDigests(part);
             _pending.Add(
                 part.ToolCallId,
                 new PendingCall(
                     part.ToolName,
                     KnownEffect(part.ToolEffect),
-                    signature));
+                    digests?.SignatureDigest,
+                    digests?.ToolIdentityDigest));
         }
 
         return true;
@@ -344,9 +418,10 @@ internal sealed class SemanticToolLoopGuard
             if (string.IsNullOrWhiteSpace(part.ToolCallId)
                 || !_pending.Remove(part.ToolCallId, out var call)
                 || call.SignatureDigest is null
+                || call.ToolIdentityDigest is null
                 || !part.Json.HasValue)
             {
-                _patterns.Clear();
+                ResetPatterns();
                 continue;
             }
 
@@ -355,7 +430,7 @@ internal sealed class SemanticToolLoopGuard
             {
                 case SemanticOutcomeKind.Progress:
                 case SemanticOutcomeKind.Indeterminate:
-                    _patterns.Clear();
+                    ResetPatterns();
                     break;
                 case SemanticOutcomeKind.Comparable:
                     ObserveComparable(
@@ -367,7 +442,7 @@ internal sealed class SemanticToolLoopGuard
         }
     }
 
-    private string? TryComputeSignature(NormalizedContentPart part)
+    private CallDigests? TryComputeCallDigests(NormalizedContentPart part)
     {
         try
         {
@@ -385,16 +460,28 @@ internal sealed class SemanticToolLoopGuard
                 part.Json!.Value,
                 _digestLimits,
                 "toolArguments");
-            var digest = new CanonicalDigestBuilder();
-            digest.Add("kind", "tool_call");
-            digest.Add("toolName", part.ToolName);
-            digest.Add("toolVersion", part.ToolVersion);
-            digest.Add("toolEffect", KnownEffect(part.ToolEffect));
-            digest.Add(
+            var toolIdentity = new CanonicalDigestBuilder();
+            toolIdentity.Add("kind", "tool_identity");
+            toolIdentity.Add("toolName", part.ToolName);
+            toolIdentity.Add("toolVersion", part.ToolVersion);
+            toolIdentity.Add("toolEffect", KnownEffect(part.ToolEffect));
+            toolIdentity.Add(
                 "toolDescriptorDigest",
                 part.ToolDescriptorDigest);
-            digest.Add("arguments", part.Json.Value);
-            return digest.Finish();
+            var identityDigest = toolIdentity.Finish();
+
+            var signature = new CanonicalDigestBuilder();
+            signature.Add("kind", "tool_call");
+            signature.Add("toolName", part.ToolName);
+            signature.Add("toolVersion", part.ToolVersion);
+            signature.Add("toolEffect", KnownEffect(part.ToolEffect));
+            signature.Add(
+                "toolDescriptorDigest",
+                part.ToolDescriptorDigest);
+            signature.Add("arguments", part.Json.Value);
+            return new CallDigests(
+                signature.Finish(),
+                identityDigest);
         }
         catch (ArgumentException)
         {
@@ -643,6 +730,7 @@ internal sealed class SemanticToolLoopGuard
         DateTimeOffset observedAt)
     {
         _sequence++;
+        ObserveArgumentChurn(call, outcomeDigest, observedAt);
         if (_patterns.TryGetValue(call.SignatureDigest!, out var existing))
         {
             if (string.Equals(
@@ -656,7 +744,7 @@ internal sealed class SemanticToolLoopGuard
                 return;
             }
 
-            _patterns.Clear();
+            ResetPatterns();
         }
 
         if (_patterns.Count >= _options.MaxTrackedSignatures)
@@ -674,6 +762,77 @@ internal sealed class SemanticToolLoopGuard
             outcomeDigest,
             _sequence,
             observedAt);
+    }
+
+    private void ObserveArgumentChurn(
+        PendingCall call,
+        string outcomeDigest,
+        DateTimeOffset observedAt)
+    {
+        if (!_options.DetectArgumentChurn)
+        {
+            return;
+        }
+
+        foreach (var stale in _churnPatterns.Values
+                     .Where(item => string.Equals(
+                         item.ToolIdentityDigest,
+                         call.ToolIdentityDigest,
+                         StringComparison.Ordinal)
+                         && !string.Equals(
+                             item.OutcomeDigest,
+                             outcomeDigest,
+                             StringComparison.Ordinal))
+                     .Select(item => item.PatternDigest)
+                     .ToArray())
+        {
+            _churnPatterns.Remove(stale);
+        }
+
+        var digest = new CanonicalDigestBuilder();
+        digest.Add("kind", ArgumentChurnPatternKind);
+        digest.Add("toolIdentity", call.ToolIdentityDigest);
+        digest.Add("outcome", outcomeDigest);
+        var patternDigest = digest.Finish();
+        if (_churnPatterns.TryGetValue(patternDigest, out var existing))
+        {
+            if (!string.Equals(
+                    existing.LastSignatureDigest,
+                    call.SignatureDigest,
+                    StringComparison.Ordinal))
+            {
+                existing.RepetitionCount++;
+                existing.LastSignatureDigest = call.SignatureDigest!;
+                existing.LastSequence = _sequence;
+                existing.LastObservedAt = observedAt;
+            }
+
+            return;
+        }
+
+        if (_churnPatterns.Count >= _options.MaxTrackedSignatures)
+        {
+            var evicted = _churnPatterns.Values
+                .OrderBy(item => item.LastSequence)
+                .ThenBy(item => item.PatternDigest, StringComparer.Ordinal)
+                .First();
+            _churnPatterns.Remove(evicted.PatternDigest);
+        }
+
+        _churnPatterns[patternDigest] = new ArgumentChurnPattern(
+            call.ToolName,
+            call.ToolIdentityDigest!,
+            patternDigest,
+            outcomeDigest,
+            call.SignatureDigest!,
+            _sequence,
+            observedAt);
+    }
+
+    private void ResetPatterns()
+    {
+        _patterns.Clear();
+        _churnPatterns.Clear();
     }
 
     private static string? KnownEffect(string? effect)
@@ -703,11 +862,13 @@ internal sealed class SemanticToolLoopGuard
         public PendingCall(
             string toolName,
             string? effect,
-            string? signatureDigest)
+            string? signatureDigest,
+            string? toolIdentityDigest)
         {
             ToolName = toolName;
             Effect = effect;
             SignatureDigest = signatureDigest;
+            ToolIdentityDigest = toolIdentityDigest;
         }
 
         public string ToolName { get; }
@@ -715,6 +876,23 @@ internal sealed class SemanticToolLoopGuard
         public string? Effect { get; }
 
         public string? SignatureDigest { get; }
+
+        public string? ToolIdentityDigest { get; }
+    }
+
+    private sealed class CallDigests
+    {
+        public CallDigests(
+            string signatureDigest,
+            string toolIdentityDigest)
+        {
+            SignatureDigest = signatureDigest;
+            ToolIdentityDigest = toolIdentityDigest;
+        }
+
+        public string SignatureDigest { get; }
+
+        public string ToolIdentityDigest { get; }
     }
 
     private sealed class StablePattern
@@ -738,6 +916,43 @@ internal sealed class SemanticToolLoopGuard
         public string SignatureDigest { get; }
 
         public string OutcomeDigest { get; }
+
+        public int RepetitionCount { get; set; }
+
+        public long LastSequence { get; set; }
+
+        public DateTimeOffset LastObservedAt { get; set; }
+    }
+
+    private sealed class ArgumentChurnPattern
+    {
+        public ArgumentChurnPattern(
+            string toolName,
+            string toolIdentityDigest,
+            string patternDigest,
+            string outcomeDigest,
+            string lastSignatureDigest,
+            long lastSequence,
+            DateTimeOffset lastObservedAt)
+        {
+            ToolName = toolName;
+            ToolIdentityDigest = toolIdentityDigest;
+            PatternDigest = patternDigest;
+            OutcomeDigest = outcomeDigest;
+            LastSignatureDigest = lastSignatureDigest;
+            LastSequence = lastSequence;
+            LastObservedAt = lastObservedAt;
+        }
+
+        public string ToolName { get; }
+
+        public string ToolIdentityDigest { get; }
+
+        public string PatternDigest { get; }
+
+        public string OutcomeDigest { get; }
+
+        public string LastSignatureDigest { get; set; }
 
         public int RepetitionCount { get; set; }
 
@@ -780,23 +995,35 @@ internal sealed class SemanticToolLoopGuardDecision
 {
     public SemanticToolLoopGuardDecision(
         string toolName,
-        string callSignatureDigest,
+        string patternKind,
+        string patternDigest,
         string outcomeDigest,
         int repetitionCount,
         DateTimeOffset lastObservedAt,
-        bool hardStop)
+        long lastSequence,
+        bool hardStop,
+        string warningReasonCode,
+        int hardStopRepetitions)
     {
         ToolName = toolName;
-        CallSignatureDigest = callSignatureDigest;
+        PatternKind = patternKind;
+        PatternDigest = patternDigest;
         OutcomeDigest = outcomeDigest;
         RepetitionCount = repetitionCount;
         LastObservedAt = lastObservedAt;
+        LastSequence = lastSequence;
         HardStop = hardStop;
+        WarningReasonCode = warningReasonCode;
+        HardStopRepetitions = hardStopRepetitions;
     }
 
     public string ToolName { get; }
 
-    public string CallSignatureDigest { get; }
+    public string PatternKind { get; }
+
+    public string PatternDigest { get; }
+
+    public string CallSignatureDigest => PatternDigest;
 
     public string OutcomeDigest { get; }
 
@@ -804,5 +1031,11 @@ internal sealed class SemanticToolLoopGuardDecision
 
     public DateTimeOffset LastObservedAt { get; }
 
+    internal long LastSequence { get; }
+
     public bool HardStop { get; }
+
+    public string WarningReasonCode { get; }
+
+    public int HardStopRepetitions { get; }
 }

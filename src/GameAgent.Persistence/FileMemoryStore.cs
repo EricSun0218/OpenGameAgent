@@ -638,63 +638,6 @@ public sealed class FileMemoryStore :
         }
     }
 
-    internal async ValueTask<IReadOnlyList<MemoryRecord>>
-        CaptureInteractiveWorldBundleAsync(
-            int maximumRecords,
-            CancellationToken cancellationToken)
-    {
-        await using var lease =
-            await AcquireInteractiveWorldBundleCaptureAsync(
-                    maximumRecords,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        return lease.Items;
-    }
-
-    internal async ValueTask<
-            InteractiveWorldSidecarCaptureLease<MemoryRecord>>
-        AcquireInteractiveWorldBundleCaptureAsync(
-            int maximumRecords,
-            CancellationToken cancellationToken)
-    {
-        if (maximumRecords < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumRecords));
-        }
-
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var release = true;
-        try
-        {
-            ThrowIfUnavailable();
-            cancellationToken.ThrowIfCancellationRequested();
-            if (_records.Count > maximumRecords)
-            {
-                throw new InteractiveWorldBundleException(
-                    InteractiveWorldBundleReasonCodes.CapacityExceeded,
-                    "The memory sidecar exceeds the bundle record limit.");
-            }
-
-            var items = new ReadOnlyCollection<MemoryRecord>(
-                _records.Values
-                    .OrderBy(
-                        static item => item.MemoryId,
-                        StringComparer.Ordinal)
-                    .ToArray());
-            release = false;
-            return new InteractiveWorldSidecarCaptureLease<MemoryRecord>(
-                _gate,
-                items);
-        }
-        finally
-        {
-            if (release)
-            {
-                _gate.Release();
-            }
-        }
-    }
-
     public void Dispose()
     {
         _gate.Wait();

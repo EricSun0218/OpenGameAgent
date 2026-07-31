@@ -50,13 +50,6 @@ immutable coordinate and propagates their batch and decision identities to the
 host. The host still owns simultaneous-action resolution. See
 [Game semantics](game-semantics.md).
 
-The implemented interactive-world layer sits above this boundary. It defines
-engine-neutral packages, separate saves, and deterministic fixed-event
-evolution at explicit clock boundaries. Typed interactions and portable numeric
-state compile into the same event transaction, while only bounded
-understanding, selection, or narration jobs reach the agent runtime. See
-[Interactive world v1](interactive-world-v1.md).
-
 ## Workload admission
 
 The core has a final in-process workload boundary even when it is used without

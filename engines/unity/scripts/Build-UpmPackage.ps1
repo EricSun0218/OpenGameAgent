@@ -24,15 +24,6 @@ $smokeProject = Join-Path $repositoryRoot `
     "tests\UnityCompileSmoke\UnityCompileSmoke.csproj"
 $smokeOutput = Join-Path $repositoryRoot `
     "tests\UnityCompileSmoke\bin\$Configuration\netstandard2.1"
-$worldSchemaSource = Join-Path $repositoryRoot "schemas\world-v1"
-$worldExampleSource = Join-Path $repositoryRoot `
-    "fixtures\world-v1\interactive-smoke"
-
-if (-not (Test-Path -LiteralPath $worldSchemaSource -PathType Container) `
-    -or -not (Test-Path -LiteralPath $worldExampleSource -PathType Container)) {
-    throw "Native-world authoring assets are missing."
-}
-
 if (Test-Path -LiteralPath $publishedOutputPath) {
     if (-not $Force) {
         throw "Artifact already exists at '$publishedOutputPath'. Pass -Force to rebuild."
@@ -143,24 +134,10 @@ Get-ChildItem -LiteralPath $templatePath -Force | ForEach-Object {
 }
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "LICENSE") `
     -Destination (Join-Path $outputPath "LICENSE.md") -Force
-$worldSchemaTarget = Join-Path $outputPath `
-    "Documentation~\Schemas\world-v1"
-$worldExampleTarget = Join-Path $outputPath `
-    "Samples~\InteractiveWorld\World"
-New-Item -ItemType Directory `
-    -Path $worldSchemaTarget, $worldExampleTarget `
-    -Force |
-    Out-Null
-Get-ChildItem -LiteralPath $worldSchemaSource -File -Force |
-    Copy-Item -Destination $worldSchemaTarget -Force
-Get-ChildItem -LiteralPath $worldExampleSource -File -Force |
-    Copy-Item -Destination $worldExampleTarget -Force
-
 $pluginsPath = Join-Path $outputPath "Runtime\Plugins"
 New-Item -ItemType Directory -Path $pluginsPath -Force | Out-Null
 
 $dependencyAssemblies = @(
-    "GameAgent.Compatibility.dll",
     "GameAgent.Protocol.dll",
     "GameAgent.Core.dll",
     "GameAgent.Persistence.dll",
@@ -175,8 +152,7 @@ $dependencyAssemblies = @(
     "System.Text.Json.dll",
     "System.Threading.Tasks.Extensions.dll",
     "GameAgent.Runtime.dll",
-    "GameAgent.Workflow.dll",
-    "GameAgent.World.dll"
+    "GameAgent.Workflow.dll"
 )
 
 $depsPath = Join-Path $smokeOutput "GameAgent.Unity.CompileSmoke.deps.json"
@@ -222,15 +198,13 @@ foreach ($assembly in $dependencyAssemblies) {
 
 if ($IncludeSymbols) {
     foreach ($symbol in @(
-            "GameAgent.Compatibility.pdb",
             "GameAgent.Protocol.pdb",
             "GameAgent.Core.pdb",
             "GameAgent.Persistence.pdb",
             "GameAgent.Providers.Anthropic.pdb",
             "GameAgent.Providers.OpenAICompatible.pdb",
             "GameAgent.Runtime.pdb",
-            "GameAgent.Workflow.pdb",
-            "GameAgent.World.pdb")) {
+            "GameAgent.Workflow.pdb")) {
         $source = Join-Path $smokeOutput $symbol
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
             throw "Required managed symbol is missing: '$source'."

@@ -23,7 +23,7 @@ public sealed class OpenAiCompatibleProviderTests
             "openai.chat-completions.sse.v1",
             source.RouteMetadata.TransportDialect);
         Assert.Equal(
-            "openai-compatible.route-policy.v3",
+            "openai-compatible.route-policy.v4",
             source.RouteMetadata.RoutePolicyVersion);
         Assert.Equal(
             ProviderRequestFamily.ChatCompletions,
@@ -328,6 +328,49 @@ public sealed class OpenAiCompatibleProviderTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RoutePolicyDigestCoversEveryConfigurableDialectField()
+    {
+        static string Digest(Action<OpenAiCompatibleProviderOptions> change)
+        {
+            var options = new OpenAiCompatibleProviderOptions
+            {
+                ProviderId = "stable-provider",
+                BaseUri = new Uri("https://api.example.com"),
+                Model = "stable-model"
+            };
+            change(options);
+            var provider = new OpenAiCompatibleStreamingProvider(
+                options,
+                new StaticBearerTokenSource("never-persisted"),
+                new FakeTransport(string.Empty));
+            return provider.RouteMetadata.RoutePolicyDigest;
+        }
+
+        var baseline = Digest(_ => { });
+        Assert.NotEqual(
+            baseline,
+            Digest(options => options.MaxOutputTokensField =
+                "max_completion_tokens"));
+        Assert.NotEqual(
+            baseline,
+            Digest(options =>
+                options.ReasoningEffortRequiresThinkingMode = false));
+        Assert.NotEqual(
+            baseline,
+            Digest(options => options.ToolChoice = "auto"));
+        Assert.NotEqual(
+            baseline,
+            Digest(options => options.ParallelToolCalls = true));
+        Assert.NotEqual(
+            baseline,
+            Digest(options => options.StrictToolSchemas = true));
+        Assert.NotEqual(
+            baseline,
+            Digest(options =>
+                options.ReasoningContentReplayRequiresThinkingMode = false));
+    }
+
     [Theory]
     [InlineData(true, "enabled", true, true, true)]
     [InlineData(false, "enabled", false, true, false)]
@@ -384,6 +427,44 @@ public sealed class OpenAiCompatibleProviderTests
         {
             Assert.Equal("private reasoning", reasoning.GetString());
         }
+    }
+
+    [Fact]
+    public async Task CanReplayReasoningWithoutVendorThinkingToggle()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                ThinkingMode = null,
+                ReasoningEffort = null,
+                ReplayReasoningContent = true,
+                ReasoningContentReplayRequiresThinkingMode = false
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+        var request = Request(
+            NormalizedTranscript.AssistantResponse(
+                "assistant-1",
+                text: "visible",
+                reasoningContent: "reasoning-state",
+                Array.Empty<ModelToolCall>(),
+                DateTimeOffset.UnixEpoch));
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        Assert.True(provider.Capabilities.ReasoningInput);
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        Assert.Equal(
+            "reasoning-state",
+            body.RootElement.GetProperty("messages")[0]
+                .GetProperty("reasoning_content")
+                .GetString());
     }
 
     [Fact]
@@ -472,6 +553,102 @@ public sealed class OpenAiCompatibleProviderTests
                 .ValueKind);
         Assert.DoesNotContain("test-secret", Encoding.UTF8.GetString(
             transport.LastRequest.Body));
+    }
+
+    [Fact]
+    public async Task EncodesConfigurableStandardChatDialectFields()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                BaseUri = new Uri("https://api.example.com"),
+                Model = "reasoning-model",
+                MaxOutputTokensField = "max_completion_tokens",
+                ThinkingMode = null,
+                ReasoningEffort = "low",
+                ReasoningEffortRequiresThinkingMode = false,
+                ReplayReasoningContent = false,
+                ToolChoice = "auto",
+                ParallelToolCalls = true,
+                StrictToolSchemas = true
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+        var request = Request(Message(
+            NormalizedRoles.User,
+            NormalizedContentPart.FromText("inspect")));
+        request.MaxOutputTokens = 23;
+        request.Tools = new[]
+        {
+            Tool(
+                "inspect_state",
+                """
+                {"type":"object","properties":{},"additionalProperties":false}
+                """)
+        };
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        var root = body.RootElement;
+        Assert.Equal(
+            23,
+            root.GetProperty("max_completion_tokens").GetInt32());
+        Assert.False(root.TryGetProperty("max_tokens", out _));
+        Assert.False(root.TryGetProperty("thinking", out _));
+        Assert.Equal("low", root.GetProperty("reasoning_effort").GetString());
+        Assert.Equal("auto", root.GetProperty("tool_choice").GetString());
+        Assert.True(root.GetProperty("parallel_tool_calls").GetBoolean());
+        Assert.True(
+            root.GetProperty("tools")[0]
+                .GetProperty("function")
+                .GetProperty("strict")
+                .GetBoolean());
+    }
+
+    [Fact]
+    public async Task RequiredToolChoiceWithoutToolsFailsBeforeTransport()
+    {
+        var transport = new FakeTransport(string.Empty);
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                ToolChoice = "required"
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(Request(), default)));
+
+        Assert.Equal(
+            "provider_tool_choice_requires_tools",
+            error.Code);
+        Assert.Equal("validation", error.Category);
+        Assert.True(error.UsageKnownToBeZero);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Theory]
+    [InlineData("tokens")]
+    [InlineData("Max_Tokens")]
+    public void RejectsUnknownOutputTokenField(string field)
+    {
+        Assert.Throws<ArgumentException>(
+            () => new OpenAiCompatibleStreamingProvider(
+                new OpenAiCompatibleProviderOptions
+                {
+                    MaxOutputTokensField = field
+                },
+                new StaticBearerTokenSource("test-secret"),
+                new FakeTransport(string.Empty)));
     }
 
     [Fact]

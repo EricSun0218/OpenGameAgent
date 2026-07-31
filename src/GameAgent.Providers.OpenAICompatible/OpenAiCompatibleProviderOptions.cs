@@ -12,13 +12,25 @@ public sealed class OpenAiCompatibleProviderOptions
 
     public int MaxOutputTokens { get; set; } = 32_768;
 
+    public string MaxOutputTokensField { get; set; } = "max_tokens";
+
     public string? ThinkingMode { get; set; } = "enabled";
 
     public string? ReasoningEffort { get; set; } = "high";
 
+    public bool ReasoningEffortRequiresThinkingMode { get; set; } = true;
+
+    public string? ToolChoice { get; set; }
+
+    public bool? ParallelToolCalls { get; set; }
+
+    public bool StrictToolSchemas { get; set; }
+
     public bool IncludeUsage { get; set; } = true;
 
     public bool ReplayReasoningContent { get; set; } = true;
+
+    public bool ReasoningContentReplayRequiresThinkingMode { get; set; } = true;
 
     public int MaxSseEventCharacters { get; set; } = 2 * 1024 * 1024;
 
@@ -91,6 +103,21 @@ public sealed class OpenAiCompatibleProviderOptions
             throw new ArgumentOutOfRangeException(nameof(MaxOutputTokens));
         }
 
+        if (!string.Equals(
+                MaxOutputTokensField,
+                "max_tokens",
+                StringComparison.Ordinal)
+            && !string.Equals(
+                MaxOutputTokensField,
+                "max_completion_tokens",
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "MaxOutputTokensField must be max_tokens or "
+                + "max_completion_tokens.",
+                nameof(MaxOutputTokensField));
+        }
+
         if (!IncludeUsage)
         {
             throw new ArgumentException(
@@ -117,12 +144,24 @@ public sealed class OpenAiCompatibleProviderOptions
         }
 
         if (ReasoningEffort is not null
-            && !string.Equals(ReasoningEffort, "high", StringComparison.Ordinal)
-            && !string.Equals(ReasoningEffort, "max", StringComparison.Ordinal))
+            && !IsReasoningEffort(ReasoningEffort))
         {
             throw new ArgumentException(
-                "ReasoningEffort must be high, max, or null.",
+                "ReasoningEffort is unsupported.",
                 nameof(ReasoningEffort));
+        }
+
+        if (ToolChoice is not null
+            && !string.Equals(ToolChoice, "auto", StringComparison.Ordinal)
+            && !string.Equals(ToolChoice, "none", StringComparison.Ordinal)
+            && !string.Equals(
+                ToolChoice,
+                "required",
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "ToolChoice must be auto, none, required, or null.",
+                nameof(ToolChoice));
         }
 
         ValidatePrice(
@@ -243,10 +282,18 @@ public sealed class OpenAiCompatibleProviderOptions
             ChatCompletionsPath = ChatCompletionsPath,
             Model = Model,
             MaxOutputTokens = MaxOutputTokens,
+            MaxOutputTokensField = MaxOutputTokensField,
             ThinkingMode = ThinkingMode,
             ReasoningEffort = ReasoningEffort,
+            ReasoningEffortRequiresThinkingMode =
+                ReasoningEffortRequiresThinkingMode,
+            ToolChoice = ToolChoice,
+            ParallelToolCalls = ParallelToolCalls,
+            StrictToolSchemas = StrictToolSchemas,
             IncludeUsage = IncludeUsage,
             ReplayReasoningContent = ReplayReasoningContent,
+            ReasoningContentReplayRequiresThinkingMode =
+                ReasoningContentReplayRequiresThinkingMode,
             MaxSseEventCharacters = MaxSseEventCharacters,
             MaxSseLineCharacters = MaxSseLineCharacters,
             MaxContextTokens = MaxContextTokens,
@@ -275,6 +322,15 @@ public sealed class OpenAiCompatibleProviderOptions
                 parameterName);
         }
     }
+
+    private static bool IsReasoningEffort(string value) =>
+        string.Equals(value, "none", StringComparison.Ordinal)
+        || string.Equals(value, "minimal", StringComparison.Ordinal)
+        || string.Equals(value, "low", StringComparison.Ordinal)
+        || string.Equals(value, "medium", StringComparison.Ordinal)
+        || string.Equals(value, "high", StringComparison.Ordinal)
+        || string.Equals(value, "xhigh", StringComparison.Ordinal)
+        || string.Equals(value, "max", StringComparison.Ordinal);
 }
 
 public interface IProviderCredentialSource

@@ -15,19 +15,6 @@ namespace GameAgent.Persistence;
 [JsonSerializable(typeof(MemoryFrameMutation))]
 [JsonSerializable(typeof(PersistedMemoryRecord))]
 [JsonSerializable(typeof(GroupInteractionFrameRecord))]
-[JsonSerializable(typeof(WorldPresentationFrameRecord))]
-[JsonSerializable(typeof(WorldSettlementFrameRecord))]
-[JsonSerializable(typeof(PersistedWorldSettlementRecord))]
-[JsonSerializable(typeof(PersistedWorldSettlementPlan))]
-[JsonSerializable(typeof(PersistedWorldSettlementDelivery))]
-[JsonSerializable(typeof(PersistedWorldSettlementDeliveryState))]
-[JsonSerializable(typeof(PersistedWorldSettlementAudience))]
-[JsonSerializable(typeof(PersistedWorldSettlementGroupRequest))]
-[JsonSerializable(typeof(PersistedWorldSettlementGroupMessage))]
-[JsonSerializable(typeof(PersistedWorldSettlementPresentation))]
-[JsonSerializable(typeof(InteractiveWorldMemorySidecar))]
-[JsonSerializable(typeof(InteractiveWorldGroupSidecar))]
-[JsonSerializable(typeof(InteractiveWorldPresentationSidecar))]
 internal sealed partial class PersistenceJsonContext : JsonSerializerContext
 {
 }

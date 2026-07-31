@@ -294,6 +294,108 @@ public sealed class SemanticToolLoopGuardTests
     }
 
     [Fact]
+    public void DistinctArgumentChurnWarnsThenStopsWithoutLeakingArguments()
+    {
+        var options = new SemanticToolLoopGuardOptions
+        {
+            ArgumentChurnWarningRepetitions = 2,
+            ArgumentChurnHardStopRepetitions = 4
+        };
+        var transcript = new List<NormalizedMessage>();
+        var guard = SemanticToolLoopGuard.Rebuild(options, transcript);
+        const string sameFailure =
+            """{"code":"not_found","category":"tool","message":"missing"}""";
+
+        for (var index = 0; index < 3; index++)
+        {
+            var exchange = Exchange(
+                100 + index,
+                ToolEffects.PureRead,
+                sameFailure,
+                arguments: $$"""{"query":"secret-{{index}}"}""");
+            transcript.AddRange(exchange);
+            guard.ObserveMessages(exchange);
+        }
+
+        var warningDecision = Assert.IsType<SemanticToolLoopGuardDecision>(
+            guard.Decision);
+        Assert.Equal(
+            SemanticToolLoopGuard.ArgumentChurnPatternKind,
+            warningDecision.PatternKind);
+        Assert.Equal(
+            SemanticToolLoopGuard.ArgumentChurnWarningReasonCode,
+            warningDecision.WarningReasonCode);
+        Assert.False(warningDecision.HardStop);
+        var warning = Assert.IsType<NormalizedMessage>(
+            guard.CreateWarningMessage());
+        var encoded = NormalizedMessageJournalCodec.Encode(warning)
+            .GetRawText();
+        Assert.DoesNotContain("secret-", encoded, StringComparison.Ordinal);
+        Assert.Contains("argument_churn", encoded, StringComparison.Ordinal);
+        Assert.Equal(
+            4,
+            warning.Parts.Single().Json!.Value
+                .GetProperty("hardStopRepetitions")
+                .GetInt32());
+
+        for (var index = 3; index < 5; index++)
+        {
+            var exchange = Exchange(
+                100 + index,
+                ToolEffects.PureRead,
+                sameFailure,
+                arguments: $$"""{"query":"secret-{{index}}"}""");
+            transcript.AddRange(exchange);
+            guard.ObserveMessages(exchange);
+        }
+
+        var hardStop = Assert.IsType<SemanticToolLoopGuardDecision>(
+            guard.Decision);
+        Assert.True(hardStop.HardStop);
+        Assert.Equal(4, hardStop.RepetitionCount);
+        Assert.Equal(4, hardStop.HardStopRepetitions);
+        Assert.DoesNotContain(
+            "secret-",
+            guard.SafeDiagnostic().GetRawText(),
+            StringComparison.Ordinal);
+
+        var rebuilt = SemanticToolLoopGuard.Rebuild(options, transcript);
+        var rebuiltDecision = Assert.IsType<SemanticToolLoopGuardDecision>(
+            rebuilt.Decision);
+        Assert.Equal(hardStop.PatternDigest, rebuiltDecision.PatternDigest);
+        Assert.Equal(hardStop.RepetitionCount, rebuiltDecision.RepetitionCount);
+        Assert.True(rebuiltDecision.HardStop);
+    }
+
+    [Fact]
+    public void ChangedOutcomeResetsArgumentChurn()
+    {
+        var guard = SemanticToolLoopGuard.Rebuild(
+            new SemanticToolLoopGuardOptions
+            {
+                ArgumentChurnWarningRepetitions = 2,
+                ArgumentChurnHardStopRepetitions = 4
+            },
+            Array.Empty<NormalizedMessage>());
+        for (var index = 0; index < 2; index++)
+        {
+            guard.ObserveMessages(Exchange(
+                120 + index,
+                ToolEffects.PureRead,
+                """{"value":0}""",
+                arguments: $$"""{"page":{{index}}}"""));
+        }
+
+        guard.ObserveMessages(Exchange(
+            122,
+            ToolEffects.PureRead,
+            """{"value":1}""",
+            arguments: """{"page":2}"""));
+
+        Assert.Null(guard.Decision);
+    }
+
+    [Fact]
     public void OversizedAndLegacySuccessfulEvidenceFailOpen()
     {
         var oversized = SemanticToolLoopGuard.Rebuild(
@@ -429,12 +531,13 @@ public sealed class SemanticToolLoopGuardTests
         int index,
         string? effect,
         string result,
-        string toolName = "game.read")
+        string toolName = "game.read",
+        string arguments = """{"query":"secret-argument"}""")
     {
         var call = CallMessage(
             index,
             effect,
-            """{"query":"secret-argument"}""",
+            arguments,
             toolName);
         return new[]
         {

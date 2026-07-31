@@ -1,10 +1,10 @@
 # GameAgent.Workflow
 
 `GameAgent.Workflow` is an optional composition plane for bounded game-agent
-and interactive-world operations. Core agent execution and authoritative
-world correctness do not depend on it. Workflow steps call registered
-adapters around those existing boundaries; they do not replace runtime
-journals, transactions, receipts, or reconciliation rules.
+and background orchestration. Core agent execution and authoritative game
+correctness do not depend on it. Workflow steps call registered adapters
+around those existing boundaries; they do not replace runtime journals,
+transactions, receipts, or reconciliation rules.
 
 The compiler accepts a static graph of `Step`, `Foreach`, `Reduce`, and `Loop`
 stages. Sequence and parallel execution are expressed with `dependsOn` edges.

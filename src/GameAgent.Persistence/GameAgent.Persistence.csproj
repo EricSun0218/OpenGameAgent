@@ -7,6 +7,5 @@
   <ItemGroup>
     <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
     <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
-    <ProjectReference Include="..\GameAgent.World\GameAgent.World.csproj" />
   </ItemGroup>
 </Project>

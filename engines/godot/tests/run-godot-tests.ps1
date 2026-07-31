@@ -71,38 +71,6 @@ if ($script:LastGodotOutput -notmatch "GODOT_TEST_PASS") {
 }
 Assert-NoGodotLeakWarning
 
-$worldTestExitCode = Invoke-Godot @(
-    "--headless",
-    "--path",
-    $projectRoot,
-    "--scene",
-    "res://tests/InteractiveWorldHeadlessTest.tscn",
-    "--quit-after",
-    "100000")
-if ($worldTestExitCode -ne 0) {
-    throw "Godot interactive-world tests failed with exit code $worldTestExitCode."
-}
-if ($script:LastGodotOutput -notmatch "GODOT_WORLD_TEST_PASS") {
-    throw "Godot interactive-world tests exited without the pass marker."
-}
-Assert-NoGodotLeakWarning
-
-$frameworkTestExitCode = Invoke-Godot @(
-    "--headless",
-    "--path",
-    $projectRoot,
-    "--scene",
-    "res://tests/InteractiveFrameworkE2ETest.tscn",
-    "--quit-after",
-    "100000")
-if ($frameworkTestExitCode -ne 0) {
-    throw "Godot interactive-framework E2E failed with exit code $frameworkTestExitCode."
-}
-if ($script:LastGodotOutput -notmatch "GODOT_FRAMEWORK_E2E_PASS") {
-    throw "Godot interactive-framework E2E exited without the pass marker."
-}
-Assert-NoGodotLeakWarning
-
 $sampleExitCode = Invoke-Godot @(
     "--headless",
     "--path",

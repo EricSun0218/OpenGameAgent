@@ -4,6 +4,20 @@ using System.Text;
 
 namespace GameAgent.Core;
 
+public static class MemoryRankingModes
+{
+    public const string RawScore = "raw_score";
+
+    public const string ReciprocalRankFusion = "reciprocal_rank_fusion";
+
+    internal static bool IsKnown(string value) =>
+        string.Equals(value, RawScore, StringComparison.Ordinal)
+        || string.Equals(
+            value,
+            ReciprocalRankFusion,
+            StringComparison.Ordinal);
+}
+
 public sealed class MemoryLifecycleOptions
 {
     public int MaxProviders { get; set; } = 16;
@@ -21,6 +35,18 @@ public sealed class MemoryLifecycleOptions
     public TimeSpan ProviderTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Controls how candidates from different providers are combined. Raw
+    /// scores preserve the original behavior. Reciprocal-rank fusion is the
+    /// recommended mode when lexical and semantic providers use incomparable
+    /// score scales.
+    /// </summary>
+    public string RankingMode { get; set; } = MemoryRankingModes.RawScore;
+
+    public int RankFusionConstant { get; set; } = 60;
+
+    public int RankFusionScoreScale { get; set; } = 1_000_000;
 
     internal MemoryLifecycleOptions Snapshot()
     {
@@ -70,6 +96,25 @@ public sealed class MemoryLifecycleOptions
             throw new ArgumentOutOfRangeException(nameof(ShutdownTimeout));
         }
 
+        if (!MemoryRankingModes.IsKnown(RankingMode))
+        {
+            throw new ArgumentException(
+                "The memory ranking mode is unsupported.",
+                nameof(RankingMode));
+        }
+
+        if (RankFusionConstant is < 1 or > 10_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(RankFusionConstant));
+        }
+
+        if (RankFusionScoreScale is < 1 or > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(RankFusionScoreScale));
+        }
+
         return new MemoryLifecycleOptions
         {
             MaxProviders = MaxProviders,
@@ -79,7 +124,10 @@ public sealed class MemoryLifecycleOptions
             MaxRetainedCandidates = MaxRetainedCandidates,
             MaxConcurrentProviderCalls = MaxConcurrentProviderCalls,
             ProviderTimeout = ProviderTimeout,
-            ShutdownTimeout = ShutdownTimeout
+            ShutdownTimeout = ShutdownTimeout,
+            RankingMode = RankingMode,
+            RankFusionConstant = RankFusionConstant,
+            RankFusionScoreScale = RankFusionScoreScale
         };
     }
 }
@@ -88,17 +136,71 @@ public sealed class MemoryRecallReport
 {
     internal MemoryRecallReport(
         IReadOnlyList<MemorySearchResult> results,
-        IReadOnlyList<string> failedProviderIds)
+        IReadOnlyList<string> failedProviderIds,
+        IReadOnlyList<MemoryRecallCandidateEvidence> candidateEvidence,
+        string rankingMode)
     {
         Results = results;
         FailedProviderIds = failedProviderIds;
+        CandidateEvidence = candidateEvidence;
+        RankingMode = rankingMode;
     }
 
     public IReadOnlyList<MemorySearchResult> Results { get; }
 
     public IReadOnlyList<string> FailedProviderIds { get; }
 
+    /// <summary>
+    /// Bounded, content-free evidence aligned with <see cref="Results"/>.
+    /// It explains which provider ranks contributed without copying memory
+    /// payloads into diagnostics.
+    /// </summary>
+    public IReadOnlyList<MemoryRecallCandidateEvidence> CandidateEvidence
+    {
+        get;
+    }
+
+    public string RankingMode { get; }
+
     public bool IsPartial => FailedProviderIds.Count > 0;
+}
+
+public sealed class MemoryRecallCandidateEvidence
+{
+    internal MemoryRecallCandidateEvidence(
+        string memoryId,
+        int finalScore,
+        IReadOnlyList<MemoryRecallProviderEvidence> providers)
+    {
+        MemoryId = memoryId;
+        FinalScore = finalScore;
+        Providers = providers;
+    }
+
+    public string MemoryId { get; }
+
+    public int FinalScore { get; }
+
+    public IReadOnlyList<MemoryRecallProviderEvidence> Providers { get; }
+}
+
+public sealed class MemoryRecallProviderEvidence
+{
+    internal MemoryRecallProviderEvidence(
+        string providerId,
+        int rank,
+        int rawScore)
+    {
+        ProviderId = providerId;
+        Rank = rank;
+        RawScore = rawScore;
+    }
+
+    public string ProviderId { get; }
+
+    public int Rank { get; }
+
+    public int RawScore { get; }
 }
 
 /// <summary>
@@ -246,8 +348,6 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         MemoryQuery query,
         CancellationToken cancellationToken)
     {
-        var results = new BoundedCandidateSet(
-            _options.MaxRetainedCandidates);
         var failures = new List<string>();
         var recalls = _providers
             .Select(
@@ -260,26 +360,117 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             .ToArray();
         var providerReports = await Task.WhenAll(recalls)
             .ConfigureAwait(false);
-        foreach (var report in providerReports.OrderBy(item => item.Index))
+        var orderedReports = providerReports
+            .OrderBy(item => item.Index)
+            .ToArray();
+        foreach (var report in orderedReports)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (report.Failed)
             {
                 failures.Add(report.ProviderId);
-                continue;
-            }
-
-            foreach (var result in report.Results)
-            {
-                results.Add(result);
             }
         }
 
-        var selected = Select(results.Ranked, query);
+        var successfulReports = orderedReports
+            .Where(item => !item.Failed)
+            .ToArray();
+        IEnumerable<MemorySearchResult> ranked;
+        if (string.Equals(
+                _options.RankingMode,
+                MemoryRankingModes.ReciprocalRankFusion,
+                StringComparison.Ordinal))
+        {
+            var fused = new RankFusionCandidateAccumulator(
+                _options.MaxRetainedCandidates,
+                _options.RankFusionConstant,
+                _options.RankFusionScoreScale);
+            var maximumRank = successfulReports.Length == 0
+                ? 0
+                : successfulReports.Max(item => item.Results.Count);
+            // Consume providers rank-by-rank. This keeps the bounded set fair
+            // when one provider returns a much longer list and lets shared
+            // high-ranked identities accumulate before lower-ranked tails.
+            for (var rank = 0; rank < maximumRank; rank++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var report in successfulReports)
+                {
+                    if (rank < report.Results.Count)
+                    {
+                        fused.Add(report.Results[rank], rank + 1);
+                    }
+                }
+            }
+
+            ranked = fused.Ranked;
+        }
+        else
+        {
+            var results = new BoundedCandidateSet(
+                _options.MaxRetainedCandidates);
+            foreach (var report in successfulReports)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var result in report.Results)
+                {
+                    results.Add(result);
+                }
+            }
+
+            ranked = results.Ranked;
+        }
+
+        var selected = Select(ranked, query);
+        var candidateEvidence = BuildCandidateEvidence(
+            selected,
+            successfulReports,
+            cancellationToken);
         failures.Sort(StringComparer.Ordinal);
         return new MemoryRecallReport(
             new ReadOnlyCollection<MemorySearchResult>(selected),
-            new ReadOnlyCollection<string>(failures));
+            new ReadOnlyCollection<string>(failures),
+            candidateEvidence,
+            _options.RankingMode);
+    }
+
+    private static IReadOnlyList<MemoryRecallCandidateEvidence>
+        BuildCandidateEvidence(
+            IReadOnlyList<MemorySearchResult> selected,
+            IReadOnlyList<ProviderRecallReport> providerReports,
+            CancellationToken cancellationToken)
+    {
+        var contributions = selected.ToDictionary(
+            item => item.Record.MemoryId,
+            _ => new List<MemoryRecallProviderEvidence>(),
+            StringComparer.Ordinal);
+        foreach (var report in providerReports)
+        {
+            for (var rank = 0; rank < report.Results.Count; rank++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var result = report.Results[rank];
+                if (contributions.TryGetValue(
+                        result.Record.MemoryId,
+                        out var providers))
+                {
+                    providers.Add(new MemoryRecallProviderEvidence(
+                        report.ProviderId,
+                        rank + 1,
+                        result.Score));
+                }
+            }
+        }
+
+        var evidence = selected
+            .Select(item => new MemoryRecallCandidateEvidence(
+                item.Record.MemoryId,
+                item.Score,
+                new ReadOnlyCollection<MemoryRecallProviderEvidence>(
+                    contributions[item.Record.MemoryId])))
+            .ToArray();
+        return new ReadOnlyCollection<MemoryRecallCandidateEvidence>(
+            evidence);
     }
 
     private async Task<ProviderRecallReport> RecallProviderAsync(
@@ -847,7 +1038,9 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
                         _providers
                             .Select((_, index) => _providerIds[index])
                             .OrderBy(id => id, StringComparer.Ordinal)
-                            .ToArray()));
+                            .ToArray()),
+                    Array.Empty<MemoryRecallCandidateEvidence>(),
+                    _options.RankingMode);
             }
         }
         finally
@@ -1009,6 +1202,79 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
 
             _ranked.Add(candidate);
             _byId.Add(memoryId, candidate);
+        }
+    }
+
+    private sealed class RankFusionCandidateAccumulator
+    {
+        private readonly int _capacity;
+        private readonly int _rankConstant;
+        private readonly int _scoreScale;
+        private readonly Dictionary<string, FusedCandidate> _byId =
+            new(StringComparer.Ordinal);
+
+        public RankFusionCandidateAccumulator(
+            int capacity,
+            int rankConstant,
+            int scoreScale)
+        {
+            _capacity = capacity;
+            _rankConstant = rankConstant;
+            _scoreScale = scoreScale;
+        }
+
+        public IEnumerable<MemorySearchResult> Ranked
+        {
+            get
+            {
+                var ranked = new BoundedCandidateSet(_capacity);
+                foreach (var candidate in _byId.Values)
+                {
+                    ranked.Add(new MemorySearchResult(
+                        candidate.Record,
+                        checked((int)Math.Min(
+                            int.MaxValue,
+                            candidate.Score))));
+                }
+
+                return ranked.Ranked;
+            }
+        }
+
+        public void Add(MemorySearchResult candidate, int rank)
+        {
+            var contribution = Math.Max(
+                1,
+                _scoreScale / checked(_rankConstant + rank));
+            var memoryId = candidate.Record.MemoryId;
+            if (_byId.TryGetValue(memoryId, out var current))
+            {
+                current.Score = Math.Min(
+                    int.MaxValue,
+                    checked(current.Score + contribution));
+                return;
+            }
+
+            // Provider reports are already bounded before fusion. Retain each
+            // admitted identity until all provider ranks have contributed;
+            // pruning on the first contribution can incorrectly discard a
+            // lower-ranked identity shared by several providers.
+            _byId.Add(
+                memoryId,
+                new FusedCandidate(candidate.Record, contribution));
+        }
+
+        private sealed class FusedCandidate
+        {
+            public FusedCandidate(MemoryRecord record, long score)
+            {
+                Record = record;
+                Score = score;
+            }
+
+            public MemoryRecord Record { get; }
+
+            public long Score { get; set; }
         }
     }
 

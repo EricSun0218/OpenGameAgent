@@ -115,15 +115,13 @@ try {
     $libraryPrefix =
         'addons/game_agent_runtime/lib/netstandard2.1/'
     $expectedLibraryEntries = @(
-        'GameAgent.Compatibility.dll',
         'GameAgent.Core.dll',
         'GameAgent.Persistence.dll',
         'GameAgent.Protocol.dll',
         'GameAgent.Providers.Anthropic.dll',
         'GameAgent.Providers.OpenAICompatible.dll',
         'GameAgent.Runtime.dll',
-        'GameAgent.Workflow.dll',
-        'GameAgent.World.dll'
+        'GameAgent.Workflow.dll'
     ) | ForEach-Object { $libraryPrefix + $_ }
     $actualLibraryEntries = @(
         $packageArchive.Entries |
@@ -165,88 +163,6 @@ try {
         throw "Packaged addon contains an unsupported executable binary."
     }
 
-    $authoringBridgeEntry =
-        'addons/game_agent_runtime/authoring/GodotWorldAuthoringBridge.cs'
-    if (-not $entryNames.Contains($authoringBridgeEntry)) {
-        throw "Packaged addon is missing the native-world authoring bridge."
-    }
-
-    $schemaPrefix =
-        'addons/game_agent_runtime/authoring/schemas/world-v1/'
-    $expectedSchemaEntries = @(
-        'agents.schema.json',
-        'clocks.schema.json',
-        'events.schema.json',
-        'interactions.schema.json',
-        'knowledge.schema.json',
-        'native-world-common.schema.json',
-        'numerics.schema.json',
-        'world.schema.json'
-    ) | ForEach-Object { $schemaPrefix + $_ }
-    $actualSchemaEntries = @(
-        $packageArchive.Entries |
-            Where-Object {
-                $_.FullName.StartsWith(
-                    $schemaPrefix,
-                    [StringComparison]::Ordinal) -and
-                $_.FullName.EndsWith(
-                    '.json',
-                    [StringComparison]::Ordinal)
-            } |
-            ForEach-Object { $_.FullName } |
-            Sort-Object
-    )
-    if ([string]::Join("`n", $actualSchemaEntries) -cne
-        [string]::Join("`n", @($expectedSchemaEntries | Sort-Object))) {
-        throw "Packaged addon native-world schema set is incomplete or unexpected."
-    }
-
-    $schemaDirectoryEntries = @(
-        $packageArchive.Entries |
-            Where-Object {
-                $_.FullName.StartsWith(
-                    $schemaPrefix,
-                    [StringComparison]::Ordinal)
-            } |
-            ForEach-Object { $_.FullName } |
-            Sort-Object
-    )
-    $allowedSchemaDirectoryEntries = @(
-        $expectedSchemaEntries
-        $schemaPrefix + 'README.md'
-    ) | Sort-Object
-    if (@(
-            $schemaDirectoryEntries |
-                Where-Object { $_ -cnotin $allowedSchemaDirectoryEntries }
-        ).Count -ne 0) {
-        throw "Packaged addon native-world schema directory contains unexpected files."
-    }
-
-    $examplePrefix =
-        'addons/game_agent_runtime/authoring/examples/interactive-smoke/'
-    $expectedExampleEntries = @(
-        'agents.json',
-        'clocks.json',
-        'events.json',
-        'interactions.json',
-        'knowledge.json',
-        'numerics.json',
-        'world.json'
-    ) | ForEach-Object { $examplePrefix + $_ }
-    $actualExampleEntries = @(
-        $packageArchive.Entries |
-            Where-Object {
-                $_.FullName.StartsWith(
-                    $examplePrefix,
-                    [StringComparison]::Ordinal)
-            } |
-            ForEach-Object { $_.FullName } |
-            Sort-Object
-    )
-    if ([string]::Join("`n", $actualExampleEntries) -cne
-        [string]::Join("`n", @($expectedExampleEntries | Sort-Object))) {
-        throw "Packaged addon native-world example set is incomplete or unexpected."
-    }
 }
 finally {
     $packageArchive.Dispose()

@@ -102,6 +102,17 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -RequireToolchain
 ```
 
+On Windows without Visual Studio, put `zig` and `ninja` on `PATH` and select
+the portable toolchain explicitly:
+
+```powershell
+$env:GAME_AGENT_UNREAL_PORTABLE_TOOLCHAIN = 'zig'
+./engines/unreal/scripts/Test-PortableWire.ps1 -RequireToolchain
+```
+
+The script uses Zig only for this portable protocol/ABI probe. It does not
+replace Unreal Build Tool or prove an Unreal Editor integration.
+
 This first exercises the automation-report parser with synthetic pass, missing,
 and failure reports. It then compiles the exact portable wire source used by the
 Unreal module, treats warnings as errors, parses repository protocol fixtures,

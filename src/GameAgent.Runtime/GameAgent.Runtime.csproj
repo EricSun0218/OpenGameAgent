@@ -6,10 +6,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
-    <ProjectReference Include="..\GameAgent.Compatibility\GameAgent.Compatibility.csproj" />
     <ProjectReference Include="..\GameAgent.Persistence\GameAgent.Persistence.csproj" />
     <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
     <ProjectReference Include="..\GameAgent.Providers.OpenAICompatible\GameAgent.Providers.OpenAICompatible.csproj" />
-    <ProjectReference Include="..\GameAgent.World\GameAgent.World.csproj" />
   </ItemGroup>
 </Project>

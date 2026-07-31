@@ -27,7 +27,6 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     private ISkillContentResolver? _skillContentResolver;
     private IToolDisclosurePolicy? _toolDisclosurePolicy;
     private IFinalOutputAdmissionPolicy? _finalOutputAdmissionPolicy;
-    private FinalOutputAdmissionOptions? _worldAgentJobOptions;
     private IConversationCompactor? _conversationCompactor;
     private RuntimeMemoryLifecycle? _memoryLifecycle;
     private IRuntimeMemoryPolicy? _memoryPolicy;
@@ -265,22 +264,6 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         return this;
     }
 
-    /// <summary>
-    /// Enables strict structured final output for interactive-world
-    /// understanding, selection, and narration jobs.
-    /// </summary>
-    public GameAgentRuntimeBuilder EnableWorldAgentJobs(
-        FinalOutputAdmissionOptions? options = null)
-    {
-        ThrowIfFinished();
-        var source = options ?? new FinalOutputAdmissionOptions();
-        _worldAgentJobOptions = CopyWorldAgentJobOptions(source);
-        ApplyWorldAgentJobOptions();
-        _finalOutputAdmissionPolicy =
-            new WorldAgentFinalOutputAdmissionPolicy();
-        return this;
-    }
-
     public GameAgentRuntimeBuilder WithConversationCompactor(
         IConversationCompactor compactor)
     {
@@ -349,39 +332,7 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         ThrowIfFinished();
         _runtimeOptions =
             options ?? throw new ArgumentNullException(nameof(options));
-        ApplyWorldAgentJobOptions();
         return this;
-    }
-
-    private void ApplyWorldAgentJobOptions()
-    {
-        if (_worldAgentJobOptions is null)
-        {
-            return;
-        }
-
-        _runtimeOptions.FinalOutputAdmission =
-            CopyWorldAgentJobOptions(_worldAgentJobOptions);
-    }
-
-    private static FinalOutputAdmissionOptions CopyWorldAgentJobOptions(
-        FinalOutputAdmissionOptions source)
-    {
-        return new FinalOutputAdmissionOptions
-        {
-            Enabled = true,
-            MaxAttempts = source.MaxAttempts,
-            MaxOutputUtf8Bytes = source.MaxOutputUtf8Bytes,
-            MaxEvidenceItems = source.MaxEvidenceItems,
-            MaxEvidenceUtf8Bytes = source.MaxEvidenceUtf8Bytes,
-            MaxJsonDepth = source.MaxJsonDepth,
-            MaxJsonNodes = source.MaxJsonNodes,
-            MaxPolicyFeedbackUtf8Bytes =
-                source.MaxPolicyFeedbackUtf8Bytes,
-            MaxConcurrentEvaluations =
-                source.MaxConcurrentEvaluations,
-            PolicyTimeout = source.PolicyTimeout
-        };
     }
 
     public GameAgentRuntimeBuilder WithRecoveryOptions(

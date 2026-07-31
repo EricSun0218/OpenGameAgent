@@ -1079,9 +1079,61 @@ internal sealed class RuntimeMemoryAgentLoop
                 nameof(report));
         }
 
+        if (!MemoryRankingModes.IsKnown(report.RankingMode))
+        {
+            throw new InvalidDataException(
+                "A prefetched memory report has an invalid ranking mode.");
+        }
+
+        var evidenceByMemoryId = report.CandidateEvidence
+            .GroupBy(item => item.MemoryId, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First(),
+                StringComparer.Ordinal);
+        var evidence = new MemoryRecallCandidateEvidence[results.Count];
+        for (var index = 0; index < results.Count; index++)
+        {
+            var result = results[index];
+            if (!evidenceByMemoryId.TryGetValue(
+                    result.Record.MemoryId,
+                    out var source))
+            {
+                evidence[index] = new MemoryRecallCandidateEvidence(
+                    result.Record.MemoryId,
+                    result.Score,
+                    Array.Empty<MemoryRecallProviderEvidence>());
+                continue;
+            }
+
+            var providers = new MemoryRecallProviderEvidence[
+                source.Providers.Count];
+            for (var providerIndex = 0;
+                 providerIndex < providers.Length;
+                 providerIndex++)
+            {
+                var provider = source.Providers[providerIndex];
+                providers[providerIndex] = new MemoryRecallProviderEvidence(
+                    RuntimeGuard.RequiredUtf8(
+                        provider.ProviderId,
+                        128,
+                        nameof(report)),
+                    provider.Rank,
+                    provider.RawScore);
+            }
+
+            evidence[index] = new MemoryRecallCandidateEvidence(
+                result.Record.MemoryId,
+                result.Score,
+                new ReadOnlyCollection<MemoryRecallProviderEvidence>(
+                    providers));
+        }
+
         return new MemoryRecallReport(
             new ReadOnlyCollection<MemorySearchResult>(results),
-            new ReadOnlyCollection<string>(failures));
+            new ReadOnlyCollection<string>(failures),
+            new ReadOnlyCollection<MemoryRecallCandidateEvidence>(evidence),
+            report.RankingMode);
     }
 
     private JsonElement RecallEvidence(
@@ -1091,19 +1143,69 @@ internal sealed class RuntimeMemoryAgentLoop
         int resultCount,
         IReadOnlyList<ContextCandidate> selected)
     {
+        const int maxEvidenceCandidates = 32;
+        const int maxProviderContributions = 8;
+        var evidenceByCandidateId = new Dictionary<
+            string,
+            MemoryRecallCandidateEvidence>(StringComparer.Ordinal);
+        foreach (var item in report.CandidateEvidence)
+        {
+            evidenceByCandidateId.TryAdd(
+                CandidateId(item.MemoryId),
+                item);
+        }
+
+        var candidateEvidence = selected
+            .Take(maxEvidenceCandidates)
+            .Select(candidate =>
+            {
+                if (!evidenceByCandidateId.TryGetValue(
+                        candidate.Id,
+                        out var evidence))
+                {
+                    return JsonArrayBuilder.Object(
+                        ("candidateId",
+                            JsonArrayBuilder.String(candidate.Id)),
+                        ("providerCount", JsonArrayBuilder.Number(0)),
+                        ("providers", JsonArrayBuilder.Array(
+                            Array.Empty<JsonElement>())));
+                }
+
+                var providers = evidence.Providers
+                    .Take(maxProviderContributions)
+                    .Select(provider => JsonArrayBuilder.Object(
+                        ("providerId", JsonArrayBuilder.String(
+                            provider.ProviderId)),
+                        ("rank", JsonArrayBuilder.Number(provider.Rank)),
+                        ("rawScore",
+                            JsonArrayBuilder.Number(provider.RawScore))));
+                return JsonArrayBuilder.Object(
+                    ("candidateId",
+                        JsonArrayBuilder.String(candidate.Id)),
+                    ("finalScore",
+                        JsonArrayBuilder.Number(evidence.FinalScore)),
+                    ("providerCount",
+                        JsonArrayBuilder.Number(evidence.Providers.Count)),
+                    ("providers", JsonArrayBuilder.Array(providers)));
+            });
+
         return JsonArrayBuilder.Object(
             ("policyId", JsonArrayBuilder.String(PolicyId)),
             ("version", JsonArrayBuilder.String(PolicyVersion)),
             ("scope", JsonArrayBuilder.String(plan.Query.Scope)),
+            ("rankingMode", JsonArrayBuilder.String(report.RankingMode)),
             ("usedPrefetch", JsonArrayBuilder.Boolean(usedPrefetch)),
             ("partial", JsonArrayBuilder.Boolean(report.IsPartial)),
             ("resultCount", JsonArrayBuilder.Number(resultCount)),
             ("selectedCount", JsonArrayBuilder.Number(selected.Count)),
+            ("candidateEvidenceTruncated", JsonArrayBuilder.Boolean(
+                selected.Count > maxEvidenceCandidates)),
             ("failedProviderIds", JsonArrayBuilder.Array(
                 report.FailedProviderIds.Select(JsonArrayBuilder.String))),
             ("selectedIds", JsonArrayBuilder.Array(
                 selected.Select(
-                    item => JsonArrayBuilder.String(item.Id)))));
+                    item => JsonArrayBuilder.String(item.Id)))),
+            ("candidateEvidence", JsonArrayBuilder.Array(candidateEvidence)));
     }
 
     private static string ReadPolicyIdentity(

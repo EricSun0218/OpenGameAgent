@@ -10,6 +10,7 @@ var results = new List<Measurement>
 {
     await MeasureContextAsync(),
     await MeasureMemoryAsync(),
+    await MeasureHybridMemoryAsync(),
     await MeasureMultiActorAsync(1, warm: false),
     await MeasureMultiActorAsync(1, warm: true),
     await MeasureMultiActorAsync(10, warm: false),
@@ -162,6 +163,66 @@ static async Task<Measurement> MeasureMemoryAsync()
             {
                 throw new InvalidOperationException(
                     "Memory performance scenario exceeded its result bound.");
+            }
+        });
+}
+
+static async Task<Measurement> MeasureHybridMemoryAsync()
+{
+    const int recordCount = 2_000;
+    var lexical = new Bm25MemoryStore(
+        providerId: "performance-lexical",
+        capacity: recordCount);
+    var semantic = new VectorMemoryStore(
+        new PerformanceEmbeddingProvider(),
+        capacity: recordCount,
+        options: new VectorMemoryStoreOptions(
+            maxVectorValues: recordCount * 8L,
+            maxComparisonsPerSearch: recordCount));
+    for (var index = 0; index < recordCount; index++)
+    {
+        var record = new MemoryRecord(
+            "hybrid-memory-" + index,
+            "world",
+            ProtocolJson.ParseElement(
+                $$"""{"entity":"npc-{{index}}","region":"north","fact":"harbor route {{index}}"}"""),
+            index % 7 == 0
+                ? new[] { "harbor" }
+                : Array.Empty<string>(),
+            index % 100,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch);
+        await lexical.UpsertAsync(record, CancellationToken.None);
+        await semantic.UpsertAsync(record, CancellationToken.None);
+    }
+
+    await using var memory = new RuntimeMemoryLifecycle(
+        new IMemoryProvider[] { lexical, semantic },
+        options: new MemoryLifecycleOptions
+        {
+            RankingMode = MemoryRankingModes.ReciprocalRankFusion
+        });
+    var query = new MemoryQuery(
+        "world",
+        ProtocolJson.ParseElement(
+            """{"region":"north","fact":"harbor route"}"""),
+        maxResults: 16);
+    _ = await memory.RecallAsync(query, CancellationToken.None);
+    return await MeasureAsync(
+        "memory.hybrid.search.2000",
+        operations: 25,
+        budgetMilliseconds: 8_000,
+        budgetAllocatedBytes: 512L * 1_048_576,
+        async _ =>
+        {
+            var report = await memory.RecallAsync(
+                query,
+                CancellationToken.None);
+            if (report.Results.Count > 16
+                || report.CandidateEvidence.Count != report.Results.Count)
+            {
+                throw new InvalidOperationException(
+                    "Hybrid memory performance scenario violated its bounds.");
             }
         });
 }
@@ -575,5 +636,31 @@ internal sealed class PerformanceActorRuntime : IDurableAgentRuntime
         _ = reconciler;
         _ = cancellationToken;
         throw new NotSupportedException();
+    }
+}
+
+internal sealed class PerformanceEmbeddingProvider : IMemoryEmbeddingProvider
+{
+    public string ProviderId => "performance-embedding";
+
+    public string ModelId => "deterministic-performance";
+
+    public string Version => "1";
+
+    public int Dimensions => 8;
+
+    public ValueTask<ReadOnlyMemory<float>> EmbedAsync(
+        JsonElement value,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var vector = new float[Dimensions];
+        var source = value.GetRawText();
+        for (var index = 0; index < source.Length; index++)
+        {
+            vector[index % vector.Length] += 1 + (source[index] % 31);
+        }
+
+        return new ValueTask<ReadOnlyMemory<float>>(vector);
     }
 }

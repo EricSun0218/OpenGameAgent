@@ -6,7 +6,6 @@ using GameAgent.Providers.Anthropic;
 using GameAgent.Providers.OpenAICompatible;
 using GameAgent.Runtime;
 using GameAgent.Workflow;
-using GameAgent.World;
 
 namespace GameAgent.Unity
 {
@@ -22,9 +21,7 @@ namespace GameAgent.Unity
                 typeof(AnthropicProviderOptions),
                 typeof(OpenAiCompatibleProviderOptions),
                 typeof(GameAgentRuntimeBuilder),
-                typeof(WorkflowCompiler),
-                typeof(InteractiveWorldFacade),
-                typeof(UnityInteractiveWorldFacade)
+                typeof(WorkflowCompiler)
             };
         }
     }

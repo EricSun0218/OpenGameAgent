@@ -12,6 +12,5 @@
     <ProjectReference Include="..\..\src\GameAgent.Providers.Anthropic\GameAgent.Providers.Anthropic.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Runtime\GameAgent.Runtime.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Workflow\GameAgent.Workflow.csproj" />
-    <ProjectReference Include="..\..\src\GameAgent.World\GameAgent.World.csproj" />
   </ItemGroup>
 </Project>

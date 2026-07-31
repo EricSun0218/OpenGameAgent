@@ -19,9 +19,9 @@ public sealed class OpenAiCompatibleStreamingProvider :
     private const int MaxRequestBodyUtf8Bytes = 8 * 1_048_576;
     private const int MaxDirectTools = 128;
     private const string RoutePolicyVersion =
-        "openai-compatible.route-policy.v3";
+        "openai-compatible.route-policy.v4";
     private const string RequestLayoutPolicy =
-        "chat-completions.request-layout.v1";
+        "chat-completions.request-layout.v2";
     private const string UsageParsingPolicy =
         "chat-completions.usage-accounting.v2";
     private const string PricingPolicy =
@@ -95,11 +95,12 @@ public sealed class OpenAiCompatibleStreamingProvider :
             JsonOutput = true,
             ReasoningInput =
                 _options.ReplayReasoningContent
-                && string.Equals(
-                    _options.ThinkingMode,
-                    "enabled",
-                    StringComparison.Ordinal),
-            ParallelToolCalls = true,
+                && (!_options.ReasoningContentReplayRequiresThinkingMode
+                    || string.Equals(
+                        _options.ThinkingMode,
+                        "enabled",
+                        StringComparison.Ordinal)),
+            ParallelToolCalls = _options.ParallelToolCalls is not false,
             RequiresCompleteToolPairs = true,
             MaxTools = MaxDirectTools,
             MaxContextTokens = _options.MaxContextTokens
@@ -679,6 +680,10 @@ public sealed class OpenAiCompatibleStreamingProvider :
             options.MaxOutputTokens.ToString(CultureInfo.InvariantCulture));
         AddRoutePolicyField(
             canonical,
+            "maxOutputTokensField",
+            options.MaxOutputTokensField);
+        AddRoutePolicyField(
+            canonical,
             "thinkingMode",
             options.ThinkingMode ?? string.Empty);
         AddRoutePolicyField(
@@ -687,12 +692,36 @@ public sealed class OpenAiCompatibleStreamingProvider :
             options.ReasoningEffort ?? string.Empty);
         AddRoutePolicyField(
             canonical,
+            "reasoningEffortRequiresThinkingMode",
+            options.ReasoningEffortRequiresThinkingMode ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "toolChoice",
+            options.ToolChoice ?? string.Empty);
+        AddRoutePolicyField(
+            canonical,
+            "parallelToolCalls",
+            options.ParallelToolCalls.HasValue
+                ? options.ParallelToolCalls.Value ? "true" : "false"
+                : "unspecified");
+        AddRoutePolicyField(
+            canonical,
+            "strictToolSchemas",
+            options.StrictToolSchemas ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
             "includeUsage",
             options.IncludeUsage ? "true" : "false");
         AddRoutePolicyField(
             canonical,
             "replayReasoningContent",
             options.ReplayReasoningContent ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "reasoningContentReplayRequiresThinkingMode",
+            options.ReasoningContentReplayRequiresThinkingMode
+                ? "true"
+                : "false");
         AddRoutePolicyField(
             canonical,
             "maxSseEventCharacters",
@@ -1165,6 +1194,20 @@ public sealed class OpenAiCompatibleStreamingProvider :
                 false);
         }
 
+        if (request.Tools.Count == 0
+            && string.Equals(
+                _options.ToolChoice,
+                "required",
+                StringComparison.Ordinal))
+        {
+            throw new ProviderException(
+                "provider_tool_choice_requires_tools",
+                "validation",
+                "Required tool choice needs at least one tool definition.",
+                false,
+                usageKnownToBeZero: true);
+        }
+
         if (request.MaxOutputTokens < 1)
         {
             throw new ProviderException(
@@ -1195,7 +1238,7 @@ public sealed class OpenAiCompatibleStreamingProvider :
             writer.WriteString("model", _options.Model);
             writer.WriteBoolean("stream", true);
             writer.WriteNumber(
-                "max_tokens",
+                _options.MaxOutputTokensField,
                 request.MaxOutputTokens.HasValue
                     ? Math.Min(
                         request.MaxOutputTokens.Value,
@@ -1210,10 +1253,11 @@ public sealed class OpenAiCompatibleStreamingProvider :
             }
 
             if (_options.ReasoningEffort is not null
-                && string.Equals(
-                    _options.ThinkingMode,
-                    "enabled",
-                    StringComparison.Ordinal))
+                && (!_options.ReasoningEffortRequiresThinkingMode
+                    || string.Equals(
+                        _options.ThinkingMode,
+                        "enabled",
+                        StringComparison.Ordinal)))
             {
                 writer.WriteString(
                     "reasoning_effort",
@@ -1242,12 +1286,26 @@ public sealed class OpenAiCompatibleStreamingProvider :
                 writer.WriteStartArray();
                 foreach (var tool in request.Tools)
                 {
-                    WriteTool(writer, tool);
+                    WriteTool(
+                        writer,
+                        tool,
+                        _options.StrictToolSchemas);
                 }
 
                 writer.WriteEndArray();
-                // DeepSeek V4 thinking mode rejects tool_choice. Omitting it also
-                // preserves the OpenAI-compatible default of auto.
+                if (_options.ToolChoice is not null)
+                {
+                    writer.WriteString(
+                        "tool_choice",
+                        _options.ToolChoice);
+                }
+
+                if (_options.ParallelToolCalls.HasValue)
+                {
+                    writer.WriteBoolean(
+                        "parallel_tool_calls",
+                        _options.ParallelToolCalls.Value);
+                }
             }
 
             writer.WriteEndObject();
@@ -1422,10 +1480,11 @@ public sealed class OpenAiCompatibleStreamingProvider :
         WriteBoundedString(writer, "content", text);
         if (_options.ReplayReasoningContent
             && !string.IsNullOrEmpty(reasoning)
-            && string.Equals(
-                _options.ThinkingMode,
-                "enabled",
-                StringComparison.Ordinal))
+            && (!_options.ReasoningContentReplayRequiresThinkingMode
+                || string.Equals(
+                    _options.ThinkingMode,
+                    "enabled",
+                    StringComparison.Ordinal)))
         {
             WriteBoundedString(
                 writer,
@@ -1524,7 +1583,10 @@ public sealed class OpenAiCompatibleStreamingProvider :
         return string.Join("\n", values);
     }
 
-    private static void WriteTool(Utf8JsonWriter writer, ToolDescriptor tool)
+    private static void WriteTool(
+        Utf8JsonWriter writer,
+        ToolDescriptor tool,
+        bool strictSchema)
     {
         if (string.IsNullOrWhiteSpace(tool.Name)
             || tool.Name.Length > 64
@@ -1550,6 +1612,10 @@ public sealed class OpenAiCompatibleStreamingProvider :
         WriteBoundedString(writer, "description", tool.Description);
         writer.WritePropertyName("parameters");
         WriteBoundedJsonValue(writer, tool.ParametersSchema);
+        if (strictSchema)
+        {
+            writer.WriteBoolean("strict", true);
+        }
         writer.WriteEndObject();
         writer.WriteEndObject();
     }
