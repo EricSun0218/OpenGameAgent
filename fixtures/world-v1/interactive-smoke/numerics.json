@@ -1,0 +1,13 @@
+{
+  "contract": "game-agent.world-numerics.v1",
+  "schemas": [
+    {
+      "schemaId": "trust.points",
+      "scale": 2,
+      "unitId": "trust-point",
+      "minimum": "0",
+      "maximum": "10000",
+      "defaultValue": "0"
+    }
+  ]
+}

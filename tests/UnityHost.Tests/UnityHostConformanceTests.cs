@@ -403,7 +403,16 @@ public sealed class UnityHostConformanceTests
             observedAtUnixMilliseconds = 1_785_196_800_000,
             trust = "authoritative",
             visibilityScope = "agent",
-            audienceIds = new[] { "agent-1" }
+            audienceIds = new[] { "agent-1" },
+            audienceIncarnations = new[]
+            {
+                new UnityAudienceIncarnationData
+                {
+                    audienceId = "agent-1",
+                    entityId = "npc-17",
+                    incarnation = 4
+                }
+            }
         };
 
         var protocol = UnityProtocolBridge.ToProtocol(input);
@@ -422,6 +431,349 @@ public sealed class UnityHostConformanceTests
             roundTrip.Extensions["trace"].GetProperty("id").GetInt32());
         Assert.Equal("agent-1", Assert.Single(
             roundTrip.Visibility.AudienceIds));
+        Assert.True(
+            ObservationAudienceIncarnations.TryRead(
+                roundTrip,
+                out var audienceIncarnations));
+        var incarnation = Assert.Single(audienceIncarnations);
+        Assert.Equal("agent-1", incarnation.AudienceId);
+        Assert.Equal("npc-17", incarnation.Entity.EntityId);
+        Assert.Equal(4, incarnation.Entity.Incarnation);
+    }
+
+    [Fact]
+    public void ReceiptDtoRoundTripsResultingGameContextExtension()
+    {
+        var coordinate = new GameContextCoordinate(
+            "world-1",
+            "timeline-1",
+            2,
+            new GameEntityIdentity("npc-17", 4),
+            stateVersion: "state-2",
+            gameTime: new GameTimePoint(
+                "world-clock",
+                "timeline-1",
+                3,
+                200),
+            sessionId: "session-1");
+        var extension = GameContextEnvelope.ToJson(coordinate)
+            .GetRawText();
+        var receipt = UnityProtocolBridge.ToProtocol(
+            new UnityActionReceiptData
+            {
+                operationId = "operation-coordinate",
+                revision = 1,
+                status = ReceiptStatuses.Succeeded,
+                extensionsJson =
+                    $$"""{"{{GameContextReceiptEnvelope.ResultingExtensionName}}":{{extension}}}""",
+                hasReceivedAtUnixMilliseconds = true,
+                receivedAtUnixMilliseconds = 0
+            });
+
+        var roundTrip = UnityProtocolBridge.ActionReceiptFromJson(
+            UnityProtocolBridge.ToJson(receipt));
+
+        Assert.True(
+            GameContextReceiptEnvelope.TryReadResulting(
+                roundTrip,
+                out var restored));
+        Assert.Equal("world-1", restored!.WorldId);
+        Assert.Equal("session-1", restored.SessionId);
+        Assert.Equal("npc-17", restored.Observer!.EntityId);
+        Assert.Equal(4, restored.Observer.Incarnation);
+        Assert.Equal("state-2", restored.StateVersion);
+    }
+
+    [Fact]
+    public void DtoBridgeAccepts64ExtensionsAndRejects65BeforeCopying()
+    {
+        static string Extensions(int count) =>
+            "{"
+            + string.Join(
+                ",",
+                Enumerable.Range(0, count)
+                    .Select(index => "\"extension_"
+                        + index
+                        + "\":true"))
+            + "}";
+
+        var input = FieldObservation("extension-boundary");
+        input.extensionsJson = Extensions(
+            ProtocolLimits.MaxProtocolExtensions);
+        var accepted = UnityProtocolBridge.ToProtocol(input);
+        Assert.Equal(
+            ProtocolLimits.MaxProtocolExtensions,
+            accepted.Extensions.Count);
+
+        input.extensionsJson = Extensions(
+            ProtocolLimits.MaxProtocolExtensions + 1);
+        Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ToProtocol(input));
+    }
+
+    [Fact]
+    public void DtoBridgeRejectsDeepLargeAndWideJsonBeforeMapping()
+    {
+        var deep = FieldObservation("deep-payload");
+        deep.payloadJson =
+            new string(
+                '[',
+                ProtocolLimits.MaxProtocolJsonDepth + 1)
+            + "0"
+            + new string(
+                ']',
+                ProtocolLimits.MaxProtocolJsonDepth + 1);
+        Assert.ThrowsAny<JsonException>(
+            () => UnityProtocolBridge.ToProtocol(deep));
+
+        var large = FieldObservation("large-payload");
+        large.payloadJson =
+            "{\"value\":\""
+            + new string(
+                'x',
+                ProtocolLimits.MaxProtocolJsonStringUtf8Bytes + 1)
+            + "\"}";
+        Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ToProtocol(large));
+
+        var wide = FieldObservation("wide-payload");
+        wide.payloadJson =
+            "["
+            + string.Join(
+                ",",
+                Enumerable.Repeat(
+                    "0",
+                    ProtocolLimits.MaxProtocolJsonContainerItems + 1))
+            + "]";
+        Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ToProtocol(wide));
+    }
+
+    [Fact]
+    public void DtoBridgeBoundsAggregateJsonAcrossNestedObservations()
+    {
+        var paddedObject =
+            "{}"
+            + new string(
+                ' ',
+                ProtocolLimits.MaxProtocolJsonUtf8Bytes - 2);
+        var shared = FieldObservation("aggregate-payload");
+        shared.extensionsJson = paddedObject;
+        shared.payloadJson = paddedObject;
+        var observations = Enumerable.Repeat(
+                shared,
+                ProtocolLimits.MaxAuthoritativeObservationsPerReceipt)
+            .ToArray();
+
+        Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ToProtocol(
+                new UnityActionReceiptData
+                {
+                    operationId = "aggregate-operation",
+                    status = ReceiptStatuses.Succeeded,
+                    authoritativeObservations = observations,
+                    hasReceivedAtUnixMilliseconds = true,
+                    receivedAtUnixMilliseconds = 0
+                }));
+    }
+
+    [Fact]
+    public void DtoBridgeChecksArrayCardinalityBeforeCopying()
+    {
+        var input = FieldObservation("subject-cardinality");
+        input.subjectIds = new string[
+            ProtocolLimits.MaxObservationSubjectIds + 1];
+
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => UnityProtocolBridge.ToProtocol(input));
+
+        Assert.Equal("subjectIds", error.ParamName);
+
+        input = FieldObservation("audience-cardinality");
+        input.audienceIds = new string[
+            ProtocolLimits.MaxObservationAudienceIds + 1];
+        error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => UnityProtocolBridge.ToProtocol(input));
+
+        Assert.Equal("audienceIds", error.ParamName);
+    }
+
+    [Fact]
+    public void JsonObjectIngressRejectsExcessiveDepthBeforeDeserialization()
+    {
+        var deeplyNested =
+            new string('[', 65)
+            + "0"
+            + new string(']', 65);
+
+        Assert.ThrowsAny<JsonException>(
+            () => UnityProtocolBridge.ObservationFromJson(deeplyNested));
+
+        var escapedExpansion =
+            "{\"value\":\""
+            + string.Concat(
+                Enumerable.Repeat(
+                    "\\u0061",
+                    ProtocolLimits.MaxProtocolJsonStringUtf8Bytes + 1))
+            + "\"}";
+        var expansionError = Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ObservationFromJson(
+                escapedExpansion));
+        Assert.Contains(
+            "bounded decode allocation limit",
+            expansionError.Message);
+    }
+
+    [Fact]
+    public void JsonObjectIngressAppliesProtocolContainerLimitsBeforeDeserialization()
+    {
+        static string Extensions(int count) =>
+            "{"
+            + string.Join(
+                ",",
+                Enumerable.Range(0, count)
+                    .Select(index => "\"extension_"
+                        + index
+                        + "\":true"))
+            + "}";
+
+        static string Observation(
+            string extensions,
+            string payload = "{}") =>
+            "{"
+            + "\"protocolVersion\":\"0.2\","
+            + "\"schemaVersion\":\"0.2\","
+            + "\"extensions\":" + extensions + ","
+            + "\"observationId\":\"wire-observation\","
+            + "\"worldId\":\"world-1\","
+            + "\"source\":\"game.state\","
+            + "\"kind\":\"snapshot\","
+            + "\"contentType\":\"application/json\","
+            + "\"payload\":" + payload + ","
+            + "\"observedAt\":\"2026-07-30T00:00:00Z\","
+            + "\"trust\":\"trusted\","
+            + "\"visibility\":{\"scope\":\"world\",\"audienceIds\":[]}"
+            + "}";
+
+        var atLimit = UnityProtocolBridge.ObservationFromJson(
+            Observation(
+                Extensions(ProtocolLimits.MaxProtocolExtensions)));
+        Assert.Equal(
+            ProtocolLimits.MaxProtocolExtensions,
+            atLimit.Extensions.Count);
+
+        var overExtensions = Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ObservationFromJson(
+                Observation(
+                    Extensions(
+                        ProtocolLimits.MaxProtocolExtensions + 1))));
+        Assert.Contains("over 64 items", overExtensions.Message);
+
+        var opaquePayload = UnityProtocolBridge.ObservationFromJson(
+            Observation(
+                "{}",
+                "{\"extensions\":"
+                + Extensions(ProtocolLimits.MaxProtocolExtensions + 1)
+                + "}"));
+        Assert.Equal(
+            ProtocolLimits.MaxProtocolExtensions + 1,
+            opaquePayload.Payload!.Value
+                .GetProperty("extensions")
+                .EnumerateObject()
+                .Count());
+
+        var receiptOverLimit =
+            "{"
+            + "\"protocolVersion\":\"0.2\","
+            + "\"schemaVersion\":\"0.2\","
+            + "\"operationId\":\"wire-operation\","
+            + "\"revision\":0,"
+            + "\"status\":\"succeeded\","
+            + "\"authoritativeObservations\":["
+            + string.Join(
+                ",",
+                Enumerable.Repeat(
+                    "{}",
+                    ProtocolLimits
+                        .MaxAuthoritativeObservationsPerReceipt + 1))
+            + "],"
+            + "\"retryable\":false,"
+            + "\"receivedAt\":\"2026-07-30T00:00:00Z\""
+            + "}";
+        var overObservations = Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ActionReceiptFromJson(
+                receiptOverLimit));
+        Assert.Contains("over 64 items", overObservations.Message);
+
+        var nestedObservationOverLimit =
+            "{"
+            + "\"protocolVersion\":\"0.2\","
+            + "\"schemaVersion\":\"0.2\","
+            + "\"operationId\":\"nested-wire-operation\","
+            + "\"revision\":0,"
+            + "\"status\":\"succeeded\","
+            + "\"authoritativeObservations\":["
+            + Observation(
+                Extensions(
+                    ProtocolLimits.MaxProtocolExtensions + 1))
+            + "],"
+            + "\"retryable\":false,"
+            + "\"receivedAt\":\"2026-07-30T00:00:00Z\""
+            + "}";
+        var overNestedExtensions = Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ActionReceiptFromJson(
+                nestedObservationOverLimit));
+        Assert.Contains("over 64 items", overNestedExtensions.Message);
+
+        var requestOverLimit =
+            "{"
+            + "\"protocolVersion\":\"0.2\","
+            + "\"schemaVersion\":\"0.2\","
+            + "\"expectedEffects\":["
+            + string.Join(
+                ",",
+                Enumerable.Repeat(
+                    "\"effect\"",
+                    ProtocolLimits.MaxActionExpectedEffects + 1))
+            + "]"
+            + "}";
+        var overExpectedEffects = Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.ActionRequestFromJson(
+                requestOverLimit));
+        Assert.Contains("over 32 items", overExpectedEffects.Message);
+    }
+
+    [Fact]
+    public void RuntimeEventBridgeRejectsSemanticWireViolations()
+    {
+        var runtimeEvent = new RuntimeEvent
+        {
+            EventId = "event-1",
+            RunId = "run-1",
+            Sequence = 0,
+            Kind = RuntimeEventKinds.ProviderDispatchStarted,
+            Durability = EventDurabilities.Durable,
+            RuntimeGeneration = 1,
+            ProviderId = "gateway/provider",
+            ModelId = "openai/gpt-4.1",
+            Timestamp = DateTimeOffset.UtcNow,
+            Payload = ProtocolJson.ParseElement("{}")
+        };
+
+        var roundTrip = UnityProtocolBridge.RuntimeEventFromJson(
+            UnityProtocolBridge.ToJson(runtimeEvent));
+        Assert.Equal("openai/gpt-4.1", roundTrip.ModelId);
+
+        runtimeEvent.Sequence = -1;
+        runtimeEvent.Kind = string.Empty;
+        runtimeEvent.RuntimeGeneration = 0;
+        runtimeEvent.ProviderId = new string(
+            'p',
+            ProtocolLimits.MaxProviderIdUnicodeScalars + 1);
+
+        Assert.Throws<JsonException>(
+            () => UnityProtocolBridge.RuntimeEventFromJson(
+                UnityProtocolBridge.ToJson(runtimeEvent)));
     }
 
     [Fact]
@@ -432,7 +784,7 @@ public sealed class UnityHostConformanceTests
             observationId = "resource-observation",
             worldId = "world-1",
             source = "game.resource",
-            kind = "resource",
+            kind = ObservationKinds.ResourceReference,
             resourceUri = "game://world/map",
             resourceMediaType = "application/json",
             resourceDigest = "sha256:abc",
@@ -460,6 +812,8 @@ public sealed class UnityHostConformanceTests
             ActionName = "inspect",
             ActionVersion = "1",
             Arguments = ProtocolJson.ParseElement("{}"),
+            DecisionKey = "npc inspect decision",
+            BatchId = "world-tick-1",
             RequestedAt = DateTimeOffset.UnixEpoch,
             Extensions = new Dictionary<string, JsonElement>
             {
@@ -483,6 +837,8 @@ public sealed class UnityHostConformanceTests
         Assert.True(unityRequest.hasRequestedAtUnixMilliseconds);
         Assert.Equal(0, unityRequest.requestedAtUnixMilliseconds);
         Assert.False(unityRequest.hasDeadlineUnixMilliseconds);
+        Assert.Equal("npc inspect decision", unityRequest.decisionKey);
+        Assert.Equal("world-tick-1", unityRequest.batchId);
     }
 
     [Fact]
@@ -535,6 +891,148 @@ public sealed class UnityHostConformanceTests
         Assert.True(request.hasDeadlineUnixMilliseconds);
         Assert.Equal(0, request.requestedAtUnixMilliseconds);
         Assert.Equal(0, request.deadlineUnixMilliseconds);
+    }
+
+    [Fact]
+    public void FieldReceiptAcceptsAuthoritativeObservationLimit()
+    {
+        var observations = Enumerable
+            .Range(0, ProtocolLimits.MaxAuthoritativeObservationsPerReceipt)
+            .Select(index => FieldObservation("observation-" + index))
+            .ToArray();
+
+        var receipt = UnityProtocolBridge.ToProtocol(
+            new UnityActionReceiptData
+            {
+                operationId = "operation-at-limit",
+                status = ReceiptStatuses.Succeeded,
+                authoritativeObservations = observations,
+                hasReceivedAtUnixMilliseconds = true,
+                receivedAtUnixMilliseconds = 0
+            });
+
+        Assert.Equal(
+            ProtocolLimits.MaxAuthoritativeObservationsPerReceipt,
+            receipt.AuthoritativeObservations.Count);
+    }
+
+    [Fact]
+    public void FieldReceiptRejectsAuthoritativeObservationsOverLimitBeforeMapping()
+    {
+        var observations = new UnityObservationData[
+            ProtocolLimits.MaxAuthoritativeObservationsPerReceipt + 1];
+
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => UnityProtocolBridge.ToProtocol(
+                new UnityActionReceiptData
+                {
+                    operationId = "operation-over-limit",
+                    status = ReceiptStatuses.Succeeded,
+                    authoritativeObservations = observations,
+                    hasReceivedAtUnixMilliseconds = true,
+                    receivedAtUnixMilliseconds = 0
+                }));
+
+        Assert.Equal("authoritativeObservations", error.ParamName);
+    }
+
+    [Fact]
+    public void FieldDtosRejectMissingRequiredTimestamps()
+    {
+        var observationError = Assert.Throws<ArgumentException>(
+            () => UnityProtocolBridge.ToProtocol(
+                new UnityObservationData
+                {
+                    observationId = "missing-observed-at",
+                    worldId = "world-1",
+                    source = "game.state"
+                }));
+        var receiptError = Assert.Throws<ArgumentException>(
+            () => UnityProtocolBridge.ToProtocol(
+                new UnityActionReceiptData
+                {
+                    operationId = "missing-received-at",
+                    status = ReceiptStatuses.Succeeded
+                }));
+
+        Assert.Equal(
+            "observedAtUnixMilliseconds",
+            observationError.ParamName);
+        Assert.Equal(
+            "receivedAtUnixMilliseconds",
+            receiptError.ParamName);
+    }
+
+    [Theory]
+    [InlineData("sequence", -1, true)]
+    [InlineData("sequence", -2, false)]
+    [InlineData("resourceSizeBytes", -1, true)]
+    [InlineData("resourceSizeBytes", -2, false)]
+    public void FieldObservationRejectsNegativeOptionalNumbers(
+        string field,
+        long value,
+        bool hasValue)
+    {
+        var observation = FieldObservation("negative-" + field);
+        if (string.Equals(field, "sequence", StringComparison.Ordinal))
+        {
+            observation.sequence = value;
+            observation.hasSequence = hasValue;
+        }
+        else
+        {
+            observation.resourceUri = "game://world/map";
+            observation.kind = ObservationKinds.ResourceReference;
+            observation.resourceSizeBytes = value;
+            observation.hasResourceSizeBytes = hasValue;
+        }
+
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            () => UnityProtocolBridge.ToProtocol(observation));
+
+        Assert.Equal(field, error.ParamName);
+    }
+
+    [Fact]
+    public void FieldObservationKeepsSentinelDefaultsAsAbsent()
+    {
+        var payload = UnityProtocolBridge.ToProtocol(
+            FieldObservation("payload-defaults"));
+        var resourceData = FieldObservation("resource-defaults");
+        resourceData.kind = ObservationKinds.ResourceReference;
+        resourceData.resourceUri = "game://world/map";
+        var resource = UnityProtocolBridge.ToProtocol(resourceData);
+
+        Assert.Null(payload.Sequence);
+        Assert.NotNull(resource.ResourceRef);
+        Assert.Null(resource.ResourceRef!.SizeBytes);
+    }
+
+    [Fact]
+    public void FieldDtoMappingIsDeterministicWithExplicitTimestamps()
+    {
+        var input = new UnityActionReceiptData
+        {
+            operationId = "deterministic-operation",
+            status = ReceiptStatuses.Succeeded,
+            authoritativeObservations =
+                new[] { FieldObservation("deterministic-observation") },
+            hasCommittedAtUnixMilliseconds = true,
+            committedAtUnixMilliseconds = 0,
+            hasReceivedAtUnixMilliseconds = true,
+            receivedAtUnixMilliseconds = 0
+        };
+
+        var first = UnityProtocolBridge.ToJson(
+            UnityProtocolBridge.ToProtocol(input));
+        var second = UnityProtocolBridge.ToJson(
+            UnityProtocolBridge.ToProtocol(input));
+
+        Assert.Equal(first, second);
+        Assert.Contains(
+            "\"receivedAt\":\"1970-01-01T00:00:00+00:00\"",
+            first,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1435,6 +1933,275 @@ public sealed class UnityHostConformanceTests
     }
 
     [Fact]
+    public async Task FacadeExposesFailClosedGuardedResume()
+    {
+        var backend = new RecordingGuardedDurableBackend();
+        var facade = new UnityAgentRuntimeFacade(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var semantic = ProtocolJson.ParseElement(
+            """{"revision":12,"timeline":"prime"}""");
+        var guard = new DurableRunResumeGuard
+        {
+            SemanticExtensionName = "game.coordinate",
+            ExpectedSemanticExtensionSha256 =
+                CanonicalJsonDigest.ComputeSha256(semantic)
+        };
+
+        var outcome = await facade.ResumeAsync(
+            "guarded-run",
+            guard,
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal("guarded-run", outcome.Run.RunId);
+        Assert.Same(guard, backend.LastGuard);
+        Assert.Equal(0, facade.ActiveRunCount);
+        await facade.DisposeAsync();
+
+        var hostBackend = new RecordingGuardedDurableBackend();
+        var host = new GameObject("GuardedResumeHost")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            hostBackend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var hostOutcome = await host.ResumeAsync(
+            "host-guarded-run",
+            guard,
+            cancellationToken: CancellationToken.None);
+        Assert.Equal("host-guarded-run", hostOutcome.Run.RunId);
+        Assert.Same(guard, hostBackend.LastGuard);
+        await host.ShutdownAsync(CancellationToken.None);
+
+        var unsupportedFacade = new UnityAgentRuntimeFacade(
+            new RecordingDurableBackend(),
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var unsupported =
+            await Assert.ThrowsAsync<DurableRunResumeGuardException>(
+                () => unsupportedFacade.ResumeAsync(
+                    "unsupported-run",
+                    guard));
+        Assert.Equal(
+            DurableRunResumeGuardReasonCodes.NotSupported,
+            unsupported.ReasonCode);
+        await unsupportedFacade.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task FacadeCreatesTrackedMultiActorCoordinatorWithLifecycle()
+    {
+        var lifecycle = new RecordingMultiActorLifecycle();
+        var runtime = new RecordingGuardedMultiActorRuntime(
+            lifecycle,
+            pauseInitialRuns: false);
+        var facade = new UnityAgentRuntimeFacade(
+            runtime,
+            new InMemorySessionStore(),
+            ownsSessionStore: false,
+            ownsRuntime: false,
+            maxActiveRuns: 4);
+        var coordinator = facade.CreateMultiActorCoordinator(
+            new MultiActorCoordinatorOptions(
+                maxBatchSize: 4,
+                maxConcurrentRuns: 2),
+            lifecycle);
+
+        var outcome = await coordinator.RunAsync(
+            new MultiActorDecisionBatch(
+                "unity-batch",
+                MultiActorCoordinate(),
+                new[]
+                {
+                    CreateMultiActorRequest(0),
+                    CreateMultiActorRequest(1)
+                }));
+
+        Assert.Equal("unity-batch", outcome.Manifest.BatchId);
+        Assert.Equal(
+            "session-1",
+            outcome.Manifest.Coordinate.SessionId);
+        Assert.Equal(2, outcome.Manifest.Participants.Count);
+        Assert.Equal(
+            new[] { "npc-0", "npc-1" },
+            outcome.Results.Select(result => result.AgentId));
+        Assert.All(outcome.Results, result => Assert.True(result.Succeeded));
+        Assert.True(runtime.AllRunsObservedManifest);
+        Assert.Equal(
+            new[] { "npc-0", "npc-1" },
+            lifecycle.FinishedAgentIds.OrderBy(
+                value => value,
+                StringComparer.Ordinal));
+        Assert.Null(lifecycle.AbortedBatchId);
+        Assert.Equal(0, facade.ActiveRunCount);
+
+        await facade.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task HostCoordinatorFactoryPreservesGuardedParticipantResume()
+    {
+        var lifecycle = new RecordingMultiActorLifecycle();
+        var runtime = new RecordingGuardedMultiActorRuntime(
+            lifecycle,
+            pauseInitialRuns: true);
+        var host = new GameObject("GameAgentRuntimeMultiActorTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            runtime,
+            new InMemorySessionStore(),
+            ownsSessionStore: false,
+            ownsRuntime: false);
+        var coordinator = host.CreateMultiActorCoordinator(
+            new MultiActorCoordinatorOptions(
+                maxBatchSize: 2,
+                maxConcurrentRuns: 1,
+                maxConcurrentParticipantResumes: 1),
+            lifecycle);
+
+        var batch = await coordinator.RunAsync(
+            new MultiActorDecisionBatch(
+                "unity-resume-batch",
+                MultiActorCoordinate(),
+                new[] { CreateMultiActorRequest(7) }));
+        var paused = Assert.Single(batch.Results);
+        Assert.NotNull(paused.Outcome);
+        Assert.False(paused.Outcome!.IsTerminal);
+        Assert.Empty(lifecycle.FinishedAgentIds);
+
+        var participant = Assert.Single(batch.Manifest.Participants);
+        var semanticExpectation = DurableRunSemanticExpectation.FromJson(
+            "game.currentCoordinate",
+            ProtocolJson.ParseElement("""{"revision":13}"""));
+        var resumed = await coordinator.ResumeParticipantAsync(
+            batch.BatchId,
+            participant,
+            semanticExpectation);
+
+        Assert.True(resumed.Outcome!.IsTerminal);
+        Assert.NotNull(runtime.LastResumeGuard);
+        Assert.Equal(
+            batch.BatchId,
+            runtime.LastResumeGuard!.ExpectedBatchId);
+        Assert.Equal(
+            participant.AgentId,
+            runtime.LastResumeGuard.ExpectedAgentId);
+        Assert.Equal(
+            participant.DecisionKey,
+            runtime.LastResumeGuard.ExpectedDecisionKey);
+        Assert.Equal(
+            participant.InputIndex,
+            runtime.LastResumeGuard.ExpectedInt32ExtensionValue);
+        Assert.Equal(
+            semanticExpectation.ExtensionName,
+            runtime.LastResumeGuard.SemanticExtensionName);
+        Assert.Equal(
+            semanticExpectation.ExpectedSha256,
+            runtime.LastResumeGuard.ExpectedSemanticExtensionSha256);
+        Assert.Equal(
+            new[] { participant.AgentId },
+            lifecycle.FinishedAgentIds);
+        Assert.Null(lifecycle.AbortedBatchId);
+
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task HostCoordinatorFactoryPreservesGuardedAbandonment()
+    {
+        var lifecycle = new RecordingMultiActorLifecycle();
+        var runtime = new RecordingGuardedMultiActorRuntime(
+            lifecycle,
+            pauseInitialRuns: true);
+        var host = new GameObject("GameAgentRuntimeAbandonmentTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            runtime,
+            new InMemorySessionStore(),
+            ownsSessionStore: false,
+            ownsRuntime: false);
+        var coordinator = host.CreateMultiActorCoordinator(
+            new MultiActorCoordinatorOptions(
+                maxBatchSize: 2,
+                maxConcurrentRuns: 1,
+                maxConcurrentParticipantResumes: 1),
+            lifecycle);
+
+        var batch = await coordinator.RunAsync(
+            new MultiActorDecisionBatch(
+                "unity-abandon-batch",
+                MultiActorCoordinate(),
+                new[] { CreateMultiActorRequest(8) }));
+        var participant = Assert.Single(batch.Manifest.Participants);
+
+        var abandoned =
+            await coordinator.ReconcileAbandonedParticipantAsync(
+                batch.BatchId,
+                participant,
+                "actor_removed");
+
+        Assert.Equal(RunStates.Cancelled, abandoned.Outcome!.Run.State);
+        var error = Assert.IsType<MultiActorParticipantAbandonedException>(
+            abandoned.Error);
+        Assert.Equal("actor_removed", error.ReasonCode);
+        Assert.True(runtime.LastContinuation!.RequestCancellation);
+        Assert.NotNull(runtime.LastResumeGuard);
+        Assert.Equal(
+            batch.BatchId,
+            runtime.LastResumeGuard!.ExpectedBatchId);
+        Assert.Equal(
+            participant.AgentId,
+            runtime.LastResumeGuard.ExpectedAgentId);
+        Assert.Equal(
+            participant.DecisionKey,
+            runtime.LastResumeGuard.ExpectedDecisionKey);
+        Assert.Equal(
+            new[] { participant.AgentId },
+            lifecycle.FinishedAgentIds);
+        Assert.Null(lifecycle.AbortedBatchId);
+
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task MultiActorFactoryRejectsBackendWithoutGuardedResume()
+    {
+        var facade = new UnityAgentRuntimeFacade(
+            new RecordingDurableBackend(),
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+
+        var error = Assert.Throws<DurableRunResumeGuardException>(
+            () => facade.CreateMultiActorCoordinator());
+
+        Assert.Equal(
+            DurableRunResumeGuardReasonCodes.NotSupported,
+            error.ReasonCode);
+        await facade.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task MultiActorFactoryRejectsUnguardedRuntimeConveniencePath()
+    {
+        var runtime = new OwnedDurableRuntime();
+        var facade = new UnityAgentRuntimeFacade(
+            runtime,
+            new InMemorySessionStore(),
+            ownsSessionStore: false,
+            ownsRuntime: false);
+
+        var error = Assert.Throws<DurableRunResumeGuardException>(
+            () => facade.CreateMultiActorCoordinator());
+
+        Assert.Equal(
+            DurableRunResumeGuardReasonCodes.NotSupported,
+            error.ReasonCode);
+        Assert.False(runtime.IsDisposed);
+        await facade.DisposeAsync();
+    }
+
+    [Fact]
     public async Task HostExposesDurableBackendControlsAndCompletion()
     {
         var backend = new RecordingDurableBackend();
@@ -2264,6 +3031,20 @@ public sealed class UnityHostConformanceTests
         };
     }
 
+    private static UnityObservationData FieldObservation(string observationId)
+    {
+        return new UnityObservationData
+        {
+            observationId = observationId,
+            worldId = "world-1",
+            source = "game.state",
+            kind = "snapshot",
+            payloadJson = "{}",
+            hasObservedAtUnixMilliseconds = true,
+            observedAtUnixMilliseconds = 0
+        };
+    }
+
     private static ActionRequest UnityActionRequest()
     {
         return new ActionRequest
@@ -2315,6 +3096,74 @@ public sealed class UnityHostConformanceTests
                     required: true,
                     canDefer: false)
             }
+        };
+    }
+
+    private static GameContextCoordinate MultiActorCoordinate()
+    {
+        return new GameContextCoordinate(
+            "world-1",
+            "prime",
+            saveRevision: 3,
+            stateVersion: "world-v3",
+            gameTime: new GameTimePoint(
+                "simulation",
+                "prime",
+                epoch: 1,
+                tick: 42),
+            sessionId: "session-1");
+    }
+
+    private static DurableRunRequest CreateMultiActorRequest(int index)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var run = new AgentRun
+        {
+            RunId = "unity-multi-run-" + index,
+            AgentId = "npc-" + index,
+            WorldId = "world-1",
+            SessionId = "session-1",
+            DecisionKey = "unity-decision-" + index,
+            State = RunStates.Queued,
+            RuntimeGeneration = 1,
+            Budget = new AgentBudget
+            {
+                MaxTurns = 4,
+                MaxActions = 2,
+                MaxDurationMs = 5000,
+                MaxTokens = 2000,
+                MaxCostUsd = "0.10"
+            },
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        GameContextEnvelope.Attach(
+            run,
+            new GameContextCoordinate(
+                "world-1",
+                "prime",
+                saveRevision: 3,
+                observer: new GameEntityIdentity("npc-" + index, 1),
+                stateVersion: "world-v3",
+                gameTime: new GameTimePoint(
+                    "simulation",
+                    "prime",
+                    epoch: 1,
+                    tick: 42)));
+        return new DurableRunRequest
+        {
+            Run = run,
+            Context = new[]
+            {
+                new ContextCandidate(
+                    "private-context-" + index,
+                    "npc_state",
+                    ProtocolJson.ParseElement(
+                        """{"goal":"observe","danger":2}"""),
+                    required: true,
+                    canDefer: false)
+            },
+            WorkloadClass = ProviderWorkloadClasses.Background
         };
     }
 
@@ -2733,6 +3582,246 @@ public sealed class UnityHostConformanceTests
                         State = RunStates.Completed
                     }
                 });
+        }
+    }
+
+    private sealed class RecordingGuardedDurableBackend
+        : IUnityGuardedDurableAgentRuntimeBackend
+    {
+        public RuntimeControlPlane Controls { get; } = new();
+
+        public bool SupportsGuardedResume => true;
+
+        public DurableRunResumeGuard? LastGuard { get; private set; }
+
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<DurableRunOutcome>(
+                new DurableRunOutcome { Run = request.Run });
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken)
+        {
+            return ResumeAsync(
+                runId,
+                continuation,
+                reconciler,
+                cancellationToken,
+                new DurableRunResumeGuard
+                {
+                    ExpectedAgentId = "unguarded"
+                });
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard guard)
+        {
+            _ = continuation;
+            _ = reconciler;
+            cancellationToken.ThrowIfCancellationRequested();
+            LastGuard = guard;
+            return new ValueTask<DurableRunOutcome>(
+                new DurableRunOutcome
+                {
+                    Run = new AgentRun
+                    {
+                        RunId = runId,
+                        State = RunStates.Completed
+                    }
+                });
+        }
+    }
+
+    private sealed class RecordingGuardedMultiActorRuntime
+        : IGuardedDurableAgentRuntime
+    {
+        private readonly object _sync = new();
+        private readonly RecordingMultiActorLifecycle _lifecycle;
+        private readonly bool _pauseInitialRuns;
+        private readonly Dictionary<string, AgentRun> _runs =
+            new(StringComparer.Ordinal);
+        private int _manifestMisses;
+
+        public RecordingGuardedMultiActorRuntime(
+            RecordingMultiActorLifecycle lifecycle,
+            bool pauseInitialRuns)
+        {
+            _lifecycle = lifecycle;
+            _pauseInitialRuns = pauseInitialRuns;
+        }
+
+        public RuntimeControlPlane Controls { get; } = new();
+
+        public bool AllRunsObservedManifest =>
+            Volatile.Read(ref _manifestMisses) == 0;
+
+        public DurableRunResumeGuard? LastResumeGuard { get; private set; }
+
+        public DurableRunContinuation? LastContinuation { get; private set; }
+
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_lifecycle.Manifest is null)
+            {
+                Interlocked.Increment(ref _manifestMisses);
+            }
+
+            request.Run.State = _pauseInitialRuns
+                ? RunStates.Reconciling
+                : RunStates.Completed;
+            lock (_sync)
+            {
+                _runs[request.Run.RunId] = request.Run;
+            }
+
+            return new ValueTask<DurableRunOutcome>(
+                new DurableRunOutcome { Run = request.Run });
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation = null,
+            IGameOperationReconciler? reconciler = null,
+            CancellationToken cancellationToken = default)
+        {
+            throw new InvalidOperationException(
+                "Multi-actor recovery must use guarded resume.");
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard? guard)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (guard is null)
+            {
+                throw new InvalidOperationException(
+                    "A multi-actor resume guard is required.");
+            }
+
+            AgentRun run;
+            lock (_sync)
+            {
+                run = _runs[runId];
+                run.State = continuation?.RequestCancellation == true
+                    ? RunStates.Cancelled
+                    : RunStates.Completed;
+            }
+
+            LastContinuation = continuation;
+            LastResumeGuard = guard;
+            return new ValueTask<DurableRunOutcome>(
+                new DurableRunOutcome { Run = run });
+        }
+    }
+
+    private sealed class RecordingMultiActorLifecycle
+        : IMultiActorDecisionLifecycle
+    {
+        private readonly object _sync = new();
+        private readonly List<string> _finishedAgentIds = new();
+        private MultiActorBatchManifest? _manifest;
+        private string? _abortedBatchId;
+
+        public MultiActorBatchManifest? Manifest
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _manifest;
+                }
+            }
+        }
+
+        public IReadOnlyList<string> FinishedAgentIds
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _finishedAgentIds.ToArray();
+                }
+            }
+        }
+
+        public string? AbortedBatchId
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _abortedBatchId;
+                }
+            }
+        }
+
+        public ValueTask BatchStartedAsync(
+            MultiActorBatchManifest manifest,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                _manifest = manifest;
+            }
+
+            return default;
+        }
+
+        public ValueTask ActorFinishedAsync(
+            string batchId,
+            MultiActorRunResult result,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                if (!string.Equals(
+                        _manifest?.BatchId,
+                        batchId,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "ActorFinished preceded the batch manifest.");
+                }
+
+                _finishedAgentIds.Add(result.AgentId);
+            }
+
+            return default;
+        }
+
+        public ValueTask BatchAbortedAsync(
+            string batchId,
+            string reasonCode,
+            CancellationToken cancellationToken)
+        {
+            _ = reasonCode;
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_sync)
+            {
+                _abortedBatchId = batchId;
+            }
+
+            return default;
         }
     }
 

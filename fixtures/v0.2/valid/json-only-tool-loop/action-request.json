@@ -12,6 +12,8 @@
   "arguments": {
     "resource": "berries"
   },
+  "decisionKey": "npc gather decision",
+  "batchId": "world-tick-42",
   "basedOnStateVersion": "world-rev-42",
   "expectedEffects": [
     "inventory.food +1"

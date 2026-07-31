@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using GameAgent.Protocol;
 
 namespace GameAgent.Core;
 
@@ -1159,7 +1160,7 @@ public sealed class ToolArgumentValidator
 public sealed class ConflictScopeResolverOptions
 {
     public ConflictScopeResolverOptions(
-        int maxScopes = 64,
+        int maxScopes = ProtocolLimits.MaxToolConflictScopes,
         int maxPlaceholdersPerScope = 16,
         int maxPathSegments = 16,
         int maxTemplateUtf8Bytes = 256,
@@ -1169,7 +1170,7 @@ public sealed class ConflictScopeResolverOptions
         int maxTrustedBindings = 16,
         int maxBindingNameUtf8Bytes = 64)
     {
-        if (maxScopes < 0 || maxScopes > 256)
+        if (maxScopes < 0 || maxScopes > ProtocolLimits.MaxToolConflictScopes)
         {
             throw new ArgumentOutOfRangeException(nameof(maxScopes));
         }
@@ -1194,7 +1195,9 @@ public sealed class ConflictScopeResolverOptions
             throw new ArgumentOutOfRangeException(nameof(maxScalarUtf8Bytes));
         }
 
-        if (maxKeyUtf8Bytes < 1 || maxKeyUtf8Bytes > 4_096)
+        if (maxKeyUtf8Bytes < 1
+            || maxKeyUtf8Bytes
+            > ProtocolLimits.MaxActionExpectedEffectUnicodeScalars)
         {
             throw new ArgumentOutOfRangeException(nameof(maxKeyUtf8Bytes));
         }

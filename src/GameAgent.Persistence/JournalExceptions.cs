@@ -1,5 +1,30 @@
 namespace GameAgent.Persistence;
 
+public sealed class JournalCapacityExceededException
+    : InvalidOperationException
+{
+    public JournalCapacityExceededException(
+        string limitName,
+        long limit,
+        long attempted)
+        : base(
+            $"Journal capacity '{limitName}' is {limit}, "
+            + $"but the operation requires {attempted}. Increase the "
+            + "configured limit or rotate the stopped journal at an "
+            + "application-defined safe point.")
+    {
+        LimitName = limitName;
+        Limit = limit;
+        Attempted = attempted;
+    }
+
+    public string LimitName { get; }
+
+    public long Limit { get; }
+
+    public long Attempted { get; }
+}
+
 public sealed class JournalCorruptionException : IOException
 {
     public JournalCorruptionException(string path, long offset, string message)

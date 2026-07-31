@@ -6,6 +6,36 @@ namespace GameAgent.Tests;
 
 public sealed class ContextCompilerTests
 {
+    [Theory]
+    [InlineData(1L)]
+    [InlineData(long.MaxValue)]
+    public void ObservationExpirationSaturatesAtRepresentableMaximum(
+        long ttlMs)
+    {
+        var run = new AgentRun
+        {
+            RunId = "run",
+            AgentId = "agent",
+            WorldId = "world"
+        };
+        var observation = new ObservationEnvelope
+        {
+            ObservationId = "observation",
+            WorldId = "world",
+            Source = "game",
+            Kind = ObservationKinds.Event,
+            Payload = ProtocolJson.ParseElement("""{"event":"late"}"""),
+            ObservedAt = DateTimeOffset.MaxValue,
+            TtlMs = ttlMs
+        };
+
+        var candidate = ContextCandidate.FromObservation(
+            observation,
+            run);
+
+        Assert.Equal(DateTimeOffset.MaxValue, candidate.ExpiresAt);
+    }
+
     [Fact]
     public void ConstructorBoundsInfiniteCandidateEnumeration()
     {

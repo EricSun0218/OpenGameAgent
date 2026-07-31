@@ -7,8 +7,8 @@
 - Added MonoBehaviour lifecycle, cancellation, and durable shutdown.
 - Added injectable durable runtime backends with run, resume, and control-plane
   access.
-- Bundled the durable composition builder and optional streaming provider
-  adapter in assembled UPM artifacts.
+- Bundled the durable composition builder, workflow module, and both streaming
+  provider adapters in assembled UPM artifacts.
 - Added Unity-safe structured DTO bridges.
 - Added sample, EditMode/PlayMode tests, stub conformance, and Player
   build-and-execution gates with durable pass markers for Mono and IL2CPP.

@@ -30,6 +30,8 @@ public sealed class OpenAiCompatibleProviderOptions
 
     public string InputCacheMissUsdPerMillionTokens { get; set; } = "0.435";
 
+    public string? InputCacheWriteUsdPerMillionTokens { get; set; }
+
     public string OutputUsdPerMillionTokens { get; set; } = "0.87";
 
     public bool AllowInsecureLoopback { get; set; }
@@ -129,6 +131,13 @@ public sealed class OpenAiCompatibleProviderOptions
         ValidatePrice(
             InputCacheMissUsdPerMillionTokens,
             nameof(InputCacheMissUsdPerMillionTokens));
+        if (InputCacheWriteUsdPerMillionTokens is not null)
+        {
+            ValidatePrice(
+                InputCacheWriteUsdPerMillionTokens,
+                nameof(InputCacheWriteUsdPerMillionTokens));
+        }
+
         ValidatePrice(
             OutputUsdPerMillionTokens,
             nameof(OutputUsdPerMillionTokens));
@@ -245,6 +254,8 @@ public sealed class OpenAiCompatibleProviderOptions
                 InputCacheHitUsdPerMillionTokens,
             InputCacheMissUsdPerMillionTokens =
                 InputCacheMissUsdPerMillionTokens,
+            InputCacheWriteUsdPerMillionTokens =
+                InputCacheWriteUsdPerMillionTokens,
             OutputUsdPerMillionTokens = OutputUsdPerMillionTokens,
             AllowInsecureLoopback = AllowInsecureLoopback
         };

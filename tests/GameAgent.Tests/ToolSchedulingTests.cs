@@ -201,6 +201,35 @@ public sealed class ToolSchedulingTests
     }
 
     [Fact]
+    public async Task DispatchGateRejectsBeforeExecutorWithoutAmbiguousEffects()
+    {
+        var request = Request(
+            CreateTools()["read"],
+            "control-fenced",
+            0,
+            "agent-a",
+            "resource:fenced");
+        var plan = new ToolBatchPlanner().Plan(new[] { request });
+        var executor = new CountingImmediateExecutor();
+        var scheduler = new ToolBatchScheduler();
+        using var reservation = scheduler.ReserveExecution(plan);
+
+        var result = Assert.Single(
+            await scheduler.ExecuteReservedAsync(
+                plan,
+                executor,
+                new SystemRuntimeClock(),
+                reservation,
+                tryAcquireDispatchPermit: () => false));
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("tool_control_before_dispatch", result.ErrorCode);
+        Assert.False(result.MayHaveExecuted);
+        Assert.Equal(0, executor.CallCount);
+        Assert.Equal(0, scheduler.QueuedCalls);
+    }
+
+    [Fact]
     public async Task BoundDeadlineIncludesPreSchedulerTimeDespiteUtcRollback()
     {
         var clock = new FakeRuntimeClock();
@@ -1197,6 +1226,44 @@ public sealed class ToolSchedulingTests
                 TimeSpan.FromSeconds(2)));
     }
 
+    [Fact]
+    public async Task ReservedBatchPreservesDispatchEvidenceAcrossCallerCancellation()
+    {
+        var descriptor = Descriptor(
+            "cancel-between-segments",
+            ToolEffects.WorldCommand,
+            ThreadAffinities.HostManaged);
+        descriptor.IdempotencyPolicy = ToolIdempotencyPolicies.Required;
+        var tool = Assert.Single(
+            new ToolCatalogRegistry().Replace(new[] { descriptor }).Tools);
+        var plan = new ToolBatchPlanner().Plan(
+            new[]
+            {
+                Request(tool, "first", 0, "agent-a", "world"),
+                Request(tool, "second", 1, "agent-a", "world")
+            });
+        using var callerCancellation = new CancellationTokenSource();
+        var executor = new CancelAfterFirstExecutor(callerCancellation);
+        var scheduler = new ToolBatchScheduler();
+        using var reservation = scheduler.ReserveExecution(plan);
+
+        var results = await scheduler.ExecuteReservedAsync(
+            plan,
+            executor,
+            new SystemRuntimeClock(),
+            reservation,
+            callerCancellation.Token);
+
+        Assert.Equal(2, results.Count);
+        Assert.Equal("tool_execution_cancelled", results[0].ErrorCode);
+        Assert.True(results[0].MayHaveExecuted);
+        Assert.Equal(
+            "tool_dispatch_blocked_by_unknown",
+            results[1].ErrorCode);
+        Assert.False(results[1].MayHaveExecuted);
+        Assert.Equal(1, executor.CallCount);
+    }
+
     [Theory]
     [InlineData(-1)]
     [InlineData(60_001)]
@@ -1205,6 +1272,19 @@ public sealed class ToolSchedulingTests
         Assert.Throws<ArgumentOutOfRangeException>(
             () => new ToolSchedulerLimits(
                 detachedShutdownDrainTimeoutMs: timeoutMs));
+    }
+
+    [Fact]
+    public void ConflictKeyLimitsCannotExceedActionWireCapacity()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ToolSchedulerLimits(
+                maxConflictKeysPerCall:
+                    ProtocolLimits.MaxActionExpectedEffects + 1));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ToolSchedulerLimits(
+                maxConflictKeyUtf8Bytes:
+                    ProtocolLimits.MaxActionExpectedEffectUnicodeScalars + 1));
     }
 
     [Fact]
@@ -1489,6 +1569,35 @@ public sealed class ToolSchedulingTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return new ValueTask<JsonElement>(Json("{}"));
+        }
+    }
+
+    private sealed class CancelAfterFirstExecutor : IToolCallExecutor
+    {
+        private readonly CancellationTokenSource _callerCancellation;
+
+        public CancelAfterFirstExecutor(
+            CancellationTokenSource callerCancellation)
+        {
+            _callerCancellation = callerCancellation;
+        }
+
+        public int CallCount { get; private set; }
+
+        public ValueTask<JsonElement> ExecuteAsync(
+            ToolExecutionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            CallCount++;
+            if (CallCount == 1)
+            {
+                _callerCancellation.Cancel();
+            }
+
+            return new ValueTask<JsonElement>(
+                Json("""{"ok":true}"""));
         }
     }
 

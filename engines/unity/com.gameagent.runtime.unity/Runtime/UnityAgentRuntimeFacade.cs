@@ -603,6 +603,48 @@ namespace GameAgent.Unity
             }
         }
 
+        /// <summary>
+        /// Creates a Core multi-actor coordinator whose participant operations
+        /// remain tracked by this facade for capacity, cancellation, and
+        /// shutdown. The durable backend must support guarded resume so a
+        /// persisted participant cannot be resumed under the wrong batch,
+        /// actor, or decision identity.
+        /// </summary>
+        public MultiActorDecisionCoordinator CreateMultiActorCoordinator(
+            MultiActorCoordinatorOptions options = null,
+            IMultiActorDecisionLifecycle lifecycle = null)
+        {
+            lock (_sync)
+            {
+                if (_shutdownRequested)
+                {
+                    throw new ObjectDisposedException(
+                        nameof(UnityAgentRuntimeFacade));
+                }
+
+                if (_durableBackend == null)
+                {
+                    throw new InvalidOperationException(
+                        "This facade is not configured with a durable "
+                        + "runtime backend.");
+                }
+
+                var guardedBackend = _durableBackend
+                    as IUnityGuardedDurableAgentRuntimeBackend;
+                if (guardedBackend == null
+                    || !guardedBackend.SupportsGuardedResume)
+                {
+                    throw new DurableRunResumeGuardException(
+                        DurableRunResumeGuardReasonCodes.NotSupported);
+                }
+            }
+
+            return new MultiActorDecisionCoordinator(
+                new UnityTrackedDurableAgentRuntime(this),
+                options,
+                lifecycle);
+        }
+
         public Task<HeadlessRunOutcome> RunAsync(
             HeadlessRunRequest request,
             CancellationToken cancellationToken)
@@ -672,6 +714,72 @@ namespace GameAgent.Unity
                     continuation,
                     reconciler,
                     token),
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// Resumes a durable run only after the backend validates the supplied
+        /// identity and/or semantic guard before any resumed side effect.
+        /// </summary>
+        public Task<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunResumeGuard guard,
+            DurableRunContinuation continuation = null,
+            IGameOperationReconciler reconciler = null,
+            CancellationToken cancellationToken =
+                default(CancellationToken))
+        {
+            if (guard == null)
+            {
+                throw new ArgumentNullException(nameof(guard));
+            }
+
+            return ResumeGuardedAsync(
+                runId,
+                continuation,
+                reconciler,
+                cancellationToken,
+                guard);
+        }
+
+        private Task<DurableRunOutcome> ResumeGuardedAsync(
+            string runId,
+            DurableRunContinuation continuation,
+            IGameOperationReconciler reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard guard)
+        {
+            if (guard == null)
+            {
+                return ResumeAsync(
+                    runId,
+                    continuation,
+                    reconciler,
+                    cancellationToken);
+            }
+
+            if (string.IsNullOrWhiteSpace(runId))
+            {
+                throw new ArgumentException(
+                    "A run id is required.",
+                    nameof(runId));
+            }
+
+            var backend = _durableBackend
+                          as IUnityGuardedDurableAgentRuntimeBackend;
+            if (backend == null || !backend.SupportsGuardedResume)
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.NotSupported);
+            }
+
+            return RunTrackedAsync(
+                token => backend.ResumeAsync(
+                    runId,
+                    continuation,
+                    reconciler,
+                    token,
+                    guard),
                 cancellationToken);
         }
 
@@ -1262,6 +1370,63 @@ namespace GameAgent.Unity
 
             throw new InvalidOperationException(
                 "The process lifecycle cancellation capacity is exhausted.");
+        }
+
+        private sealed class UnityTrackedDurableAgentRuntime
+            : IGuardedDurableAgentRuntime
+        {
+            private readonly UnityAgentRuntimeFacade _owner;
+
+            internal UnityTrackedDurableAgentRuntime(
+                UnityAgentRuntimeFacade owner)
+            {
+                _owner = owner;
+            }
+
+            public RuntimeControlPlane Controls
+            {
+                get { return _owner.DurableControls; }
+            }
+
+            public ValueTask<DurableRunOutcome> RunAsync(
+                DurableRunRequest request,
+                CancellationToken cancellationToken = default(
+                    CancellationToken))
+            {
+                return new ValueTask<DurableRunOutcome>(
+                    _owner.RunAsync(request, cancellationToken));
+            }
+
+            public ValueTask<DurableRunOutcome> ResumeAsync(
+                string runId,
+                DurableRunContinuation continuation = null,
+                IGameOperationReconciler reconciler = null,
+                CancellationToken cancellationToken = default(
+                    CancellationToken))
+            {
+                return new ValueTask<DurableRunOutcome>(
+                    _owner.ResumeAsync(
+                        runId,
+                        continuation,
+                        reconciler,
+                        cancellationToken));
+            }
+
+            public ValueTask<DurableRunOutcome> ResumeAsync(
+                string runId,
+                DurableRunContinuation continuation,
+                IGameOperationReconciler reconciler,
+                CancellationToken cancellationToken,
+                DurableRunResumeGuard guard)
+            {
+                return new ValueTask<DurableRunOutcome>(
+                    _owner.ResumeGuardedAsync(
+                        runId,
+                        continuation,
+                        reconciler,
+                        cancellationToken,
+                        guard));
+            }
         }
 
         private sealed class CancellationAdmissionResult

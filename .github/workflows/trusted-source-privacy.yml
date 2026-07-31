@@ -14,15 +14,17 @@ concurrency:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
-  RELEASE_VERSION: "0.1.0-alpha.1"
 
 jobs:
   identity:
     name: Resolve candidate
     if: >-
-      github.event.workflow_run.event == 'pull_request' ||
-      github.event.workflow_run.event == 'push' ||
-      github.event.workflow_run.event == 'workflow_dispatch'
+      github.event.workflow_run.conclusion == 'success' &&
+      (
+        github.event.workflow_run.event == 'pull_request' ||
+        github.event.workflow_run.event == 'push' ||
+        github.event.workflow_run.event == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -87,6 +89,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      release_version: ${{ steps.release.outputs.release_version }}
     steps:
       - name: Check out trusted scanner
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -117,23 +121,37 @@ jobs:
             -Repository candidate `
             -Revision $env:CANDIDATE_SHA `
             -RequireInjectedDenyRegex
+      - name: Validate exact candidate release metadata with trusted code
+        id: release
+        shell: pwsh
+        run: |
+          $result = @(
+            ./trusted/engines/shared/Test-ReleaseVersionConsistency.ps1 `
+              -RepositoryRoot ./candidate)
+          $markers = @(
+            $result | Where-Object {
+              $_ -match (
+                '^RELEASE_VERSION_CONSISTENCY_PASS version=' +
+                '[0-9]+\.[0-9]+\.[0-9]+' +
+                '(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$')
+            })
+          if ($markers.Count -ne 1) {
+            throw 'The candidate release version could not be derived.'
+          }
+          $releaseVersion = $markers[0].Substring(
+            'RELEASE_VERSION_CONSISTENCY_PASS version='.Length)
+          "release_version=$releaseVersion" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   dotnet:
-    name: Trusted .NET (${{ matrix.os }})
+    name: Trusted Windows .NET
     needs:
       - identity
       - source_privacy
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     timeout-minutes: 30
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -148,19 +166,61 @@ jobs:
       - name: Restore
         run: dotnet restore GameAgentRuntime.sln
       - name: Build
-        run: dotnet build GameAgentRuntime.sln -c Release --no-restore
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
       - name: Test
-        run: dotnet test GameAgentRuntime.sln -c Release --no-build
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
+      - name: Runtime performance smoke
+        run: >-
+          dotnet run
+          --project tests/GameAgent.PerformanceSmoke/GameAgent.PerformanceSmoke.csproj
+          -c Release --no-build
+
+  linux_portability:
+    name: Trusted Linux runtime portability
+    needs:
+      - identity
+      - source_privacy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore portable runtime
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build portable runtime
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
+      - name: Test portable runtime
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
 
   quality:
     name: Trusted quality and packages
     needs:
       - identity
       - source_privacy
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -234,7 +294,7 @@ jobs:
                 -LiteralPath $set.Source `
                 -File `
                 -Filter '*.nupkg')
-            if ($packages.Count -ne 6) {
+            if ($packages.Count -ne 10) {
               throw 'A raw NuGet package set is incomplete.'
             }
             foreach ($package in $packages) {
@@ -354,12 +414,13 @@ jobs:
     needs:
       - identity
       - source_privacy
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 45
     permissions:
       contents: read
     env:
       GODOT_VERSION: 4.7.1
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -373,30 +434,13 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Install Godot .NET
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          asset="Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64.zip"
-          archive="$RUNNER_TEMP/$asset"
-          checksum="$GITHUB_WORKSPACE/candidate/engines/godot/checksums/${asset}.sha512"
-          install_root="$RUNNER_TEMP/godot"
-          test -f "$checksum"
-          curl --fail --location --retry 3 \
-            --output "$archive" \
-            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/$asset"
-          (
-            cd "$RUNNER_TEMP"
-            sha512sum --check "$checksum"
-          )
-          mkdir -p "$install_root"
-          unzip -q "$archive" -d "$install_root"
-          godot_bin="$(
-            find "$install_root" -maxdepth 2 -type f \
-              -name 'Godot_v*-stable_mono_linux.x86_64' -print -quit
-          )"
-          test -n "$godot_bin"
-          chmod +x "$godot_bin"
-          echo "GODOT_BIN=$godot_bin" >> "$GITHUB_ENV"
+          $godot = ./candidate/engines/godot/tools/Install-PinnedGodot.ps1 `
+            -Version $env:GODOT_VERSION `
+            -InstallPath (Join-Path $env:RUNNER_TEMP 'godot')
+          "GODOT_BIN=$godot" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Test candidate addon and sample
         shell: pwsh
         run: >-
@@ -409,11 +453,14 @@ jobs:
           -Version $env:RELEASE_VERSION
       - name: Test candidate isolated package
         shell: pwsh
-        run: >-
-          ./candidate/engines/godot/tests/verify-packaged-addon.ps1
-          -Archive
-          ./candidate/engines/godot/artifacts/game-agent-runtime-godot-$env:RELEASE_VERSION.zip
-          -Godot $env:GODOT_BIN
+        run: |
+          $archive = "./candidate/engines/godot/artifacts/game-agent-runtime-godot-$env:RELEASE_VERSION.zip"
+          ./candidate/engines/godot/tests/verify-packaged-addon.ps1 `
+            -Archive $archive `
+            -Godot $env:GODOT_BIN `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./candidate/engines/godot/tests/Test-PackagedAddonArtifactSelfTest.ps1 `
+            -Archive $archive
       - name: Check out trusted artifact protector
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -445,6 +492,7 @@ jobs:
       - identity
       - source_privacy
       - dotnet
+      - linux_portability
       - quality
       - unity
       - unreal
@@ -454,6 +502,8 @@ jobs:
     permissions:
       actions: read
       contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
     steps:
       - name: Check out trusted release tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -494,12 +544,12 @@ jobs:
               @{
                 Source = './sealed-artifacts/nuget/raw-a'
                 Destination = './trusted-artifacts/nuget-raw-a'
-                Expected = 6
+                Expected = 10
               },
               @{
                 Source = './sealed-artifacts/nuget/raw-b'
                 Destination = './trusted-artifacts/nuget-raw-b'
-                Expected = 6
+                Expected = 10
               },
               @{
                 Source = './sealed-artifacts/unity'
@@ -603,11 +653,14 @@ jobs:
     needs:
       - identity
       - privacy
+      - source_privacy
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       actions: read
       contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
     steps:
       - name: Check out trusted NuGet validation tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -643,11 +696,14 @@ jobs:
     name: Validate approved Unity package
     needs:
       - privacy
+      - source_privacy
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       actions: read
       contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
     steps:
       - name: Check out trusted Unity validation tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -667,22 +723,26 @@ jobs:
           dotnet-version: 8.0.x
       - name: Validate approved Unity package
         shell: pwsh
-        run: >-
-          ./trusted/engines/unity/scripts/Test-UnityPackageArtifact.ps1
-          -ArtifactPath ./approved-artifacts/unity
-          -ExpectedVersion $env:RELEASE_VERSION
+        run: |
+          ./trusted/engines/unity/scripts/Test-UnityPackageArtifact.ps1 `
+            -ArtifactPath ./approved-artifacts/unity `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./trusted/engines/unity/scripts/Test-UnityPackageArtifactSelfTest.ps1 `
+            -ArtifactPath ./approved-artifacts/unity
 
   validate_godot:
     name: Validate approved Godot package
     needs:
       - privacy
-    runs-on: ubuntu-latest
+      - source_privacy
+    runs-on: windows-latest
     timeout-minutes: 45
     permissions:
       actions: read
       contents: read
     env:
       GODOT_VERSION: 4.7.1
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
     steps:
       - name: Check out trusted Godot validation tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -701,30 +761,13 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Install Godot .NET
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          asset="Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64.zip"
-          archive="$RUNNER_TEMP/$asset"
-          checksum="$GITHUB_WORKSPACE/trusted/engines/godot/checksums/${asset}.sha512"
-          install_root="$RUNNER_TEMP/godot"
-          test -f "$checksum"
-          curl --fail --location --retry 3 \
-            --output "$archive" \
-            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/$asset"
-          (
-            cd "$RUNNER_TEMP"
-            sha512sum --check "$checksum"
-          )
-          mkdir -p "$install_root"
-          unzip -q "$archive" -d "$install_root"
-          godot_bin="$(
-            find "$install_root" -maxdepth 2 -type f \
-              -name 'Godot_v*-stable_mono_linux.x86_64' -print -quit
-          )"
-          test -n "$godot_bin"
-          chmod +x "$godot_bin"
-          echo "GODOT_BIN=$godot_bin" >> "$GITHUB_ENV"
+          $godot = ./trusted/engines/godot/tools/Install-PinnedGodot.ps1 `
+            -Version $env:GODOT_VERSION `
+            -InstallPath (Join-Path $env:RUNNER_TEMP 'godot')
+          "GODOT_BIN=$godot" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Validate approved Godot package
         shell: pwsh
         run: |
@@ -738,7 +781,10 @@ jobs:
           }
           ./trusted/engines/godot/tests/verify-packaged-addon.ps1 `
             -Archive $archives[0].FullName `
-            -Godot $env:GODOT_BIN
+            -Godot $env:GODOT_BIN `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./trusted/engines/godot/tests/Test-PackagedAddonArtifactSelfTest.ps1 `
+            -Archive $archives[0].FullName
 
   publish:
     name: Publish immutable approved artifacts
@@ -781,7 +827,7 @@ jobs:
               -File)
           $godot = @(
             Get-ChildItem -LiteralPath ./publish-artifacts/godot -File)
-          if ($nuget.Count -ne 6 -or
+          if ($nuget.Count -ne 10 -or
               @($nuget | Where-Object {
                   $_.Extension -ne '.nupkg'
                 }).Count -ne 0 -or
@@ -816,6 +862,7 @@ jobs:
       - identity
       - source_privacy
       - dotnet
+      - linux_portability
       - quality
       - unity
       - unreal
@@ -837,6 +884,7 @@ jobs:
           IDENTITY_RESULT: ${{ needs.identity.result }}
           SOURCE_PRIVACY_RESULT: ${{ needs.source_privacy.result }}
           DOTNET_RESULT: ${{ needs.dotnet.result }}
+          LINUX_PORTABILITY_RESULT: ${{ needs.linux_portability.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           UNITY_RESULT: ${{ needs.unity.result }}
           UNREAL_RESULT: ${{ needs.unreal.result }}
@@ -856,6 +904,7 @@ jobs:
             $env:IDENTITY_RESULT,
             $env:SOURCE_PRIVACY_RESULT,
             $env:DOTNET_RESULT,
+            $env:LINUX_PORTABILITY_RESULT,
             $env:QUALITY_RESULT,
             $env:UNITY_RESULT,
             $env:UNREAL_RESULT,

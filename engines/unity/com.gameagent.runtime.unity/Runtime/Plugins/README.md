@@ -5,7 +5,8 @@ The script copies the authoritative shared runtime assemblies; they are not
 forked or reimplemented under `engines/unity`.
 
 The staged set includes the protocol, core, persistence, composition builder,
-and optional streaming provider adapter together with their managed
+interactive-world, compatibility, optional durable Workflow, and both
+streaming-provider adapter assemblies together with their managed
 dependencies. `SHA256SUMS` covers every bundled DLL.
 
 Do not publish the source template directly. Publish the assembled artifact

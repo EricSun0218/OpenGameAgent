@@ -390,6 +390,737 @@ public sealed class DurableAgentRuntimeTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResumeGuardRejectsWrongOrMissingBatchBeforeSideEffects(
+        bool ordinaryRun)
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            run.BatchId = ordinaryRun ? null : "batch-actual";
+            run.DecisionKey = ordinaryRun ? null : "decision-actual";
+            run.Extensions["participantIndex"] = Json("3");
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            var eventCount = (await store.ReadRunAsync(run.RunId, default))
+                .Count;
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "No action should be dispatched."));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                host,
+                clock,
+                ids);
+
+            var error =
+                await Assert.ThrowsAsync<DurableRunResumeGuardException>(
+                    () => runtime.ResumeAsync(
+                            run.RunId,
+                            guard: new DurableRunResumeGuard
+                            {
+                                ExpectedBatchId = "batch-expected",
+                                RequiredInt32ExtensionName =
+                                    "participantIndex",
+                                MinimumInt32ExtensionValue = 0,
+                                MaximumInt32ExtensionValue = 31
+                            })
+                        .AsTask());
+
+            Assert.Equal(
+                DurableRunResumeGuardReasonCodes.BatchIdMismatch,
+                error.ReasonCode);
+            Assert.Empty(provider.Requests);
+            Assert.Equal(0, host.CallCount);
+            Assert.Equal(
+                eventCount,
+                (await store.ReadRunAsync(run.RunId, default)).Count);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MatchingResumeGuardAllowsTheDurableRunToContinue()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            run.BatchId = "batch-actual";
+            run.DecisionKey = "decision-actual";
+            run.Extensions["participantIndex"] = Json("3");
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"done\""));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                    "No action should be dispatched.")),
+                clock,
+                ids);
+            IDurableAgentRuntime guardedView = runtime;
+
+            var outcome = await guardedView.ResumeAsync(
+                run.RunId,
+                continuation: null,
+                reconciler: null,
+                cancellationToken: default,
+                guard: new DurableRunResumeGuard
+                {
+                    ExpectedBatchId = run.BatchId,
+                    ExpectedAgentId = run.AgentId,
+                    ExpectedDecisionKey = run.DecisionKey,
+                    RequiredInt32ExtensionName = "participantIndex",
+                    MinimumInt32ExtensionValue = 0,
+                    MaximumInt32ExtensionValue = 31,
+                    ExpectedInt32ExtensionValue = 3
+                });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Single(provider.Requests);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SemanticResumeGuardRejectsStaleStateBeforeSideEffects()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            var durableState = Json("""{"revision":12,"timeline":"prime"}""");
+            run.Extensions["game.semanticCoordinate"] = durableState;
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            var originalEventCount =
+                (await store.ReadRunAsync(run.RunId, default)).Count;
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"done\""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "No action should be dispatched."));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                host,
+                clock,
+                ids);
+            var staleExpectation = new DurableRunResumeGuard
+            {
+                SemanticExtensionName = "game.semanticCoordinate",
+                ExpectedSemanticExtensionSha256 =
+                    CanonicalJsonDigest.ComputeSha256(
+                        Json(
+                            """{"revision":13,"timeline":"prime"}"""))
+            };
+
+            var error =
+                await Assert.ThrowsAsync<DurableRunResumeGuardException>(
+                    () => runtime.ResumeAsync(
+                            run.RunId,
+                            guard: staleExpectation)
+                        .AsTask());
+
+            Assert.Equal(
+                DurableRunResumeGuardReasonCodes
+                    .SemanticExtensionDigestMismatch,
+                error.ReasonCode);
+            Assert.Empty(provider.Requests);
+            Assert.Equal(0, host.CallCount);
+            Assert.Equal(
+                originalEventCount,
+                (await store.ReadRunAsync(run.RunId, default)).Count);
+
+            var outcome = await runtime.ResumeAsync(
+                run.RunId,
+                guard: new DurableRunResumeGuard
+                {
+                    SemanticExtensionName = "game.semanticCoordinate",
+                    ExpectedSemanticExtensionSha256 =
+                        CanonicalJsonDigest.ComputeSha256(durableState)
+                });
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Single(provider.Requests);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SemanticResumeGuardRejectsMissingExtension()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No action should be dispatched.")),
+                clock,
+                ids);
+
+            var error =
+                await Assert.ThrowsAsync<DurableRunResumeGuardException>(
+                    () => runtime.ResumeAsync(
+                            run.RunId,
+                            guard: new DurableRunResumeGuard
+                            {
+                                SemanticExtensionName = "game.missing",
+                                ExpectedSemanticExtensionSha256 =
+                                    CanonicalJsonDigest.ComputeSha256(
+                                        Json("{}"))
+                            })
+                        .AsTask());
+
+            Assert.Equal(
+                DurableRunResumeGuardReasonCodes.SemanticExtensionMissing,
+                error.ReasonCode);
+            Assert.Empty(provider.Requests);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RequiredSemanticGuardRejectsUnguardedNonterminalResume()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            var semantic = Json("""{"revision":12}""");
+            run.Extensions["game.coordinate"] = semantic;
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"done\""));
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No action should be dispatched.")),
+                clock,
+                ids,
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 2,
+                    RequireSemanticResumeGuard = true
+                });
+            IDurableAgentRuntime runtimeView = runtime;
+
+            var error =
+                await Assert.ThrowsAsync<DurableRunResumeGuardException>(
+                    () => runtimeView.ResumeAsync(run.RunId).AsTask());
+
+            Assert.Equal(
+                DurableRunResumeGuardReasonCodes.SemanticGuardRequired,
+                error.ReasonCode);
+            Assert.Empty(provider.Requests);
+
+            var outcome = await runtime.ResumeAsync(
+                run.RunId,
+                guard: new DurableRunResumeGuard
+                {
+                    SemanticExtensionName = "game.coordinate",
+                    ExpectedSemanticExtensionSha256 =
+                        CanonicalJsonDigest.ComputeSha256(semantic)
+                });
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Single(provider.Requests);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RequiredSemanticGuardAllowsUnguardedTerminalReplay()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            await using (var initialRuntime = CreateRuntime(
+                       store,
+                       new QueueStreamingProvider(
+                           FinalResponse("\"done\"")),
+                       new Host(
+                           _ => throw new InvalidOperationException(
+                               "No action should be dispatched.")),
+                       clock,
+                       ids))
+            {
+                var completed = await initialRuntime.RunAsync(
+                    new DurableRunRequest { Run = run });
+                Assert.Equal(RunStates.Completed, completed.Run.State);
+            }
+
+            var replayProvider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            await using var replayRuntime = CreateRuntimeWithOptions(
+                store,
+                replayProvider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No action should be dispatched.")),
+                clock,
+                ids,
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 2,
+                    RequireSemanticResumeGuard = true
+                });
+            IDurableAgentRuntime runtimeView = replayRuntime;
+
+            var replayed = await runtimeView.ResumeAsync(run.RunId);
+
+            Assert.Equal(RunStates.Completed, replayed.Run.State);
+            Assert.Empty(replayProvider.Requests);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ResumeGuardRequiresBoundedInt32Metadata()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "No action should be dispatched."));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                host,
+                clock,
+                ids);
+            var cases = new[]
+            {
+                (
+                    Extension: (JsonElement?)null,
+                    ExpectedValue: (int?)null,
+                    Reason:
+                    DurableRunResumeGuardReasonCodes.ExtensionMissing),
+                (
+                    Extension: (JsonElement?)Json("\"3\""),
+                    ExpectedValue: (int?)null,
+                    Reason:
+                    DurableRunResumeGuardReasonCodes.ExtensionNotInt32),
+                (
+                    Extension: (JsonElement?)Json("32"),
+                    ExpectedValue: (int?)null,
+                    Reason:
+                    DurableRunResumeGuardReasonCodes.ExtensionOutOfRange),
+                (
+                    Extension: (JsonElement?)Json("3"),
+                    ExpectedValue: (int?)4,
+                    Reason:
+                    DurableRunResumeGuardReasonCodes.ExtensionValueMismatch)
+            };
+
+            foreach (var item in cases)
+            {
+                var run = Run(clock.UtcNow);
+                run.BatchId = "batch-actual";
+                if (item.Extension.HasValue)
+                {
+                    run.Extensions["participantIndex"] =
+                        item.Extension.Value;
+                }
+
+                using (var journal = new JournalCoordinator(
+                           store,
+                           store,
+                           clock,
+                           ids))
+                {
+                    await journal.CommitRunStartAsync(
+                        run,
+                        Array.Empty<NormalizedMessage>(),
+                        default);
+                }
+
+                var error =
+                    await Assert.ThrowsAsync<DurableRunResumeGuardException>(
+                        () => runtime.ResumeAsync(
+                                run.RunId,
+                                guard: new DurableRunResumeGuard
+                                {
+                                    ExpectedBatchId = run.BatchId,
+                                    RequiredInt32ExtensionName =
+                                        "participantIndex",
+                                    MinimumInt32ExtensionValue = 0,
+                                    MaximumInt32ExtensionValue = 31,
+                                    ExpectedInt32ExtensionValue =
+                                        item.ExpectedValue
+                                })
+                            .AsTask());
+                Assert.Equal(item.Reason, error.ReasonCode);
+            }
+
+            Assert.Empty(provider.Requests);
+            Assert.Equal(0, host.CallCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ResumeCancellationIsPersistedBeforeTheProviderLoop()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "No action should be dispatched."));
+            await using (var runtime = CreateRuntime(
+                             store,
+                             provider,
+                             host,
+                             clock,
+                             ids))
+            {
+                var cancelled = await runtime.ResumeAsync(
+                    run.RunId,
+                    new DurableRunContinuation
+                    {
+                        RequestCancellation = true
+                    });
+
+                Assert.Equal(RunStates.Cancelled, cancelled.Run.State);
+                Assert.Equal(
+                    CompletionIntents.Cancelled,
+                    cancelled.Run.CompletionIntent);
+                Assert.Empty(provider.Requests);
+                Assert.Equal(0, host.CallCount);
+            }
+
+            var recoveredProvider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run-after-recovery\""));
+            await using var recoveredRuntime = CreateRuntime(
+                store,
+                recoveredProvider,
+                host,
+                clock,
+                ids);
+            IDurableAgentRuntime legacyView = recoveredRuntime;
+
+            var recovered = await legacyView.ResumeAsync(run.RunId);
+
+            Assert.Equal(RunStates.Cancelled, recovered.Run.State);
+            Assert.Empty(recoveredProvider.Requests);
+            Assert.Equal(0, host.CallCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ResumeCancellationWithPendingOperationOnlyReconciles()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            DurableRunOutcome first;
+            await using (var firstRuntime = CreateRuntime(
+                             store,
+                             new QueueStreamingProvider(
+                                 ToolResponse(
+                                     "call-1",
+                                     "read_state",
+                                     """{"entityId":"npc-7"}""")),
+                             new Host(
+                                 request => new ValueTask<ActionReceipt>(
+                                     Receipt(
+                                         request,
+                                         ReceiptStatuses.Unknown,
+                                         result: null,
+                                         clock.UtcNow))),
+                             clock,
+                             ids,
+                             Tool("read_state")))
+            {
+                first = await firstRuntime.RunAsync(
+                    new DurableRunRequest { Run = Run(clock.UtcNow) });
+            }
+
+            Assert.Equal(RunStates.Reconciling, first.Run.State);
+            Assert.Single(first.Run.PendingOperationIds);
+
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "A pending operation must not be redispatched."));
+            await using (var cancellingRuntime = CreateRuntime(
+                             store,
+                             provider,
+                             host,
+                             clock,
+                             ids,
+                             Tool("read_state")))
+            {
+                var fenced = await cancellingRuntime.ResumeAsync(
+                    first.Run.RunId,
+                    new DurableRunContinuation
+                    {
+                        RequestCancellation = true
+                    });
+
+                Assert.Equal(RunStates.Reconciling, fenced.Run.State);
+                Assert.Equal(
+                    CompletionIntents.Cancelled,
+                    fenced.Run.CompletionIntent);
+                Assert.Single(fenced.Run.PendingOperationIds);
+                Assert.Empty(provider.Requests);
+                Assert.Equal(0, host.CallCount);
+
+                var eventCount = (await store.ReadRunAsync(
+                        first.Run.RunId,
+                        default))
+                    .Count;
+                var replayed = await cancellingRuntime.ResumeAsync(
+                    first.Run.RunId,
+                    new DurableRunContinuation
+                    {
+                        RequestCancellation = true
+                    });
+                Assert.Equal(RunStates.Reconciling, replayed.Run.State);
+                Assert.Equal(
+                    CompletionIntents.Cancelled,
+                    replayed.Run.CompletionIntent);
+                Assert.Equal(
+                    eventCount,
+                    (await store.ReadRunAsync(
+                        first.Run.RunId,
+                        default)).Count);
+            }
+
+            var recoveredProvider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run-after-reconcile\""));
+            await using var recoveredRuntime = CreateRuntime(
+                store,
+                recoveredProvider,
+                host,
+                clock,
+                ids,
+                Tool("read_state"));
+
+            var cancelled = await recoveredRuntime.ResumeAsync(
+                first.Run.RunId,
+                reconciler: new Reconciler(clock.UtcNow));
+
+            Assert.Equal(RunStates.Cancelled, cancelled.Run.State);
+            Assert.Equal(
+                CompletionIntents.Cancelled,
+                cancelled.Run.CompletionIntent);
+            Assert.Empty(cancelled.Run.PendingOperationIds);
+            Assert.Empty(recoveredProvider.Requests);
+            Assert.Equal(0, host.CallCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentResumeAndResumeCancellationShareOwnership()
+    {
+        var directory = TempDirectory();
+        var provider = new BlockingCancellationProvider();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitRunStartAsync(
+                    run,
+                    Array.Empty<NormalizedMessage>(),
+                    default);
+            }
+
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No action should be dispatched.")),
+                clock,
+                ids);
+            var activeResume = runtime.ResumeAsync(run.RunId).AsTask();
+            await provider.Started.Task.WaitAsync(TestWaitTimeout);
+
+            await Assert.ThrowsAsync<DuplicateRunException>(
+                () => runtime.ResumeAsync(
+                        run.RunId,
+                        new DurableRunContinuation
+                        {
+                            RequestCancellation = true
+                        })
+                    .AsTask());
+
+            provider.Release.TrySetResult();
+            _ = await activeResume.WaitAsync(TestWaitTimeout);
+        }
+        finally
+        {
+            provider.Release.TrySetResult();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task NewRunInitializationIsCommittedAsOneOrderedBatch()
     {
@@ -859,6 +1590,17 @@ public sealed class DurableAgentRuntimeTests
             var preparedSnapshot = Assert.Single(
                 preparedEvents,
                 item => item.Kind == RuntimeEventKinds.TurnSnapshot);
+            var preparedTurnSnapshot =
+                ProtocolJson.DeserializeTurnSnapshot(
+                    preparedSnapshot.Payload.GetRawText());
+            var checkpoint = preparedTurnSnapshot.Extensions[
+                ConversationContextView.CheckpointExtensionName];
+            var checkpointOutputMessageIds = checkpoint
+                .GetProperty("payload")
+                .GetProperty("outputMessageIds")
+                .EnumerateArray()
+                .Select(item => item.GetString())
+                .ToArray();
             var preparedTurn = preparedEvents
                 .Where(
                     item => string.Equals(
@@ -923,6 +1665,11 @@ public sealed class DurableAgentRuntimeTests
                         .Where(part => part.Json.HasValue)
                         .Select(
                             part => part.Json!.Value.GetRawText())));
+            Assert.Equal(
+                checkpointOutputMessageIds,
+                request.Messages
+                    .Select(message => message.MessageId)
+                    .ToArray());
         }
         finally
         {
@@ -1327,6 +2074,733 @@ public sealed class DurableAgentRuntimeTests
     }
 
     [Fact]
+    public async Task JournalsStablePrefixCacheDecisionsAndUsageStates()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    "call-cache",
+                    "read_state",
+                    """{"entityId":"npc-cache"}"""),
+                FinalResponseWithUsage(
+                    "\"done\"",
+                    new ProviderUsage
+                    {
+                        InputTokens = 0,
+                        OutputTokens = 1,
+                        CostUsd = "0",
+                        CacheReadTokens = 0,
+                        CacheWriteTokens = 0,
+                        CacheMissTokens = 0
+                    }));
+            var host = new Host(
+                request => new ValueTask<ActionReceipt>(
+                    Receipt(
+                        request,
+                        ReceiptStatuses.Succeeded,
+                        """{"value":1}""",
+                        clock.UtcNow)));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                host,
+                clock,
+                ids,
+                Tool("read_state"));
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = Run(clock.UtcNow) });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            var events = await store.ReadRunAsync(
+                outcome.Run.RunId,
+                default);
+            var snapshots = events
+                .Where(
+                    item => item.Kind == RuntimeEventKinds.TurnSnapshot)
+                .Select(
+                    item => ProtocolJson.DeserializeTurnSnapshot(
+                        item.Payload.GetRawText()))
+                .ToArray();
+            Assert.Equal(2, snapshots.Length);
+
+            var firstDecision = ProviderCacheDecision.FromJson(
+                snapshots[0].Extensions[
+                    ProviderCacheTelemetry.DecisionExtensionName]);
+            Assert.False(firstDecision.PrefixReusable);
+            Assert.Equal(
+                new[] { ProviderCacheBreakReasonCodes.ColdStart },
+                firstDecision.BreakReasons);
+
+            var secondDecision = ProviderCacheDecision.FromJson(
+                snapshots[1].Extensions[
+                    ProviderCacheTelemetry.DecisionExtensionName]);
+            Assert.True(secondDecision.PrefixReusable);
+            Assert.Empty(secondDecision.BreakReasons);
+            Assert.Contains(
+                ProviderCacheDynamicTailChangeCodes.DynamicRequestChanged,
+                secondDecision.DynamicTailChanges);
+
+            var usage = events
+                .Where(
+                    item => item.Kind == RuntimeEventKinds.BudgetUpdated
+                            && item.Extensions.ContainsKey(
+                                ProviderCacheTelemetry.UsageExtensionName))
+                .Select(
+                    item => ProviderCacheUsageEvidence.FromJson(
+                        item.Extensions[
+                            ProviderCacheTelemetry.UsageExtensionName]))
+                .ToArray();
+            Assert.Equal(2, usage.Length);
+            Assert.Equal(ProviderCacheUsageStates.Unknown, usage[0].State);
+            Assert.Equal(
+                ProviderCacheUsageStates.NoActivity,
+                usage[1].State);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CapturedRoutePlanSurvivesCapabilityDriftAfterSnapshot()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var inner = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"done\""));
+            await using var store =
+                new MutateCapabilitiesAfterTurnSnapshotStore(
+                    inner,
+                    provider.Capabilities);
+            var clock = new Clock();
+            var ids = new Ids();
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "No action should be dispatched."));
+            await using var runtime = CreateRuntimeCore(
+                store,
+                store,
+                provider,
+                host,
+                clock,
+                ids,
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 2
+                },
+                maxProviderAttempts: 2,
+                new SystemRuntimeDelay(),
+                Tool("read_state"));
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = Run(clock.UtcNow) });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.True(store.CapabilitiesMutated);
+            Assert.False(provider.Capabilities.ToolCalling);
+            Assert.Single(provider.Requests);
+            Assert.Single(provider.Requests[0].Tools);
+
+            var events = await inner.ReadRunAsync(
+                outcome.Run.RunId,
+                default);
+            var snapshot = Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.TurnSnapshot);
+            var durableSnapshot =
+                ProtocolJson.DeserializeTurnSnapshot(
+                    snapshot.Payload.GetRawText());
+            var cacheKey = ProviderCacheKey.FromJson(
+                durableSnapshot.Extensions[
+                    ProviderCacheTelemetry.KeyExtensionName]);
+            var dispatch = Assert.Single(
+                events,
+                item => item.Kind
+                        == RuntimeEventKinds.ProviderDispatchStarted);
+            Assert.Equal(
+                cacheKey.ProviderRouteDigest,
+                dispatch.ProviderRouteDigest);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OpaqueContinuationIsEphemeralAndNoUpdateClearsIt()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var provider = new TypedContinuationProvider(
+                ToolResponseWithContinuation(
+                    "call-state-1",
+                    "read_state",
+                    """{"entityId":"npc-state-1"}""",
+                    new ProviderOpaqueContinuationUpdate(
+                        TypedContinuationProvider.StateVersion,
+                        Json("""{"cursor":"next"}"""),
+                        ProviderOpaqueStatePersistence.DurableNonSecret)),
+                ToolResponseWithContinuation(
+                    "call-state-2",
+                    "read_state",
+                    """{"entityId":"npc-state-2"}""",
+                    update: null),
+                FinalResponse("\"done\""));
+            var host = new Host(
+                request => new ValueTask<ActionReceipt>(
+                    Receipt(
+                        request,
+                        ReceiptStatuses.Succeeded,
+                        """{"value":1}""",
+                        clock.UtcNow)));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                host,
+                clock,
+                ids,
+                Tool("read_state"));
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = Run(clock.UtcNow) });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(3, provider.Requests.Count);
+            Assert.Null(provider.Requests[0].OpaqueContinuationState);
+            var carried = Assert.IsType<ProviderOpaqueContinuationState>(
+                provider.Requests[1].OpaqueContinuationState);
+            Assert.Equal(
+                "next",
+                carried.Payload.GetProperty("cursor").GetString());
+            Assert.Null(provider.Requests[2].OpaqueContinuationState);
+
+            var events = await store.ReadRunAsync(
+                outcome.Run.RunId,
+                default);
+            Assert.DoesNotContain(
+                events,
+                item => item.Extensions.ContainsKey(
+                    ProviderOpaqueContinuationState.JournalExtensionName));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitNonSecretContinuationRestoresAcrossRestart()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "runtime.journal");
+            await using var inner = new FileSessionStore(path);
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            var options = new DurableAgentRuntimeOptions
+            {
+                ModelId = "test-model",
+                MaxConcurrentProviderCalls = 2,
+                AllowProviderDeclaredNonSecretContinuationPersistence = true
+            };
+            var host = new Host(
+                request => new ValueTask<ActionReceipt>(
+                    Receipt(
+                        request,
+                        ReceiptStatuses.Succeeded,
+                        """{"value":1}""",
+                        clock.UtcNow)));
+
+            await using (var crashStore =
+                         new RejectAfterCleanTurnCompletedStore(inner))
+            {
+                var firstProvider = new TypedContinuationProvider(
+                    ToolResponseWithContinuation(
+                        "call-restart-state",
+                        "read_state",
+                        """{"entityId":"npc-restart"}""",
+                        new ProviderOpaqueContinuationUpdate(
+                            TypedContinuationProvider.StateVersion,
+                            Json("""{"cursor":"resume-me"}"""),
+                            ProviderOpaqueStatePersistence
+                                .DurableNonSecret)));
+                await using var firstRuntime = CreateRuntimeCore(
+                    crashStore,
+                    crashStore,
+                    firstProvider,
+                    host,
+                    clock,
+                    ids,
+                    options,
+                    maxProviderAttempts: 1,
+                    new SystemRuntimeDelay(),
+                    Tool("read_state"));
+
+                var interrupted = await firstRuntime.RunAsync(
+                    new DurableRunRequest { Run = run });
+
+                Assert.True(crashStore.CleanTurnCompleted);
+                Assert.Equal("runtime_failure", interrupted.ErrorCode);
+                Assert.Single(firstProvider.Requests);
+            }
+
+            var preparedEvents = await inner.ReadRunAsync(
+                run.RunId,
+                default);
+            Assert.Single(
+                preparedEvents,
+                item => item.Kind
+                        == RuntimeEventKinds.ProviderResultCommitted
+                        && item.Extensions.ContainsKey(
+                            ProviderOpaqueContinuationState
+                                .JournalExtensionName));
+
+            var resumedProvider = new TypedContinuationProvider(
+                FinalResponse("\"done\""));
+            await using var resumedRuntime = CreateRuntimeCore(
+                inner,
+                inner,
+                resumedProvider,
+                host,
+                clock,
+                ids,
+                options,
+                maxProviderAttempts: 1,
+                new SystemRuntimeDelay(),
+                Tool("read_state"));
+
+            var resumed = await resumedRuntime.ResumeAsync(run.RunId);
+
+            Assert.Equal(RunStates.Completed, resumed.Run.State);
+            var restored = Assert.IsType<
+                ProviderOpaqueContinuationState>(
+                    Assert.Single(resumedProvider.Requests)
+                        .OpaqueContinuationState);
+            Assert.Equal(
+                "resume-me",
+                restored.Payload.GetProperty("cursor").GetString());
+
+            var finalEvents = await inner.ReadRunAsync(run.RunId, default);
+            Assert.Single(
+                finalEvents,
+                item => item.Extensions.ContainsKey(
+                    ProviderOpaqueContinuationState.JournalExtensionName));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SchedulerAdmissionFailureCannotCreatePendingAction()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    "call-admission",
+                    "read_state",
+                    """{"entityId":"npc-7"}"""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "No action should be dispatched."));
+            var tool = Tool("read_state");
+            tool.ConflictScopes.Add("agent:{agentId}");
+            await using var runtime = CreateRuntimeCoreWithSkills(
+                store,
+                store,
+                provider,
+                host,
+                clock,
+                ids,
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1
+                },
+                maxProviderAttempts: 1,
+                new SystemRuntimeDelay(),
+                Array.Empty<SkillManifest>(),
+                new[] { tool },
+                toolPlanner: new ToolBatchPlanner(),
+                toolScheduler: new ToolBatchScheduler(
+                    new ToolSchedulerLimits(
+                        maxConflictKeysPerCall: 1)));
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.Failed, outcome.Run.State);
+            Assert.Empty(outcome.Run.PendingOperationIds);
+            Assert.Equal(0, outcome.Run.Usage.Actions);
+            Assert.Equal(0, host.CallCount);
+            Assert.Empty(
+                await store.ReadPendingOperationsAsync(
+                    run.RunId,
+                    default));
+            var events = await store.ReadRunAsync(run.RunId, default);
+            Assert.DoesNotContain(
+                events,
+                item => item.Kind is RuntimeEventKinds.ToolStarted
+                    or RuntimeEventKinds.ActionRequested
+                    or RuntimeEventKinds.ActionReconciling);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SideEffectTurnLimitRejectsEveryWriteBeforeWriteAhead()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    (
+                        "write-call-1",
+                        "write_state_a",
+                        """{"entityId":"npc-7"}"""),
+                    (
+                        "write-call-2",
+                        "write_state_b",
+                        """{"entityId":"npc-8"}""")),
+                FinalResponse("""{"done":true}"""));
+            var host = new Host(
+                _ => throw new InvalidOperationException(
+                    "Rejected side effects must not reach the host."));
+            var firstWrite = Tool("write_state_a");
+            firstWrite.Effect = ToolEffects.WorldCommand;
+            firstWrite.IdempotencyPolicy =
+                ToolIdempotencyPolicies.Required;
+            var secondWrite = Tool("write_state_b");
+            secondWrite.Effect = ToolEffects.AgentLocalWrite;
+            secondWrite.IdempotencyPolicy =
+                ToolIdempotencyPolicies.Required;
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                host,
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1,
+                    MaxSideEffectToolCallsPerTurn = 1
+                },
+                firstWrite,
+                secondWrite);
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(0, outcome.Run.Usage.Actions);
+            Assert.Equal(0, host.CallCount);
+            Assert.Equal(2, provider.Requests.Count);
+            var rejected = provider.Requests[1].Messages
+                .SelectMany(message => message.Parts)
+                .Where(
+                    part => part.Type == NormalizedPartTypes.ToolResult
+                            && part.ToolCallId is
+                                "write-call-1" or "write-call-2")
+                .ToArray();
+            Assert.Equal(2, rejected.Length);
+            Assert.All(
+                rejected,
+                part => Assert.Equal(
+                    "side_effect_tool_call_limit_exceeded",
+                    part.Json!.Value.GetProperty("code").GetString()));
+
+            var events = await store.ReadRunAsync(run.RunId, default);
+            Assert.DoesNotContain(
+                events,
+                item => item.Kind is RuntimeEventKinds.ToolStarted
+                    or RuntimeEventKinds.ActionRequested);
+            var policySnapshots = events
+                .Where(
+                    item => item.Kind == RuntimeEventKinds.TurnSnapshot
+                            && item.Payload.TryGetProperty(
+                                "maxSideEffectToolCallsPerTurn",
+                                out _))
+                .ToArray();
+            Assert.Equal(2, policySnapshots.Length);
+            var firstSnapshot = policySnapshots[0];
+            Assert.Equal(
+                1,
+                firstSnapshot.Payload
+                    .GetProperty("maxSideEffectToolCallsPerTurn")
+                    .GetInt32());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SideEffectTurnLimitStillExecutesPureReads()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    (
+                        "read-call",
+                        "read_state",
+                        """{"entityId":"npc-7"}"""),
+                    (
+                        "write-call-1",
+                        "write_state_a",
+                        """{"entityId":"npc-7"}"""),
+                    (
+                        "write-call-2",
+                        "write_state_b",
+                        """{"entityId":"npc-8"}""")),
+                FinalResponse("""{"done":true}"""));
+            var host = new Host(
+                request => new ValueTask<ActionReceipt>(
+                    Receipt(
+                        request,
+                        ReceiptStatuses.Succeeded,
+                        """{"visible":true}""",
+                        clock.UtcNow)));
+            var read = Tool("read_state");
+            var firstWrite = Tool("write_state_a");
+            firstWrite.Effect = ToolEffects.WorldCommand;
+            firstWrite.IdempotencyPolicy =
+                ToolIdempotencyPolicies.Required;
+            var secondWrite = Tool("write_state_b");
+            secondWrite.Effect = ToolEffects.ExternalWrite;
+            secondWrite.IdempotencyPolicy =
+                ToolIdempotencyPolicies.Required;
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                host,
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1,
+                    MaxSideEffectToolCallsPerTurn = 1
+                },
+                read,
+                firstWrite,
+                secondWrite);
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(1, outcome.Run.Usage.Actions);
+            Assert.Equal(1, host.CallCount);
+            Assert.Equal("read_state", host.LastRequest!.ActionName);
+            var toolResults = provider.Requests[1].Messages
+                .SelectMany(message => message.Parts)
+                .Where(part => part.Type == NormalizedPartTypes.ToolResult)
+                .ToDictionary(
+                    part => part.ToolCallId!,
+                    part => part.Json!.Value,
+                    StringComparer.Ordinal);
+            Assert.Equal(
+                ReceiptStatuses.Succeeded,
+                toolResults["read-call"].GetProperty("status").GetString());
+            Assert.Equal(
+                "side_effect_tool_call_limit_exceeded",
+                toolResults["write-call-1"].GetProperty("code").GetString());
+            Assert.Equal(
+                "side_effect_tool_call_limit_exceeded",
+                toolResults["write-call-2"].GetProperty("code").GetString());
+
+            var events = await store.ReadRunAsync(run.RunId, default);
+            Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.ActionRequested);
+            var invocation = Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.ToolStarted);
+            Assert.Equal(
+                0,
+                invocation.Payload.GetProperty("sequence").GetInt64());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UnsetSideEffectTurnLimitPreservesMultipleWrites()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    (
+                        "write-call-1",
+                        "write_state_a",
+                        """{"entityId":"npc-7"}"""),
+                    (
+                        "write-call-2",
+                        "write_state_b",
+                        """{"entityId":"npc-8"}""")),
+                FinalResponse("""{"done":true}"""));
+            var host = new Host(
+                request => new ValueTask<ActionReceipt>(
+                    Receipt(
+                        request,
+                        ReceiptStatuses.Succeeded,
+                        """{"committed":true}""",
+                        clock.UtcNow)));
+            var firstWrite = Tool("write_state_a");
+            firstWrite.Effect = ToolEffects.WorldCommand;
+            firstWrite.IdempotencyPolicy =
+                ToolIdempotencyPolicies.Required;
+            var secondWrite = Tool("write_state_b");
+            secondWrite.Effect = ToolEffects.AgentLocalWrite;
+            secondWrite.IdempotencyPolicy =
+                ToolIdempotencyPolicies.Required;
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                host,
+                clock,
+                new Ids(),
+                firstWrite,
+                secondWrite);
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(2, outcome.Run.Usage.Actions);
+            Assert.Equal(2, host.CallCount);
+            Assert.Equal(2, provider.Requests.Count);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SideEffectTurnLimitAllowsOneWriteAlongsideReads()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    (
+                        "read-call",
+                        "read_state",
+                        """{"entityId":"npc-7"}"""),
+                    (
+                        "write-call",
+                        "write_state",
+                        """{"entityId":"npc-7"}""")),
+                FinalResponse("""{"done":true}"""));
+            var host = new Host(
+                request => new ValueTask<ActionReceipt>(
+                    Receipt(
+                        request,
+                        ReceiptStatuses.Succeeded,
+                        """{"ok":true}""",
+                        clock.UtcNow)));
+            var read = Tool("read_state");
+            var write = Tool("write_state");
+            write.Effect = ToolEffects.WorldCommand;
+            write.IdempotencyPolicy = ToolIdempotencyPolicies.Required;
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                host,
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1,
+                    MaxSideEffectToolCallsPerTurn = 1
+                },
+                read,
+                write);
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(2, outcome.Run.Usage.Actions);
+            Assert.Equal(2, host.CallCount);
+            Assert.DoesNotContain(
+                provider.Requests[1].Messages
+                    .SelectMany(message => message.Parts)
+                    .Where(
+                        part => part.Type
+                                == NormalizedPartTypes.ToolResult),
+                part => part.Json!.Value.TryGetProperty(
+                            "code",
+                            out var code)
+                        && code.GetString()
+                        == "side_effect_tool_call_limit_exceeded");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TimeAfterWriteAheadDoesNotRestartTheToolDeadline()
     {
         var directory = TempDirectory();
@@ -1393,7 +2867,7 @@ public sealed class DurableAgentRuntimeTests
     }
 
     [Fact]
-    public async Task LateSuccessfulHostReceiptDoesNotOverrideToolTimeout()
+    public async Task LateSuccessfulHostReceiptOverridesSyntheticTimeout()
     {
         var directory = TempDirectory();
         try
@@ -1413,7 +2887,8 @@ public sealed class DurableAgentRuntimeTests
                 ToolResponse(
                     "late-call",
                     "read_state",
-                    """{"entityId":"npc-7"}"""));
+                    """{"entityId":"npc-7"}"""),
+                FinalResponse("\"done\""));
             var host = new Host(
                 request =>
                 {
@@ -1441,31 +2916,23 @@ public sealed class DurableAgentRuntimeTests
             var outcome = await runtime.RunAsync(
                 new DurableRunRequest { Run = run });
 
-            Assert.True(
-                string.Equals(
-                    RunStates.Reconciling,
-                    outcome.Run.State,
-                    StringComparison.Ordinal),
-                $"state={outcome.Run.State}; "
-                + $"terminal={outcome.Run.TerminalReason}; "
-                + $"error={outcome.ErrorCode}; "
-                + $"message={outcome.SafeErrorMessage}; "
-                + $"run={ProtocolJson.Serialize(outcome.Run)}");
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
             Assert.Equal(1, host.CallCount);
-            Assert.Single(outcome.Run.PendingOperationIds);
+            Assert.Empty(outcome.Run.PendingOperationIds);
             var events = await store.ReadRunAsync(run.RunId, default);
             var receipt = Assert.Single(
                 events,
                 item => item.Kind == RuntimeEventKinds.ActionReceived);
             Assert.Equal(
-                ReceiptStatuses.Unknown,
+                ReceiptStatuses.Succeeded,
                 receipt.Payload.GetProperty("status").GetString());
-            Assert.Equal(
-                "tool_timeout",
-                receipt.Payload.GetProperty("errorCode").GetString());
-            Assert.DoesNotContain(
+            Assert.Contains(
                 events,
                 item => item.Kind == RuntimeEventKinds.ToolCompleted);
+            Assert.DoesNotContain(
+                events,
+                item => item.Kind
+                        == RuntimeEventKinds.ActionOutcomeUncertain);
         }
         finally
         {
@@ -1570,7 +3037,7 @@ public sealed class DurableAgentRuntimeTests
             var outcome = await runtime.RunAsync(
                 new DurableRunRequest
                 {
-                    Run = Run(clock.UtcNow),
+                    Run = Run(clock.UtcNow, maxTokens: 64_000),
                     Context = context
                 });
 
@@ -1651,7 +3118,7 @@ public sealed class DurableAgentRuntimeTests
             var outcome = await runtime.RunAsync(
                 new DurableRunRequest
                 {
-                    Run = Run(clock.UtcNow),
+                    Run = Run(clock.UtcNow, maxTokens: 64_000),
                     Context = SelectionFillers()
                         .Append(deferred)
                         .ToArray()
@@ -1714,7 +3181,7 @@ public sealed class DurableAgentRuntimeTests
             var outcome = await runtime.RunAsync(
                 new DurableRunRequest
                 {
-                    Run = Run(clock.UtcNow),
+                    Run = Run(clock.UtcNow, maxTokens: 64_000),
                     Context = SelectionFillers()
                         .Concat(deferred)
                         .ToArray()
@@ -1861,7 +3328,7 @@ public sealed class DurableAgentRuntimeTests
                 first = await firstRuntime.RunAsync(
                     new DurableRunRequest
                     {
-                        Run = Run(clock.UtcNow),
+                        Run = Run(clock.UtcNow, maxTokens: 64_000),
                         Context = SelectionFillers()
                             .Append(deferred)
                             .ToArray()
@@ -2121,6 +3588,163 @@ public sealed class DurableAgentRuntimeTests
     }
 
     [Fact]
+    public async Task StrictObservationIncarnationRejectsInitialContextBeforeJournalOrProvider()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 2,
+                    RequireAudienceIncarnationForRestrictedObservations =
+                        true
+                });
+            var run = Run(clock.UtcNow);
+            GameContextEnvelope.Attach(
+                run,
+                new GameContextCoordinate(
+                    run.WorldId,
+                    "prime",
+                    saveRevision: 1,
+                    observer: new GameEntityIdentity("npc-1", 2)));
+            var observation = Observation(
+                run.WorldId,
+                clock.UtcNow,
+                """{"secret":"old lifetime"}""");
+            observation.SessionId = run.SessionId;
+            observation.Visibility = new VisibilityRule
+            {
+                Scope = ObservationVisibilityScopes.Private,
+                AudienceIds = new List<string> { run.AgentId }
+            };
+            var context = ContextCandidate.FromObservation(
+                observation,
+                run,
+                required: true,
+                canDefer: false);
+
+            var error = await Assert.ThrowsAsync<
+                ObservationAdmissionException>(
+                () => runtime.RunAsync(
+                        new DurableRunRequest
+                        {
+                            Run = run,
+                            Context = new[] { context }
+                        })
+                    .AsTask());
+
+            Assert.Equal(
+                ObservationAdmissionReasonCodes.AudienceIncarnationMissing,
+                error.ReasonCode);
+            Assert.Empty(provider.Requests);
+            Assert.Empty(
+                await store.ReadRunAsync(run.RunId, default));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StrictObservationIncarnationRejectsControlBeforeInterruptOrJournal()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new SteerStreamingProvider();
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 2,
+                    RequireAudienceIncarnationForRestrictedObservations =
+                        true
+                });
+            var run = Run(clock.UtcNow);
+            GameContextEnvelope.Attach(
+                run,
+                new GameContextCoordinate(
+                    run.WorldId,
+                    "prime",
+                    saveRevision: 1,
+                    observer: new GameEntityIdentity("npc-1", 2)));
+            using var cancellation = new CancellationTokenSource();
+            var running = runtime.RunAsync(
+                    new DurableRunRequest { Run = run },
+                    cancellation.Token)
+                .AsTask();
+            await provider.FirstAttemptStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5));
+            var observation = Observation(
+                run.WorldId,
+                clock.UtcNow,
+                """{"secret":"old lifetime"}""");
+            observation.SessionId = run.SessionId;
+            observation.Visibility = new VisibilityRule
+            {
+                Scope = ObservationVisibilityScopes.Private,
+                AudienceIds = new List<string> { run.AgentId }
+            };
+            ObservationAudienceIncarnations.Attach(
+                observation,
+                new[]
+                {
+                    new ObservationAudienceIncarnationBinding(
+                        run.AgentId,
+                        new GameEntityIdentity("npc-1", 1))
+                });
+
+            Assert.False(
+                runtime.Controls.TryPost(
+                    run.RunId,
+                    new RunControlCommand
+                    {
+                        CommandId = "stale-incarnation-control",
+                        Kind = RunControlKinds.Steer,
+                        Observation = observation,
+                        CreatedAt = clock.UtcNow
+                    }));
+            await Task.Delay(25);
+            Assert.Single(provider.Requests);
+            cancellation.Cancel();
+            _ = await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.DoesNotContain(
+                await store.ReadRunAsync(run.RunId, default),
+                item => item.Kind == RuntimeEventKinds.ControlReceived);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ProviderCompletionRacingSteerClosesTheDiscardedDispatch()
     {
         var directory = TempDirectory();
@@ -2366,14 +3990,17 @@ public sealed class DurableAgentRuntimeTests
     public async Task DurationDeadlineStopsASlowProviderAsBudgetExhausted()
     {
         var directory = TempDirectory();
+        var provider = new SlowStreamingProvider();
+        DurableAgentRuntime? runtime = null;
+        FileSessionStore? store = null;
         try
         {
             var path = Path.Combine(directory, "runtime.journal");
-            await using var store = new FileSessionStore(path);
+            store = new FileSessionStore(path);
             var clock = new Clock();
-            await using var runtime = CreateRuntime(
+            runtime = CreateRuntime(
                 store,
-                new SlowStreamingProvider(),
+                provider,
                 new Host(
                     _ => throw new InvalidOperationException(
                         "No tool expected.")),
@@ -2390,9 +4017,24 @@ public sealed class DurableAgentRuntimeTests
             Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
             Assert.Equal("max_duration", outcome.Run.TerminalReason);
             Assert.Empty(outcome.Run.PendingOperationIds);
+            provider.Release.TrySetResult();
+            await runtime.WaitForShutdownDrainAsync()
+                .AsTask()
+                .WaitAsync(TestWaitTimeout);
         }
         finally
         {
+            provider.Release.TrySetResult();
+            if (runtime is not null)
+            {
+                await runtime.DisposeAsync();
+            }
+
+            if (store is not null)
+            {
+                await store.DisposeAsync();
+            }
+
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -2519,6 +4161,73 @@ public sealed class DurableAgentRuntimeTests
             Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
             Assert.Equal("max_cost", outcome.Run.TerminalReason);
             Assert.Null(outcome.FinalOutput);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UnavailableProviderCostIsJournaledAndFailsClosed()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var provider = new QueueStreamingProvider(
+                FinalResponseWithUsage(
+                    "\"must-not-return\"",
+                    new ProviderUsage
+                    {
+                        InputTokens = 10,
+                        OutputTokens = 2,
+                        CostUsd = "0",
+                        ProviderTotalTokens = 12,
+                        Availability =
+                            UsageAvailabilityStates.CostUnavailable
+                    }));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                ids);
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
+            Assert.Equal(
+                "provider_cost_unavailable",
+                outcome.Run.TerminalReason);
+            Assert.Null(outcome.FinalOutput);
+            Assert.True(outcome.Run.Usage.HasUnaccountedUsage);
+            Assert.Equal(
+                UsageAvailabilityStates.CostUnavailable,
+                outcome.Run.Usage.Availability);
+            Assert.Equal(1, outcome.Run.Usage.ProviderUsageSamples);
+            Assert.Equal(12, outcome.Run.Usage.ProviderTotalTokens);
+
+            var events = await store.ReadRunAsync(run.RunId, default);
+            var usageEvent = Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.BudgetUpdated
+                        && item.StreamAttemptId is not null);
+            var checkpoint = ProtocolJson.DeserializeAgentRun(
+                usageEvent.Payload.GetRawText());
+            Assert.Equal(
+                UsageAvailabilityStates.CostUnavailable,
+                checkpoint.Usage.Availability);
+            Assert.Equal(1, checkpoint.Usage.ProviderUsageSamples);
+            Assert.Equal(12, checkpoint.Usage.ProviderTotalTokens);
+            Assert.True(checkpoint.Usage.HasUnaccountedUsage);
         }
         finally
         {
@@ -2853,10 +4562,12 @@ public sealed class DurableAgentRuntimeTests
             Assert.False(string.IsNullOrWhiteSpace(uncertain.AttemptId));
             Assert.False(string.IsNullOrWhiteSpace(
                 uncertain.StreamAttemptId));
-            Assert.EndsWith(
-                uncertain.StreamAttemptId,
-                uncertain.EventId,
-                StringComparison.Ordinal);
+            Assert.Equal(
+                RuntimeEventIdDerivation.Derive(
+                    run.RunId,
+                    "provider-usage-uncertain:"
+                    + uncertain.StreamAttemptId),
+                uncertain.EventId);
 
             var provider = new NeverInvokedProvider();
             await using var recoveredRuntime = CreateRuntime(
@@ -2893,7 +4604,208 @@ public sealed class DurableAgentRuntimeTests
     }
 
     [Fact]
-    public async Task TerminalRecoveryClosesEveryOpenProviderDispatch()
+    public async Task CancellationRecoveryClosesOpenProviderDispatchesBeforeTerminalTransition()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            const string turnId = "cancel-recovery-turn";
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitTransitionAsync(
+                    run,
+                    RunStates.Running,
+                    RuntimeEventKinds.RunStarted);
+                await journal.CommitRunMutationAsync(
+                    run,
+                    RuntimeEventKinds.ProviderDispatchStarted,
+                    _ => { },
+                    turnId,
+                    "cancel-uncertain-attempt",
+                    eventId: "provider-dispatch:cancel-uncertain-stream",
+                    streamAttemptId: "cancel-uncertain-stream",
+                    providerId: "cancel-provider-uncertain");
+                await journal.CommitRunMutationAsync(
+                    run,
+                    RuntimeEventKinds.ProviderDispatchStarted,
+                    _ => { },
+                    turnId,
+                    "cancel-billed-attempt",
+                    eventId: "provider-dispatch:cancel-billed-stream",
+                    streamAttemptId: "cancel-billed-stream",
+                    providerId: "cancel-provider-billed");
+                await journal.CommitRunMutationAsync(
+                    run,
+                    RuntimeEventKinds.BudgetUpdated,
+                    next =>
+                    {
+                        next.Usage.InputTokens = 7;
+                        next.Usage.OutputTokens = 2;
+                        next.Usage.CostUsd = "0.004";
+                    },
+                    turnId,
+                    "cancel-billed-attempt",
+                    eventId: "provider-usage:cancel-billed-stream",
+                    streamAttemptId: "cancel-billed-stream",
+                    providerId: "cancel-provider-billed");
+            }
+
+            var provider = new NeverInvokedProvider();
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                ids);
+
+            var outcome = await runtime.ResumeAsync(
+                run.RunId,
+                new DurableRunContinuation
+                {
+                    RequestCancellation = true
+                });
+
+            Assert.Equal(RunStates.Cancelled, outcome.Run.State);
+            Assert.True(outcome.Run.Usage.HasUnaccountedUsage);
+            Assert.Equal(
+                1,
+                outcome.Run.Usage.UnaccountedProviderAttempts);
+            Assert.Equal(7, outcome.Run.Usage.InputTokens);
+            Assert.Equal(2, outcome.Run.Usage.OutputTokens);
+            Assert.Equal("0.004", outcome.Run.Usage.CostUsd);
+            Assert.Equal(0, provider.CallCount);
+
+            var events = await store.ReadRunAsync(run.RunId, default);
+            var uncertain = Assert.Single(
+                events,
+                item => item.Kind
+                        == RuntimeEventKinds.ProviderUsageUncertain);
+            Assert.Equal(
+                "terminal_provider_dispatch_unknown",
+                uncertain.ReasonCode);
+            var discarded = Assert.Single(
+                events,
+                item => item.Kind
+                        == RuntimeEventKinds.ProviderResultDiscarded);
+            Assert.Equal(
+                "terminal_provider_result_recovery",
+                discarded.ReasonCode);
+            Assert.True(
+                uncertain.Sequence
+                < events.Single(
+                        item => item.Kind
+                                == RuntimeEventKinds.RunCancelled)
+                    .Sequence);
+            Assert.True(
+                discarded.Sequence
+                < events.Single(
+                        item => item.Kind
+                                == RuntimeEventKinds.RunCancelled)
+                    .Sequence);
+
+            var loaded = await new RunRecovery(
+                    store,
+                    store,
+                    new JournalCoordinator(
+                        store,
+                        store,
+                        clock,
+                        ids))
+                .LoadAsync(run.RunId, default);
+            Assert.NotNull(loaded);
+            Assert.Empty(loaded!.UnsettledProviderDispatches);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MaximumPersistedDurationCanBeResumedOrCancelled(
+        bool requestCancellation)
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var run = Run(clock.UtcNow);
+            run.Usage.DurationMs = long.MaxValue;
+            using (var journal = new JournalCoordinator(
+                       store,
+                       store,
+                       clock,
+                       ids))
+            {
+                await journal.CommitTransitionAsync(
+                    run,
+                    RunStates.Running,
+                    RuntimeEventKinds.RunStarted);
+                if (!requestCancellation)
+                {
+                    await journal.CommitTransitionAsync(
+                        run,
+                        RunStates.Failed,
+                        RuntimeEventKinds.RunFailed,
+                        terminalReason: "persisted-terminal",
+                        completionIntent: CompletionIntents.Failed);
+                }
+            }
+
+            var provider = new NeverInvokedProvider();
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                ids);
+
+            var outcome = await runtime.ResumeAsync(
+                run.RunId,
+                requestCancellation
+                    ? new DurableRunContinuation
+                    {
+                        RequestCancellation = true
+                    }
+                    : null);
+
+            Assert.Equal(
+                requestCancellation
+                    ? RunStates.Cancelled
+                    : RunStates.Failed,
+                outcome.Run.State);
+            Assert.Equal(long.MaxValue, outcome.Run.Usage.DurationMs);
+            Assert.Equal(0, provider.CallCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TerminalRecoveryClosesEveryOpenProviderDispatch(
+        bool requestCancellation)
     {
         var directory = TempDirectory();
         try
@@ -2983,7 +4895,15 @@ public sealed class DurableAgentRuntimeTests
                 clock,
                 ids);
 
-            var recovered = await runtime.ResumeAsync(run.RunId);
+            var continuation = requestCancellation
+                ? new DurableRunContinuation
+                {
+                    RequestCancellation = true
+                }
+                : null;
+            var recovered = await runtime.ResumeAsync(
+                run.RunId,
+                continuation);
 
             Assert.Equal(RunStates.Failed, recovered.Run.State);
             Assert.Equal(
@@ -3039,7 +4959,9 @@ public sealed class DurableAgentRuntimeTests
             Assert.Empty(loaded!.UnsettledProviderDispatches);
 
             var eventCount = events.Count;
-            var resumedAgain = await runtime.ResumeAsync(run.RunId);
+            var resumedAgain = await runtime.ResumeAsync(
+                run.RunId,
+                continuation);
             Assert.Equal(RunStates.Failed, resumedAgain.Run.State);
             Assert.Equal(
                 eventCount,
@@ -3394,6 +5316,296 @@ public sealed class DurableAgentRuntimeTests
     }
 
     [Fact]
+    public async Task ContextCompactionProtectsTheCurrentPlayerInput()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    "call-1",
+                    "read_state",
+                    """{"entityId":"npc-7"}"""),
+                FinalResponse("\"ok\""));
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                new Host(
+                    request => new ValueTask<ActionReceipt>(
+                        Receipt(
+                            request,
+                            ReceiptStatuses.Succeeded,
+                            """{"safe":true}""",
+                            clock.UtcNow))),
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    MaxTranscriptMessages = 32,
+                    MaxPromptUtf8Bytes = 16_384,
+                    ConversationContext = new ConversationContextOptions
+                    {
+                        MaxRequestMessages = 6,
+                        MaxRequestUtf8Bytes = 4_096,
+                        RecentMessagesToKeep = 1,
+                        MaxSummaryUtf8Bytes = 512
+                    }
+                },
+                Tool("read_state"));
+            var playerInput = InitialMessage(
+                "player-command",
+                "move to the north gate",
+                clock.UtcNow);
+            var transcript = new[]
+            {
+                InitialMessage(
+                    "older-player-message",
+                    "older request",
+                    clock.UtcNow),
+                playerInput,
+                new NormalizedMessage
+                {
+                    MessageId = "assistant-progress-1",
+                    Role = NormalizedRoles.Assistant,
+                    CreatedAt = clock.UtcNow,
+                    Parts = new List<NormalizedContentPart>
+                    {
+                        NormalizedContentPart.FromText("checking route")
+                    }
+                },
+                new NormalizedMessage
+                {
+                    MessageId = "assistant-progress-2",
+                    Role = NormalizedRoles.Assistant,
+                    CreatedAt = clock.UtcNow,
+                    Parts = new List<NormalizedContentPart>
+                    {
+                        NormalizedContentPart.FromText("checking hazards")
+                    }
+                }
+            };
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = Run(clock.UtcNow),
+                    InitialTranscript = transcript,
+                    Context = new[]
+                    {
+                        new ContextCandidate(
+                            "current-location",
+                            "world_state",
+                            Json("""{"location":"south gate"}"""),
+                            required: true,
+                            canDefer: false)
+                    }
+                });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(2, provider.Requests.Count);
+            var sent = provider.Requests[0].Messages;
+            Assert.Contains(
+                sent,
+                message => message.MessageId == "player-command");
+            Assert.Contains(
+                sent,
+                message => message.Parts.Any(
+                    part => part.Json?.GetRawText().Contains(
+                        "south gate",
+                        StringComparison.Ordinal) == true));
+            Assert.Contains(
+                provider.Requests[1].Messages,
+                message => message.MessageId == "player-command");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DurableRunRejectsContradictoryGameContextBeforeJournal()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"unexpected\""));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids());
+            var run = Run(clock.UtcNow);
+            run.Extensions[GameContextEnvelope.ExtensionName] =
+                GameContextEnvelope.ToJson(
+                    new GameContextCoordinate(
+                        "other-world",
+                        "prime",
+                        saveRevision: 1));
+
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => runtime.RunAsync(
+                        new DurableRunRequest { Run = run })
+                    .AsTask());
+
+            Assert.Empty(provider.Requests);
+            Assert.Empty(await store.ReadRunAsync(run.RunId, default));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BackgroundWorkloadClassIsJournaledAndTraced()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"ok\""));
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids());
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = run,
+                    WorkloadClass = ProviderWorkloadClasses.Background
+                });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            var events = await store.ReadRunAsync(run.RunId, default);
+            var captured = Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.RunInputCaptured);
+            Assert.Equal(
+                ProviderWorkloadClasses.Background,
+                DurableRunInputJournalCodec
+                    .Decode(captured.Payload)
+                    .WorkloadClass);
+            var snapshot = Assert.Single(
+                events,
+                item => item.Kind == RuntimeEventKinds.TurnSnapshot);
+            Assert.Equal(
+                ProviderWorkloadClasses.Background,
+                snapshot.Payload
+                    .GetProperty("extensions")
+                    .GetProperty("providerWorkloadClass")
+                    .GetString());
+            var dispatch = Assert.Single(
+                events,
+                item => item.Kind
+                        == RuntimeEventKinds.ProviderDispatchStarted);
+            var preparation = dispatch.Extensions[
+                "providerRequestPreparation"];
+            Assert.Equal(
+                preparation.GetProperty("inputDigest").GetString(),
+                preparation.GetProperty("outputDigest").GetString());
+            Assert.Equal(
+                64,
+                preparation.GetProperty("outputDigest")
+                    .GetString()!
+                    .Length);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BackgroundRunsCannotConsumeTheInteractiveProviderSlot()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new WorkloadBlockingProvider();
+            await using var runtime = CreateRuntimeWithOptions(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    MaxConcurrentProviderCalls = 3,
+                    MaxConcurrentBackgroundProviderCalls = 2
+                });
+            var background = Enumerable.Range(0, 3)
+                .Select(
+                    index =>
+                    {
+                        var run = Run(clock.UtcNow);
+                        run.RunId = "background-run-" + index;
+                        run.AgentId = "background-agent-" + index;
+                        return runtime.RunAsync(
+                                new DurableRunRequest
+                                {
+                                    Run = run,
+                                    WorkloadClass =
+                                        ProviderWorkloadClasses.Background
+                                })
+                            .AsTask();
+                    })
+                .ToArray();
+            await provider.TwoEntered.WaitAsync(TestWaitTimeout);
+            await Task.Delay(30);
+            Assert.Equal(2, provider.CallCount);
+
+            var interactiveRun = Run(clock.UtcNow);
+            interactiveRun.RunId = "interactive-run";
+            interactiveRun.AgentId = "interactive-agent";
+            var interactive = runtime.RunAsync(
+                    new DurableRunRequest { Run = interactiveRun })
+                .AsTask();
+            await provider.ThreeEntered.WaitAsync(TestWaitTimeout);
+            Assert.Equal(3, provider.CallCount);
+
+            provider.Release();
+            var outcomes = await Task.WhenAll(
+                    background.Append(interactive))
+                .WaitAsync(TestWaitTimeout);
+            Assert.All(
+                outcomes,
+                outcome => Assert.Equal(
+                    RunStates.Completed,
+                    outcome.Run.State));
+            Assert.Equal(4, provider.CallCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RunEntryDeepSnapshotsMutableRequestGraphBeforeWaiting()
     {
         var directory = TempDirectory();
@@ -3671,6 +5883,353 @@ public sealed class DurableAgentRuntimeTests
             await using var store = new FileSessionStore(path);
             var clock = new Clock();
             var host = new SlowHost();
+            var tool = Tool("write_state");
+            tool.Effect = ToolEffects.WorldCommand;
+            tool.IdempotencyPolicy = ToolIdempotencyPolicies.Required;
+            await using var runtime = CreateRuntime(
+                store,
+                new QueueStreamingProvider(
+                    ToolResponse(
+                        "call-1",
+                        "write_state",
+                        """{"entityId":"npc-7"}""")),
+                host,
+                clock,
+                new Ids(),
+                tool);
+            var run = Run(clock.UtcNow);
+            run.Budget.MaxDurationMs = 2_000;
+
+            var execution = runtime.RunAsync(
+                    new DurableRunRequest { Run = run })
+                .AsTask();
+            await host.Started.WaitAsync(TestWaitTimeout);
+            var outcome = await execution.WaitAsync(TestWaitTimeout);
+
+            Assert.Equal(RunStates.Reconciling, outcome.Run.State);
+            Assert.Equal("max_duration", outcome.Run.TerminalReason);
+            Assert.Single(outcome.Run.PendingOperationIds);
+            var events = await store.ReadRunAsync(run.RunId, default);
+            var receipt = events.Last(
+                item => item.Kind
+                        == RuntimeEventKinds.ActionOutcomeUncertain);
+            Assert.Equal(
+                ReceiptStatuses.Unknown,
+                receipt.Payload.GetProperty("status").GetString());
+            Assert.DoesNotContain(
+                events,
+                item => item.Kind == RuntimeEventKinds.ToolCompleted
+                        || item.Kind == RuntimeEventKinds.ToolFailed);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CancelledToolBatchPreservesReceiptAndUndispatchedEvidence()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            using var cancellation = new CancellationTokenSource();
+            var host = new Host(
+                request =>
+                {
+                    cancellation.Cancel();
+                    return new ValueTask<ActionReceipt>(
+                        Receipt(
+                            request,
+                            ReceiptStatuses.Succeeded,
+                            """{"applied":true}""",
+                            clock.UtcNow));
+                });
+            var tool = Tool("write_state");
+            tool.Effect = ToolEffects.WorldCommand;
+            tool.IdempotencyPolicy = ToolIdempotencyPolicies.Required;
+            await using var runtime = CreateRuntime(
+                store,
+                new QueueStreamingProvider(
+                    ToolResponse(
+                        (
+                            "call-1",
+                            "write_state",
+                            """{"entityId":"npc-1"}"""),
+                        (
+                            "call-2",
+                            "write_state",
+                            """{"entityId":"npc-2"}"""))),
+                host,
+                clock,
+                new Ids(),
+                tool);
+            var run = Run(clock.UtcNow);
+
+            var outcome = await runtime.RunAsync(
+                new DurableRunRequest { Run = run },
+                cancellation.Token);
+
+            Assert.Equal(RunStates.Cancelled, outcome.Run.State);
+            Assert.Empty(outcome.Run.PendingOperationIds);
+            Assert.Equal(1, host.CallCount);
+            var events = await store.ReadRunAsync(run.RunId, default);
+            var receipts = events
+                .Where(
+                    item => item.Kind
+                            == RuntimeEventKinds.ActionReceived)
+                .Select(
+                    item => ProtocolJson.DeserializeActionReceipt(
+                        item.Payload.GetRawText()))
+                .ToArray();
+            Assert.Equal(2, receipts.Length);
+            Assert.Equal(ReceiptStatuses.Succeeded, receipts[0].Status);
+            Assert.Equal(ReceiptStatuses.Failed, receipts[1].Status);
+            Assert.DoesNotContain(
+                events,
+                item => item.Kind
+                        == RuntimeEventKinds.ActionOutcomeUncertain);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SyntheticUncertaintyAcceptsRevisionZeroReconciliation()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var provider = new QueueStreamingProvider(
+                ToolResponse(
+                    "call-1",
+                    "write_state",
+                    """{"entityId":"npc-7"}"""),
+                FinalResponse("\"done\""));
+            var tool = Tool("write_state");
+            tool.Effect = ToolEffects.WorldCommand;
+            tool.IdempotencyPolicy = ToolIdempotencyPolicies.Required;
+            tool.TimeoutMs = 50;
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new SlowHost(),
+                clock,
+                new Ids(),
+                tool);
+            var run = Run(clock.UtcNow);
+
+            var initial = await runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            Assert.Equal(RunStates.Reconciling, initial.Run.State);
+            Assert.Single(initial.Run.PendingOperationIds);
+            var before = await store.ReadRunAsync(run.RunId, default);
+            Assert.Contains(
+                before,
+                item => item.Kind
+                        == RuntimeEventKinds.ActionOutcomeUncertain);
+            Assert.DoesNotContain(
+                before,
+                item => item.Kind == RuntimeEventKinds.ActionReceived);
+
+            var resumed = await runtime.ResumeAsync(
+                run.RunId,
+                reconciler: new RevisionZeroReconciler(clock.UtcNow));
+
+            Assert.Equal(RunStates.Completed, resumed.Run.State);
+            Assert.Empty(resumed.Run.PendingOperationIds);
+            Assert.Equal(2, provider.Requests.Count);
+            var after = await store.ReadRunAsync(run.RunId, default);
+            var receiptEvent = Assert.Single(
+                after,
+                item => item.Kind == RuntimeEventKinds.ActionReceived);
+            var receipt = ProtocolJson.DeserializeActionReceipt(
+                receiptEvent.Payload.GetRawText());
+            Assert.Equal(0, receipt.Revision);
+            Assert.Equal(ReceiptStatuses.Succeeded, receipt.Status);
+            Assert.Single(
+                after,
+                item => item.Kind == RuntimeEventKinds.ToolCompleted);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExternalCancellationDuringReconciliationPersistsIntent()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var tool = Tool("read_state");
+            DurableRunOutcome initial;
+            await using (var firstRuntime = CreateRuntime(
+                             store,
+                             new QueueStreamingProvider(
+                                 ToolResponse(
+                                     "call-1",
+                                     "read_state",
+                                     """{"entityId":"npc-7"}""")),
+                             new Host(
+                                 request => new ValueTask<ActionReceipt>(
+                                     Receipt(
+                                         request,
+                                         ReceiptStatuses.Unknown,
+                                         result: null,
+                                         clock.UtcNow))),
+                             clock,
+                             ids,
+                             tool))
+            {
+                initial = await firstRuntime.RunAsync(
+                    new DurableRunRequest { Run = Run(clock.UtcNow) });
+            }
+
+            Assert.Equal(RunStates.Reconciling, initial.Run.State);
+            var provider = new QueueStreamingProvider(
+                FinalResponse("\"must-not-run\""));
+            var reconciler = new BlockingSuccessfulReconciler(clock.UtcNow);
+            await using var runtime = CreateRuntime(
+                store,
+                provider,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "A pending operation must not be redispatched.")),
+                clock,
+                ids,
+                tool);
+            using var cancellation = new CancellationTokenSource();
+            var cancelling = runtime.ResumeAsync(
+                    initial.Run.RunId,
+                    reconciler: reconciler,
+                    cancellationToken: cancellation.Token)
+                .AsTask();
+            await reconciler.Started.WaitAsync(TestWaitTimeout);
+            cancellation.Cancel();
+
+            var fenced = await cancelling.WaitAsync(TestWaitTimeout);
+
+            Assert.Equal(RunStates.Reconciling, fenced.Run.State);
+            Assert.Equal(
+                CompletionIntents.Cancelled,
+                fenced.Run.CompletionIntent);
+            Assert.Single(fenced.Run.PendingOperationIds);
+            Assert.Empty(provider.Requests);
+
+            reconciler.Release();
+            await reconciler.Completed.WaitAsync(TestWaitTimeout);
+            var cancelled = await runtime.ResumeAsync(
+                initial.Run.RunId,
+                reconciler: new Reconciler(clock.UtcNow));
+
+            Assert.Equal(RunStates.Cancelled, cancelled.Run.State);
+            Assert.Equal(
+                CompletionIntents.Cancelled,
+                cancelled.Run.CompletionIntent);
+            Assert.Empty(cancelled.Run.PendingOperationIds);
+            Assert.Empty(provider.Requests);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DurationDeadlineReconciliationSurvivesRepeatedReopenAndResume()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "runtime.journal");
+            var clock = new Clock();
+            string runId;
+            var tool = Tool("write_state");
+            tool.Effect = ToolEffects.WorldCommand;
+            tool.IdempotencyPolicy = ToolIdempotencyPolicies.Required;
+            await using (var store = new FileSessionStore(path))
+            {
+                var host = new SlowHost();
+                await using var runtime = CreateRuntime(
+                    store,
+                    new QueueStreamingProvider(
+                        ToolResponse(
+                            "call-1",
+                            "write_state",
+                            """{"entityId":"npc-7"}""")),
+                    host,
+                    clock,
+                    new Ids(),
+                    tool);
+                var run = Run(clock.UtcNow);
+                run.Budget.MaxDurationMs = 2_000;
+                runId = run.RunId;
+
+                var execution = runtime.RunAsync(
+                        new DurableRunRequest { Run = run })
+                    .AsTask();
+                await host.Started.WaitAsync(TestWaitTimeout);
+                var outcome = await execution.WaitAsync(
+                    TestWaitTimeout);
+
+                Assert.Equal(RunStates.Reconciling, outcome.Run.State);
+                Assert.Equal("max_duration", outcome.Run.TerminalReason);
+                Assert.Single(outcome.Run.PendingOperationIds);
+            }
+
+            for (var reopen = 0; reopen < 2; reopen++)
+            {
+                await using var store = new FileSessionStore(path);
+                var provider = new QueueStreamingProvider();
+                await using var runtime = CreateRuntime(
+                    store,
+                    provider,
+                    new Host(
+                        _ => throw new InvalidOperationException(
+                            "A pending operation must not be redispatched.")),
+                    clock,
+                    new Ids(),
+                    tool);
+
+                var outcome = await runtime.ResumeAsync(runId);
+
+                Assert.Equal(RunStates.Reconciling, outcome.Run.State);
+                Assert.Equal("max_duration", outcome.Run.TerminalReason);
+                Assert.Single(outcome.Run.PendingOperationIds);
+                Assert.Empty(provider.Requests);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DurationDeadlineAfterDispatchedPureReadIsBudgetExhausted()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "runtime.journal");
+            await using var store = new FileSessionStore(path);
+            var clock = new Clock();
+            var host = new SlowHost();
             await using var runtime = CreateRuntime(
                 store,
                 new QueueStreamingProvider(
@@ -3683,27 +6242,26 @@ public sealed class DurableAgentRuntimeTests
                 new Ids(),
                 Tool("read_state"));
             var run = Run(clock.UtcNow);
-            run.Budget.MaxDurationMs = 1_000;
+            run.Budget.MaxDurationMs = 2_000;
 
             var execution = runtime.RunAsync(
                     new DurableRunRequest { Run = run })
                 .AsTask();
-            await host.Started.WaitAsync(TimeSpan.FromSeconds(2));
-            var outcome = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+            await host.Started.WaitAsync(TestWaitTimeout);
+            var outcome = await execution.WaitAsync(TestWaitTimeout);
 
-            Assert.Equal(RunStates.Reconciling, outcome.Run.State);
+            Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
             Assert.Equal("max_duration", outcome.Run.TerminalReason);
-            Assert.Single(outcome.Run.PendingOperationIds);
+            Assert.Empty(outcome.Run.PendingOperationIds);
             var events = await store.ReadRunAsync(run.RunId, default);
             var receipt = events.Last(
                 item => item.Kind == RuntimeEventKinds.ActionReceived);
             Assert.Equal(
-                ReceiptStatuses.Unknown,
+                ReceiptStatuses.Failed,
                 receipt.Payload.GetProperty("status").GetString());
             Assert.DoesNotContain(
                 events,
-                item => item.Kind == RuntimeEventKinds.ToolCompleted
-                        || item.Kind == RuntimeEventKinds.ToolFailed);
+                item => item.Kind == RuntimeEventKinds.ToolCompleted);
         }
         finally
         {
@@ -3799,6 +6357,10 @@ public sealed class DurableAgentRuntimeTests
                 TestWaitTimeout);
             await runtime.StopAsync().AsTask().WaitAsync(
                 TestWaitTimeout);
+            var actualDrain = runtime.WaitForShutdownDrainAsync().AsTask();
+            Assert.False(actualDrain.IsCompleted);
+            delay.Release.TrySetResult();
+            await actualDrain.WaitAsync(TestWaitTimeout);
         }
         finally
         {
@@ -3840,6 +6402,10 @@ public sealed class DurableAgentRuntimeTests
                 TestWaitTimeout);
             await runtime.StopAsync().AsTask().WaitAsync(
                 TestWaitTimeout);
+            var actualDrain = runtime.WaitForShutdownDrainAsync().AsTask();
+            Assert.False(actualDrain.IsCompleted);
+            provider.Release.TrySetResult();
+            await actualDrain.WaitAsync(TestWaitTimeout);
         }
         finally
         {
@@ -3880,10 +6446,83 @@ public sealed class DurableAgentRuntimeTests
             Assert.Equal(RunStates.Cancelled, outcome.Run.State);
             await provider.CallbackInvoked.Task.WaitAsync(
                 TestWaitTimeout);
+            var actualDrain = runtime.WaitForShutdownDrainAsync().AsTask();
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            Assert.False(actualDrain.IsCompleted);
+
+            provider.Release.TrySetResult();
+            await actualDrain.WaitAsync(TestWaitTimeout);
+            Assert.True(runtime.ShutdownResourceCleanupCompleted);
         }
         finally
         {
             provider.Release.TrySetResult();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DisposeWaitsForActiveLeaseBeyondBoundedStop()
+    {
+        var directory = TempDirectory();
+        var policy = new BlockingShutdownMemoryPolicy();
+        var memory = new RuntimeMemoryLifecycle(
+            Array.Empty<IMemoryProvider>());
+        DurableAgentRuntime? runtime = null;
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            runtime = CreateRuntimeCoreWithSkills(
+                store,
+                store,
+                new QueueStreamingProvider(FinalResponse("\"done\"")),
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1,
+                    ShutdownDrainTimeout =
+                        TimeSpan.FromMilliseconds(20)
+                },
+                maxProviderAttempts: 1,
+                new SystemRuntimeDelay(),
+                Array.Empty<SkillManifest>(),
+                Array.Empty<ToolDescriptor>(),
+                memoryLifecycle: memory,
+                memoryPolicy: policy);
+            var running = runtime.RunAsync(
+                    new DurableRunRequest { Run = Run(clock.UtcNow) })
+                .AsTask();
+            await policy.SelectionEntered.Task.WaitAsync(TestWaitTimeout);
+
+            await runtime.StopAsync().AsTask().WaitAsync(TestWaitTimeout);
+
+            Assert.False(runtime.ActiveRunsDrainedOnStop);
+            var dispose = runtime.DisposeAsync().AsTask();
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            Assert.False(dispose.IsCompleted);
+            Assert.False(runtime.ShutdownResourceCleanupCompleted);
+
+            policy.Release.TrySetResult();
+            _ = await running.WaitAsync(TestWaitTimeout);
+            await dispose.WaitAsync(TestWaitTimeout);
+            Assert.True(runtime.ShutdownResourceCleanupCompleted);
+        }
+        finally
+        {
+            policy.Release.TrySetResult();
+            if (runtime is not null)
+            {
+                await runtime.DisposeAsync();
+            }
+
+            await memory.WaitForShutdownDrainAsync();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -3965,6 +6604,11 @@ public sealed class DurableAgentRuntimeTests
             await first.StopAsync().AsTask().WaitAsync(
                 TestWaitTimeout);
             await callbackInvoked.Task.WaitAsync(TestWaitTimeout);
+            var firstActualDrain =
+                first.WaitForShutdownDrainAsync().AsTask();
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            Assert.False(firstActualDrain.IsCompleted);
+            Assert.False(first.ShutdownResourceCleanupCompleted);
             Assert.Equal(1, dataPlaneDispatcher.ActiveReservations);
             Assert.Equal(1, dispatcher.ActiveReservations);
 
@@ -3973,6 +6617,8 @@ public sealed class DurableAgentRuntimeTests
 
             release.TrySetResult();
             registration.Dispose();
+            await firstActualDrain.WaitAsync(TestWaitTimeout);
+            Assert.True(first.ShutdownResourceCleanupCompleted);
             Assert.True(
                 await WaitUntilAsync(
                     () => dispatcher.ActiveReservations == 0));
@@ -4004,6 +6650,168 @@ public sealed class DurableAgentRuntimeTests
                 await second.StopAsync();
             }
 
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConversationCleanupRetriesAfterRuntimeShutdownCapacityReturns()
+    {
+        var directory = TempDirectory();
+        var callbackInvoked = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationTokenRegistration registration = default;
+        BoundedCancellationDispatcher? dispatcher = null;
+        DurableAgentRuntime? runtime = null;
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            dispatcher = new BoundedCancellationDispatcher(capacity: 1);
+            runtime = CreateRuntimeCoreWithSkills(
+                store,
+                store,
+                new QueueStreamingProvider(FinalResponse("unused")),
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                clock,
+                new Ids(),
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1,
+                    ConversationContext = new ConversationContextOptions
+                    {
+                        DetachedShutdownTimeout =
+                            TimeSpan.FromMilliseconds(20)
+                    }
+                },
+                maxProviderAttempts: 1,
+                new SystemRuntimeDelay(),
+                Array.Empty<SkillManifest>(),
+                Array.Empty<ToolDescriptor>(),
+                cancellationDispatcher:
+                    BoundedCancellationDispatcher.Shared,
+                shutdownCancellationDispatcher: dispatcher);
+            var shutdownSource = Assert.IsType<CancellationTokenSource>(
+                typeof(DurableAgentRuntime)
+                    .GetField(
+                        "_shutdownCancellation",
+                        BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(runtime));
+            registration = shutdownSource.Token.Register(
+                () =>
+                {
+                    callbackInvoked.TrySetResult();
+                    release.Task.GetAwaiter().GetResult();
+                });
+
+            await runtime.StopAsync().AsTask().WaitAsync(TestWaitTimeout);
+            await callbackInvoked.Task.WaitAsync(TestWaitTimeout);
+
+            Assert.False(
+                runtime.DetachedConversationCompactionsDrainedOnStop);
+            Assert.False(runtime.ConversationContextCleanupCompleted);
+            Assert.Equal(1, dispatcher.ActiveReservations);
+
+            release.TrySetResult();
+            registration.Dispose();
+            Assert.True(
+                await WaitUntilAsync(
+                    () => runtime.ConversationContextCleanupCompleted
+                          && dispatcher.ActiveReservations == 0));
+        }
+        finally
+        {
+            release.TrySetResult();
+            registration.Dispose();
+            if (runtime is not null)
+            {
+                await runtime.StopAsync();
+            }
+
+            if (dispatcher is not null)
+            {
+                _ = await WaitUntilAsync(
+                    () => dispatcher.ActiveReservations == 0);
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DetachedPreparationDoesNotStarveGlobalProviderAdmission()
+    {
+        var directory = TempDirectory();
+        var first = new BlockingRequestPreparationProvider("blocking-first");
+        var second = new BlockingRequestPreparationProvider("blocking-second");
+        try
+        {
+            await using var store = new FileSessionStore(
+                Path.Combine(directory, "runtime.journal"));
+            var clock = new Clock();
+            var ids = new Ids();
+            var journal = new JournalCoordinator(store, store, clock, ids);
+            var runner = new ProviderAttemptRunner(
+                new IStreamingModelProvider[] { first, second },
+                new ProviderRetryPolicy
+                {
+                    MaxAttemptsPerProvider = 1,
+                    RequestPreparationTimeout =
+                        TimeSpan.FromMilliseconds(25),
+                    IdleTimeout = TimeSpan.FromSeconds(1),
+                    TotalTimeout = TimeSpan.FromSeconds(2)
+                },
+                new SystemRuntimeDelay(),
+                ids);
+            await using var runtime = new DurableAgentRuntime(
+                runner,
+                new Host(
+                    _ => throw new InvalidOperationException(
+                        "No tool expected.")),
+                journal,
+                new RunRecovery(store, store, journal),
+                new ToolCatalogRegistry(),
+                new SkillCatalogRegistry(),
+                new ContextCompiler(),
+                new ToolBatchPlanner(),
+                new ToolBatchScheduler(),
+                clock,
+                ids,
+                new DurableAgentRuntimeOptions
+                {
+                    ModelId = "test-model",
+                    MaxConcurrentProviderCalls = 1
+                });
+
+            var failed = runtime.RunAsync(
+                    new DurableRunRequest { Run = Run(clock.UtcNow) })
+                .AsTask();
+            await first.Entered.WaitAsync(TestWaitTimeout);
+            await second.Entered.WaitAsync(TestWaitTimeout);
+            var failedOutcome = await failed.WaitAsync(TestWaitTimeout);
+            Assert.Equal(RunStates.Failed, failedOutcome.Run.State);
+
+            second.Release();
+            await second.Settled.WaitAsync(TestWaitTimeout);
+            var next = runtime.RunAsync(
+                    new DurableRunRequest { Run = Run(clock.UtcNow) })
+                .AsTask();
+            var completed = await next.WaitAsync(TestWaitTimeout);
+            Assert.Equal(RunStates.Completed, completed.Run.State);
+
+            first.Release();
+            await first.Settled.WaitAsync(TestWaitTimeout);
+        }
+        finally
+        {
+            first.Release();
+            second.Release();
             Directory.Delete(directory, recursive: true);
         }
     }
@@ -4051,7 +6859,7 @@ public sealed class DurableAgentRuntimeTests
                     store,
                     clock,
                     ids)
-                .AppendDurableAsync(
+                .AppendBuiltInDurableAsync(
                     first.Run,
                     RuntimeEventKinds.BudgetUpdated,
                     ProtocolJson.ToElement(nearDeadline),
@@ -4492,7 +7300,11 @@ public sealed class DurableAgentRuntimeTests
         IReadOnlyList<SkillManifest> skills,
         IReadOnlyList<ToolDescriptor> tools,
         BoundedCancellationDispatcher? cancellationDispatcher = null,
-        BoundedCancellationDispatcher? shutdownCancellationDispatcher = null)
+        BoundedCancellationDispatcher? shutdownCancellationDispatcher = null,
+        ToolBatchPlanner? toolPlanner = null,
+        ToolBatchScheduler? toolScheduler = null,
+        RuntimeMemoryLifecycle? memoryLifecycle = null,
+        IRuntimeMemoryPolicy? memoryPolicy = null)
     {
         var journal = new JournalCoordinator(store, operations, clock, ids);
         var toolRegistry = new ToolCatalogRegistry();
@@ -4517,8 +7329,8 @@ public sealed class DurableAgentRuntimeTests
             toolRegistry,
             skillRegistry,
             new ContextCompiler(),
-            new ToolBatchPlanner(),
-            new ToolBatchScheduler(),
+            toolPlanner ?? new ToolBatchPlanner(),
+            toolScheduler ?? new ToolBatchScheduler(),
             clock,
             ids,
             options,
@@ -4530,10 +7342,15 @@ public sealed class DurableAgentRuntimeTests
             cancellationDispatcher
             ?? BoundedCancellationDispatcher.Shared,
             shutdownCancellationDispatcher
-            ?? BoundedCancellationDispatcher.LifecycleShared);
+            ?? BoundedCancellationDispatcher.LifecycleShared,
+            conversationCompactor: null,
+            memoryLifecycle: memoryLifecycle,
+            memoryPolicy: memoryPolicy);
     }
 
-    private static AgentRun Run(DateTimeOffset now)
+    private static AgentRun Run(
+        DateTimeOffset now,
+        int maxTokens = 8_000)
     {
         return new AgentRun
         {
@@ -4546,7 +7363,7 @@ public sealed class DurableAgentRuntimeTests
             {
                 MaxTurns = 8,
                 MaxDurationMs = 30_000,
-                MaxTokens = 8_000,
+                MaxTokens = maxTokens,
                 MaxActions = 8,
                 MaxCostUsd = "1"
             },
@@ -4679,7 +7496,7 @@ public sealed class DurableAgentRuntimeTests
             ObservationId = Guid.NewGuid().ToString("N"),
             WorldId = worldId,
             Source = "test",
-            Kind = "steer",
+            Kind = ObservationKinds.Event,
             Payload = Json(json),
             ObservedAt = now,
             Priority = 100
@@ -4725,6 +7542,64 @@ public sealed class DurableAgentRuntimeTests
     private static Func<StreamingModelRequest, IEnumerable<ModelStreamEvent>>
         ToolResponse(string callId, string name, string arguments)
     {
+        return ToolResponse((callId, name, arguments));
+    }
+
+    private static Func<StreamingModelRequest, IEnumerable<ModelStreamEvent>>
+        ToolResponse(
+            params (string CallId, string Name, string Arguments)[] calls)
+    {
+        return request =>
+        {
+            var events = new List<ModelStreamEvent>(
+                checked(calls.Length + 2));
+            var ordinal = 0L;
+            foreach (var call in calls)
+            {
+                events.Add(
+                    new ModelStreamEvent
+                    {
+                        StreamAttemptId = request.StreamAttemptId,
+                        Ordinal = ordinal++,
+                        Kind = ModelStreamEventKinds.ToolCallDelta,
+                        ToolCallId = call.CallId,
+                        ToolNameDelta = call.Name,
+                        ArgumentsJsonDelta = call.Arguments
+                    });
+            }
+
+            events.Add(
+                new ModelStreamEvent
+                {
+                    StreamAttemptId = request.StreamAttemptId,
+                    Ordinal = ordinal++,
+                    Kind = ModelStreamEventKinds.Usage,
+                    Usage = new ProviderUsage
+                    {
+                        InputTokens = 0,
+                        OutputTokens = 0,
+                        CostUsd = "0"
+                    }
+                });
+            events.Add(
+                new ModelStreamEvent
+                {
+                    StreamAttemptId = request.StreamAttemptId,
+                    Ordinal = ordinal,
+                    Kind = ModelStreamEventKinds.Completed,
+                    FinishReason = "tool_calls"
+                });
+            return events;
+        };
+    }
+
+    private static Func<StreamingModelRequest, IEnumerable<ModelStreamEvent>>
+        ToolResponseWithContinuation(
+            string callId,
+            string name,
+            string arguments,
+            ProviderOpaqueContinuationUpdate? update)
+    {
         return request => new[]
         {
             new ModelStreamEvent
@@ -4743,8 +7618,8 @@ public sealed class DurableAgentRuntimeTests
                 Kind = ModelStreamEventKinds.Usage,
                 Usage = new ProviderUsage
                 {
-                    InputTokens = 0,
-                    OutputTokens = 0,
+                    InputTokens = 1,
+                    OutputTokens = 1,
                     CostUsd = "0"
                 }
             },
@@ -4753,7 +7628,8 @@ public sealed class DurableAgentRuntimeTests
                 StreamAttemptId = request.StreamAttemptId,
                 Ordinal = 2,
                 Kind = ModelStreamEventKinds.Completed,
-                FinishReason = "tool_calls"
+                FinishReason = "tool_calls",
+                OpaqueContinuationUpdate = update
             }
         };
     }
@@ -4795,6 +7671,37 @@ public sealed class DurableAgentRuntimeTests
                     OutputTokens = outputTokens,
                     CostUsd = costUsd
                 }
+            },
+            new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 2,
+                Kind = ModelStreamEventKinds.Completed,
+                FinishReason = "stop"
+            }
+        };
+    }
+
+    private static Func<StreamingModelRequest, IEnumerable<ModelStreamEvent>>
+        FinalResponseWithUsage(
+            string text,
+            ProviderUsage usage)
+    {
+        return request => new[]
+        {
+            new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 0,
+                Kind = ModelStreamEventKinds.TextDelta,
+                TextDelta = text
+            },
+            new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 1,
+                Kind = ModelStreamEventKinds.Usage,
+                Usage = usage
             },
             new ModelStreamEvent
             {
@@ -4880,6 +7787,211 @@ public sealed class DurableAgentRuntimeTests
                 yield return item;
                 await Task.Yield();
             }
+        }
+    }
+
+    private sealed class TypedContinuationProvider :
+        IStreamingModelProvider,
+        IProviderRouteMetadataSource
+    {
+        public const string StateVersion = "test.continuation-state.v1";
+
+        private readonly Queue<
+            Func<StreamingModelRequest, IEnumerable<ModelStreamEvent>>>
+            _steps;
+
+        public TypedContinuationProvider(
+            params Func<
+                StreamingModelRequest,
+                IEnumerable<ModelStreamEvent>>[] steps)
+        {
+            _steps = new Queue<
+                Func<
+                    StreamingModelRequest,
+                    IEnumerable<ModelStreamEvent>>>(steps);
+            RouteMetadata = new ProviderRouteMetadata(
+                "test-continuation-model",
+                new ProviderDialectContract(
+                    "test.typed-stream.v1",
+                    ProviderRequestFamily.Custom,
+                    "test.request.v1",
+                    ProviderStreamFraming.ServerSentEvents,
+                    "test.stream-framing.v1",
+                    "test.tool-calls.v1",
+                    "test.usage.v1",
+                    "test.reasoning.v1",
+                    "application/json",
+                    StateVersion));
+        }
+
+        public string ProviderId => "test-continuation-provider";
+
+        public ProviderRouteMetadata RouteMetadata { get; }
+
+        public ProviderCapabilities Capabilities { get; } = new()
+        {
+            Streaming = true,
+            ToolCalling = true,
+            JsonOutput = true,
+            MaxContextTokens = 100_000
+        };
+
+        public List<StreamingModelRequest> Requests { get; } = new();
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(request);
+            if (_steps.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "No scripted response remains.");
+            }
+
+            foreach (var item in _steps.Dequeue()(request))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return item;
+                await Task.Yield();
+            }
+        }
+    }
+
+    private sealed class BlockingRequestPreparationProvider :
+        IStreamingModelProvider,
+        IProviderRouteMetadataSource,
+        IProviderRequestAdapter
+    {
+        private readonly TaskCompletionSource _entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _settled =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public BlockingRequestPreparationProvider(string providerId)
+        {
+            ProviderId = providerId;
+            RouteMetadata = new ProviderRouteMetadata(
+                providerId + "-model",
+                "test.streaming.v1");
+        }
+
+        public string ProviderId { get; }
+
+        public ProviderRouteMetadata RouteMetadata { get; }
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public Task Entered => _entered.Task;
+
+        public Task Settled => _settled.Task;
+
+        public ValueTask<ProviderPreparedRequest> PrepareRequestAsync(
+            ProviderRequestPreparationContext context,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            _entered.TrySetResult();
+            _release.Task.GetAwaiter().GetResult();
+            _settled.TrySetResult();
+            return new ProviderRequestSanitizer()
+                .PrepareRequestAsync(context, CancellationToken.None);
+        }
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var item in FinalResponse("\"ok\"")(request))
+            {
+                yield return item;
+                await Task.Yield();
+            }
+        }
+
+        public void Release()
+        {
+            _release.TrySetResult();
+        }
+    }
+
+    private sealed class WorkloadBlockingProvider : IStreamingModelProvider
+    {
+        private readonly TaskCompletionSource<bool> _twoEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _threeEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _calls;
+
+        public string ProviderId => "workload-blocking";
+
+        public ProviderCapabilities Capabilities { get; } = new()
+        {
+            Streaming = true,
+            ToolCalling = true,
+            JsonOutput = true,
+            MaxContextTokens = 100_000
+        };
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public Task TwoEntered => _twoEntered.Task;
+
+        public Task ThreeEntered => _threeEntered.Task;
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var calls = Interlocked.Increment(ref _calls);
+            if (calls >= 2)
+            {
+                _twoEntered.TrySetResult(true);
+            }
+
+            if (calls >= 3)
+            {
+                _threeEntered.TrySetResult(true);
+            }
+
+            await _release.Task.WaitAsync(cancellationToken);
+            yield return new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 0,
+                Kind = ModelStreamEventKinds.TextDelta,
+                TextDelta = "\"ok\""
+            };
+            yield return new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 1,
+                Kind = ModelStreamEventKinds.Usage,
+                Usage = new ProviderUsage
+                {
+                    InputTokens = 1,
+                    OutputTokens = 1,
+                    CostUsd = "0"
+                }
+            };
+            yield return new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 2,
+                Kind = ModelStreamEventKinds.Completed,
+                FinishReason = "stop"
+            };
+        }
+
+        public void Release()
+        {
+            _release.TrySetResult(true);
         }
     }
 
@@ -5329,6 +8441,36 @@ public sealed class DurableAgentRuntimeTests
         }
     }
 
+    private sealed class BlockingShutdownMemoryPolicy :
+        IRuntimeMemoryPolicy
+    {
+        public string PolicyId => "blocking-shutdown-policy";
+
+        public string Version => "1.0.0";
+
+        public TaskCompletionSource SelectionEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public RuntimeMemoryRecallPlan? PlanRecall(
+            RuntimeMemoryRecallContext context)
+        {
+            _ = context;
+            return null;
+        }
+
+        public IReadOnlyList<MemoryMutation> SelectCommittedMutations(
+            RuntimeMemoryCommitContext context)
+        {
+            _ = context;
+            SelectionEntered.TrySetResult();
+            Release.Task.GetAwaiter().GetResult();
+            return Array.Empty<MemoryMutation>();
+        }
+    }
+
     private sealed class BlockingCancellationProvider :
         IStreamingModelProvider
     {
@@ -5573,13 +8715,17 @@ public sealed class DurableAgentRuntimeTests
             JsonOutput = true
         };
 
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
             StreamingModelRequest request,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             _ = request;
             _ = cancellationToken;
-            await Task.Delay(Timeout.InfiniteTimeSpan, CancellationToken.None);
+            await Release.Task;
+            cancellationToken.ThrowIfCancellationRequested();
             yield break;
         }
     }
@@ -6021,6 +9167,45 @@ public sealed class DurableAgentRuntimeTests
                     expectedRunRevision,
                     cancellationToken)
                 .ConfigureAwait(false);
+        }
+    }
+
+    private sealed class MutateCapabilitiesAfterTurnSnapshotStore :
+        DelegatingSessionStore
+    {
+        private readonly ProviderCapabilities _capabilities;
+        private int _capabilitiesMutated;
+
+        public MutateCapabilitiesAfterTurnSnapshotStore(
+            FileSessionStore inner,
+            ProviderCapabilities capabilities)
+            : base(inner)
+        {
+            _capabilities = capabilities;
+        }
+
+        public bool CapabilitiesMutated =>
+            Volatile.Read(ref _capabilitiesMutated) != 0;
+
+        public override async ValueTask<
+            IReadOnlyList<JournalAppendResult>> AppendAtomicBatchAsync(
+            IReadOnlyList<RuntimeEvent> runtimeEvents,
+            long? expectedRunRevision = null,
+            CancellationToken cancellationToken = default)
+        {
+            var result = await base.AppendAtomicBatchAsync(
+                    runtimeEvents,
+                    expectedRunRevision,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (runtimeEvents.Any(
+                    item => item.Kind == RuntimeEventKinds.TurnSnapshot))
+            {
+                _capabilities.ToolCalling = false;
+                Volatile.Write(ref _capabilitiesMutated, 1);
+            }
+
+            return result;
         }
     }
 
@@ -6478,6 +9663,78 @@ public sealed class DurableAgentRuntimeTests
                 _now);
             receipt.Revision = 1;
             return new ValueTask<ActionReceipt>(receipt);
+        }
+    }
+
+    private sealed class RevisionZeroReconciler : IGameOperationReconciler
+    {
+        private readonly DateTimeOffset _now;
+
+        public RevisionZeroReconciler(DateTimeOffset now)
+        {
+            _now = now;
+        }
+
+        public ValueTask<ActionReceipt> QueryOperationAsync(
+            ActionRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<ActionReceipt>(
+                Receipt(
+                    request,
+                    ReceiptStatuses.Succeeded,
+                    """{"reconciled":true}""",
+                    _now));
+        }
+    }
+
+    private sealed class BlockingSuccessfulReconciler :
+        IGameOperationReconciler
+    {
+        private readonly DateTimeOffset _now;
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _completed =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public BlockingSuccessfulReconciler(DateTimeOffset now)
+        {
+            _now = now;
+        }
+
+        public Task Started => _started.Task;
+
+        public Task Completed => _completed.Task;
+
+        public void Release()
+        {
+            _release.TrySetResult();
+        }
+
+        public async ValueTask<ActionReceipt> QueryOperationAsync(
+            ActionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            _started.TrySetResult();
+            try
+            {
+                await _release.Task.ConfigureAwait(false);
+                var receipt = Receipt(
+                    request,
+                    ReceiptStatuses.Succeeded,
+                    """{"reconciled":true}""",
+                    _now);
+                receipt.Revision = 1;
+                return receipt;
+            }
+            finally
+            {
+                _completed.TrySetResult();
+            }
         }
     }
 

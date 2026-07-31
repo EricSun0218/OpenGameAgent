@@ -57,16 +57,9 @@ jobs:
             -Revision $revision
 
   dotnet:
-    name: .NET (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Windows .NET
+    runs-on: windows-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
     steps:
       - name: Check out
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -79,13 +72,46 @@ jobs:
       - name: Restore
         run: dotnet restore GameAgentRuntime.sln
       - name: Build
-        run: dotnet build GameAgentRuntime.sln -c Release --no-restore
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
       - name: Test
-        run: dotnet test GameAgentRuntime.sln -c Release --no-build
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
+      - name: Runtime performance smoke
+        run: >-
+          dotnet run
+          --project tests/GameAgent.PerformanceSmoke/GameAgent.PerformanceSmoke.csproj
+          -c Release --no-build
+
+  linux-portability:
+    name: Linux runtime portability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore portable runtime
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build portable runtime
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
+      - name: Test portable runtime
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
 
   quality:
     name: Quality and packages
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 30
     needs: privacy-scanner
     steps:
@@ -186,7 +212,7 @@ jobs:
 
   godot:
     name: Godot .NET package
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 45
     needs: privacy-scanner
     env:
@@ -201,30 +227,13 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Install Godot .NET
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          asset="Godot_v${GODOT_VERSION}-stable_mono_linux_x86_64.zip"
-          archive="$RUNNER_TEMP/$asset"
-          pinned_checksum="$GITHUB_WORKSPACE/engines/godot/checksums/${asset}.sha512"
-          install_root="$RUNNER_TEMP/godot"
-          test -f "$pinned_checksum"
-          curl --fail --location --retry 3 \
-            --output "$archive" \
-            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/$asset"
-          (
-            cd "$RUNNER_TEMP"
-            sha512sum --check "$pinned_checksum"
-          )
-          mkdir -p "$install_root"
-          unzip -q "$archive" -d "$install_root"
-          godot_bin="$(
-            find "$install_root" -maxdepth 2 -type f \
-              -name 'Godot_v*-stable_mono_linux.x86_64' -print -quit
-          )"
-          test -n "$godot_bin"
-          chmod +x "$godot_bin"
-          echo "GODOT_BIN=$godot_bin" >> "$GITHUB_ENV"
+          $godot = ./engines/godot/tools/Install-PinnedGodot.ps1 `
+            -Version $env:GODOT_VERSION `
+            -InstallPath (Join-Path $env:RUNNER_TEMP 'godot')
+          "GODOT_BIN=$godot" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Test addon and sample
         shell: pwsh
         run: ./engines/godot/tests/run-godot-tests.ps1 -Godot $env:GODOT_BIN
@@ -235,8 +244,11 @@ jobs:
           -Version $env:RELEASE_VERSION
       - name: Test isolated package
         shell: pwsh
-        run: >-
-          ./engines/godot/tests/verify-packaged-addon.ps1
-          -Archive
-          ./engines/godot/artifacts/game-agent-runtime-godot-$env:RELEASE_VERSION.zip
-          -Godot $env:GODOT_BIN
+        run: |
+          $archive = "./engines/godot/artifacts/game-agent-runtime-godot-$env:RELEASE_VERSION.zip"
+          ./engines/godot/tests/verify-packaged-addon.ps1 `
+            -Archive $archive `
+            -Godot $env:GODOT_BIN `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./engines/godot/tests/Test-PackagedAddonArtifactSelfTest.ps1 `
+            -Archive $archive

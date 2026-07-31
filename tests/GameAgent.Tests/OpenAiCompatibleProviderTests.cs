@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using GameAgent.Core;
@@ -21,6 +22,368 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.Equal(
             "openai.chat-completions.sse.v1",
             source.RouteMetadata.TransportDialect);
+        Assert.Equal(
+            "openai-compatible.route-policy.v3",
+            source.RouteMetadata.RoutePolicyVersion);
+        Assert.Equal(
+            ProviderRequestFamily.ChatCompletions,
+            source.RouteMetadata.DialectContract.RequestFamily);
+        Assert.True(source.RouteMetadata.HasBoundDialectSemantics);
+        Assert.Equal(
+            ProviderStreamFraming.ServerSentEvents,
+            source.RouteMetadata.DialectContract.StreamFraming);
+        Assert.False(
+            source.RouteMetadata.DialectContract
+                .SupportsOpaqueContinuationState);
+        Assert.Equal(
+            "application/json; charset=utf-8",
+            source.RouteMetadata.DialectContract.RequestContentType);
+        Assert.True(
+            CanonicalJsonDigest.IsSha256(
+                source.RouteMetadata.DialectContract.SemanticDigest));
+        Assert.True(
+            CanonicalJsonDigest.IsSha256(
+                source.RouteMetadata.RoutePolicyDigest));
+        var estimator =
+            Assert.IsAssignableFrom<IProviderPromptTokenEstimator>(provider);
+        Assert.Equal("calibrating:script-aware", estimator.EstimatorId);
+        Assert.Equal("1:1", estimator.Version);
+        Assert.Equal(128, provider.Capabilities.MaxTools);
+    }
+
+    [Fact]
+    public void RoutePolicyDigestIncludesPromptEstimatorIdentityAndVersion()
+    {
+        static string Digest(string estimatorId, string version)
+        {
+            var provider = new OpenAiCompatibleStreamingProvider(
+                new OpenAiCompatibleProviderOptions(),
+                new StaticBearerTokenSource("never-persisted"),
+                new FakeTransport(string.Empty),
+                new FixedProviderPromptEstimator(
+                    estimatorId,
+                    version,
+                    8));
+            return provider.RouteMetadata.RoutePolicyDigest;
+        }
+
+        var baseline = Digest("model-tokenizer", "1");
+
+        Assert.NotEqual(baseline, Digest("other-tokenizer", "1"));
+        Assert.NotEqual(baseline, Digest("model-tokenizer", "2"));
+        Assert.Equal(baseline, Digest("model-tokenizer", "1"));
+    }
+
+    [Fact]
+    public async Task CompletedUsageCalibratesDefaultPromptEstimator()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                """,
+                """
+                {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":1,"total_tokens":1001}}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var estimator =
+            Assert.IsAssignableFrom<IProviderPromptTokenEstimator>(provider);
+        var messages = new[]
+        {
+            Message(
+                NormalizedRoles.User,
+                NormalizedContentPart.FromText(
+                    "\u6c5f\u6e56\u4eba\u7269\u6b63\u5728\u884c\u52a8"))
+        };
+        var before = estimator.EstimatePromptTokens(
+            messages,
+            Array.Empty<ToolDescriptor>());
+        var runner = new ProviderAttemptRunner(
+            new[] { provider },
+            new ProviderRetryPolicy { MaxAttemptsPerProvider = 1 },
+            new SystemRuntimeDelay(),
+            new StableIds());
+
+        _ = await runner.RunAsync(
+            "calibration-run",
+            "calibration-attempt",
+            "calibration-turn",
+            messages,
+            Array.Empty<ToolDescriptor>(),
+            new AttemptFence(),
+            null,
+            CancellationToken.None);
+
+        Assert.True(
+            estimator.EstimatePromptTokens(
+                messages,
+                Array.Empty<ToolDescriptor>()) > before);
+    }
+
+    [Fact]
+    public async Task DispatchEvidenceMatchesExactBytesReceivedByTransport()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                """,
+                """
+                {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var runner = new ProviderAttemptRunner(
+            new[] { provider },
+            new ProviderRetryPolicy { MaxAttemptsPerProvider = 1 },
+            new SystemRuntimeDelay(),
+            new StableIds());
+        ProviderDispatchNotice? dispatch = null;
+
+        _ = await runner.RunAsync(
+            "run-1",
+            "attempt-1",
+            "turn-1",
+            new[]
+            {
+                Message(
+                    NormalizedRoles.User,
+                    NormalizedContentPart.FromText("wire evidence"))
+            },
+            Array.Empty<ToolDescriptor>(),
+            new AttemptFence(),
+            null,
+            CancellationToken.None,
+            onDispatch: notice =>
+            {
+                dispatch = notice;
+                return default;
+            });
+
+        Assert.NotNull(dispatch);
+        Assert.True(dispatch!.WireRequestEvidence.IsAvailable);
+        Assert.Equal(
+            transport.LastRequest!.Body.Length,
+            dispatch.WireRequestEvidence.PayloadByteLength);
+        Assert.Equal(
+            transport.LastRequest.ContentType,
+            dispatch.WireRequestEvidence.ContentType);
+        Assert.Equal(
+            LowerSha256(transport.LastRequest.Body),
+            dispatch.WireRequestEvidence.PayloadSha256);
+        Assert.Equal(
+            dispatch.RouteIdentity.RouteDigest,
+            dispatch.WireRequestEvidence.ProviderRouteDigest);
+        Assert.Equal(
+            dispatch.RouteIdentity.DialectSemanticDigest,
+            dispatch.WireRequestEvidence.DialectSemanticDigest);
+    }
+
+    [Fact]
+    public async Task AnyFinalBodyChangeChangesWireDigest()
+    {
+        async Task<string> DigestAsync(string prompt)
+        {
+            var transport = new FakeTransport(
+                Sse(
+                    """
+                    {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                    """,
+                    """
+                    {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+                    """,
+                    "[DONE]"));
+            var provider = CreateProvider(transport);
+            var runner = new ProviderAttemptRunner(
+                new[] { provider },
+                new ProviderRetryPolicy { MaxAttemptsPerProvider = 1 },
+                new SystemRuntimeDelay(),
+                new StableIds());
+            string? digest = null;
+            _ = await runner.RunAsync(
+                "run-1",
+                "attempt-1",
+                "turn-1",
+                new[]
+                {
+                    Message(
+                        NormalizedRoles.User,
+                        NormalizedContentPart.FromText(prompt))
+                },
+                Array.Empty<ToolDescriptor>(),
+                new AttemptFence(),
+                null,
+                CancellationToken.None,
+                onDispatch: notice =>
+                {
+                    digest =
+                        notice.WireRequestEvidence.PayloadSha256;
+                    return default;
+                });
+            return Assert.IsType<string>(digest);
+        }
+
+        Assert.NotEqual(
+            await DigestAsync("body-A"),
+            await DigestAsync("body-B"));
+    }
+
+    [Fact]
+    public async Task PreparedBodyIsClearedAfterTransportConsumesIt()
+    {
+        var transport = new RetainingBodyTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+
+        _ = await CollectAsync(
+            provider.StreamAsync(Request(), CancellationToken.None));
+
+        Assert.NotNull(transport.ObservedBody);
+        Assert.NotEmpty(transport.ObservedBody!);
+        Assert.All(
+            transport.ObservedBody!,
+            value => Assert.Equal((byte)0, value));
+    }
+
+    [Fact]
+    public void RoutePolicyDigestChangesWithEndpointLayoutAndPricing()
+    {
+        static ProviderRouteIdentity Identity(
+            Uri baseUri,
+            string path = "/chat/completions",
+            int maxOutputTokens = 32_768,
+            string cacheMissPrice = "0.435",
+            int maxSseEventCharacters = 2 * 1024 * 1024,
+            int maxSseLineCharacters = 512 * 1024)
+        {
+            var provider = new OpenAiCompatibleStreamingProvider(
+                new OpenAiCompatibleProviderOptions
+                {
+                    ProviderId = "stable-provider",
+                    BaseUri = baseUri,
+                    ChatCompletionsPath = path,
+                    Model = "stable-model",
+                    MaxOutputTokens = maxOutputTokens,
+                    InputCacheMissUsdPerMillionTokens =
+                        cacheMissPrice,
+                    MaxSseEventCharacters = maxSseEventCharacters,
+                    MaxSseLineCharacters = maxSseLineCharacters
+                },
+                new StaticBearerTokenSource("never-persisted"),
+                new FakeTransport(string.Empty));
+            return new ProviderRouteIdentity(
+                provider.ProviderId,
+                provider.RouteMetadata,
+                provider.Capabilities);
+        }
+
+        var baseline = Identity(new Uri("https://api.example.com"));
+        var equivalentPrice = Identity(
+            new Uri("https://api.example.com"),
+            cacheMissPrice: "0.4350");
+
+        Assert.Equal(
+            baseline.RoutePolicyDigest,
+            equivalentPrice.RoutePolicyDigest);
+        Assert.Equal(baseline.RouteDigest, equivalentPrice.RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(new Uri("https://other.example.com")).RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(new Uri("https://api.example.com/v2/")).RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(
+                new Uri("https://api.example.com"),
+                "/v2/chat/completions").RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(
+                new Uri("https://api.example.com"),
+                maxOutputTokens: 16_384).RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(
+                new Uri("https://api.example.com"),
+                cacheMissPrice: "0.5").RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(
+                new Uri("https://api.example.com"),
+                maxSseEventCharacters: 1_048_576).RouteDigest);
+        Assert.NotEqual(
+            baseline.RouteDigest,
+            Identity(
+                new Uri("https://api.example.com"),
+                maxSseLineCharacters: 262_144).RouteDigest);
+        Assert.DoesNotContain(
+            "example.com",
+            baseline.RoutePolicyDigest,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true, "enabled", true, true, true)]
+    [InlineData(false, "enabled", false, true, false)]
+    [InlineData(true, "disabled", false, true, false)]
+    [InlineData(false, "disabled", false, true, false)]
+    [InlineData(true, null, false, false, false)]
+    [InlineData(false, null, false, false, false)]
+    public async Task ReasoningInputCapabilityMatchesEncodedWireCondition(
+        bool replayReasoningContent,
+        string? thinkingMode,
+        bool expectedCapability,
+        bool expectedThinking,
+        bool expectedReasoning)
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                ReplayReasoningContent = replayReasoningContent,
+                ThinkingMode = thinkingMode
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+        var request = Request(
+            NormalizedTranscript.AssistantResponse(
+                "assistant-1",
+                text: "visible",
+                reasoningContent: "private reasoning",
+                Array.Empty<ModelToolCall>(),
+                DateTimeOffset.UnixEpoch));
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        Assert.Equal(
+            expectedCapability,
+            provider.Capabilities.ReasoningInput);
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        Assert.Equal(
+            expectedThinking,
+            body.RootElement.TryGetProperty("thinking", out _));
+        var encodedMessage =
+            body.RootElement.GetProperty("messages")[0];
+        Assert.Equal(
+            expectedReasoning,
+            encodedMessage.TryGetProperty(
+                "reasoning_content",
+                out var reasoning));
+        if (expectedReasoning)
+        {
+            Assert.Equal("private reasoning", reasoning.GetString());
+        }
     }
 
     [Fact]
@@ -112,6 +475,80 @@ public sealed class OpenAiCompatibleProviderTests
     }
 
     [Fact]
+    public async Task EncodesStrictReceiptEvidenceWrapperOnTheWire()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var receipt = new ActionReceipt
+        {
+            OperationId = "operation-1",
+            Revision = 2,
+            Status = ReceiptStatuses.Succeeded,
+            Result = Json("""{"changed":true}"""),
+            Retryable = false,
+            CommittedAt = DateTimeOffset.UnixEpoch,
+            ReceivedAt = DateTimeOffset.UnixEpoch
+        };
+        var presentation =
+            FinalOutputAdmissionCodec.ForModelPresentation(
+                receipt,
+                "action-receipt:operation-1:2");
+        var request = Request(
+            NormalizedTranscript.AssistantToolCalls(
+                "assistant-1",
+                new[]
+                {
+                    new ModelToolCall
+                    {
+                        ToolCallId = "call-1",
+                        Name = "set_flag",
+                        Arguments = Json("""{"value":true}""")
+                    }
+                },
+                DateTimeOffset.UnixEpoch),
+            Message(
+                NormalizedRoles.Tool,
+                NormalizedContentPart.FromToolResult(
+                    "call-1",
+                    "set_flag",
+                    presentation)));
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        var content = body.RootElement
+            .GetProperty("messages")[1]
+            .GetProperty("content")
+            .GetString()!;
+        using var encoded = JsonDocument.Parse(content);
+        Assert.Equal(
+            FinalOutputAdmissionControl.EvidencePresentationContentType,
+            encoded.RootElement
+                .GetProperty("contentType")
+                .GetString());
+        Assert.Equal(
+            "operation-1",
+            encoded.RootElement
+                .GetProperty("receipt")
+                .GetProperty("operationId")
+                .GetString());
+        var reference = encoded.RootElement.GetProperty(
+            "evidenceReference");
+        Assert.Equal(2, reference.GetProperty("revision").GetInt64());
+        Assert.Equal(
+            "action-receipt:operation-1:2",
+            reference.GetProperty(
+                    FinalOutputAdmissionControl
+                        .EvidenceSourceEventIdPropertyName)
+                .GetString());
+    }
+
+    [Fact]
     public async Task ParsesReasoningFragmentedToolsUsageAndCompletion()
     {
         var transport = new FakeTransport(
@@ -153,7 +590,14 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.Equal(3, call.Arguments.GetProperty("x").GetInt32());
         Assert.Equal(41, result.Usage.InputTokens);
         Assert.Equal(9, result.Usage.OutputTokens);
-        Assert.Equal("0.000025665", result.Usage.CostUsd);
+        Assert.Null(result.Usage.CacheReadTokens);
+        Assert.Null(result.Usage.CacheMissTokens);
+        Assert.Null(result.Usage.CacheWriteTokens);
+        Assert.Equal(50, result.Usage.ProviderTotalTokens);
+        Assert.Equal(
+            UsageAvailabilityStates.CostUnavailable,
+            result.Usage.Availability);
+        Assert.Equal("0", result.Usage.CostUsd);
         Assert.Equal("tool_calls", result.FinishReason);
     }
 
@@ -176,7 +620,70 @@ public sealed class OpenAiCompatibleProviderTests
             events,
             item => item.Kind == ModelStreamEventKinds.Usage).Usage!;
 
+        Assert.Equal(750, usage.CacheReadTokens);
+        Assert.Equal(250, usage.CacheMissTokens);
+        Assert.Null(usage.CacheWriteTokens);
+        Assert.Equal(
+            UsageAvailabilityStates.CostAvailable,
+            usage.Availability);
         Assert.Equal("0.00019846875", usage.CostUsd);
+    }
+
+    [Fact]
+    public async Task PreservesExplicitMissWriteReasoningAndProviderTotal()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                """,
+                """
+                {"choices":[],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100,"prompt_cache_write_tokens":0,"completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":7},"total_tokens":120}}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var events = await CollectAsync(provider.StreamAsync(Request(), default));
+
+        var usage = Assert.Single(
+            events,
+            item => item.Kind == ModelStreamEventKinds.Usage).Usage!;
+
+        Assert.Equal(0, usage.CacheReadTokens);
+        Assert.Equal(100, usage.CacheMissTokens);
+        Assert.Equal(0, usage.CacheWriteTokens);
+        Assert.Equal(7, usage.ReasoningTokens);
+        Assert.Equal(120, usage.ProviderTotalTokens);
+        Assert.Equal(
+            UsageAvailabilityStates.CostAvailable,
+            usage.Availability);
+        Assert.Equal("0.0000609", usage.CostUsd);
+    }
+
+    [Fact]
+    public async Task PartialCacheBreakdownStaysPartialAndUnpriced()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                """,
+                """
+                {"choices":[],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":25,"completion_tokens":20,"total_tokens":120}}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var events = await CollectAsync(provider.StreamAsync(Request(), default));
+
+        var usage = Assert.Single(
+            events,
+            item => item.Kind == ModelStreamEventKinds.Usage).Usage!;
+
+        Assert.Equal(25, usage.CacheReadTokens);
+        Assert.Null(usage.CacheMissTokens);
+        Assert.Equal(
+            UsageAvailabilityStates.CostUnavailable,
+            usage.Availability);
+        Assert.Equal("0", usage.CostUsd);
     }
 
     [Fact]
@@ -229,6 +736,51 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.True(error.Retryable);
         Assert.Equal(TimeSpan.FromSeconds(2), error.RetryAfter);
         Assert.DoesNotContain("test-secret", error.Message);
+    }
+
+    [Theory]
+    [InlineData(401, "provider_auth_failed")]
+    [InlineData(402, "provider_balance_exhausted")]
+    [InlineData(403, "provider_auth_failed")]
+    [InlineData(404, "provider_route_unavailable")]
+    [InlineData(405, "provider_route_unavailable")]
+    [InlineData(410, "provider_route_unavailable")]
+    public async Task RouteScopedHttpRejectionAllowsFailover(
+        int statusCode,
+        string expectedCode)
+    {
+        var provider = CreateProvider(
+            new FakeTransport(string.Empty, statusCode: statusCode));
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () =>
+                await CollectAsync(provider.StreamAsync(Request(), default)));
+
+        Assert.Equal(expectedCode, error.Code);
+        Assert.Equal(
+            ProviderFailureDisposition.Failover,
+            error.Disposition);
+        Assert.False(error.Retryable);
+        Assert.True(error.FallbackEligible);
+        Assert.True(error.UsageKnownToBeZero);
+    }
+
+    [Fact]
+    public async Task InvalidRequestHttpRejectionAbortsTheRun()
+    {
+        var provider = CreateProvider(
+            new FakeTransport(string.Empty, statusCode: 400));
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () =>
+                await CollectAsync(provider.StreamAsync(Request(), default)));
+
+        Assert.Equal("provider_invalid_request", error.Code);
+        Assert.Equal(
+            ProviderFailureDisposition.AbortRun,
+            error.Disposition);
+        Assert.False(error.FallbackEligible);
+        Assert.True(error.UsageKnownToBeZero);
     }
 
     [Fact]
@@ -363,6 +915,9 @@ public sealed class OpenAiCompatibleProviderTests
 
         Assert.Equal("provider_auth_missing", error.Code);
         Assert.Equal("auth", error.Category);
+        Assert.Equal(
+            ProviderFailureDisposition.Failover,
+            error.Disposition);
         Assert.True(error.UsageKnownToBeZero);
         Assert.Null(transport.LastRequest);
         Assert.Empty(uncertain);
@@ -381,6 +936,329 @@ public sealed class OpenAiCompatibleProviderTests
                 await CollectAsync(
                     provider.StreamAsync(Request(), cancellation.Token)));
 
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task CredentialFailureDoesNotRetainSecretTaintedException()
+    {
+        const string secret = "credential-exception-secret-canary";
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions(),
+            new ThrowingSecretCredentialSource(secret),
+            new FakeTransport(string.Empty));
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(Request(), CancellationToken.None)));
+
+        Assert.Equal("provider_auth_missing", error.Code);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain(
+            secret,
+            error.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TransportFailureDoesNotRetainSecretTaintedException()
+    {
+        const string secret = "transport-exception-secret-canary";
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions(),
+            new StaticBearerTokenSource(secret),
+            new SecretEchoingFailureTransport());
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(Request(), CancellationToken.None)));
+
+        Assert.Equal("provider_connect_failed", error.Code);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain(
+            secret,
+            error.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DirectProviderRejectsOversizedInputBeforeTransport()
+    {
+        var transport = new FakeTransport(string.Empty);
+        var provider = CreateProvider(transport);
+        var request = Request(
+            Message(
+                NormalizedRoles.User,
+                NormalizedContentPart.FromText(
+                    new string('x', 8 * 1_048_576))));
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(request, CancellationToken.None)));
+
+        Assert.Equal("provider_request_input_limit", error.Code);
+        Assert.True(error.UsageKnownToBeZero);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task RequestSnapshotSurvivesMutationDuringCredentialLookup()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var credentials =
+            new BlockingCredentialSource("snapshot-secret");
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions(),
+            credentials,
+            transport);
+        var message = Message(
+            NormalizedRoles.User,
+            NormalizedContentPart.FromText("original-message"));
+        message.MessageId = "original-message-id";
+        var tool = Tool(
+            "original_tool",
+            """{"type":"object","properties":{"original":{"type":"string"}}}""");
+        var request = Request(message);
+        request.RunId = "original-run";
+        request.RunAttemptId = "original-run-attempt";
+        request.TurnId = "original-turn";
+        request.ProviderAttemptId = "original-provider-attempt";
+        request.StreamAttemptId = "original-stream-attempt";
+        request.Tools = new[] { tool };
+        request.MaxOutputTokens = 19;
+
+        var collection = CollectAsync(
+            provider.StreamAsync(request, CancellationToken.None));
+        await credentials.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        request.RunId = string.Empty;
+        request.RunAttemptId = "mutated-run-attempt";
+        request.TurnId = "mutated-turn";
+        request.ProviderAttemptId = "mutated-provider-attempt";
+        request.StreamAttemptId = string.Empty;
+        request.MaxOutputTokens = 1;
+        request.Messages = Array.Empty<NormalizedMessage>();
+        request.Tools = Array.Empty<ToolDescriptor>();
+        message.MessageId = "mutated-message-id";
+        message.Role = "mutated-role";
+        message.Parts[0].Text = "mutated-message";
+        message.Parts.Add(
+            NormalizedContentPart.FromText("mutated-extra-part"));
+        tool.Name = "mutated_tool";
+        tool.Version = "mutated-version";
+        tool.Description = "mutated-description";
+        tool.ParametersSchema =
+            Json("""{"type":"object","properties":{"mutated":true}}""");
+        credentials.Release();
+
+        var events = await collection;
+
+        Assert.All(
+            events,
+            item => Assert.Equal(
+                "original-stream-attempt",
+                item.StreamAttemptId));
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        Assert.Equal(
+            19,
+            body.RootElement.GetProperty("max_tokens").GetInt32());
+        Assert.Equal(
+            "original-message",
+            body.RootElement.GetProperty("messages")[0]
+                .GetProperty("content")
+                .GetString());
+        Assert.Equal(
+            "original_tool",
+            body.RootElement.GetProperty("tools")[0]
+                .GetProperty("function")
+                .GetProperty("name")
+                .GetString());
+        Assert.True(
+            body.RootElement.GetProperty("tools")[0]
+                .GetProperty("function")
+                .GetProperty("parameters")
+                .GetProperty("properties")
+                .TryGetProperty("original", out _));
+    }
+
+    [Fact]
+    public async Task PreparedWireAndEvidenceIgnoreMutationDuringCredentialWait()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}
+                """,
+                """
+                {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+                """,
+                "[DONE]"));
+        var credentials =
+            new BlockingCredentialSource("snapshot-secret");
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions(),
+            credentials,
+            transport);
+        var runner = new ProviderAttemptRunner(
+            new[] { provider },
+            new ProviderRetryPolicy { MaxAttemptsPerProvider = 1 },
+            new SystemRuntimeDelay(),
+            new StableIds());
+        var message = Message(
+            NormalizedRoles.User,
+            NormalizedContentPart.FromText("immutable-wire"));
+        ProviderWireRequestEvidence? evidence = null;
+
+        var run = runner.RunAsync(
+                "run-1",
+                "attempt-1",
+                "turn-1",
+                new[] { message },
+                Array.Empty<ToolDescriptor>(),
+                new AttemptFence(),
+                null,
+                CancellationToken.None,
+                onDispatch: notice =>
+                {
+                    evidence = notice.WireRequestEvidence;
+                    return default;
+                })
+            .AsTask();
+        await credentials.Started.WaitAsync(TimeSpan.FromSeconds(5));
+
+        message.Parts[0].Text = "mutated-after-dispatch";
+        message.Parts.Add(
+            NormalizedContentPart.FromText("extra-mutation"));
+        credentials.Release();
+        _ = await run;
+
+        Assert.NotNull(evidence);
+        Assert.Equal(
+            LowerSha256(transport.LastRequest!.Body),
+            evidence!.PayloadSha256);
+        using var body = JsonDocument.Parse(transport.LastRequest.Body);
+        Assert.Equal(
+            "immutable-wire",
+            body.RootElement.GetProperty("messages")[0]
+                .GetProperty("content")
+                .GetString());
+    }
+
+    [Fact]
+    public async Task RequestSnapshotUsesIndexedListsWithoutEnumeration()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Messages =
+            new IndexedOnlyReadOnlyList<NormalizedMessage>(
+                request.Messages.ToArray());
+        request.Tools =
+            new IndexedOnlyReadOnlyList<ToolDescriptor>(
+                new[] { Tool("inspect", """{"type":"object"}""") });
+
+        _ = await CollectAsync(
+            provider.StreamAsync(request, CancellationToken.None));
+
+        Assert.NotNull(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task RequestSnapshotFailsClosedOnCountIndexMismatch()
+    {
+        var transport = new FakeTransport(string.Empty);
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Messages =
+            new CountIndexMismatchReadOnlyList<NormalizedMessage>(
+                request.Messages[0]);
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(request, CancellationToken.None)));
+
+        Assert.Equal("provider_request_input_limit", error.Code);
+        Assert.True(error.UsageKnownToBeZero);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task RequestSnapshotFailsClosedOnToolCountIndexMismatch()
+    {
+        var transport = new FakeTransport(string.Empty);
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Tools =
+            new CountIndexMismatchReadOnlyList<ToolDescriptor>(
+                Tool("inspect", """{"type":"object"}"""));
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(request, CancellationToken.None)));
+
+        Assert.Equal("provider_request_input_limit", error.Code);
+        Assert.True(error.UsageKnownToBeZero);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task EncodedRequestBodyAcceptsTheExactHardByteLimit()
+    {
+        const int maximumBodyBytes = 8 * 1_048_576;
+        const int emptyUserBodyBytes = 198;
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = CreateProvider(transport);
+        var request = Request(
+            Message(
+                NormalizedRoles.User,
+                NormalizedContentPart.FromText(
+                    new string(
+                        'x',
+                        maximumBodyBytes - emptyUserBodyBytes))));
+
+        _ = await CollectAsync(
+            provider.StreamAsync(request, CancellationToken.None));
+
+        Assert.NotNull(transport.LastRequest);
+        Assert.Equal(maximumBodyBytes, transport.LastRequest.Body.Length);
+    }
+
+    [Fact]
+    public async Task EncodedRequestBodyRejectsOneByteOverTheHardLimit()
+    {
+        const int maximumBodyBytes = 8 * 1_048_576;
+        const int emptyUserBodyBytes = 198;
+        var transport = new FakeTransport(string.Empty);
+        var provider = CreateProvider(transport);
+        var request = Request(
+            Message(
+                NormalizedRoles.User,
+                NormalizedContentPart.FromText(
+                    new string(
+                        'x',
+                        maximumBodyBytes - emptyUserBodyBytes + 1))));
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            async () => await CollectAsync(
+                provider.StreamAsync(request, CancellationToken.None)));
+
+        Assert.Equal("provider_request_body_limit", error.Code);
+        Assert.True(error.UsageKnownToBeZero);
         Assert.Null(transport.LastRequest);
     }
 
@@ -572,6 +1450,9 @@ public sealed class OpenAiCompatibleProviderTests
                     CancellationToken.None)));
 
         Assert.Equal("provider_auth_missing", error.Code);
+        Assert.Equal(
+            ProviderFailureDisposition.Failover,
+            error.Disposition);
         Assert.True(error.UsageKnownToBeZero);
         Assert.Null(transport.LastRequest);
     }
@@ -891,6 +1772,12 @@ public sealed class OpenAiCompatibleProviderTests
         return document.RootElement.Clone();
     }
 
+    private static string LowerSha256(byte[] value)
+    {
+        return Convert.ToHexString(SHA256.HashData(value))
+            .ToLowerInvariant();
+    }
+
     private static string Sse(params string[] payloads)
     {
         return string.Join(
@@ -990,7 +1877,8 @@ public sealed class OpenAiCompatibleProviderTests
             {
                 Uri = new Uri(request.Uri.AbsoluteUri, UriKind.Absolute),
                 BearerToken = request.BearerToken,
-                Body = request.Body.ToArray()
+                Body = request.Body.ToArray(),
+                ContentType = request.ContentType
             };
             return new ValueTask<IStreamingHttpResponse>(
                 new FakeResponse(_response, _statusCode, _retryAfter));
@@ -1028,6 +1916,28 @@ public sealed class OpenAiCompatibleProviderTests
         public void Dispose()
         {
             Content.Dispose();
+        }
+    }
+
+    private sealed class RetainingBodyTransport : IStreamingHttpTransport
+    {
+        private readonly string _response;
+
+        public RetainingBodyTransport(string response)
+        {
+            _response = response;
+        }
+
+        public byte[]? ObservedBody { get; private set; }
+
+        public ValueTask<IStreamingHttpResponse> SendAsync(
+            StreamingHttpRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ObservedBody = request.Body;
+            return new ValueTask<IStreamingHttpResponse>(
+                new FakeResponse(_response, 200, retryAfter: null));
         }
     }
 
@@ -1149,6 +2059,35 @@ public sealed class OpenAiCompatibleProviderTests
         }
     }
 
+    private sealed class FixedProviderPromptEstimator :
+        IProviderPromptTokenEstimator
+    {
+        private readonly int _tokens;
+
+        public FixedProviderPromptEstimator(
+            string estimatorId,
+            string version,
+            int tokens)
+        {
+            EstimatorId = estimatorId;
+            Version = version;
+            _tokens = tokens;
+        }
+
+        public string EstimatorId { get; }
+
+        public string Version { get; }
+
+        public int EstimatePromptTokens(
+            IReadOnlyList<NormalizedMessage> messages,
+            IReadOnlyList<ToolDescriptor> tools)
+        {
+            _ = messages ?? throw new ArgumentNullException(nameof(messages));
+            _ = tools ?? throw new ArgumentNullException(nameof(tools));
+            return _tokens;
+        }
+    }
+
     private sealed class SelfCancellingCredentialSource :
         IProviderCredentialSource
     {
@@ -1159,6 +2098,57 @@ public sealed class OpenAiCompatibleProviderTests
             return ValueTask.FromException<string>(
                 new TaskCanceledException(
                     "The credential source cancelled itself."));
+        }
+    }
+
+    private sealed class ThrowingSecretCredentialSource :
+        IProviderCredentialSource
+    {
+        private readonly string _secret;
+
+        public ThrowingSecretCredentialSource(string secret)
+        {
+            _secret = secret;
+        }
+
+        public ValueTask<string> GetBearerTokenAsync(
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var exception = new InvalidOperationException(
+                "credential source exposed " + _secret);
+            exception.Data["credential"] = _secret;
+            return ValueTask.FromException<string>(exception);
+        }
+    }
+
+    private sealed class BlockingCredentialSource :
+        IProviderCredentialSource
+    {
+        private readonly string _token;
+        private readonly TaskCompletionSource<bool> _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public BlockingCredentialSource(string token)
+        {
+            _token = token;
+        }
+
+        public Task Started => _started.Task;
+
+        public void Release()
+        {
+            _release.TrySetResult(true);
+        }
+
+        public async ValueTask<string> GetBearerTokenAsync(
+            CancellationToken cancellationToken)
+        {
+            _started.TrySetResult(true);
+            await _release.Task.WaitAsync(cancellationToken);
+            return _token;
         }
     }
 
@@ -1176,6 +2166,79 @@ public sealed class OpenAiCompatibleProviderTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return new ValueTask<string>(_token);
+        }
+    }
+
+    private sealed class SecretEchoingFailureTransport :
+        IStreamingHttpTransport
+    {
+        public ValueTask<IStreamingHttpResponse> SendAsync(
+            StreamingHttpRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var exception = new InvalidOperationException(
+                "transport exposed " + request.BearerToken);
+            exception.Data["authorization"] = request.BearerToken;
+            return ValueTask.FromException<IStreamingHttpResponse>(
+                exception);
+        }
+    }
+
+    private sealed class IndexedOnlyReadOnlyList<T> :
+        IReadOnlyList<T>
+    {
+        private readonly T[] _items;
+
+        public IndexedOnlyReadOnlyList(T[] items)
+        {
+            _items = items;
+        }
+
+        public int Count => _items.Length;
+
+        public T this[int index] => _items[index];
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            throw new InvalidOperationException(
+                "The caller-owned list must not be enumerated.");
+        }
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+    }
+
+    private sealed class CountIndexMismatchReadOnlyList<T> :
+        IReadOnlyList<T>
+    {
+        private readonly T _onlyItem;
+
+        public CountIndexMismatchReadOnlyList(T onlyItem)
+        {
+            _onlyItem = onlyItem;
+        }
+
+        public int Count => 2;
+
+        public T this[int index] => index == 0
+            ? _onlyItem
+            : throw new InvalidOperationException(
+                "The declared count cannot be satisfied.");
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            throw new InvalidOperationException(
+                "The caller-owned list must not be enumerated.");
+        }
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
         }
     }
 

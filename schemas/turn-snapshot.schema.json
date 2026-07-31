@@ -39,13 +39,19 @@
       "minimum": 1
     },
     "providerId": {
-      "$ref": "common.schema.json#/$defs/id"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
     },
     "modelId": {
-      "$ref": "common.schema.json#/$defs/id"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
     },
     "promptLayoutVersion": {
-      "$ref": "common.schema.json#/$defs/version"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
     },
     "stablePrefixHash": {
       "type": "string",
@@ -79,10 +85,19 @@
       "maxLength": 256
     },
     "contextPolicyVersion": {
-      "$ref": "common.schema.json#/$defs/version"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
     },
     "budgetPolicyVersion": {
-      "$ref": "common.schema.json#/$defs/version"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "maxSideEffectToolCallsPerTurn": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4096
     },
     "createdAt": {
       "type": "string",

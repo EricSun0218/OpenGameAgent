@@ -32,6 +32,8 @@ public static class SkillAdmissionReasonCodes
         "skill_required_tool_descriptor_mismatch";
     public const string RequiredToolDisclosureCapacityExceeded =
         "skill_required_tool_disclosure_capacity_exceeded";
+    public const string CatalogEntryChanged =
+        SkillRuntimeReasonCodes.CatalogEntryChanged;
     public const string PolicyError = "skill_admission_policy_error";
     public const string PolicyDecisionInvalid =
         "skill_admission_policy_decision_invalid";
@@ -95,7 +97,7 @@ public sealed class SkillAdmissionDecision
     private SkillAdmissionDecision(bool allowed, string reasonCode)
     {
         Allowed = allowed;
-        ReasonCode = RuntimeGuard.RequiredId(
+        ReasonCode = RuntimeGuard.RequiredReasonCode(
             reasonCode,
             nameof(reasonCode));
     }
@@ -176,7 +178,7 @@ public sealed class SkillAdmissionException : InvalidOperationException
     public SkillAdmissionException(string reasonCode)
         : base("The requested skill was not admitted for this turn.")
     {
-        ReasonCode = RuntimeGuard.RequiredId(
+        ReasonCode = RuntimeGuard.RequiredReasonCode(
             reasonCode,
             nameof(reasonCode));
     }

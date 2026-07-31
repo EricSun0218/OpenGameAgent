@@ -1,0 +1,10 @@
+{
+  "contract": "game-agent.world-clocks.v1",
+  "clocks": [
+    {
+      "clockId": "calendar.month",
+      "statePath": "/time/month",
+      "initialTick": "0"
+    }
+  ]
+}

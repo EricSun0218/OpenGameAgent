@@ -1,8 +1,10 @@
 using GameAgent.Core;
 using GameAgent.Godot;
+using GameAgent.Providers.Anthropic;
 using GameAgent.Providers.OpenAICompatible;
 using GameAgent.Protocol;
 using GameAgent.Runtime;
+using GameAgent.Workflow;
 
 namespace PackageConsumer;
 
@@ -14,6 +16,8 @@ public partial class Smoke : global::Godot.Node
         {
             var runtime = GetNode<GameAgentRuntimeNode>(
                 "/root/GameAgentRuntime");
+            _ = typeof(AnthropicMessagesStreamingProvider);
+            _ = typeof(WorkflowCompiler);
             var host = new GodotMainThreadGameHost(
                 runtime.Dispatcher,
                 new SystemRuntimeClock());
@@ -43,6 +47,44 @@ public partial class Smoke : global::Godot.Node
             {
                 throw new InvalidOperationException(
                     "The packaged composition builder did not configure the durable backend.");
+            }
+
+            using var authoring = new GodotWorldAuthoringBridge();
+            var authoredWorldPath = global::Godot.ProjectSettings.GlobalizePath(
+                "res://addons/game_agent_runtime/authoring/examples/interactive-smoke");
+            var validation = authoring.validate_world_source(
+                authoredWorldPath,
+                "package-smoke-world",
+                "1");
+            if (!validation["success"].AsBool())
+            {
+                throw new InvalidOperationException(
+                    "The packaged authoring bridge could not validate its example.");
+            }
+
+            var packagePath = global::Godot.ProjectSettings.GlobalizePath(
+                $"user://package-smoke-{Guid.NewGuid():N}.gaworld");
+            try
+            {
+                var package = authoring.build_world_package_file(
+                    authoredWorldPath,
+                    "package-smoke-world",
+                    "1",
+                    packagePath);
+                if (!package["success"].AsBool()
+                    || !File.Exists(packagePath)
+                    || new FileInfo(packagePath).Length == 0)
+                {
+                    throw new InvalidOperationException(
+                        "The packaged authoring bridge could not build an archive.");
+                }
+            }
+            finally
+            {
+                if (File.Exists(packagePath))
+                {
+                    File.Delete(packagePath);
+                }
             }
 
             global::Godot.GD.Print("PACKAGED_CONSUMER_PASS");

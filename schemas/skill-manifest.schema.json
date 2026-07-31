@@ -44,12 +44,16 @@
     },
     "promptFragments": {
       "type": "array",
+      "maxItems": 256,
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192
       }
     },
     "requiredToolRefs": {
       "type": "array",
+      "maxItems": 256,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -59,6 +63,7 @@
     },
     "optionalToolRefs": {
       "type": "array",
+      "maxItems": 256,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -68,6 +73,7 @@
     },
     "contextProviderRefs": {
       "type": "array",
+      "maxItems": 256,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -77,12 +83,15 @@
     },
     "resourceRefs": {
       "type": "array",
+      "maxItems": 256,
       "items": {
         "$ref": "common.schema.json#/$defs/resourceRef"
-      }
+      },
+      "uniqueItems": true
     },
     "capabilityRequirements": {
-      "type": "object"
+      "type": "object",
+      "maxProperties": 2048
     },
     "trust": {
       "enum": [
@@ -92,10 +101,16 @@
       ]
     },
     "activationPolicy": {
-      "type": "object"
+      "type": "object",
+      "maxProperties": 2048
     },
     "extensions": {
-      "$ref": "common.schema.json#/$defs/extensions"
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
     }
   },
   "additionalProperties": false

@@ -13,6 +13,10 @@ GameAgentRuntime="*res://addons/game_agent_runtime/runtime/GameAgentRuntimeNode.
 
 project/assembly_name="PackageConsumer"
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/game_agent_runtime/plugin.cfg")
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"

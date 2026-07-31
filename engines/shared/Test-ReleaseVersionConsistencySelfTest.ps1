@@ -11,6 +11,49 @@ $temporaryRoot = Join-Path (
 $expectedVersion = '0.1.0-alpha.1'
 $driftVersion = '9.9.9-test'
 
+function Get-TrustedWorkflowFixture {
+    return @'
+name: Trusted release gate
+jobs:
+  source_privacy:
+    outputs:
+      release_version: ${{ steps.release.outputs.release_version }}
+    steps:
+      - name: Validate release
+        id: release
+  quality:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+  godot:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+  privacy:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+  validate_nuget:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+  validate_unity:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+  validate_godot:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+'@
+}
+
 function Write-FixtureFile {
     param(
         [Parameter(Mandatory)]
@@ -108,6 +151,8 @@ name: CI
 env:
   RELEASE_VERSION: "$fixtureVersion"
 "@
+        '.github\workflows\trusted-source-privacy.yml' = (
+            Get-TrustedWorkflowFixture)
     }
 
     foreach ($entry in $files.GetEnumerator()) {
@@ -175,6 +220,19 @@ try {
         throw 'The release version checker rejected a missing stable suffix.'
     }
 
+    Reset-Fixture `
+        -VersionPrefix '0.2.0' `
+        -VersionSuffix 'beta.2'
+    $futureCandidateOutput = @(
+        & $checker -RepositoryRoot $temporaryRoot
+    )
+    if ($futureCandidateOutput -notcontains (
+            'RELEASE_VERSION_CONSISTENCY_PASS version=0.2.0-beta.2')) {
+        throw (
+            'The trusted release version flow rejected a future ' +
+            'candidate version.')
+    }
+
     Assert-FixtureRejected `
         -Name 'root README' `
         -RelativePath 'README.md' `
@@ -239,6 +297,60 @@ try {
         -Name 'CI release artifact' `
         -RelativePath '.github\workflows\ci.yml' `
         -Content "env:`n  RELEASE_VERSION: `"$driftVersion`""
+    Assert-FixtureRejected `
+        -Name 'CI job release artifact override' `
+        -RelativePath '.github\workflows\ci.yml' `
+        -Content @"
+env:
+  RELEASE_VERSION: "$expectedVersion"
+jobs:
+  package:
+    env:
+      RELEASE_VERSION: "$driftVersion"
+"@
+    Assert-FixtureRejected `
+        -Name 'trusted release gate literal artifact' `
+        -RelativePath '.github\workflows\trusted-source-privacy.yml' `
+        -Content "env:`n  RELEASE_VERSION: `"$driftVersion`""
+    Assert-FixtureRejected `
+        -Name 'trusted release gate job override' `
+        -RelativePath '.github\workflows\trusted-source-privacy.yml' `
+        -Content (
+            (Get-TrustedWorkflowFixture) +
+            @"
+
+  override:
+    needs:
+      - source_privacy
+    env:
+      RELEASE_VERSION: "$driftVersion"
+"@)
+    Assert-FixtureRejected `
+        -Name 'trusted release gate flow-map override' `
+        -RelativePath '.github\workflows\trusted-source-privacy.yml' `
+        -Content (
+            (Get-TrustedWorkflowFixture) +
+            @"
+
+  override:
+    needs:
+      - source_privacy
+    env: { "RELEASE_VERSION": "$driftVersion" }
+"@)
+    Assert-FixtureRejected `
+        -Name 'trusted release gate runtime assignment' `
+        -RelativePath '.github\workflows\trusted-source-privacy.yml' `
+        -Content (
+            (Get-TrustedWorkflowFixture) +
+            @'
+
+  override:
+    needs:
+      - source_privacy
+    steps:
+      - shell: pwsh
+        run: $env:RELEASE_VERSION = '9.9.9-test'
+'@)
 
     Write-Output 'RELEASE_VERSION_CONSISTENCY_SELF_TEST_PASS'
 }

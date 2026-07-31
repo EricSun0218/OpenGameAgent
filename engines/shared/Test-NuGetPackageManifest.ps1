@@ -22,27 +22,38 @@ if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
 }
 
 $expectedPackageIds = @(
+    'GameAgent.Compatibility',
     'GameAgent.Core',
     'GameAgent.Persistence',
     'GameAgent.Protocol',
+    'GameAgent.Providers.Anthropic',
     'GameAgent.Providers.OpenAICompatible',
     'GameAgent.Runtime',
-    'GameAgent.Testing')
+    'GameAgent.Testing',
+    'GameAgent.Workflow',
+    'GameAgent.World')
 $expectedInternalDependencies = @{
+    'GameAgent.Compatibility' = @()
     'GameAgent.Core' = @('GameAgent.Protocol')
     'GameAgent.Persistence' = @(
         'GameAgent.Core',
-        'GameAgent.Protocol')
+        'GameAgent.Protocol',
+        'GameAgent.World')
     'GameAgent.Protocol' = @()
+    'GameAgent.Providers.Anthropic' = @('GameAgent.Core')
     'GameAgent.Providers.OpenAICompatible' = @('GameAgent.Core')
     'GameAgent.Runtime' = @(
+        'GameAgent.Compatibility',
         'GameAgent.Core',
         'GameAgent.Persistence',
         'GameAgent.Protocol',
-        'GameAgent.Providers.OpenAICompatible')
+        'GameAgent.Providers.OpenAICompatible',
+        'GameAgent.World')
     'GameAgent.Testing' = @(
         'GameAgent.Core',
         'GameAgent.Protocol')
+    'GameAgent.Workflow' = @('GameAgent.Core')
+    'GameAgent.World' = @('GameAgent.Core')
 }
 $packageRoot = [IO.Path]::GetFullPath(
     (Resolve-Path -LiteralPath $Path))

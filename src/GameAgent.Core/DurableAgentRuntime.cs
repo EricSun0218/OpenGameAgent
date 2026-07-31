@@ -8,6 +8,7 @@ namespace GameAgent.Core;
 
 public sealed class DurableAgentRuntime :
     IDurableAgentRuntime,
+    IGuardedDurableAgentRuntime,
     IAsyncDisposable
 {
     private const int MaxDeferredContextCandidates = 128;
@@ -23,27 +24,47 @@ public sealed class DurableAgentRuntime :
     private readonly ToolCatalogRegistry _tools;
     private readonly SkillCatalogRegistry _skills;
     private readonly SkillAdmissionEvaluator _skillAdmission;
+    private readonly SkillContentRuntime _skillContent;
     private readonly ToolDisclosureEvaluator _toolDisclosure;
     private readonly ContextCompiler _contextCompiler;
     private readonly ToolBatchPlanner _toolPlanner;
     private readonly ToolBatchScheduler _toolScheduler;
     private readonly ToolInputSafetyGuard _toolSafety;
+    private readonly ConversationContextManager _conversationContext;
+    private readonly RuntimeMemoryAgentLoop? _memory;
+    private readonly FinalOutputAdmissionEvaluator? _finalOutputAdmission;
     private readonly IRuntimeClock _clock;
     private readonly IRuntimeIdGenerator _ids;
+    private readonly IRuntimeTokenEstimator _tokenEstimator;
     private readonly RunOwnershipRegistry _ownership;
     private readonly DurableAgentRuntimeOptions _options;
-    private readonly SemaphoreSlim _providerSlots;
+    private readonly RuntimeMetricsEmitter _metrics;
+    private readonly ProviderWorkloadAdmission _providerAdmission;
     private readonly BoundedCancellationDispatcher _cancellationDispatcher;
     private readonly BoundedCancellationDispatcher
         _shutdownCancellationDispatcher;
     private readonly object _lifecycleSync = new();
+    private readonly object _detachedProviderCleanupSync = new();
     private readonly CancellationTokenSource _shutdownCancellation = new();
     private TaskCompletionSource<bool>? _activeRunsDrained;
+    private TaskCompletionSource<bool>? _detachedProviderCleanupsDrained;
     private Task? _stopTask;
+    private Task? _shutdownResourceCleanupTask;
+    private Task? _shutdownBoundedCleanupTask;
+    private Task? _conversationContextCleanupTask;
     private long _ephemeralSequence;
+    private long _detachedProviderCleanupCompletedCount;
+    private long _detachedProviderCleanupFailureCount;
     private int _activeRuns;
+    private int _detachedProviderCleanupCount;
     private int _lifecycleState;
-    private int _detachedShutdownDrainResult;
+    private int _detachedToolShutdownDrainResult;
+    private int _detachedConversationShutdownDrainResult;
+    private int _skillContentResolverShutdownDrainResult;
+    private int _finalOutputAdmissionShutdownDrainResult;
+    private int _detachedProviderShutdownDrainResult;
+    private int _activeRunShutdownDrainResult;
+    private int _shutdownResourceCleanupCompleted;
 
     public DurableAgentRuntime(
         ProviderAttemptRunner provider,
@@ -62,7 +83,16 @@ public sealed class DurableAgentRuntime :
         RunOwnershipRegistry? ownership = null,
         ToolInputSafetyGuard? toolSafety = null,
         ISkillAdmissionPolicy? skillAdmissionPolicy = null,
-        IToolDisclosurePolicy? toolDisclosurePolicy = null)
+        IToolDisclosurePolicy? toolDisclosurePolicy = null,
+        IConversationCompactor? conversationCompactor = null,
+        RuntimeMemoryLifecycle? memoryLifecycle = null,
+        IRuntimeMemoryPolicy? memoryPolicy = null,
+        RuntimeMemoryIntegrationOptions? memoryOptions = null,
+        ISkillContentResolver? skillContentResolver = null,
+        IFinalOutputAdmissionPolicy? finalOutputAdmissionPolicy = null,
+        IRuntimeTokenEstimator? tokenEstimator = null,
+        IRuntimeMetricsSink? metricsSink = null,
+        RuntimeMetricsOptions? metricsOptions = null)
         : this(
             provider,
             host,
@@ -82,7 +112,16 @@ public sealed class DurableAgentRuntime :
             skillAdmissionPolicy,
             toolDisclosurePolicy,
             BoundedCancellationDispatcher.Shared,
-            BoundedCancellationDispatcher.LifecycleShared)
+            BoundedCancellationDispatcher.LifecycleShared,
+            conversationCompactor,
+            memoryLifecycle,
+            memoryPolicy,
+            memoryOptions,
+            skillContentResolver,
+            finalOutputAdmissionPolicy,
+            tokenEstimator,
+            metricsSink,
+            metricsOptions)
     {
     }
 
@@ -105,7 +144,16 @@ public sealed class DurableAgentRuntime :
         ISkillAdmissionPolicy? skillAdmissionPolicy,
         IToolDisclosurePolicy? toolDisclosurePolicy,
         BoundedCancellationDispatcher cancellationDispatcher,
-        BoundedCancellationDispatcher shutdownCancellationDispatcher)
+        BoundedCancellationDispatcher shutdownCancellationDispatcher,
+        IConversationCompactor? conversationCompactor = null,
+        RuntimeMemoryLifecycle? memoryLifecycle = null,
+        IRuntimeMemoryPolicy? memoryPolicy = null,
+        RuntimeMemoryIntegrationOptions? memoryOptions = null,
+        ISkillContentResolver? skillContentResolver = null,
+        IFinalOutputAdmissionPolicy? finalOutputAdmissionPolicy = null,
+        IRuntimeTokenEstimator? tokenEstimator = null,
+        IRuntimeMetricsSink? metricsSink = null,
+        RuntimeMetricsOptions? metricsOptions = null)
     {
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -133,7 +181,53 @@ public sealed class DurableAgentRuntime :
         _toolSafety = toolSafety ?? new ToolInputSafetyGuard();
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _ids = ids ?? throw new ArgumentNullException(nameof(ids));
+        _tokenEstimator =
+            tokenEstimator ?? ScriptAwareTokenEstimator.Shared;
         _options = (options ?? new DurableAgentRuntimeOptions()).Snapshot();
+        _skillContent = new SkillContentRuntime(
+            skillContentResolver,
+            _options.SkillRuntimeLimits,
+            BoundedCancellationDispatcher.SkillContentResolverShared);
+        if ((memoryLifecycle is null) != (memoryPolicy is null)
+            || memoryLifecycle is null && memoryOptions is not null)
+        {
+            throw new ArgumentException(
+                "Memory lifecycle and policy must be configured together.");
+        }
+
+        _memory = memoryLifecycle is null
+            ? null
+            : new RuntimeMemoryAgentLoop(
+                memoryLifecycle,
+                memoryPolicy!,
+                memoryOptions);
+        if (_options.FinalOutputAdmission.Enabled
+            != (finalOutputAdmissionPolicy is not null))
+        {
+            throw new ArgumentException(
+                _options.FinalOutputAdmission.Enabled
+                    ? "Strict final-output admission requires an admission "
+                      + "policy."
+                    : "A final-output admission policy requires strict "
+                      + "admission to be enabled.",
+                nameof(finalOutputAdmissionPolicy));
+        }
+
+        _finalOutputAdmission = finalOutputAdmissionPolicy is null
+            ? null
+            : new FinalOutputAdmissionEvaluator(
+                finalOutputAdmissionPolicy,
+                _options.FinalOutputAdmission);
+        _metrics = new RuntimeMetricsEmitter(metricsSink, metricsOptions);
+        _conversationContext = new ConversationContextManager(
+            _options.ConversationContext,
+            conversationCompactor ?? new ExtractiveConversationCompactor(),
+            _clock,
+            shutdownCancellationDispatcher
+            ?? throw new ArgumentNullException(
+                nameof(shutdownCancellationDispatcher)),
+            detachedCompactionCleanupCheckpoint: null,
+            metrics: _metrics);
         Controls = controls ?? new RuntimeControlPlane();
         _ownership = ownership ?? new RunOwnershipRegistry();
         _cancellationDispatcher = cancellationDispatcher
@@ -143,12 +237,15 @@ public sealed class DurableAgentRuntime :
                                           ?? throw new ArgumentNullException(
                                               nameof(
                                                   shutdownCancellationDispatcher));
-        _providerSlots = new SemaphoreSlim(
+        _providerAdmission = new ProviderWorkloadAdmission(
             _options.MaxConcurrentProviderCalls,
-            _options.MaxConcurrentProviderCalls);
+            _options.MaxConcurrentBackgroundProviderCalls,
+            _metrics);
     }
 
     public RuntimeControlPlane Controls { get; }
+
+    public RuntimeMetricsHealth MetricsHealth => _metrics.Health;
 
     public int DetachedToolExecutionCount =>
         _toolScheduler.DetachedExecutionCount;
@@ -157,12 +254,166 @@ public sealed class DurableAgentRuntime :
     {
         get
         {
-            return Volatile.Read(ref _detachedShutdownDrainResult) switch
+            return Volatile.Read(
+                ref _detachedToolShutdownDrainResult) switch
             {
                 1 => true,
                 2 => false,
                 _ => null
             };
+        }
+    }
+
+    public bool? DetachedConversationCompactionsDrainedOnStop
+    {
+        get
+        {
+            return Volatile.Read(
+                ref _detachedConversationShutdownDrainResult) switch
+            {
+                1 => true,
+                2 => false,
+                _ => null
+            };
+        }
+    }
+
+    /// <summary>
+    /// Reports whether tracked skill-content resolver calls drained within
+    /// their bounded shutdown window. Null means shutdown has not reached
+    /// that boundary.
+    /// </summary>
+    public bool? SkillContentResolversDrainedOnStop
+    {
+        get
+        {
+            return Volatile.Read(
+                ref _skillContentResolverShutdownDrainResult) switch
+            {
+                1 => true,
+                2 => false,
+                _ => null
+            };
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of resolver calls that outlived their bounded caller
+    /// and remain isolated under the runtime's resolver concurrency cap.
+    /// </summary>
+    public int DetachedSkillContentResolverCallCount =>
+        _skillContent.DetachedResolverCallCount;
+
+    /// <summary>
+    /// Reports whether final-output admission policy calls that outlived
+    /// their caller drained within their bounded shutdown window. Null means
+    /// strict admission is disabled or shutdown has not reached that
+    /// boundary.
+    /// </summary>
+    public bool? FinalOutputAdmissionPolicyCallsDrainedOnStop
+    {
+        get
+        {
+            if (_finalOutputAdmission is null)
+            {
+                return null;
+            }
+
+            return Volatile.Read(
+                ref _finalOutputAdmissionShutdownDrainResult) switch
+            {
+                1 => true,
+                2 => false,
+                _ => null
+            };
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of final-output admission evaluations that outlived
+    /// their caller and whose policy execution or cancellation cleanup has
+    /// not yet settled.
+    /// </summary>
+    public int DetachedFinalOutputAdmissionPolicyCallCount =>
+        _finalOutputAdmission?.DetachedEvaluationCount ?? 0;
+
+    public bool? ActiveRunsDrainedOnStop
+    {
+        get
+        {
+            return Volatile.Read(ref _activeRunShutdownDrainResult) switch
+            {
+                1 => true,
+                2 => false,
+                _ => null
+            };
+        }
+    }
+
+    /// <summary>
+    /// Reports whether provider attempt cleanup tasks drained within the
+    /// bounded shutdown window. Null means shutdown has not reached that
+    /// boundary.
+    /// </summary>
+    public bool? DetachedProviderCleanupsDrainedOnStop
+    {
+        get
+        {
+            return Volatile.Read(
+                ref _detachedProviderShutdownDrainResult) switch
+            {
+                1 => true,
+                2 => false,
+                _ => null
+            };
+        }
+    }
+
+    /// <summary>
+    /// Gets the number of detached provider cleanup tasks that have not yet
+    /// settled. The runtime retains only a count and a shared drain signal,
+    /// rather than retaining every task.
+    /// </summary>
+    public int DetachedProviderCleanupCount =>
+        Volatile.Read(ref _detachedProviderCleanupCount);
+
+    /// <summary>
+    /// Gets the number of tracked detached provider cleanup tasks that have
+    /// settled, whether successfully or with an observed failure.
+    /// </summary>
+    public long DetachedProviderCleanupCompletedCount =>
+        Volatile.Read(ref _detachedProviderCleanupCompletedCount);
+
+    /// <summary>
+    /// Gets the number of detached provider cleanup tasks that faulted after
+    /// they were handed to the runtime.
+    /// </summary>
+    public long DetachedProviderCleanupFailureCount =>
+        Volatile.Read(ref _detachedProviderCleanupFailureCount);
+
+    /// <summary>
+    /// Reports whether active runs, provider-owned cleanup, conversation
+    /// cleanup, root cancellation callbacks, and the bounded skill-content
+    /// resolver cancellation/isolation phase, and the bounded final-output
+    /// admission cancellation/isolation phase have settled. This is distinct
+    /// from the bounded result returned by <see cref="StopAsync"/> and does
+    /// not claim that a non-cooperative host tool, skill-content resolver, or
+    /// final-output admission policy callback exited. Inspect
+    /// <see cref="DetachedSkillContentResolverCallCount"/> and
+    /// <see cref="DetachedFinalOutputAdmissionPolicyCallCount"/> for those
+    /// callbacks.
+    /// </summary>
+    public bool ShutdownResourceCleanupCompleted =>
+        Volatile.Read(ref _shutdownResourceCleanupCompleted) != 0;
+
+    internal bool ConversationContextCleanupCompleted
+    {
+        get
+        {
+            var cleanup = Volatile.Read(
+                ref _conversationContextCleanupTask);
+            return _conversationContext.CleanupCompleted
+                   && (cleanup is null || cleanup.IsCompletedSuccessfully);
         }
     }
 
@@ -178,6 +429,18 @@ public sealed class DurableAgentRuntime :
         return _toolScheduler.GetDetachedExecutionSnapshot(maxItems);
     }
 
+    /// <summary>
+    /// Captures the execution-policy identity that a newly admitted agent loop
+    /// would use now. A caller may persist this through
+    /// <see cref="DurableExecutionPolicyBinding"/> to fail closed if policy
+    /// changes before execution starts.
+    /// </summary>
+    public DurableExecutionPolicyIdentity CaptureExecutionPolicyIdentity(
+        CancellationToken cancellationToken = default)
+    {
+        return CaptureExecutionPolicy(cancellationToken).Identity;
+    }
+
     public async ValueTask<DurableRunOutcome> RunAsync(
         DurableRunRequest request,
         CancellationToken cancellationToken = default)
@@ -190,6 +453,15 @@ public sealed class DurableAgentRuntime :
         using var activeRun = EnterRun(cancellationToken);
         cancellationToken = activeRun.Token;
         var requestSnapshot = Snapshot(request, cancellationToken);
+        BindNewRunFinalOutputAdmission(
+            requestSnapshot.Run,
+            requestSnapshot.FinalOutputContract);
+        _ = GameContextEnvelope.ValidateForRun(
+            requestSnapshot.Run,
+            nameof(request));
+        EnsureContextObservationsVisibleToRun(
+            requestSnapshot.Context,
+            requestSnapshot.Run);
         RunAdmission.EnsureNewRun(requestSnapshot.Run, nameof(request));
 
         var laneId = LaneId(
@@ -201,8 +473,8 @@ public sealed class DurableAgentRuntime :
                 cancellationToken)
             .ConfigureAwait(false);
         using var control = Controls.Register(
-            requestSnapshot.Run.RunId,
-            requestSnapshot.Run.WorldId);
+            requestSnapshot.Run,
+            _options.RequireAudienceIncarnationForRestrictedObservations);
         var transcript = DistinctTranscript(
                 requestSnapshot.InitialTranscript)
             .ToList();
@@ -215,11 +487,23 @@ public sealed class DurableAgentRuntime :
 
         try
         {
+            var executionPolicy = CaptureExecutionPolicy(cancellationToken);
+            EnsureExecutionPolicyBinding(
+                requestSnapshot.Run,
+                executionPolicy);
+            var initialSkillActivationState = ReconcileActiveSkillState(
+                requestSnapshot.ActiveSkills,
+                Array.Empty<SkillActivationStateRecord>(),
+                executionPolicy.Skills);
+            SkillActivationStateCodec.Attach(
+                requestSnapshot.Run,
+                initialSkillActivationState);
             await _journal.CommitRunStartAsync(
                     requestSnapshot.Run,
                     transcript,
                     requestSnapshot.Context,
                     requestSnapshot.ActiveSkills,
+                    requestSnapshot.WorkloadClass,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -229,9 +513,13 @@ public sealed class DurableAgentRuntime :
                     requestSnapshot.Context,
                     requestSnapshot.ActiveSkills,
                     Array.Empty<ToolActivationRecord>(),
+                    requestSnapshot.WorkloadClass,
                     control,
                     startedAt,
-                    deadline)
+                    deadline,
+                    executionPolicy,
+                    initialSkillActivationState:
+                        initialSkillActivationState)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (deadline.IsExpired)
@@ -243,7 +531,8 @@ public sealed class DurableAgentRuntime :
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (
-            exception is not DuplicateRunException)
+            exception is not DuplicateRunException
+            and not DurableExecutionPolicyMismatchException)
         {
             return await FailOrCancelAsync(
                     requestSnapshot.Run,
@@ -260,11 +549,26 @@ public sealed class DurableAgentRuntime :
     /// active. A caller that resumes a run must resupply any still-relevant
     /// candidates through <paramref name="continuation"/>.
     /// </remarks>
+    ValueTask<DurableRunOutcome> IDurableAgentRuntime.ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken)
+    {
+        return ResumeAsync(
+            runId,
+            continuation,
+            reconciler,
+            cancellationToken,
+            guard: null);
+    }
+
     public async ValueTask<DurableRunOutcome> ResumeAsync(
         string runId,
         DurableRunContinuation? continuation = null,
         IGameOperationReconciler? reconciler = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        DurableRunResumeGuard? guard = null)
     {
         if (string.IsNullOrWhiteSpace(runId))
         {
@@ -276,22 +580,47 @@ public sealed class DurableAgentRuntime :
         var continuationSnapshot = Snapshot(
             continuation ?? new DurableRunContinuation(),
             cancellationToken);
+        var guardSnapshot = guard is null ? null : Snapshot(guard);
         var recovered = await _recovery.LoadAsync(runId, cancellationToken)
             .ConfigureAwait(false)
-            ?? throw new KeyNotFoundException(
-                $"Run '{runId}' does not exist in the durable journal.");
+            ?? throw new DurableRunNotFoundException(runId);
+        var recoveredAdmission = EnsureRecoveredFinalOutputAdmission(
+            recovered,
+            continuationSnapshot.FinalOutputContract);
+        if (_options.RequireSemanticResumeGuard
+            && !RunStateMachine.IsTerminal(recovered.Run.State)
+            && guardSnapshot?.SemanticExtensionName is null)
+        {
+            throw ResumeGuardFailure(
+                DurableRunResumeGuardReasonCodes.SemanticGuardRequired);
+        }
+
+        if (guardSnapshot is not null)
+        {
+            EnsureResumeGuard(recovered.Run, runId, guardSnapshot);
+        }
+
+        _ = GameContextEnvelope.ValidateForRun(
+            recovered.Run,
+            nameof(runId));
         var laneId = LaneId(recovered.Run, continuationSnapshot.LaneId);
         await using var ownership = await _ownership.AcquireAsync(
                 runId,
                 laneId,
                 cancellationToken)
             .ConfigureAwait(false);
-        using var control = Controls.Register(runId, recovered.Run.WorldId);
         var transcript = recovered.Transcript.ToList();
         IReadOnlyList<ContextCandidate> context =
             continuationSnapshot.Context;
         IReadOnlyList<SkillReference> activeSkills =
             continuationSnapshot.ActiveSkills;
+        var replacesActiveSkillState =
+            activeSkills.Count > 0
+            || continuationSnapshot.ReplaceActiveSkills;
+        IReadOnlyList<SkillActivationStateRecord> activeSkillState =
+            Array.Empty<SkillActivationStateRecord>();
+        var workloadClass = continuationSnapshot.WorkloadClass
+                            ?? recovered.RecoveryWorkloadClass;
         if (context.Count == 0)
         {
             context = recovered.RecoveryContext;
@@ -301,20 +630,46 @@ public sealed class DurableAgentRuntime :
             && !continuationSnapshot.ReplaceActiveSkills)
         {
             activeSkills = recovered.RecoveryActiveSkills;
+            activeSkillState = recovered.RecoverySkillActivationState;
         }
 
-        var startedAt = _clock.UtcNow.AddMilliseconds(
-            -Math.Max(0, recovered.Run.Usage.DurationMs));
+        EnsureContextObservationsVisibleToRun(context, recovered.Run);
+        var startedAt = BackdateDuration(
+            _clock.UtcNow,
+            recovered.Run.Usage.DurationMs);
         using var deadline = new RunDeadline(
             recovered.Run.Budget.MaxDurationMs,
             recovered.Run.Usage.DurationMs,
             cancellationToken,
             _cancellationDispatcher);
+        var replaySafeCheckpointTurnId = recovered.ReplaySafeTurnId;
 
         try
         {
+            if (continuationSnapshot.RequestCancellation)
+            {
+                return await CancelRecoveredRunAsync(
+                        recovered,
+                        transcript,
+                        reconciler,
+                        startedAt,
+                        deadline.Token)
+                    .ConfigureAwait(false);
+            }
+
+            using var control = Controls.Register(
+                recovered.Run,
+                _options
+                    .RequireAudienceIncarnationForRestrictedObservations);
+            await ReplayPreparedMemoryCommitsAsync(
+                    recovered,
+                    cancellationToken)
+                .ConfigureAwait(false);
             if (RunStateMachine.IsTerminal(recovered.Run.State))
             {
+                EnsureTerminalOutputWasAdmitted(
+                    recovered,
+                    recoveredAdmission);
                 await SettleRecoveredProviderDispatchesAsync(
                         recovered.Run,
                         recovered.UnsettledProviderDispatches,
@@ -324,7 +679,8 @@ public sealed class DurableAgentRuntime :
                 return Outcome(
                     recovered.Run,
                     transcript,
-                    recovered.FinalOutput);
+                    recovered.FinalOutput,
+                    recovered.TerminalOutcome);
             }
 
             if (string.Equals(
@@ -384,6 +740,10 @@ public sealed class DurableAgentRuntime :
                 && recovered.FinalOutput.HasValue
                 && recovered.PendingOperations.Count == 0)
             {
+                _ = await CommitRecoveredMemoryReceiptsAsync(
+                        recovered,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 await _journal.CommitRecoveredCompletionAsync(
                         recovered.Run,
                         recovered.Run.CurrentTurnId ?? "recovered-turn",
@@ -434,6 +794,32 @@ public sealed class DurableAgentRuntime :
                         recovered.Run,
                         transcript,
                         startedAt)
+                    .ConfigureAwait(false);
+            }
+
+            await AdvanceRecoveredGameContextAsync(
+                    recovered,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var memoryDecisionSettled =
+                await CommitRecoveredMemoryReceiptsAsync(
+                    recovered,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (string.Equals(
+                    recovered.Run.State,
+                    RunStates.Running,
+                    StringComparison.Ordinal)
+                && recovered.Run.CurrentTurnId is string committedTurnId
+                && memoryDecisionSettled)
+            {
+                await CompleteTurnWithoutStateChangeAsync(
+                        recovered.Run,
+                        committedTurnId,
+                        _ids.NewId("memory-recovery"),
+                        startedAt,
+                        "memory_recovered_committed_turn",
+                        deadline.Token)
                     .ConfigureAwait(false);
             }
 
@@ -495,15 +881,34 @@ public sealed class DurableAgentRuntime :
                 return Outcome(recovered.Run, transcript);
             }
 
+            var executionPolicy = CaptureExecutionPolicy(cancellationToken);
+            EnsureExecutionPolicyBinding(
+                recovered.Run,
+                executionPolicy);
+            if (replacesActiveSkillState)
+            {
+                activeSkillState = ReconcileActiveSkillState(
+                    activeSkills,
+                    Array.Empty<SkillActivationStateRecord>(),
+                    executionPolicy.Skills);
+            }
+
             return await ExecuteLoopAsync(
                     recovered.Run,
                     transcript,
                     context,
                     activeSkills,
                     recovered.RecoveryToolActivations,
+                    workloadClass,
                     control,
                     startedAt,
-                    deadline)
+                    deadline,
+                    executionPolicy,
+                    CreateRuntimeLoopRecoveryState(
+                        recovered,
+                        replaySafeCheckpointTurnId),
+                    activeSkillState,
+                    replacesActiveSkillState)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (deadline.IsExpired)
@@ -515,7 +920,8 @@ public sealed class DurableAgentRuntime :
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (
-            exception is not DuplicateRunException)
+            exception is not DuplicateRunException
+            and not DurableExecutionPolicyMismatchException)
         {
             return await FailOrCancelAsync(
                     recovered.Run,
@@ -529,7 +935,7 @@ public sealed class DurableAgentRuntime :
 
     public ValueTask DisposeAsync()
     {
-        return StopAsync();
+        return WaitForShutdownDrainAsync();
     }
 
     public ValueTask StopAsync()
@@ -537,6 +943,7 @@ public sealed class DurableAgentRuntime :
         Task stopTask;
         Task? drainTask = null;
         TaskCompletionSource<bool>? completion = null;
+        TaskCompletionSource<bool>? boundedCleanupCompletion = null;
         BoundedCancellationDispatcher.CancellationDispatchReservation?
             shutdownCancellationReservation = null;
         var initiate = false;
@@ -557,6 +964,7 @@ public sealed class DurableAgentRuntime :
                         ? Task.CompletedTask
                         : (_activeRunsDrained ??= NewCompletion()).Task;
                     completion = NewCompletion();
+                    boundedCleanupCompletion = NewCompletion();
                     _stopTask = completion.Task;
                     initiate = true;
                 }
@@ -592,16 +1000,55 @@ public sealed class DurableAgentRuntime :
                 return new ValueTask(stopTask);
             }
 
-            _ = DisposeShutdownCancellationAsync(
+            var shutdownCancellationCleanup =
+                DisposeShutdownCancellationAsync(
                 _shutdownCancellation,
                 cancellationTask,
                 shutdownCancellationReservation!);
+            var resourceCleanup = CompleteShutdownResourceCleanupAsync(
+                drainTask!,
+                boundedCleanupCompletion!,
+                shutdownCancellationCleanup);
+            Volatile.Write(
+                ref _shutdownBoundedCleanupTask,
+                boundedCleanupCompletion!.Task);
+            Volatile.Write(
+                ref _shutdownResourceCleanupTask,
+                resourceCleanup);
+            ObserveTaskFailure(resourceCleanup);
             _ = CompleteStopAsync(
                 drainTask!,
                 completion!);
         }
 
         return new ValueTask(stopTask);
+    }
+
+    /// <summary>
+    /// Initiates bounded shutdown and then waits for active runs, detached
+    /// provider cleanup, conversation-context cleanup, and the bounded
+    /// skill-content resolver and final-output admission
+    /// cancellation/isolation phases to settle. It does not wait forever for
+    /// a resolver or admission policy that ignores cancellation; such calls
+    /// remain visible through
+    /// <see cref="DetachedSkillContentResolverCallCount"/> and
+    /// <see cref="DetachedFinalOutputAdmissionPolicyCallCount"/>. Calling
+    /// this method does not cancel the shared cleanup when the caller's token
+    /// is cancelled.
+    /// </summary>
+    public async ValueTask WaitForShutdownDrainAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await WaitForSharedTaskAsync(
+                StopAsync().AsTask(),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var cleanup = Volatile.Read(ref _shutdownResourceCleanupTask)
+                      ?? throw new InvalidOperationException(
+                          "Runtime shutdown cleanup was not initialized.");
+        await WaitForSharedTaskAsync(cleanup, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private ValueTask AbandonReplaySafeTurnAsync(
@@ -641,23 +1088,132 @@ public sealed class DurableAgentRuntime :
             reasonCode: RunRecovery.ReplaySafeTurnAbandonedReason);
     }
 
+    private RuntimeExecutionPolicyLease CaptureExecutionPolicy(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var tools = _tools.Current;
+        var skills = _skills.Current;
+        var providerRoutes = _provider.CaptureRoutePlan(cancellationToken);
+        var providerPolicy = new CanonicalDigestBuilder();
+        providerPolicy.Add("type", "durable-provider-policy.v1");
+        var modelPolicy = new CanonicalDigestBuilder();
+        modelPolicy.Add("type", "durable-model-policy.v1");
+        var identities = providerRoutes.RouteIdentities;
+        providerPolicy.Add("routeCount", identities.Count);
+        modelPolicy.Add("routeCount", identities.Count);
+        for (var index = 0; index < identities.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var route = identities[index];
+            providerPolicy.Add("routeIndex", index);
+            providerPolicy.Add("providerId", route.ProviderId);
+            providerPolicy.Add(
+                "transportDialect",
+                route.TransportDialect);
+            providerPolicy.Add(
+                "dialectSemanticDigest",
+                route.DialectSemanticDigest);
+            providerPolicy.Add(
+                "capabilityDigest",
+                route.CapabilityDigest);
+            providerPolicy.Add(
+                "routePolicyVersion",
+                route.RoutePolicyVersion);
+            providerPolicy.Add(
+                "routePolicyDigest",
+                route.RoutePolicyDigest);
+            modelPolicy.Add("routeIndex", index);
+            modelPolicy.Add("providerId", route.ProviderId);
+            modelPolicy.Add(
+                "modelId",
+                string.Equals(
+                    route.ModelId,
+                    "unspecified",
+                    StringComparison.Ordinal)
+                    ? _options.ModelId
+                    : route.ModelId);
+        }
+
+        return new RuntimeExecutionPolicyLease(
+            tools,
+            skills,
+            providerRoutes,
+            new DurableExecutionPolicyIdentity(
+                tools.Digest,
+                skills.Digest,
+                providerPolicy.Finish(),
+                modelPolicy.Finish()));
+    }
+
+    private static void EnsureExecutionPolicyBinding(
+        AgentRun run,
+        RuntimeExecutionPolicyLease executionPolicy)
+    {
+        var expected = DurableExecutionPolicyBinding.Read(run);
+        if (expected is not null
+            && !expected.Matches(executionPolicy.Identity))
+        {
+            throw new DurableExecutionPolicyMismatchException();
+        }
+    }
+
     private async ValueTask<DurableRunOutcome> ExecuteLoopAsync(
         AgentRun run,
         List<NormalizedMessage> transcript,
         IReadOnlyList<ContextCandidate> initialContext,
         IReadOnlyList<SkillReference> activeSkills,
         IReadOnlyList<ToolActivationRecord> initialToolActivations,
+        string workloadClass,
         RuntimeControlPlane.Registration control,
         DateTimeOffset startedAt,
-        RunDeadline deadline)
+        RunDeadline deadline,
+        RuntimeExecutionPolicyLease executionPolicy,
+        RuntimeLoopRecoveryState? recoveryState = null,
+        IReadOnlyList<SkillActivationStateRecord>?
+            initialSkillActivationState = null,
+        bool allowInitialSkillStateReplacement = false)
     {
         var cancellationToken = deadline.Token;
+        var toolSnapshot = executionPolicy.Tools;
+        var skillSnapshot = executionPolicy.Skills;
+        var routePlan = executionPolicy.ProviderRoutes;
+        var effectiveActiveSkills = activeSkills
+            .Select(value => new SkillReference(value.SkillId, value.Version))
+            .ToList();
+        var activeSkillState =
+            (initialSkillActivationState
+             ?? Array.Empty<SkillActivationStateRecord>())
+            .Select(value => value.Clone())
+            .ToList();
+        var allowSkillStateReplacement =
+            allowInitialSkillStateReplacement;
         var pendingContext = new List<ContextCandidate>(initialContext);
         var contextDeferralTurns = new Dictionary<string, int>(
             StringComparer.Ordinal);
         var runAttemptId = _ids.NewId("run-attempt");
         var fence = new AttemptFence();
-        string? disclosedSkillDigest = null;
+        var disclosedSkillDigest =
+            recoveryState?.DisclosedSkillAdmissionDigest;
+        var previousProviderCacheKey =
+            recoveryState?.PreviousProviderCacheKey;
+        var providerOpaqueContinuationState =
+            recoveryState?.ProviderOpaqueContinuationState?.Snapshot();
+        var finalOutputAdmission =
+            FinalOutputAdmissionBinding.Read(run);
+        var finalOutputEvidence = new FinalOutputEvidenceRegistry();
+        foreach (var item in recoveryState?.FinalOutputCommittedEvidence
+                 ?? Array.Empty<FinalOutputCommittedEvidence>())
+        {
+            finalOutputEvidence.Add(item);
+        }
+        var finalOutputAdmissionAttempts =
+            recoveryState?.FinalOutputAdmissionAttempts ?? 0;
+        if (finalOutputAdmission is not null)
+        {
+            EnsureFinalOutputAttemptsRemain(
+                finalOutputAdmissionAttempts);
+        }
         IReadOnlyList<ToolActivationRecord> toolActivations =
             initialToolActivations.Select(item => item.Clone()).ToArray();
         var toolLoopGuard = SemanticToolLoopGuard.Rebuild(
@@ -739,8 +1295,117 @@ public sealed class DurableAgentRuntime :
 
             var turnId = _ids.NewId("turn");
             var attemptId = _ids.NewId("turn-attempt");
-            var toolSnapshot = _tools.Current;
-            var skillSnapshot = _skills.Current;
+            RuntimeMemoryRecallSelection? memoryRecall = null;
+            if (_memory is not null)
+            {
+                var memoryRecallStarted =
+                    System.Diagnostics.Stopwatch.GetTimestamp();
+                var memoryRecallOutcome = RuntimeMetricOutcomes.Failure;
+                try
+                {
+                    using var step = control.BeginStep(cancellationToken);
+                    if (step.PendingControlAtStart)
+                    {
+                        throw new OperationCanceledException(
+                            "A queued run control superseded memory recall.",
+                            step.CancellationToken);
+                    }
+
+                    memoryRecall = await _memory.RecallAsync(
+                            run,
+                            turnId,
+                            transcript,
+                            pendingContext,
+                            Math.Max(
+                                0,
+                                _contextCompiler.MaxCandidates
+                                - pendingContext.Count),
+                            step.CancellationToken)
+                        .ConfigureAwait(false);
+                    memoryRecallOutcome = RuntimeMetricOutcomes.Success;
+                }
+                catch (OperationCanceledException)
+                {
+                    memoryRecallOutcome = RuntimeMetricOutcomes.Canceled;
+                    var interrupted = await DrainControlsAsync(
+                            run,
+                            control,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    pendingContext.AddRange(interrupted.Context);
+                    if (deadline.IsExpired)
+                    {
+                        await CompleteBudgetAsync(
+                                run,
+                                "max_duration",
+                                startedAt,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        return Outcome(run, transcript);
+                    }
+
+                    if (interrupted.Steer
+                        && !interrupted.Cancel
+                        && !interrupted.Interrupt
+                        && !cancellationToken.IsCancellationRequested)
+                    {
+                        continue;
+                    }
+
+                    if (interrupted.Cancel
+                        || interrupted.Interrupt
+                        || cancellationToken.IsCancellationRequested)
+                    {
+                        await CompleteControlAsync(
+                                run,
+                                interrupted.Interrupt
+                                    ? RunControlKinds.Interrupt
+                                    : RunControlKinds.Cancel,
+                                startedAt,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        return Outcome(run, transcript);
+                    }
+
+                    throw;
+                }
+                finally
+                {
+                    _metrics.Record(
+                        RuntimeMetricNames.MemoryRecallMilliseconds,
+                        RuntimeMetricKind.Histogram,
+                        RuntimeMetricsEmitter.ElapsedMilliseconds(
+                            memoryRecallStarted),
+                        workloadClass,
+                        memoryRecallOutcome);
+                }
+            }
+
+            activeSkillState = ReconcileActiveSkillState(
+                    effectiveActiveSkills,
+                    activeSkillState,
+                    skillSnapshot)
+                .ToList();
+            var activeSkillStateExtension =
+                SkillActivationStateCodec.Encode(activeSkillState);
+            var hasDurableSkillState =
+                run.Extensions.TryGetValue(
+                    SkillActivationStateCodec.ExtensionName,
+                    out var priorSkillStateExtension);
+            var durableSkillStateChanged =
+                hasDurableSkillState
+                    ? !string.Equals(
+                        ProtocolJson.Serialize(priorSkillStateExtension),
+                        ProtocolJson.Serialize(activeSkillStateExtension),
+                        StringComparison.Ordinal)
+                    : activeSkillState.Count > 0;
+            if (durableSkillStateChanged
+                && !allowSkillStateReplacement)
+            {
+                throw new InvalidDataException(
+                    "Active skill state changed outside an authorized "
+                    + "durable progression.");
+            }
             var toolDisclosure = _toolDisclosure.Evaluate(
                 run,
                 turnId,
@@ -753,18 +1418,40 @@ public sealed class DurableAgentRuntime :
                 skillSnapshot,
                 toolSnapshot,
                 toolDisclosure,
-                activeSkills,
+                effectiveActiveSkills,
                 _options.SkillDisclosureBudget);
             toolDisclosure.FinalizeSkillActivations();
             var disclosure = skillSnapshot.CreateDisclosure(
-                activeSkills,
+                effectiveActiveSkills,
                 _options.SkillDisclosureBudget,
                 skillAdmission.CatalogReferences);
+            var skillRuntime = new SkillRuntimePlan(
+                skillSnapshot,
+                skillAdmission.CatalogReferences,
+                activeSkillState,
+                _options.SkillRuntimeLimits);
+            var resolvedSkillContent = await _skillContent.ResolveAsync(
+                    run,
+                    turnId,
+                    disclosure.Activated,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var promptAssemblyStarted =
+                System.Diagnostics.Stopwatch.GetTimestamp();
+            var compilationContext = memoryRecall is null
+                || memoryRecall.Candidates.Count == 0
+                ? pendingContext.ToArray()
+                : pendingContext
+                    .Concat(memoryRecall.Candidates)
+                    .ToArray();
+            var ephemeralMemoryIds = memoryRecall?.Candidates
+                .Select(item => item.Id)
+                .ToHashSet(StringComparer.Ordinal);
             var compiled = _contextCompiler.Compile(
                 new ContextCompilationRequest(
                     run.RunId,
                     turnId,
-                    pendingContext,
+                    compilationContext,
                     _clock.UtcNow,
                     disclosure,
                     _contextCompiler.MaxCandidates,
@@ -772,12 +1459,23 @@ public sealed class DurableAgentRuntime :
             RetainDeferredContext(
                 pendingContext,
                 contextDeferralTurns,
-                compiled.BudgetReport);
+                compiled.BudgetReport,
+                ephemeralMemoryIds);
 
             var preparedTranscript = transcript.ToList();
             preparedTranscript.RemoveAll(
                 SemanticToolLoopGuard.IsWarningMessage);
-            var promptMessages = new List<NormalizedMessage>(3);
+            preparedTranscript.RemoveAll(IsSkillContentMessage);
+            var currentUserMessageId = preparedTranscript
+                .LastOrDefault(
+                    message => string.Equals(
+                                   message.Role,
+                                   NormalizedRoles.User,
+                                   StringComparison.Ordinal)
+                               && !IsRuntimeContextMessage(message)
+                               && !IsSkillContentMessage(message))
+                ?.MessageId;
+            var promptMessages = new List<NormalizedMessage>(4);
             var disclosureChanged = !string.Equals(
                     disclosedSkillDigest,
                     skillAdmission.DisclosureDigest,
@@ -791,6 +1489,17 @@ public sealed class DurableAgentRuntime :
                     _clock.UtcNow);
                 preparedTranscript.Add(skillMessage);
                 promptMessages.Add(skillMessage);
+            }
+
+            if (resolvedSkillContent.HasReferences)
+            {
+                var skillContentMessage =
+                    RuntimePromptBuilder.SkillContentMessage(
+                        _ids.NewId("skill-content-message"),
+                        resolvedSkillContent,
+                        _clock.UtcNow);
+                preparedTranscript.Add(skillContentMessage);
+                promptMessages.Add(skillContentMessage);
             }
 
             if (compiled.BudgetReport.InputCount > 0)
@@ -810,7 +1519,25 @@ public sealed class DurableAgentRuntime :
                 promptMessages.Add(loopWarning);
             }
 
-            var directTools = toolDisclosure.EffectiveProviderTools;
+            IReadOnlyList<ToolDescriptor> directTools =
+                SkillRuntimePlan.MergeProviderTools(
+                toolDisclosure.EffectiveProviderTools,
+                skillRuntime.ControlTools);
+            if (finalOutputAdmission is not null)
+            {
+                directTools = directTools
+                    .Concat(
+                        new[]
+                        {
+                            FinalOutputAdmissionCodec.CreateSubmitDescriptor(
+                                _options.FinalOutputAdmission,
+                                finalOutputAdmission.Contract)
+                        })
+                    .OrderBy(item => item.Name, StringComparer.Ordinal)
+                    .ToArray();
+            }
+            var effectiveToolDigest =
+                SkillRuntimePlan.ComputeProviderToolDigest(directTools);
             var providerPrompt = preparedTranscript
                 .Where(IsSkillDisclosureMessage)
                 .Concat(
@@ -820,12 +1547,46 @@ public sealed class DurableAgentRuntime :
             var stablePrefix = providerPrompt
                 .TakeWhile(IsSkillDisclosureMessage)
                 .ToArray();
+            var contextView = await _conversationContext.PrepareAsync(
+                    run.RunId,
+                    turnId,
+                    providerPrompt,
+                    stablePrefix
+                        .Select(message => message.MessageId)
+                        .Concat(
+                            promptMessages.Select(
+                                message => message.MessageId))
+                        .Concat(
+                            currentUserMessageId is null
+                                ? Array.Empty<string>()
+                                : new[] { currentUserMessageId })
+                        .ToArray(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            providerPrompt = contextView.Messages.ToArray();
+            stablePrefix = providerPrompt
+                .TakeWhile(IsSkillDisclosureMessage)
+                .ToArray();
             var prompt = RuntimePromptBuilder.MeasurePrompt(
                 providerPrompt,
                 directTools,
                 _options.MaxTranscriptMessages,
                 _options.MaxPromptUtf8Bytes,
-                _options.EstimatedPromptBytesPerToken);
+                _options.EstimatedPromptBytesPerToken,
+                _tokenEstimator);
+            _metrics.Record(
+                RuntimeMetricNames.PromptAssemblyMilliseconds,
+                RuntimeMetricKind.Histogram,
+                RuntimeMetricsEmitter.ElapsedMilliseconds(
+                    promptAssemblyStarted),
+                workloadClass,
+                RuntimeMetricOutcomes.Success);
+            _metrics.Record(
+                RuntimeMetricNames.PromptUtf8Bytes,
+                RuntimeMetricKind.Histogram,
+                prompt.Utf8Bytes,
+                workloadClass,
+                RuntimeMetricOutcomes.Success);
             var remainingTokens = run.Budget.MaxTokens
                                   - ((long)run.Usage.InputTokens
                                      + run.Usage.OutputTokens);
@@ -845,56 +1606,119 @@ public sealed class DurableAgentRuntime :
             var maxOutputTokens = (int)Math.Min(
                 int.MaxValue,
                 remainingOutputTokens);
+            var primaryRoute = routePlan.PrimaryRouteIdentity;
+            var promptDigest = RuntimePromptBuilder.TranscriptDigest(
+                providerPrompt,
+                effectiveToolDigest,
+                skillSnapshot);
+            var memoryEvidence = _memory is null
+                ? JsonArrayBuilder.Object(
+                    ("memoryConfigured", JsonArrayBuilder.Boolean(false)))
+                : memoryRecall?.Evidence
+                  ?? RuntimeMemoryRecallSelection.Empty(
+                      _memory.PolicyId,
+                      _memory.PolicyVersion).Evidence;
+            var providerCacheKey = new ProviderCacheKey(
+                _options.PromptLayoutVersion,
+                RuntimePromptBuilder.StablePrefixDigest(
+                    stablePrefix,
+                    _options.PromptLayoutVersion),
+                effectiveToolDigest,
+                skillAdmission.DisclosureDigest,
+                primaryRoute.RouteDigest,
+                CanonicalJsonDigest.ComputeSha256(memoryEvidence),
+                ProviderCacheCompactionDigest(contextView.Report),
+                ProviderCacheDynamicRequestDigest(
+                    promptDigest,
+                    providerOpaqueContinuationState));
+            var providerCacheDecision = ProviderCacheTelemetry.Evaluate(
+                previousProviderCacheKey,
+                providerCacheKey);
             var snapshot = new TurnSnapshot
             {
                 TurnId = turnId,
                 RunId = run.RunId,
                 RuntimeGeneration = run.RuntimeGeneration,
-                ProviderId = _provider.PrimaryProviderId,
+                ProviderId = primaryRoute.ProviderId,
                 ModelId = string.Equals(
-                    _provider.PrimaryRouteMetadata.ModelId,
+                    primaryRoute.ModelId,
                     "unspecified",
                     StringComparison.Ordinal)
                     ? _options.ModelId
-                    : _provider.PrimaryRouteMetadata.ModelId,
+                    : primaryRoute.ModelId,
                 PromptLayoutVersion = _options.PromptLayoutVersion,
-                StablePrefixHash = RuntimePromptBuilder.StablePrefixDigest(
-                    stablePrefix,
-                    _options.PromptLayoutVersion),
+                StablePrefixHash = providerCacheKey.StablePrefixDigest,
                 SkillGeneration = skillSnapshot.Generation,
                 SkillDigests = disclosure.Activated
                     .Select(item => item.ContentDigest)
                     .ToList(),
                 ToolCatalogGeneration = toolSnapshot.Generation,
-                DirectToolDigest = toolDisclosure.EffectiveDirectDigest,
+                DirectToolDigest = effectiveToolDigest,
                 DeferredCatalogDigest =
                     toolDisclosure.AuthorizedHiddenTools.Count == 0
                     ? null
                     : toolDisclosure.DeferredOnlyDigest,
                 ContextPolicyVersion = _options.ContextPolicyVersion,
                 BudgetPolicyVersion = _options.BudgetPolicyVersion,
+                MaxSideEffectToolCallsPerTurn =
+                    _options.MaxSideEffectToolCallsPerTurn,
                 CreatedAt = _clock.UtcNow,
                 Extensions = new Dictionary<string, JsonElement>(
                     StringComparer.Ordinal)
                 {
                     ["skillAdmission"] =
                         skillAdmission.ToSnapshotExtension(),
+                    [SkillActivationStateCodec.ExtensionName] =
+                        activeSkillStateExtension.Clone(),
+                    ["skillContentResolution"] =
+                        resolvedSkillContent.Evidence,
                     ["toolDisclosure"] =
                         toolDisclosure.ToSnapshotExtension(),
                     ["contextBudget"] =
                         ProtocolJson.ToElement(compiled.BudgetReport),
+                    ["conversationContext"] =
+                        contextView.Report.ToSnapshotExtension(),
                     ["promptMeasurement"] =
                         RuntimePromptBuilder.PromptMeasurementEvidence(prompt),
                     ["promptDigest"] =
-                        JsonArrayBuilder.String(
-                            RuntimePromptBuilder.TranscriptDigest(
-                                providerPrompt,
-                                toolDisclosure.EffectiveDirectDigest,
-                                skillSnapshot)),
+                        JsonArrayBuilder.String(promptDigest),
                     ["stablePrefixMessageCount"] =
-                        JsonArrayBuilder.Number(stablePrefix.Length)
+                        JsonArrayBuilder.Number(stablePrefix.Length),
+                    ["providerWorkloadClass"] =
+                        JsonArrayBuilder.String(workloadClass),
+                    [ProviderCacheTelemetry.KeyExtensionName] =
+                        providerCacheKey.ToJson(),
+                    [ProviderCacheTelemetry.DecisionExtensionName] =
+                        providerCacheDecision.ToJson()
                 }
             };
+            if (_memory is not null)
+            {
+                snapshot.Extensions[
+                        RuntimeMemoryAgentLoop.PolicySnapshotExtension] =
+                    _memory.PolicyEvidence;
+                snapshot.Extensions[
+                        RuntimeMemoryAgentLoop.RecallSnapshotExtension] =
+                    memoryRecall?.Evidence
+                    ?? RuntimeMemoryRecallSelection.Empty(
+                        _memory.PolicyId,
+                        _memory.PolicyVersion).Evidence;
+            }
+            if (finalOutputAdmission is not null)
+            {
+                snapshot.Extensions[
+                        FinalOutputAdmissionBinding
+                            .TurnSnapshotExtensionName] =
+                    finalOutputAdmission.ToJson();
+            }
+
+            if (hasDurableSkillState || activeSkillState.Count > 0)
+            {
+                run.Extensions[SkillActivationStateCodec.ExtensionName] =
+                    activeSkillStateExtension.Clone();
+            }
+            TryAttachConversationContextCheckpoint(snapshot, contextView);
+            ProtocolValidator.EnsureValid(snapshot);
             await _journal.CommitTurnPreparationAsync(
                     run,
                     turnId,
@@ -903,11 +1727,16 @@ public sealed class DurableAgentRuntime :
                     snapshot,
                     startedAt,
                     cancellationToken,
-                    toolDisclosure.StateChanged
+                    toolDisclosure: toolDisclosure.StateChanged
                         ? toolDisclosure.ToJournalRecord(
                             toolDisclosure.StateReasonCodes)
+                        : null,
+                    checkpointReasonCode: durableSkillStateChanged
+                        ? SkillRuntimeReasonCodes.ReplacedByContinuation
                         : null)
                 .ConfigureAwait(false);
+            allowSkillStateReplacement = false;
+            previousProviderCacheKey = providerCacheKey;
             toolActivations = toolDisclosure.RequestedActivations;
             transcript.Clear();
             transcript.AddRange(preparedTranscript);
@@ -920,77 +1749,131 @@ public sealed class DurableAgentRuntime :
             try
             {
                 using var step = control.BeginStep(cancellationToken);
-                var acquired = false;
-                Task? detachedProviderCleanup = null;
+                if (step.PendingControlAtStart)
+                {
+                    throw new OperationCanceledException(
+                        "A queued run control superseded provider dispatch.",
+                        step.CancellationToken);
+                }
+                ProviderWorkloadAdmission.Lease? providerLease = null;
                 try
                 {
-                    await _providerSlots.WaitAsync(step.CancellationToken)
+                    providerLease = await _providerAdmission.AcquireAsync(
+                            workloadClass,
+                            step.CancellationToken)
                         .ConfigureAwait(false);
-                    acquired = true;
-                    response = await _provider.RunAsync(
-                            run.RunId,
-                            runAttemptId,
-                            turnId,
-                            providerPrompt,
-                            directTools,
-                            fence,
-                            item => PublishProviderEventAsync(run, item),
-                            step.CancellationToken,
-                            onLifecycleNotice: notice => PublishProviderLifecycle(
-                                run,
-                                notice),
-                            estimatedPromptTokens: prompt.EstimatedTokens,
-                            maxOutputTokens: maxOutputTokens,
-                            onDetachedCleanup: cleanup =>
-                                detachedProviderCleanup = cleanup,
-                            onUsage: notice =>
-                                ChargeAndEnforceProviderUsageAsync(
-                                    run,
-                                    notice,
-                                    budget,
-                                    startedAt,
-                                    turnId),
-                            onUsageUncertain: notice =>
-                                MarkProviderUsageUncertainAsync(
-                                    run,
-                                    notice,
-                                    startedAt,
-                                    turnId),
-                            onDispatch: notice =>
-                                MarkProviderDispatchAsync(
-                                    run,
-                                    notice,
-                                    startedAt,
-                                    turnId),
-                            onDispatchKnownZero: notice =>
-                                MarkProviderDispatchKnownZeroAsync(
-                                    run,
-                                    notice,
-                                    startedAt,
-                                    turnId),
-                            onResultDiscarded: notice =>
-                                MarkProviderResultDiscardedAsync(
-                                    run,
-                                    notice,
-                                    startedAt,
-                                    turnId))
-                        .ConfigureAwait(false);
+                    var streamStarted =
+                        System.Diagnostics.Stopwatch.GetTimestamp();
+                    var streamOutcome = RuntimeMetricOutcomes.Failure;
+                    var firstTokenRecorded = 0;
+                    try
+                    {
+                        response = await _provider.RunAsync(
+                                run.RunId,
+                                runAttemptId,
+                                turnId,
+                                providerPrompt,
+                                directTools,
+                                fence,
+                                async item =>
+                                {
+                                    if ((string.Equals(
+                                                item.Kind,
+                                                ModelStreamEventKinds.TextDelta,
+                                                StringComparison.Ordinal)
+                                         || string.Equals(
+                                                item.Kind,
+                                                ModelStreamEventKinds
+                                                    .ReasoningDelta,
+                                                StringComparison.Ordinal)
+                                         || string.Equals(
+                                                item.Kind,
+                                                ModelStreamEventKinds
+                                                    .ToolCallDelta,
+                                                StringComparison.Ordinal))
+                                        && Interlocked.CompareExchange(
+                                            ref firstTokenRecorded,
+                                            1,
+                                            0) == 0)
+                                    {
+                                        _metrics.Record(
+                                            RuntimeMetricNames
+                                                .ProviderTimeToFirstTokenMilliseconds,
+                                            RuntimeMetricKind.Histogram,
+                                            RuntimeMetricsEmitter
+                                                .ElapsedMilliseconds(
+                                                    streamStarted),
+                                            workloadClass,
+                                            RuntimeMetricOutcomes.Success);
+                                    }
+
+                                    await PublishProviderEventAsync(run, item)
+                                        .ConfigureAwait(false);
+                                },
+                                step.CancellationToken,
+                                 onLifecycleNotice: notice => PublishProviderLifecycle(
+                                     run,
+                                     notice),
+                                 estimatedPromptTokens: prompt.EstimatedTokens,
+                                 maxOutputTokens: maxOutputTokens,
+                                 onDetachedCleanup: TrackDetachedProviderCleanup,
+                                 onUsage: notice =>
+                                     ChargeAndEnforceProviderUsageAsync(
+                                         run,
+                                        notice,
+                                        budget,
+                                        startedAt,
+                                        turnId),
+                                onUsageUncertain: notice =>
+                                    MarkProviderUsageUncertainAsync(
+                                        run,
+                                        notice,
+                                        startedAt,
+                                        turnId),
+                                onDispatch: notice =>
+                                    MarkProviderDispatchAsync(
+                                        run,
+                                        notice,
+                                        startedAt,
+                                        turnId),
+                                onDispatchKnownZero: notice =>
+                                    MarkProviderDispatchKnownZeroAsync(
+                                        run,
+                                        notice,
+                                        startedAt,
+                                        turnId),
+                                onResultDiscarded: notice =>
+                                    MarkProviderResultDiscardedAsync(
+                                        run,
+                                        notice,
+                                        startedAt,
+                                        turnId),
+                                opaqueContinuationState:
+                                    providerOpaqueContinuationState,
+                                routePlan: routePlan)
+                            .ConfigureAwait(false);
+                        streamOutcome = RuntimeMetricOutcomes.Success;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        streamOutcome = RuntimeMetricOutcomes.Canceled;
+                        throw;
+                    }
+                    finally
+                    {
+                        _metrics.Record(
+                            RuntimeMetricNames
+                                .ProviderStreamDurationMilliseconds,
+                            RuntimeMetricKind.Histogram,
+                            RuntimeMetricsEmitter.ElapsedMilliseconds(
+                                streamStarted),
+                            workloadClass,
+                            streamOutcome);
+                    }
                 }
                 finally
                 {
-                    if (acquired)
-                    {
-                        if (detachedProviderCleanup is null)
-                        {
-                            _providerSlots.Release();
-                        }
-                        else
-                        {
-                            _ = ReleaseProviderSlotAfterCleanupAsync(
-                                detachedProviderCleanup,
-                                _providerSlots);
-                        }
-                    }
+                    providerLease?.Dispose();
                 }
             }
             catch (ProviderBudgetExceededException exception)
@@ -1151,13 +2034,38 @@ public sealed class DurableAgentRuntime :
             }
 
             var guardTranscriptStart = transcript.Count;
+            var responseRoute = response.RouteIdentity
+                                ?? throw new InvalidDataException(
+                                    "A provider result is missing its route "
+                                    + "identity.");
+            var nextProviderOpaqueContinuationState =
+                response.OpaqueContinuationState?.Snapshot();
+            if (nextProviderOpaqueContinuationState is not null
+                && !nextProviderOpaqueContinuationState.Matches(
+                    responseRoute))
+            {
+                throw new InvalidDataException(
+                    "A provider continuation does not match its result "
+                    + "route.");
+            }
+
+            var durableProviderOpaqueContinuationState =
+                _options
+                    .AllowProviderDeclaredNonSecretContinuationPersistence
+                && nextProviderOpaqueContinuationState
+                    ?.IsDurableNonSecret == true
+                    ? nextProviderOpaqueContinuationState
+                    : null;
             var assistant = NormalizedTranscript.AssistantResponse(
                 _ids.NewId("assistant-message"),
                 response.Text,
                 response.ReasoningContent,
                 response.ToolCalls,
                 _clock.UtcNow);
-            AnnotateToolCallEvidence(assistant, toolDisclosure);
+            AnnotateToolCallEvidence(
+                assistant,
+                toolDisclosure,
+                directTools);
 
             if (response.ToolCalls.Count == 0)
             {
@@ -1170,9 +2078,37 @@ public sealed class DurableAgentRuntime :
                             response.ProviderId,
                             response.ProviderAttemptId,
                             response.StreamAttemptId,
-                            CancellationToken.None)
+                            CancellationToken.None,
+                            routeIdentity: responseRoute,
+                            opaqueContinuationState:
+                                durableProviderOpaqueContinuationState,
+                            finalOutputPresentation:
+                                finalOutputAdmission is null
+                                    ? null
+                                    : FinalOutputAdmissionCodec
+                                        .CreatePresentation(
+                                            FinalOutputAdmissionCodec
+                                                .ProvisionalPresentationState,
+                                            "provider_follow_up"))
                         .ConfigureAwait(false);
+                    providerOpaqueContinuationState =
+                        nextProviderOpaqueContinuationState;
                     transcript.Add(assistant);
+                    await CommitMemoryForReceiptsAsync(
+                            run,
+                            turnId,
+                            response.ProviderAttemptId,
+                            ProviderMemorySources(
+                                run,
+                                turnId,
+                                response.StreamAttemptId,
+                                includeAssistantOutput: false),
+                            Array.Empty<ActionReceipt>(),
+                            transcript,
+                            assistant,
+                            null,
+                            deadline.Token)
+                        .ConfigureAwait(false);
                     await CompleteTurnWithoutStateChangeAsync(
                             run,
                             turnId,
@@ -1184,8 +2120,52 @@ public sealed class DurableAgentRuntime :
                     continue;
                 }
 
+                if (finalOutputAdmission is not null)
+                {
+                    finalOutputAdmissionAttempts = checked(
+                        finalOutputAdmissionAttempts + 1);
+                    await CommitMissingFinalOutputSubmissionAsync(
+                            run,
+                            transcript,
+                            assistant,
+                            turnId,
+                            attemptId,
+                            response,
+                            responseRoute,
+                            durableProviderOpaqueContinuationState,
+                            startedAt,
+                            deadline,
+                            finalOutputAdmissionAttempts)
+                        .ConfigureAwait(false);
+                    providerOpaqueContinuationState =
+                        nextProviderOpaqueContinuationState;
+                    toolLoopGuard.ObserveMessages(
+                        transcript.Skip(guardTranscriptStart).ToArray());
+                    EnsureFinalOutputAttemptsRemain(
+                        finalOutputAdmissionAttempts);
+                    continue;
+                }
+
                 var finalOutput = RuntimePromptBuilder.FinalOutput(response.Text!);
-                await _journal.CommitFinalCompletionAsync(
+                if (_memory is null)
+                {
+                    await _journal.CommitFinalCompletionAsync(
+                            run,
+                            assistant,
+                            finalOutput,
+                            turnId,
+                            response.ProviderId,
+                            response.ProviderAttemptId,
+                            response.StreamAttemptId,
+                            startedAt,
+                            CancellationToken.None,
+                            routeIdentity: responseRoute)
+                        .ConfigureAwait(false);
+                    transcript.Add(assistant);
+                    return Outcome(run, transcript, finalOutput);
+                }
+
+                await _journal.CommitProviderResultAndOutputAsync(
                         run,
                         assistant,
                         finalOutput,
@@ -1193,13 +2173,114 @@ public sealed class DurableAgentRuntime :
                         response.ProviderId,
                         response.ProviderAttemptId,
                         response.StreamAttemptId,
-                        startedAt,
-                        CancellationToken.None)
+                        CancellationToken.None,
+                        routeIdentity: responseRoute)
                     .ConfigureAwait(false);
                 transcript.Add(assistant);
+                try
+                {
+                    await CommitMemoryForReceiptsAsync(
+                            run,
+                            turnId,
+                            response.ProviderAttemptId,
+                            ProviderMemorySources(
+                                run,
+                                turnId,
+                                response.StreamAttemptId,
+                                includeAssistantOutput: true),
+                            Array.Empty<ActionReceipt>(),
+                            transcript,
+                            assistant,
+                            finalOutput,
+                            deadline.Token)
+                        .ConfigureAwait(false);
+                    await _journal.CommitRecoveredCompletionAsync(
+                            run,
+                            turnId,
+                            response.ProviderAttemptId,
+                            startedAt,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (deadline.IsExpired)
+                {
+                    var outcome = await CompleteDurationDeadlineAsync(
+                            run,
+                            transcript,
+                            startedAt)
+                        .ConfigureAwait(false);
+                    outcome.FinalOutput = finalOutput.Clone();
+                    return outcome;
+                }
+                catch (Exception exception) when (
+                    exception is not DuplicateRunException)
+                {
+                    var outcome = await FailOrCancelAsync(
+                            run,
+                            transcript,
+                            exception,
+                            startedAt,
+                            deadline.ExternalCancellationRequested)
+                        .ConfigureAwait(false);
+                    outcome.FinalOutput = finalOutput.Clone();
+                    return outcome;
+                }
+
                 return Outcome(run, transcript, finalOutput);
             }
 
+            if (finalOutputAdmission is not null
+                && response.ToolCalls.Any(
+                    call => string.Equals(
+                        call.Name,
+                        FinalOutputAdmissionControl.SubmitToolName,
+                        StringComparison.Ordinal)))
+            {
+                finalOutputAdmissionAttempts = checked(
+                    finalOutputAdmissionAttempts + 1);
+                var admitted = await ProcessFinalOutputSubmissionAsync(
+                        run,
+                        transcript,
+                        assistant,
+                        response,
+                        responseRoute,
+                        durableProviderOpaqueContinuationState,
+                        turnId,
+                        attemptId,
+                        startedAt,
+                        deadline,
+                        compiled.Selected
+                            .Select(item => item.Candidate)
+                            .ToArray(),
+                        finalOutputAdmission,
+                        finalOutputEvidence,
+                        finalOutputAdmissionAttempts)
+                    .ConfigureAwait(false);
+                providerOpaqueContinuationState =
+                    nextProviderOpaqueContinuationState;
+                if (admitted is not null)
+                {
+                    return admitted;
+                }
+
+                toolLoopGuard.ObserveMessages(
+                    transcript.Skip(guardTranscriptStart).ToArray());
+                EnsureFinalOutputAttemptsRemain(
+                    finalOutputAdmissionAttempts);
+                continue;
+            }
+
+            var prepared = PrepareToolCalls(
+                run,
+                turnId,
+                attemptId,
+                response.ToolCalls,
+                toolDisclosure,
+                skillRuntime);
+            prepared = ApplySideEffectToolCallLimit(
+                prepared,
+                snapshot.MaxSideEffectToolCallsPerTurn,
+                run.Usage.Actions);
             await _journal.CommitProviderResultAsync(
                     run,
                     assistant,
@@ -1207,15 +2288,22 @@ public sealed class DurableAgentRuntime :
                     response.ProviderId,
                     response.ProviderAttemptId,
                     response.StreamAttemptId,
-                    CancellationToken.None)
+                    CancellationToken.None,
+                    routeIdentity: responseRoute,
+                    opaqueContinuationState:
+                        durableProviderOpaqueContinuationState,
+                    finalOutputPresentation:
+                        finalOutputAdmission is null
+                            ? null
+                            : FinalOutputAdmissionCodec
+                                .CreatePresentation(
+                                    FinalOutputAdmissionCodec
+                                        .ProvisionalPresentationState,
+                                    "final_output_not_submitted"))
                 .ConfigureAwait(false);
+            providerOpaqueContinuationState =
+                nextProviderOpaqueContinuationState;
             transcript.Add(assistant);
-            var prepared = PrepareToolCalls(
-                run,
-                turnId,
-                attemptId,
-                response.ToolCalls,
-                toolDisclosure);
             var valid = prepared
                 .Where(item => item.Execution is not null)
                 .Select(item => item.Execution!)
@@ -1249,6 +2337,11 @@ public sealed class DurableAgentRuntime :
                         prepared,
                         toolMessages,
                         toolDisclosure,
+                        skillRuntime,
+                        skillSnapshot,
+                        toolSnapshot,
+                        effectiveActiveSkills,
+                        activeSkillState,
                         turnId,
                         attemptId,
                         cancellationToken)
@@ -1262,7 +2355,11 @@ public sealed class DurableAgentRuntime :
                         attemptId,
                         startedAt,
                         prepared.Any(item => item.Activation is not null
+                                             || item.SkillActivation is not null
                                              || ToolDisclosureControlNames
+                                                 .IsReserved(
+                                                     item.ToolCall.Name)
+                                             || SkillRuntimeControlNames
                                                  .IsReserved(
                                                      item.ToolCall.Name))
                             ? "tool_controls"
@@ -1272,12 +2369,52 @@ public sealed class DurableAgentRuntime :
                 continue;
             }
 
+            var invocations = new Dictionary<string, ToolInvocation>(
+                valid.Length,
+                StringComparer.Ordinal);
+            var committedReceipts = new List<ActionReceipt>(valid.Length);
             foreach (var call in valid)
             {
-                await _journal.AppendDurableAsync(
+                var invocation = call.Invocation();
+                ProtocolValidator.EnsureValid(invocation);
+                invocations.Add(call.ToolCallId, invocation);
+            }
+
+            var plan = _toolPlanner.Plan(valid);
+            var toolQueuedAt =
+                System.Diagnostics.Stopwatch.GetTimestamp();
+            using var schedulerReservation =
+                _toolScheduler.ReserveExecution(plan);
+            _metrics.Record(
+                RuntimeMetricNames.ToolQueueDepth,
+                RuntimeMetricKind.Gauge,
+                _toolScheduler.QueuedCalls);
+            var actionRequests = new Dictionary<string, ActionRequest>(
+                StringComparer.Ordinal);
+            var operationIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var call in valid)
+            {
+                var request = ActionRequestFor(
+                    run,
+                    call,
+                    RunDeadlineAt(startedAt, run.Budget.MaxDurationMs));
+                ProtocolValidator.EnsureValid(request);
+                if (!operationIds.Add(request.OperationId))
+                {
+                    throw new InvalidOperationException(
+                        "The runtime generated a duplicate operation id.");
+                }
+
+                actionRequests.Add(call.ToolCallId, request);
+            }
+
+            foreach (var call in valid)
+            {
+                await _journal.AppendBuiltInDurableAsync(
                         run,
                         RuntimeEventKinds.ToolStarted,
-                        ProtocolJson.ToElement(call.Invocation()),
+                        ProtocolJson.ToElement(
+                            invocations[call.ToolCallId]),
                         turnId,
                         attemptId,
                         eventId: "tool-start:" + call.ToolCallId,
@@ -1293,17 +2430,6 @@ public sealed class DurableAgentRuntime :
                     attemptId: attemptId,
                     cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
-
-            var actionRequests = new Dictionary<string, ActionRequest>(
-                StringComparer.Ordinal);
-            foreach (var call in valid)
-            {
-                var request = ActionRequestFor(
-                    run,
-                    call,
-                    RunDeadlineAt(startedAt, run.Budget.MaxDurationMs));
-                actionRequests.Add(call.ToolCallId, request);
-            }
 
             await _journal.AppendActionRequestsAsync(
                     run,
@@ -1328,37 +2454,108 @@ public sealed class DurableAgentRuntime :
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            var executor = new HostToolExecutor(_host, actionRequests);
-            var plan = _toolPlanner.Plan(valid);
+            var executor = new HostToolExecutor(
+                _host,
+                actionRequests,
+                run,
+                requireAudienceIncarnation:
+                    _options
+                        .RequireAudienceIncarnationForRestrictedObservations);
             IReadOnlyList<ToolExecutionResult>? executionResults = null;
             var executionCancelled = false;
+            var controlQueuedBeforeDispatch = false;
+            var toolQueueWaitRecorded = false;
             try
             {
                 using var step = control.BeginStep(cancellationToken);
-                executionResults = await _toolScheduler.ExecuteAsync(
-                        plan,
-                        executor,
-                        _clock,
-                        step.CancellationToken)
-                    .ConfigureAwait(false);
-                step.CancellationToken.ThrowIfCancellationRequested();
+                if (step.PendingControlAtStart)
+                {
+                    executionCancelled = true;
+                    controlQueuedBeforeDispatch = true;
+                }
+                else
+                {
+                    _metrics.Record(
+                        RuntimeMetricNames.ToolQueueWaitMilliseconds,
+                        RuntimeMetricKind.Histogram,
+                        RuntimeMetricsEmitter.ElapsedMilliseconds(
+                            toolQueuedAt),
+                        workloadClass,
+                        RuntimeMetricOutcomes.Success);
+                    toolQueueWaitRecorded = true;
+                    var toolExecutionStarted =
+                        System.Diagnostics.Stopwatch.GetTimestamp();
+                    var toolExecutionOutcome =
+                        RuntimeMetricOutcomes.Failure;
+                    try
+                    {
+                        executionResults = await _toolScheduler
+                            .ExecuteReservedAsync(
+                                plan,
+                                executor,
+                                _clock,
+                                schedulerReservation,
+                                step.CancellationToken,
+                                step.TryAcquireDispatchPermit)
+                            .ConfigureAwait(false);
+                        step.CancellationToken.ThrowIfCancellationRequested();
+                        toolExecutionOutcome =
+                            executionResults.All(item => item.IsSuccess)
+                                ? RuntimeMetricOutcomes.Success
+                                : RuntimeMetricOutcomes.Failure;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        toolExecutionOutcome =
+                            RuntimeMetricOutcomes.Canceled;
+                        throw;
+                    }
+                    finally
+                    {
+                        _metrics.Record(
+                            RuntimeMetricNames.ToolExecutionMilliseconds,
+                            RuntimeMetricKind.Histogram,
+                            RuntimeMetricsEmitter.ElapsedMilliseconds(
+                                toolExecutionStarted),
+                            workloadClass,
+                            toolExecutionOutcome);
+                    }
+                }
             }
             catch (OperationCanceledException)
             {
                 executionCancelled = true;
             }
+            finally
+            {
+                schedulerReservation.Dispose();
+                _metrics.Record(
+                    RuntimeMetricNames.ToolQueueDepth,
+                    RuntimeMetricKind.Gauge,
+                    _toolScheduler.QueuedCalls);
+                if (!toolQueueWaitRecorded)
+                {
+                    _metrics.Record(
+                        RuntimeMetricNames.ToolQueueWaitMilliseconds,
+                        RuntimeMetricKind.Histogram,
+                        RuntimeMetricsEmitter.ElapsedMilliseconds(
+                            toolQueuedAt),
+                        workloadClass,
+                        RuntimeMetricOutcomes.Canceled);
+                }
+            }
 
             foreach (var call in valid)
             {
                 ActionReceipt receipt;
+                var syntheticUncertainty = false;
                 var executionResult = executionResults?
                     .FirstOrDefault(
                         item => string.Equals(
                             item.Request.ToolCallId,
                             call.ToolCallId,
                             StringComparison.Ordinal));
-                if (executionResult?.IsSuccess == true
-                    && executor.TryGetReceipt(
+                if (executor.TryGetReceipt(
                         call.ToolCallId,
                         out var actual))
                 {
@@ -1370,34 +2567,65 @@ public sealed class DurableAgentRuntime :
                         ?? (executionCancelled
                             ? "tool_execution_cancelled"
                             : "tool_result_missing");
-                    receipt = executionResult is not null
-                              && !executionResult.MayHaveExecuted
+                    var definitelyNoSideEffect =
+                        controlQueuedBeforeDispatch
+                        || executionResult is not null
+                        && !executionResult.MayHaveExecuted
+                        || executionResult is null
+                        && executionCancelled
+                        && string.Equals(
+                            call.Tool.Effect,
+                            ToolEffects.PureRead,
+                            StringComparison.Ordinal);
+                    receipt = definitelyNoSideEffect
                         ? FailedReceipt(
                             actionRequests[call.ToolCallId],
                             errorCode)
                         : UnknownReceipt(
                             actionRequests[call.ToolCallId],
                             errorCode);
+                    syntheticUncertainty = !definitelyNoSideEffect;
                 }
 
-                await _journal.AppendActionReceiptAsync(
-                        run,
-                        turnId,
-                        attemptId,
-                        receipt,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
+                var receiptSourceEventId =
+                    syntheticUncertainty
+                        ? await _journal.AppendActionUncertaintyAsync(
+                                run,
+                                turnId,
+                                attemptId,
+                                receipt,
+                                CancellationToken.None)
+                            .ConfigureAwait(false)
+                        : await _journal.AppendActionReceiptAsync(
+                                run,
+                                turnId,
+                                attemptId,
+                                receipt,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
                 if (!string.Equals(
                         receipt.Status,
                         ReceiptStatuses.Unknown,
                         StringComparison.Ordinal))
                 {
+                    committedReceipts.Add(receipt);
+                    finalOutputEvidence.Add(
+                        new FinalOutputCommittedEvidence(
+                            run.RunId,
+                            turnId,
+                            receiptSourceEventId,
+                            receipt));
                     toolMessages[call.ToolCallId] =
                         NormalizedTranscript.ToolResult(
                             RunRecovery.ToolResultMessageId(receipt),
                             call.ToolCallId,
                             call.Tool.Name,
-                            receipt,
+                            finalOutputAdmission is null
+                                ? ProtocolJson.ToElement(receipt)
+                                : FinalOutputAdmissionCodec
+                                    .ForModelPresentation(
+                                        receipt,
+                                        receiptSourceEventId),
                             receipt.ReceivedAt);
                 }
             }
@@ -1408,10 +2636,38 @@ public sealed class DurableAgentRuntime :
                     prepared,
                     toolMessages,
                     toolDisclosure,
+                    skillRuntime,
+                    skillSnapshot,
+                    toolSnapshot,
+                    effectiveActiveSkills,
+                    activeSkillState,
                     turnId,
                     attemptId,
                     CancellationToken.None)
                 .ConfigureAwait(false);
+            if (run.PendingOperationIds.Count == 0)
+            {
+                var gameContextAdvancement =
+                    GameContextAdvancementPlanner.Plan(
+                        run,
+                        actionRequests.Values
+                            .OrderBy(
+                                item => item.OperationId,
+                                StringComparer.Ordinal)
+                            .ToArray(),
+                        committedReceipts);
+                if (gameContextAdvancement is not null)
+                {
+                    await _journal.CommitGameContextAdvancementAsync(
+                            run,
+                            turnId,
+                            attemptId,
+                            gameContextAdvancement,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+            }
+
             if (run.PendingOperationIds.Count > 0)
             {
                 toolLoopGuard.ResetForIndeterminateOutcome();
@@ -1442,16 +2698,34 @@ public sealed class DurableAgentRuntime :
                         run,
                         RunStates.Reconciling,
                         RuntimeEventKinds.ActionReconciling,
-                        terminalReason: deadline.IsExpired
-                            ? "max_duration"
-                            : null,
                         completionIntent: intent,
                         turnId: turnId,
                         attemptId: attemptId,
                         cancellationToken: CancellationToken.None)
                     .ConfigureAwait(false);
+                if (deadline.IsExpired)
+                {
+                    return await CompleteDurationDeadlineAsync(
+                            run,
+                            transcript,
+                            startedAt)
+                        .ConfigureAwait(false);
+                }
+
                 return Outcome(run, transcript);
             }
+
+            await CommitMemoryForReceiptsAsync(
+                    run,
+                    turnId,
+                    attemptId,
+                    ReceiptMemorySources(run, committedReceipts),
+                    committedReceipts,
+                    transcript,
+                    assistant,
+                    null,
+                    deadline.Token)
+                .ConfigureAwait(false);
 
             await _journal.CommitTransitionAndMutationAsync(
                     run,
@@ -1466,6 +2740,15 @@ public sealed class DurableAgentRuntime :
                     attemptId: attemptId,
                     cancellationToken: CancellationToken.None)
                 .ConfigureAwait(false);
+
+            if (deadline.IsExpired)
+            {
+                return await CompleteDurationDeadlineAsync(
+                        run,
+                        transcript,
+                        startedAt)
+                    .ConfigureAwait(false);
+            }
 
             if (cancellationToken.IsCancellationRequested || afterTools.Cancel)
             {
@@ -1491,10 +2774,839 @@ public sealed class DurableAgentRuntime :
         }
     }
 
+    private async ValueTask CommitMissingFinalOutputSubmissionAsync(
+        AgentRun run,
+        ICollection<NormalizedMessage> transcript,
+        NormalizedMessage assistant,
+        string turnId,
+        string attemptId,
+        ProviderAttemptResult response,
+        ProviderRouteIdentity responseRoute,
+        ProviderOpaqueContinuationState?
+            durableProviderOpaqueContinuationState,
+        DateTimeOffset startedAt,
+        RunDeadline deadline,
+        int admissionAttempt)
+    {
+        var feedback = new NormalizedMessage
+        {
+            MessageId = _ids.NewId("final-output-feedback"),
+            Role = NormalizedRoles.User,
+            CreatedAt = _clock.UtcNow,
+            Parts = new List<NormalizedContentPart>
+            {
+                NormalizedContentPart.FromJson(
+                    FinalOutputAdmissionCodec.CreateResult(
+                        admitted: false,
+                        "final_output_submission_required",
+                        admissionAttempt,
+                        _options.FinalOutputAdmission.MaxAttempts))
+            }
+        };
+        await _journal.CommitProviderResultWithFeedbackAsync(
+                run,
+                assistant,
+                new[] { feedback },
+                turnId,
+                response.ProviderId,
+                response.ProviderAttemptId,
+                response.StreamAttemptId,
+                CancellationToken.None,
+                routeIdentity: responseRoute,
+                opaqueContinuationState:
+                    durableProviderOpaqueContinuationState,
+                finalOutputPresentation:
+                    FinalOutputAdmissionCodec.CreatePresentation(
+                        FinalOutputAdmissionCodec
+                            .ProvisionalPresentationState,
+                        "final_output_submission_required"))
+            .ConfigureAwait(false);
+        transcript.Add(assistant);
+        transcript.Add(feedback);
+        await CommitMemoryForReceiptsAsync(
+                run,
+                turnId,
+                response.ProviderAttemptId,
+                ProviderMemorySources(
+                    run,
+                    turnId,
+                    response.StreamAttemptId,
+                    includeAssistantOutput: false),
+                Array.Empty<ActionReceipt>(),
+                transcript.ToArray(),
+                assistant,
+                null,
+                deadline.Token)
+            .ConfigureAwait(false);
+        await CompleteTurnWithoutStateChangeAsync(
+                run,
+                turnId,
+                attemptId,
+                startedAt,
+                "final_output_submission_required",
+                CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask<DurableRunOutcome?>
+        ProcessFinalOutputSubmissionAsync(
+            AgentRun run,
+            List<NormalizedMessage> transcript,
+            NormalizedMessage assistant,
+            ProviderAttemptResult response,
+            ProviderRouteIdentity responseRoute,
+            ProviderOpaqueContinuationState?
+                durableProviderOpaqueContinuationState,
+            string turnId,
+            string attemptId,
+            DateTimeOffset startedAt,
+            RunDeadline deadline,
+            IReadOnlyList<ContextCandidate> selectedContext,
+            FinalOutputAdmissionBinding binding,
+            FinalOutputEvidenceRegistry evidenceRegistry,
+            int admissionAttempt)
+    {
+        var admissionCalls = response.ToolCalls
+            .Where(
+                call => string.Equals(
+                    call.Name,
+                    FinalOutputAdmissionControl.SubmitToolName,
+                    StringComparison.Ordinal))
+            .ToArray();
+        ModelToolCall? admissionCall =
+            admissionCalls.Length == 1
+            && response.ToolCalls.Count == 1
+                ? admissionCalls[0]
+                : null;
+        ParsedFinalOutputSubmission? submission = null;
+        string reasonCode;
+        if (admissionCall is null)
+        {
+            reasonCode =
+                "final_output_submission_must_be_exclusive";
+        }
+        else if (!FinalOutputAdmissionCodec.TryParseSubmission(
+                     admissionCall,
+                     _options.FinalOutputAdmission,
+                     binding.Contract,
+                     evidenceRegistry,
+                     run.RunId,
+                     out submission,
+                     out reasonCode))
+        {
+            // The parser returns a bounded, non-sensitive reason code.
+        }
+        else
+        {
+            var proposal = new FinalOutputProposal(
+                admissionCall.ToolCallId,
+                response.Text,
+                submission!.Output,
+                submission.Evidence);
+            var policyRequest = new FinalOutputAdmissionRequest(
+                run,
+                turnId,
+                selectedContext,
+                proposal,
+                evidenceRegistry.Snapshot());
+            var decision = await _finalOutputAdmission!.EvaluateAsync(
+                    policyRequest,
+                    deadline.Token)
+                .ConfigureAwait(false);
+            if (decision.Accepted)
+            {
+                var finalOutput = proposal.Output;
+                var admissionEvidence =
+                    FinalOutputAdmissionCodec.CreateEvidence(
+                        run,
+                        turnId,
+                        assistant,
+                        proposal,
+                        binding,
+                        decision.ReasonCode);
+                if (_memory is null)
+                {
+                    await _journal.CommitFinalCompletionAsync(
+                            run,
+                            assistant,
+                            finalOutput,
+                            turnId,
+                            response.ProviderId,
+                            response.ProviderAttemptId,
+                            response.StreamAttemptId,
+                            startedAt,
+                            CancellationToken.None,
+                            routeIdentity: responseRoute,
+                            finalOutputAdmissionEvidence:
+                                admissionEvidence)
+                        .ConfigureAwait(false);
+                    transcript.Add(assistant);
+                    return Outcome(run, transcript, finalOutput);
+                }
+
+                await _journal.CommitProviderResultAndOutputAsync(
+                        run,
+                        assistant,
+                        finalOutput,
+                        turnId,
+                        response.ProviderId,
+                        response.ProviderAttemptId,
+                        response.StreamAttemptId,
+                        CancellationToken.None,
+                        routeIdentity: responseRoute,
+                        finalOutputAdmissionEvidence:
+                            admissionEvidence)
+                    .ConfigureAwait(false);
+                transcript.Add(assistant);
+                try
+                {
+                    await CommitMemoryForReceiptsAsync(
+                            run,
+                            turnId,
+                            response.ProviderAttemptId,
+                            ProviderMemorySources(
+                                run,
+                                turnId,
+                                response.StreamAttemptId,
+                                includeAssistantOutput: true),
+                            Array.Empty<ActionReceipt>(),
+                            transcript,
+                            assistant,
+                            finalOutput,
+                            deadline.Token)
+                        .ConfigureAwait(false);
+                    await _journal.CommitRecoveredCompletionAsync(
+                            run,
+                            turnId,
+                            response.ProviderAttemptId,
+                            startedAt,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (deadline.IsExpired)
+                {
+                    var outcome = await CompleteDurationDeadlineAsync(
+                            run,
+                            transcript,
+                            startedAt)
+                        .ConfigureAwait(false);
+                    outcome.FinalOutput = finalOutput.Clone();
+                    return outcome;
+                }
+                catch (Exception exception) when (
+                    exception is not DuplicateRunException)
+                {
+                    var outcome = await FailOrCancelAsync(
+                            run,
+                            transcript,
+                            exception,
+                            startedAt,
+                            deadline.ExternalCancellationRequested)
+                        .ConfigureAwait(false);
+                    outcome.FinalOutput = finalOutput.Clone();
+                    return outcome;
+                }
+
+                return Outcome(run, transcript, finalOutput);
+            }
+
+            reasonCode = decision.ReasonCode;
+            return await CommitFinalOutputRejectionAsync(
+                    run,
+                    transcript,
+                    assistant,
+                    response,
+                    responseRoute,
+                    durableProviderOpaqueContinuationState,
+                    turnId,
+                    attemptId,
+                    startedAt,
+                    deadline,
+                    admissionAttempt,
+                    admissionCalls,
+                    reasonCode,
+                    decision.Feedback)
+                .ConfigureAwait(false);
+        }
+
+        return await CommitFinalOutputRejectionAsync(
+                run,
+                transcript,
+                assistant,
+                response,
+                responseRoute,
+                durableProviderOpaqueContinuationState,
+                turnId,
+                attemptId,
+                startedAt,
+                deadline,
+                admissionAttempt,
+                admissionCalls,
+                reasonCode)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask<DurableRunOutcome?>
+        CommitFinalOutputRejectionAsync(
+            AgentRun run,
+            ICollection<NormalizedMessage> transcript,
+            NormalizedMessage assistant,
+            ProviderAttemptResult response,
+            ProviderRouteIdentity responseRoute,
+            ProviderOpaqueContinuationState?
+                durableProviderOpaqueContinuationState,
+            string turnId,
+            string attemptId,
+            DateTimeOffset startedAt,
+            RunDeadline deadline,
+            int admissionAttempt,
+            IReadOnlyList<ModelToolCall> admissionCalls,
+            string reasonCode,
+            JsonElement? policyFeedback = null)
+    {
+        var calls = response.ToolCalls.Count == 1
+            ? admissionCalls
+            : response.ToolCalls;
+        var feedbackMessages = new List<NormalizedMessage>(calls.Count);
+        foreach (var call in calls)
+        {
+            var callReason = string.Equals(
+                    call.Name,
+                    FinalOutputAdmissionControl.SubmitToolName,
+                    StringComparison.Ordinal)
+                ? reasonCode
+                : "final_output_submission_must_be_exclusive";
+            var feedback = ToolControlMessage(
+                call,
+                FinalOutputAdmissionCodec.CreateResult(
+                    admitted: false,
+                    callReason,
+                    admissionAttempt,
+                    _options.FinalOutputAdmission.MaxAttempts,
+                    string.Equals(
+                        call.Name,
+                        FinalOutputAdmissionControl.SubmitToolName,
+                        StringComparison.Ordinal)
+                        ? policyFeedback
+                        : null));
+            feedbackMessages.Add(feedback);
+        }
+        await _journal.CommitProviderResultWithFeedbackAsync(
+                run,
+                assistant,
+                feedbackMessages,
+                turnId,
+                response.ProviderId,
+                response.ProviderAttemptId,
+                response.StreamAttemptId,
+                CancellationToken.None,
+                routeIdentity: responseRoute,
+                opaqueContinuationState:
+                    durableProviderOpaqueContinuationState,
+                finalOutputPresentation:
+                    FinalOutputAdmissionCodec.CreatePresentation(
+                        FinalOutputAdmissionCodec
+                            .ProvisionalPresentationState,
+                        reasonCode))
+            .ConfigureAwait(false);
+        transcript.Add(assistant);
+        foreach (var feedback in feedbackMessages)
+        {
+            transcript.Add(feedback);
+        }
+
+        await CommitMemoryForReceiptsAsync(
+                run,
+                turnId,
+                response.ProviderAttemptId,
+                ProviderMemorySources(
+                    run,
+                    turnId,
+                    response.StreamAttemptId,
+                    includeAssistantOutput: false),
+                Array.Empty<ActionReceipt>(),
+                transcript.ToArray(),
+                assistant,
+                null,
+                deadline.Token)
+            .ConfigureAwait(false);
+        await CompleteTurnWithoutStateChangeAsync(
+                run,
+                turnId,
+                attemptId,
+                startedAt,
+                "final_output_rejected",
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        return null;
+    }
+
+    private void EnsureFinalOutputAttemptsRemain(int attempts)
+    {
+        if (attempts >= _options.FinalOutputAdmission.MaxAttempts)
+        {
+            throw new ProviderException(
+                "final_output_admission_attempts_exhausted",
+                "policy",
+                "The final output could not be admitted within the "
+                + "configured attempt limit.",
+                false);
+        }
+    }
+
+    private static IReadOnlyList<string> ProviderMemorySources(
+        AgentRun run,
+        string turnId,
+        string streamAttemptId,
+        bool includeAssistantOutput)
+    {
+        var sources = new List<string>(includeAssistantOutput ? 2 : 1)
+        {
+            RuntimeEventIdDerivation.Derive(
+                run.RunId,
+                "provider-result-committed:" + streamAttemptId)
+        };
+        if (includeAssistantOutput)
+        {
+            sources.Add(
+                RuntimeEventIdDerivation.Derive(
+                    run.RunId,
+                    "assistant-completed:" + turnId));
+        }
+
+        sources.Sort(StringComparer.Ordinal);
+        return sources;
+    }
+
+    private static IReadOnlyList<string> ReceiptMemorySources(
+        AgentRun run,
+        IReadOnlyList<ActionReceipt> receipts)
+    {
+        return receipts
+            .Select(
+                receipt => RuntimeEventIdDerivation.Derive(
+                    run.RunId,
+                    "action-receipt:"
+                    + receipt.OperationId
+                    + ":"
+                    + receipt.Revision.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture)))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(item => item, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private async ValueTask<PreparedRuntimeMemoryCommit?>
+        CommitMemoryForReceiptsAsync(
+        AgentRun run,
+        string turnId,
+        string? attemptId,
+        IReadOnlyList<string> committedSourceEventIds,
+        IReadOnlyList<ActionReceipt> receipts,
+        IReadOnlyList<NormalizedMessage> committedTranscript,
+        NormalizedMessage? assistantMessage,
+        JsonElement? assistantOutput,
+        CancellationToken cancellationToken)
+    {
+        if (_memory is null)
+        {
+            return null;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var outcome = RuntimeMetricOutcomes.Failure;
+        try
+        {
+            var prepared = await CommitMemoryForReceiptsCoreAsync(
+                    run,
+                    turnId,
+                    attemptId,
+                    committedSourceEventIds,
+                    receipts,
+                    committedTranscript,
+                    assistantMessage,
+                    assistantOutput,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            outcome = RuntimeMetricOutcomes.Success;
+            return prepared;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = RuntimeMetricOutcomes.Canceled;
+            throw;
+        }
+        finally
+        {
+            _metrics.Record(
+                RuntimeMetricNames.MemoryCommitMilliseconds,
+                RuntimeMetricKind.Histogram,
+                RuntimeMetricsEmitter.ElapsedMilliseconds(started),
+                outcome: outcome);
+        }
+    }
+
+    private async ValueTask<PreparedRuntimeMemoryCommit?>
+        CommitMemoryForReceiptsCoreAsync(
+        AgentRun run,
+        string turnId,
+        string? attemptId,
+        IReadOnlyList<string> committedSourceEventIds,
+        IReadOnlyList<ActionReceipt> receipts,
+        IReadOnlyList<NormalizedMessage> committedTranscript,
+        NormalizedMessage? assistantMessage,
+        JsonElement? assistantOutput,
+        CancellationToken cancellationToken)
+    {
+        var memory = _memory
+                     ?? throw new InvalidOperationException(
+                         "Runtime memory is not configured.");
+        if (FinalOutputAdmissionBinding.Read(run) is not null)
+        {
+            var admittedAssistantMessageId = assistantOutput.HasValue
+                ? assistantMessage?.MessageId
+                : null;
+            committedTranscript = committedTranscript
+                .Where(
+                    message => !string.Equals(
+                                   message.Role,
+                                   NormalizedRoles.Assistant,
+                                   StringComparison.Ordinal)
+                               || (admittedAssistantMessageId is not null
+                                   && string.Equals(
+                                       message.MessageId,
+                                       admittedAssistantMessageId,
+                                       StringComparison.Ordinal)))
+                .ToArray();
+            if (!assistantOutput.HasValue)
+            {
+                assistantMessage = null;
+            }
+        }
+
+        var prepared = memory.PrepareCommit(
+            run,
+            turnId,
+            committedSourceEventIds,
+            receipts,
+            committedTranscript,
+            assistantMessage,
+            assistantOutput);
+        memory.ValidatePreparedForRun(
+            prepared,
+            run,
+            committedSourceEventIds);
+        if (prepared.Mutations.Count == 0)
+        {
+            await _journal.AppendBuiltInDurableAsync(
+                    run,
+                    RuntimeEventKinds.MemoryCommitSettled,
+                    RuntimeMemoryCommitJournalCodec.EncodeSettled(prepared),
+                    turnId,
+                    attemptId,
+                    eventId: "memory-settled:" + prepared.CommitId,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            return prepared;
+        }
+
+        await _journal.AppendBuiltInDurableAsync(
+                run,
+                RuntimeEventKinds.MemoryCommitPrepared,
+                RuntimeMemoryCommitJournalCodec.EncodePrepared(prepared),
+                turnId,
+                attemptId,
+                eventId: "memory-prepared:" + prepared.CommitId,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        await memory.ApplyPreparedAsync(prepared, cancellationToken)
+            .ConfigureAwait(false);
+        await _journal.AppendBuiltInDurableAsync(
+                run,
+                RuntimeEventKinds.MemoryCommitCompleted,
+                RuntimeMemoryCommitJournalCodec.EncodeCompleted(prepared),
+                turnId,
+                attemptId,
+                eventId: "memory-completed:" + prepared.CommitId,
+                cancellationToken: CancellationToken.None)
+            .ConfigureAwait(false);
+        return prepared;
+    }
+
+    private async ValueTask ReplayPreparedMemoryCommitsAsync(
+        RecoveredRun recovered,
+        CancellationToken cancellationToken)
+    {
+        var count = recovered.PendingMemoryCommits.Count;
+        if (count == 0)
+        {
+            return;
+        }
+
+        if (_memory is null)
+        {
+            throw new RuntimeMemoryIntegrationException(
+                RuntimeMemoryIntegrationReasonCodes.CommitFailed,
+                "The recovered run has a pending memory commit, but this "
+                + "runtime has no memory lifecycle.");
+        }
+
+        var completed = recovered.CompletedMemoryCommitIds.ToHashSet(
+            StringComparer.Ordinal);
+        for (var index = 0; index < count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var prepared = recovered.PendingMemoryCommits[index]
+                           ?? throw new RuntimeMemoryIntegrationException(
+                               RuntimeMemoryIntegrationReasonCodes
+                                   .RecoveryRecordInvalid,
+                               "A recovered memory commit is null.");
+            var receiptBatch = recovered.MemoryReceiptBatches.SingleOrDefault(
+                item => string.Equals(
+                    item.TurnId,
+                    prepared.TurnId,
+                    StringComparison.Ordinal));
+            IReadOnlyList<string> sourceEventIds;
+            if (receiptBatch?.Receipts.Count > 0)
+            {
+                sourceEventIds = receiptBatch.SourceEventIds;
+            }
+            else if (!recovered.CommittedMemorySourceEventIdsByTurn.TryGetValue(
+                         prepared.TurnId,
+                         out sourceEventIds)
+                     || sourceEventIds.Count == 0)
+            {
+                throw new RuntimeMemoryIntegrationException(
+                    RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+                    "A recovered memory commit has no committed sources.");
+            }
+
+            _memory.ValidatePreparedForRun(
+                prepared,
+                recovered.Run,
+                sourceEventIds,
+                enforceConfiguredLimits: false,
+                enforcePolicyIdentity: false);
+            await _memory.ApplyPreparedAsync(prepared, cancellationToken)
+                .ConfigureAwait(false);
+            await _journal.AppendBuiltInDurableAsync(
+                    recovered.Run,
+                    RuntimeEventKinds.MemoryCommitCompleted,
+                    RuntimeMemoryCommitJournalCodec.EncodeCompleted(prepared),
+                    prepared.TurnId,
+                    attemptId: null,
+                    eventId: "memory-completed:" + prepared.CommitId,
+                    cancellationToken: CancellationToken.None)
+                .ConfigureAwait(false);
+            completed.Add(prepared.CommitId);
+        }
+
+        recovered.PendingMemoryCommits =
+            Array.Empty<PreparedRuntimeMemoryCommit>();
+        recovered.CompletedMemoryCommitIds = completed
+            .OrderBy(item => item, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private async ValueTask AdvanceRecoveredGameContextAsync(
+        RecoveredRun recovered,
+        CancellationToken cancellationToken)
+    {
+        var turnId = recovered.Run.CurrentTurnId;
+        if (turnId is null
+            || recovered.GameContextAdvancedTurnIds.Contains(
+                turnId,
+                StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        var receiptBatch = recovered.MemoryReceiptBatches.SingleOrDefault(
+            item => string.Equals(
+                item.TurnId,
+                turnId,
+                StringComparison.Ordinal));
+        if (receiptBatch is null || receiptBatch.Receipts.Count == 0)
+        {
+            return;
+        }
+
+        var requests = recovered.RecoveryActionRequests
+            .Where(
+                item => string.Equals(
+                    item.TurnId,
+                    turnId,
+                    StringComparison.Ordinal))
+            .OrderBy(item => item.OperationId, StringComparer.Ordinal)
+            .ToArray();
+        var plan = GameContextAdvancementPlanner.Plan(
+            recovered.Run,
+            requests,
+            receiptBatch.Receipts);
+        if (plan is null)
+        {
+            return;
+        }
+
+        await _journal.CommitGameContextAdvancementAsync(
+                recovered.Run,
+                turnId,
+                attemptId: null,
+                plan,
+                cancellationToken)
+            .ConfigureAwait(false);
+        recovered.GameContextAdvancedTurnIds =
+            recovered.GameContextAdvancedTurnIds
+                .Append(turnId)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(item => item, StringComparer.Ordinal)
+                .ToArray();
+    }
+
+    private async ValueTask<bool> CommitRecoveredMemoryReceiptsAsync(
+        RecoveredRun recovered,
+        CancellationToken cancellationToken)
+    {
+        var turnId = recovered.Run.CurrentTurnId;
+        if (turnId is null)
+        {
+            return false;
+        }
+
+        var memoryWasConfigured =
+            recovered.LastTurnSnapshot?.Extensions.ContainsKey(
+                RuntimeMemoryAgentLoop.PolicySnapshotExtension) == true;
+        if (!memoryWasConfigured)
+        {
+            return false;
+        }
+
+        var commitId = RuntimeMemoryAgentLoop.CommitId(
+            recovered.Run.RunId,
+            recovered.Run.RuntimeGeneration,
+            turnId);
+        RecoveredMemoryReceiptBatch? receiptBatch = null;
+        var batchCount = recovered.MemoryReceiptBatches.Count;
+        for (var index = 0; index < batchCount; index++)
+        {
+            var candidate = recovered.MemoryReceiptBatches[index]
+                            ?? throw new InvalidDataException(
+                                "A recovered memory receipt batch is null.");
+            if (!string.Equals(
+                    candidate.TurnId,
+                    turnId,
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (receiptBatch is not null)
+            {
+                throw new InvalidDataException(
+                    "A recoverable turn has duplicate receipt batches.");
+            }
+
+            receiptBatch = candidate;
+        }
+
+        recovered.CommittedAssistantMessagesByTurn.TryGetValue(
+            turnId,
+            out var assistantMessage);
+        var assistantOutput =
+            string.Equals(
+                recovered.FinalOutputTurnId,
+                turnId,
+                StringComparison.Ordinal)
+                ? recovered.FinalOutput
+                : null;
+        var committedProviderOutcome =
+            recovered.CommittedProviderResultTurnIds.Contains(
+                turnId,
+                StringComparer.Ordinal)
+            && assistantMessage is not null
+            && (assistantOutput.HasValue
+                || !assistantMessage.Parts.Any(
+                    part => string.Equals(
+                        part.Type,
+                        NormalizedPartTypes.ToolCall,
+                        StringComparison.Ordinal)));
+        if ((receiptBatch is null || receiptBatch.Receipts.Count == 0)
+            && !committedProviderOutcome)
+        {
+            return false;
+        }
+
+        IReadOnlyList<string> sourceEventIds;
+        if (receiptBatch?.Receipts.Count > 0)
+        {
+            sourceEventIds = receiptBatch.SourceEventIds;
+        }
+        else if (!recovered.CommittedMemorySourceEventIdsByTurn.TryGetValue(
+                     turnId,
+                     out sourceEventIds)
+                 || sourceEventIds.Count == 0)
+        {
+            throw new RuntimeMemoryIntegrationException(
+                RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+                "A recovered memory decision has no committed source events.");
+        }
+
+        if (recovered.CompletedMemoryCommitIds.Contains(
+                commitId,
+                StringComparer.Ordinal))
+        {
+            if (!recovered.MemoryCommitRecords.TryGetValue(
+                    commitId,
+                    out _))
+            {
+                throw new RuntimeMemoryIntegrationException(
+                    RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+                    "A recovered memory settlement has no durable record.");
+            }
+
+            return true;
+        }
+
+        if (_memory is null)
+        {
+            throw new RuntimeMemoryIntegrationException(
+                RuntimeMemoryIntegrationReasonCodes.RecoveryPolicyMismatch,
+                "The recoverable turn requires a configured memory policy.");
+        }
+
+        _memory.EnsureRecoveryPolicy(
+            recovered.LastTurnSnapshot,
+            turnId);
+        var prepared = await CommitMemoryForReceiptsAsync(
+                recovered.Run,
+                turnId,
+                null,
+                sourceEventIds,
+                receiptBatch?.Receipts
+                ?? Array.Empty<ActionReceipt>(),
+                recovered.Transcript,
+                assistantMessage,
+                assistantOutput,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (prepared is not null)
+        {
+            recovered.CompletedMemoryCommitIds =
+                recovered.CompletedMemoryCommitIds
+                    .Append(commitId)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(item => item, StringComparer.Ordinal)
+                    .ToArray();
+        }
+
+        return prepared is not null;
+    }
+
     private static void RetainDeferredContext(
         List<ContextCandidate> pendingContext,
         Dictionary<string, int> deferralTurns,
-        ContextBudgetReport report)
+        ContextBudgetReport report,
+        IReadOnlyCollection<string>? ephemeralIds = null)
     {
         if (report.DeferredIds.Count == 0)
         {
@@ -1519,7 +3631,17 @@ public sealed class DurableAgentRuntime :
 
         foreach (var id in report.DeferredIds)
         {
-            var candidate = candidatesById[id];
+            if (ephemeralIds?.Contains(id, StringComparer.Ordinal) == true)
+            {
+                continue;
+            }
+
+            if (!candidatesById.TryGetValue(id, out var candidate))
+            {
+                throw new InvalidDataException(
+                    "The context compiler deferred an unknown candidate.");
+            }
+
             var turns = checked(
                 (deferralTurns.TryGetValue(id, out var previousTurns)
                     ? previousTurns
@@ -1602,12 +3724,14 @@ public sealed class DurableAgentRuntime :
         string turnId,
         string attemptId,
         IReadOnlyList<ModelToolCall> calls,
-        ToolDisclosurePlan disclosure)
+        ToolDisclosurePlan disclosure,
+        SkillRuntimePlan skillRuntime)
     {
         var prepared = new List<PreparedToolCall>(calls.Count);
         var callIds = new HashSet<string>(StringComparer.Ordinal);
         var dispatchIndex = 0;
         var controlCalls = 0;
+        var skillControlCalls = 0;
         for (var index = 0; index < calls.Count; index++)
         {
             var call = calls[index];
@@ -1676,6 +3800,61 @@ public sealed class DurableAgentRuntime :
                 continue;
             }
 
+            if (skillRuntime.IsControlVisible(call.Name))
+            {
+                skillControlCalls++;
+                if (skillControlCalls
+                    > skillRuntime.Limits.MaxControlCallsPerTurn)
+                {
+                    prepared.Add(
+                        new PreparedToolCall(
+                            call,
+                            execution: null,
+                            ToolErrorMessage(
+                                call,
+                                "skill_control_call_limit_exceeded",
+                                "The skill control-call limit was exceeded.")));
+                    continue;
+                }
+
+                if (string.Equals(
+                        call.Name,
+                        SkillRuntimeControlNames.Search,
+                        StringComparison.Ordinal))
+                {
+                    prepared.Add(
+                        new PreparedToolCall(
+                            call,
+                            execution: null,
+                            PrepareSkillSearchResult(call, skillRuntime)));
+                    continue;
+                }
+
+                if (!SkillRuntimePlan.TryReadActivation(
+                        call.Arguments,
+                        out var skillActivation))
+                {
+                    prepared.Add(
+                        new PreparedToolCall(
+                            call,
+                            execution: null,
+                            ToolErrorMessage(
+                                call,
+                                SkillRuntimeReasonCodes
+                                    .ActivationArgumentsInvalid,
+                                "The skill activation arguments are invalid.")));
+                    continue;
+                }
+
+                prepared.Add(
+                    new PreparedToolCall(
+                        call,
+                        execution: null,
+                        immediateMessage: null,
+                        skillActivation: skillActivation));
+                continue;
+            }
+
             if (!disclosure.TryGetEffectiveTool(call.Name, out var tool)
                 || tool is null)
             {
@@ -1740,6 +3919,136 @@ public sealed class DurableAgentRuntime :
         return new ReadOnlyCollection<PreparedToolCall>(prepared);
     }
 
+    private IReadOnlyList<PreparedToolCall> ApplySideEffectToolCallLimit(
+        IReadOnlyList<PreparedToolCall> prepared,
+        int? maximumSideEffects,
+        long firstSequence)
+    {
+        if (!maximumSideEffects.HasValue)
+        {
+            return prepared;
+        }
+
+        var sideEffectCount = prepared.Count(
+            item => item.Execution is not null
+                    && !string.Equals(
+                        item.Execution.Tool.Effect,
+                        ToolEffects.PureRead,
+                        StringComparison.Ordinal));
+        if (sideEffectCount <= maximumSideEffects.Value)
+        {
+            return prepared;
+        }
+
+        var admitted = new List<PreparedToolCall>(prepared.Count);
+        var sequence = firstSequence;
+        foreach (var item in prepared)
+        {
+            var execution = item.Execution;
+            if (execution is null)
+            {
+                admitted.Add(item);
+                continue;
+            }
+
+            if (!string.Equals(
+                    execution.Tool.Effect,
+                    ToolEffects.PureRead,
+                    StringComparison.Ordinal))
+            {
+                admitted.Add(
+                    new PreparedToolCall(
+                        item.ToolCall,
+                        execution: null,
+                        ToolErrorMessage(
+                            item.ToolCall,
+                            "side_effect_tool_call_limit_exceeded",
+                            "This turn requested too many side-effecting "
+                            + "tools. No side-effecting tool from the "
+                            + "response was executed.")));
+                continue;
+            }
+
+            var invocation = execution.Invocation();
+            invocation.Sequence = sequence;
+            sequence = checked(sequence + 1);
+            admitted.Add(
+                new PreparedToolCall(
+                    item.ToolCall,
+                    new ToolExecutionRequest(
+                        execution.AgentId,
+                        invocation,
+                        execution.Tool),
+                    immediateMessage: null));
+        }
+
+        return new ReadOnlyCollection<PreparedToolCall>(admitted);
+    }
+
+    private NormalizedMessage PrepareSkillSearchResult(
+        ModelToolCall call,
+        SkillRuntimePlan runtimePlan)
+    {
+        if (!SkillRuntimePlan.TryReadSearch(
+                call.Arguments,
+                runtimePlan.Limits,
+                out var query,
+                out var limit,
+                out var reasonCode))
+        {
+            return ToolErrorMessage(
+                call,
+                reasonCode,
+                reasonCode == SkillRuntimeReasonCodes.SearchBudgetExceeded
+                    ? "The skill search exceeded its bounded work budget."
+                    : "The skill search arguments are invalid.");
+        }
+
+        if (!runtimePlan.TrySearch(
+                query,
+                limit,
+                out var hits,
+                out reasonCode))
+        {
+            return ToolErrorMessage(
+                call,
+                reasonCode,
+                "The skill search exceeded its bounded work budget.");
+        }
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString(
+                "contentType",
+                "application/vnd.game-agent.skill-search-result+json");
+            writer.WritePropertyName("query");
+            query.WriteTo(writer);
+            writer.WriteNumber("count", hits.Count);
+            writer.WritePropertyName("results");
+            writer.WriteStartArray();
+            foreach (var hit in hits)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("skillId", hit.Skill.SkillId);
+                writer.WriteString("version", hit.Skill.Version);
+                writer.WriteString(
+                    "skillDigest",
+                    hit.Skill.ContentDigest);
+                writer.WriteString(
+                    "description",
+                    hit.Skill.Description);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        using var document = JsonDocument.Parse(buffer.WrittenMemory);
+        return ToolControlMessage(call, document.RootElement);
+    }
+
     private NormalizedMessage PrepareToolSearchResult(
         ModelToolCall call,
         ToolDisclosurePlan disclosure)
@@ -1792,9 +4101,9 @@ public sealed class DurableAgentRuntime :
 
     private static void AnnotateToolCallEvidence(
         NormalizedMessage assistant,
-        ToolDisclosurePlan disclosure)
+        ToolDisclosurePlan disclosure,
+        IReadOnlyList<ToolDescriptor> providerTools)
     {
-        var providerTools = disclosure.EffectiveProviderTools;
         foreach (var part in assistant.Parts)
         {
             if (!string.Equals(
@@ -1844,6 +4153,11 @@ public sealed class DurableAgentRuntime :
             IReadOnlyList<PreparedToolCall> prepared,
             IReadOnlyDictionary<string, NormalizedMessage> toolMessages,
             ToolDisclosurePlan disclosure,
+            SkillRuntimePlan skillRuntime,
+            SkillCatalogSnapshot skillSnapshot,
+            ToolCatalogSnapshot toolSnapshot,
+            ICollection<SkillReference> activeSkills,
+            ICollection<SkillActivationStateRecord> activeSkillState,
             string turnId,
             string attemptId,
             CancellationToken cancellationToken)
@@ -1892,6 +4206,60 @@ public sealed class DurableAgentRuntime :
                 continue;
             }
 
+            if (item.SkillActivation is not null)
+            {
+                var reason = ActivateSkillFromModel(
+                    run,
+                    turnId,
+                    item.SkillActivation,
+                    skillRuntime,
+                    skillSnapshot,
+                    toolSnapshot,
+                    disclosure,
+                    activeSkills,
+                    activeSkillState,
+                    out var activated);
+                var message = SkillActivationResultMessage(
+                    item.ToolCall,
+                    item.SkillActivation,
+                    reason);
+                if (activated is not null)
+                {
+                    var nextSkillState = activeSkillState
+                        .Concat(new[] { activated })
+                        .ToArray();
+                    await _journal.CommitSkillActivationResultAsync(
+                            run,
+                            turnId,
+                            attemptId,
+                            item.ToolCall.ToolCallId,
+                            nextSkillState,
+                            disclosure.ToJournalRecord(
+                                new[]
+                                {
+                                    SkillRuntimeReasonCodes.ActivatedByModel
+                                }),
+                            message,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    activeSkills.Add(activated.ToReference());
+                    activeSkillState.Add(activated);
+                    transcript.Add(message);
+                }
+                else
+                {
+                    await AppendTranscriptOnceAsync(
+                            run,
+                            transcript,
+                            message,
+                            turnId,
+                            attemptId,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                continue;
+            }
+
             if (toolMessages.TryGetValue(
                     item.ToolCall.ToolCallId,
                     out var immediate))
@@ -1908,6 +4276,136 @@ public sealed class DurableAgentRuntime :
         }
 
         return disclosure.RequestedActivations;
+    }
+
+    private string ActivateSkillFromModel(
+        AgentRun run,
+        string turnId,
+        PreparedSkillActivation activation,
+        SkillRuntimePlan runtimePlan,
+        SkillCatalogSnapshot skillSnapshot,
+        ToolCatalogSnapshot toolSnapshot,
+        ToolDisclosurePlan toolDisclosure,
+        ICollection<SkillReference> activeSkills,
+        ICollection<SkillActivationStateRecord> activeSkillState,
+        out SkillActivationStateRecord? activated)
+    {
+        activated = null;
+        var existing = activeSkillState.FirstOrDefault(
+            value => string.Equals(
+                         value.Reference,
+                         activation.Reference,
+                         StringComparison.Ordinal));
+        if (existing is not null)
+        {
+            return string.Equals(
+                    existing.ContentDigest,
+                    activation.SkillDigest,
+                    StringComparison.Ordinal)
+                ? SkillRuntimeReasonCodes.AlreadyActivated
+                : SkillRuntimeReasonCodes.ExactIdentityMismatch;
+        }
+
+        if (!runtimePlan.TryResolveExact(
+                activation.SkillId,
+                activation.Version,
+                activation.SkillDigest,
+                out var skill,
+                out var reasonCode)
+            || skill is null)
+        {
+            return reasonCode;
+        }
+
+        var proposed = activeSkills
+            .Select(value => new SkillReference(value.SkillId, value.Version))
+            .Concat(
+                new[]
+                {
+                    new SkillReference(skill.SkillId, skill.Version)
+                })
+            .ToArray();
+        try
+        {
+            _ = skillSnapshot.CreateDisclosure(
+                proposed,
+                _options.SkillDisclosureBudget);
+            _ = _skillAdmission.Evaluate(
+                run,
+                turnId,
+                skillSnapshot,
+                toolSnapshot,
+                toolDisclosure,
+                proposed,
+                _options.SkillDisclosureBudget);
+            toolDisclosure.FinalizeSkillActivations();
+        }
+        catch (SkillAdmissionException exception)
+        {
+            return exception.ReasonCode;
+        }
+        catch (RuntimeContentLimitException exception)
+        {
+            return exception.LimitCode;
+        }
+        catch (ArgumentException)
+        {
+            return SkillRuntimeReasonCodes.NotAuthorized;
+        }
+        catch (KeyNotFoundException)
+        {
+            return SkillRuntimeReasonCodes.NotAuthorized;
+        }
+
+        activated = new SkillActivationStateRecord(
+            skill.SkillId,
+            skill.Version,
+            skill.ContentDigest);
+        return SkillRuntimeReasonCodes.ActivatedByModel;
+    }
+
+    private NormalizedMessage SkillActivationResultMessage(
+        ModelToolCall call,
+        PreparedSkillActivation activation,
+        string reasonCode)
+    {
+        var activated = string.Equals(
+                            reasonCode,
+                            SkillRuntimeReasonCodes.ActivatedByModel,
+                            StringComparison.Ordinal)
+                        || string.Equals(
+                            reasonCode,
+                            SkillRuntimeReasonCodes.AlreadyActivated,
+                            StringComparison.Ordinal);
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString(
+                "contentType",
+                "application/vnd.game-agent.skill-activation-result+json");
+            writer.WriteBoolean("activated", activated);
+            writer.WriteString("reasonCode", reasonCode);
+            writer.WriteString("skillId", activation.SkillId);
+            writer.WriteString("version", activation.Version);
+            writer.WriteString("skillDigest", activation.SkillDigest);
+            if (activated)
+            {
+                writer.WriteString(
+                    "availableFrom",
+                    string.Equals(
+                        reasonCode,
+                        SkillRuntimeReasonCodes.ActivatedByModel,
+                        StringComparison.Ordinal)
+                        ? "next_provider_turn"
+                        : "current_provider_turn");
+            }
+
+            writer.WriteEndObject();
+        }
+
+        using var document = JsonDocument.Parse(buffer.WrittenMemory);
+        return ToolControlMessage(call, document.RootElement);
     }
 
     private NormalizedMessage ToolActivationResultMessage(
@@ -2120,10 +4618,24 @@ public sealed class DurableAgentRuntime :
             ActionName = call.Tool.Name,
             ActionVersion = call.Tool.Version,
             Arguments = call.Arguments.Clone(),
+            DecisionKey = run.DecisionKey,
+            BatchId = run.BatchId,
             ExpectedEffects = call.ResolvedConflictKeys.ToList(),
             RequestedAt = requestedAt,
             Deadline = effectiveDeadline
         };
+        var gameContext = GameContextEnvelope.ValidateForRun(
+            run,
+            nameof(run));
+        if (gameContext is not null)
+        {
+            request.BasedOnStateVersion = gameContext.StateVersion
+                                          ?? gameContext.Causality
+                                              ?.BasedOnStateVersion;
+            request.Extensions[GameContextEnvelope.ExtensionName] =
+                GameContextEnvelope.ToJson(gameContext);
+        }
+
         call.BindExecutionDeadline(
             effectiveDeadline,
             monotonicDeadline);
@@ -2197,17 +4709,16 @@ public sealed class DurableAgentRuntime :
         var batch = new ControlBatch();
         foreach (var command in registration.Drain())
         {
-            if (command.Observation is not null
-                && !string.Equals(
-                    command.Observation.WorldId,
-                    run.WorldId,
-                    StringComparison.Ordinal))
+            if (command.Observation is not null)
             {
-                throw new InvalidDataException(
-                    "A control observation belongs to a different world.");
+                ObservationAdmission.EnsureVisibleToRun(
+                    command.Observation,
+                    run,
+                    _options
+                        .RequireAudienceIncarnationForRestrictedObservations);
             }
 
-            await _journal.AppendDurableAsync(
+            await _journal.AppendBuiltInDurableAsync(
                     run,
                     RuntimeEventKinds.ControlReceived,
                     RuntimePromptBuilder.ControlPayload(command),
@@ -2221,6 +4732,7 @@ public sealed class DurableAgentRuntime :
                 batch.Context.Add(
                     ContextCandidate.FromObservation(
                         command.Observation,
+                        run,
                         required: true,
                         canDefer: false));
             }
@@ -2246,11 +4758,156 @@ public sealed class DurableAgentRuntime :
         return batch;
     }
 
+    private async ValueTask<DurableRunOutcome> CancelRecoveredRunAsync(
+        RecoveredRun recovered,
+        IReadOnlyList<NormalizedMessage> transcript,
+        IGameOperationReconciler? reconciler,
+        DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
+    {
+        var run = recovered.Run;
+        await SettleRecoveredProviderDispatchesAsync(
+                run,
+                recovered.UnsettledProviderDispatches,
+                startedAt,
+                terminalRun: true)
+            .ConfigureAwait(false);
+        if (RunStateMachine.IsTerminal(run.State))
+        {
+            return Outcome(run, transcript, recovered.FinalOutput);
+        }
+
+        if (recovered.PendingOperations.Count == 0)
+        {
+            await AdvanceRecoveredGameContextAsync(
+                    recovered,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (string.Equals(
+                    run.State,
+                    RunStates.Running,
+                    StringComparison.Ordinal)
+                || string.Equals(
+                    run.State,
+                    RunStates.WaitingForAction,
+                    StringComparison.Ordinal))
+            {
+                await _journal.CommitTransitionAndMutationAsync(
+                        run,
+                        RunStates.Cancelling,
+                        RuntimeEventKinds.RunCheckpoint,
+                        next => UpdateDuration(next, startedAt),
+                        completionIntent: CompletionIntents.Cancelled,
+                        turnId: run.CurrentTurnId,
+                        cancellationToken: CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
+            await _journal.CommitTransitionAndMutationAsync(
+                    run,
+                    RunStates.Cancelled,
+                    RuntimeEventKinds.RunCancelled,
+                    next =>
+                    {
+                        next.CurrentTurnId = null;
+                        UpdateDuration(next, startedAt);
+                    },
+                    terminalReason: RunControlKinds.Cancel,
+                    completionIntent: CompletionIntents.Cancelled,
+                    turnId: run.CurrentTurnId,
+                    cancellationToken: CancellationToken.None)
+                .ConfigureAwait(false);
+            return Outcome(run, transcript);
+        }
+
+        if (string.Equals(
+                run.State,
+                RunStates.Running,
+                StringComparison.Ordinal)
+            || string.Equals(
+                run.State,
+                RunStates.WaitingForAction,
+                StringComparison.Ordinal)
+            || string.Equals(
+                run.State,
+                RunStates.Reconciling,
+                StringComparison.Ordinal)
+            && !string.Equals(
+                run.CompletionIntent,
+                CompletionIntents.Cancelled,
+                StringComparison.Ordinal))
+        {
+            await _journal.CommitTransitionAndMutationAsync(
+                    run,
+                    RunStates.Cancelling,
+                    RuntimeEventKinds.RunCheckpoint,
+                    next => UpdateDuration(next, startedAt),
+                    completionIntent: CompletionIntents.Cancelled,
+                    turnId: run.CurrentTurnId,
+                    cancellationToken: CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
+        if (string.Equals(
+                run.State,
+                RunStates.Cancelling,
+                StringComparison.Ordinal))
+        {
+            await _journal.CommitTransitionAndMutationAsync(
+                    run,
+                    RunStates.Reconciling,
+                    RuntimeEventKinds.ActionReconciling,
+                    next => UpdateDuration(next, startedAt),
+                    completionIntent: CompletionIntents.Cancelled,
+                    turnId: run.CurrentTurnId,
+                    cancellationToken: CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
+        if (reconciler is null)
+        {
+            return Outcome(run, transcript);
+        }
+
+        try
+        {
+            recovered = await _recovery.ReconcileAsync(
+                    recovered,
+                    reconciler,
+                    _ids.NewId("reconcile-attempt"),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return Outcome(run, transcript);
+        }
+
+        transcript = recovered.Transcript.ToArray();
+        if (recovered.PendingOperations.Count > 0)
+        {
+            return Outcome(run, transcript);
+        }
+
+        await AdvanceRecoveredGameContextAsync(
+                recovered,
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        await TransitionAfterReconciliationAsync(
+                run,
+                RunStates.Cancelled,
+                startedAt,
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        return Outcome(run, transcript);
+    }
+
     private async ValueTask CompleteControlAsync(
         AgentRun run,
         string kind,
         DateTimeOffset startedAt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DurableTerminalOutcome? terminalError = null)
     {
         var cancelling = string.Equals(
             kind,
@@ -2310,7 +4967,11 @@ public sealed class DurableAgentRuntime :
                     },
                     terminalReason: kind,
                     completionIntent: intent,
-                    cancellationToken: cancellationToken)
+                    cancellationToken: cancellationToken,
+                    eventExtensions: terminalError is null
+                        ? null
+                        : TerminalOutcomeJournalCodec.Extensions(
+                            terminalError))
                 .ConfigureAwait(false);
             return;
         }
@@ -2345,7 +5006,11 @@ public sealed class DurableAgentRuntime :
                     },
                     terminalReason: kind,
                     completionIntent: intent,
-                    cancellationToken: cancellationToken)
+                    cancellationToken: cancellationToken,
+                    eventExtensions: terminalError is null
+                        ? null
+                        : TerminalOutcomeJournalCodec.Extensions(
+                            terminalError))
                 .ConfigureAwait(false);
         }
     }
@@ -2423,15 +5088,40 @@ public sealed class DurableAgentRuntime :
                 RuntimeEventKinds.BudgetUpdated,
                 next =>
                 {
+                    ProviderUsageAccounting.AccumulateDetails(
+                        next.Usage,
+                        notice.Usage);
                     next.Usage.InputTokens = (int)Math.Min(
                         int.MaxValue,
                         chargedInputTokens);
                     next.Usage.OutputTokens = (int)Math.Min(
                         int.MaxValue,
                         chargedOutputTokens);
-                    next.Usage.CostUsd = RuntimePromptBuilder.AddCost(
-                        next.Usage.CostUsd,
-                        notice.Usage.CostUsd);
+                    if (string.Equals(
+                            next.Usage.Availability,
+                            UsageAvailabilityStates.CostAvailable,
+                            StringComparison.Ordinal))
+                    {
+                        next.Usage.CostUsd = RuntimePromptBuilder.AddCost(
+                            next.Usage.CostUsd,
+                            notice.Usage.CostUsd);
+                    }
+                    else
+                    {
+                        next.Usage.CostUsd =
+                            RuntimePromptBuilder.AddCost(
+                                next.Usage.CostUsd,
+                                notice.Usage.CostUsd);
+                        next.Usage.HasUnaccountedUsage = true;
+                        next.Usage.UnaccountedProviderAttempts =
+                            next.Usage.UnaccountedProviderAttempts
+                            == int.MaxValue
+                                ? int.MaxValue
+                                : next.Usage
+                                      .UnaccountedProviderAttempts
+                                  + 1;
+                    }
+
                     UpdateDuration(next, startedAt);
                 },
                 turnId,
@@ -2439,7 +5129,16 @@ public sealed class DurableAgentRuntime :
                 CancellationToken.None,
                 eventId: "provider-usage:" + notice.StreamAttemptId,
                 streamAttemptId: notice.StreamAttemptId,
-                providerId: notice.ProviderId)
+                providerId: notice.ProviderId,
+                eventExtensions:
+                    new Dictionary<string, JsonElement>(
+                        StringComparer.Ordinal)
+                    {
+                        [ProviderCacheTelemetry.UsageExtensionName] =
+                            ProviderCacheUsageEvidence
+                                .FromUsage(notice.Usage)
+                                .ToJson()
+                    })
             .ConfigureAwait(false);
 
         var decision = tokenUsageOverflowed
@@ -2473,6 +5172,7 @@ public sealed class DurableAgentRuntime :
         DateTimeOffset startedAt,
         string turnId)
     {
+        var wireEvidence = notice.WireRequestEvidence.ToJson();
         await _journal.CommitRunMutationAsync(
                 run,
                 RuntimeEventKinds.ProviderDispatchStarted,
@@ -2489,7 +5189,33 @@ public sealed class DurableAgentRuntime :
                 providerCapabilityDigest:
                     notice.RouteIdentity.CapabilityDigest,
                 providerRouteDigest:
-                    notice.RouteIdentity.RouteDigest)
+                    notice.RouteIdentity.RouteDigest,
+                eventExtensions:
+                    new Dictionary<string, JsonElement>(
+                        StringComparer.Ordinal)
+                    {
+                        ["providerRequestPreparation"] =
+                            notice.RequestPreparation.ToSnapshotExtension(),
+                        [ProviderWireRequestEvidence.JournalExtensionName] =
+                            wireEvidence,
+                        [ProviderWireRequestEvidence
+                                .IntegrityDigestJournalExtensionName] =
+                            JsonArrayBuilder.String(
+                                CanonicalJsonDigest.ComputeSha256(
+                                    wireEvidence)),
+                        [ProviderWireRequestEvidence
+                                .DialectSemanticDigestJournalExtensionName] =
+                            JsonArrayBuilder.String(
+                                notice.RouteIdentity.DialectSemanticDigest),
+                        [ProviderDialectContract.JournalExtensionName] =
+                            notice.RouteIdentity.DialectContract.ToJson(),
+                        [ProviderRouteJournalExtensions.PolicyVersion] =
+                            JsonArrayBuilder.String(
+                                notice.RouteIdentity.RoutePolicyVersion),
+                        [ProviderRouteJournalExtensions.PolicyDigest] =
+                            JsonArrayBuilder.String(
+                                notice.RouteIdentity.RoutePolicyDigest)
+                    })
             .ConfigureAwait(false);
     }
 
@@ -2677,14 +5403,6 @@ public sealed class DurableAgentRuntime :
             if (string.Equals(
                     run.State,
                     RunStates.WaitingForAction,
-                    StringComparison.Ordinal)
-                || string.Equals(
-                    run.State,
-                    RunStates.Cancelling,
-                    StringComparison.Ordinal)
-                || string.Equals(
-                    run.State,
-                    RunStates.Interrupting,
                     StringComparison.Ordinal))
             {
                 await _journal.CommitTransitionAndMutationAsync(
@@ -2693,19 +5411,43 @@ public sealed class DurableAgentRuntime :
                         RuntimeEventKinds.ActionReconciling,
                         next =>
                         {
-                            next.TerminalReason = "max_duration";
-                            next.CompletionIntent = null;
                             UpdateDuration(next, startedAt);
                         },
                         turnId: run.CurrentTurnId,
                         cancellationToken: CancellationToken.None)
                     .ConfigureAwait(false);
             }
-            else
+            else if (string.Equals(
+                         run.State,
+                         RunStates.Cancelling,
+                         StringComparison.Ordinal)
+                     || string.Equals(
+                         run.State,
+                         RunStates.Interrupting,
+                         StringComparison.Ordinal))
+            {
+                await _journal.CommitTransitionAndMutationAsync(
+                        run,
+                        RunStates.Reconciling,
+                        RuntimeEventKinds.ActionReconciling,
+                        next => UpdateDuration(next, startedAt),
+                        completionIntent: run.CompletionIntent,
+                        turnId: run.CurrentTurnId,
+                        cancellationToken: CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            if (string.Equals(
+                    run.State,
+                    RunStates.Reconciling,
+                    StringComparison.Ordinal)
+                && !string.Equals(
+                    run.TerminalReason,
+                    "max_duration",
+                    StringComparison.Ordinal))
             {
                 await _journal.CommitRunMutationAsync(
                         run,
-                        RuntimeEventKinds.RunCheckpoint,
+                        RuntimeEventKinds.BudgetUpdated,
                         next =>
                         {
                             next.TerminalReason = "max_duration";
@@ -2713,7 +5455,8 @@ public sealed class DurableAgentRuntime :
                             UpdateDuration(next, startedAt);
                         },
                         turnId: run.CurrentTurnId,
-                        cancellationToken: CancellationToken.None)
+                        cancellationToken: CancellationToken.None,
+                        reasonCode: "max_duration")
                     .ConfigureAwait(false);
             }
 
@@ -2827,6 +5570,13 @@ public sealed class DurableAgentRuntime :
         {
             ProviderException provider => provider.Code,
             SkillAdmissionException admission => admission.ReasonCode,
+            SkillContentResolutionException skillContent =>
+                skillContent.ReasonCode,
+            RuntimeMemoryIntegrationException memory => memory.ReasonCode,
+            GameContextAdvancementException gameContext =>
+                gameContext.ReasonCode,
+            DurableExecutionPolicyMismatchException =>
+                DurableExecutionPolicyMismatchException.ReasonCode,
             _ when cancellationRequested => "run_cancelled",
             _ => "runtime_failure"
         };
@@ -2834,6 +5584,10 @@ public sealed class DurableAgentRuntime :
         {
             ProviderException provider => provider.Category,
             SkillAdmissionException => "skill_admission",
+            SkillContentResolutionException => "skill_content",
+            RuntimeMemoryIntegrationException => "memory",
+            GameContextAdvancementException => "game_context",
+            DurableExecutionPolicyMismatchException => "execution_policy",
             _ when cancellationRequested => "control",
             _ => "runtime"
         };
@@ -2842,9 +5596,23 @@ public sealed class DurableAgentRuntime :
             ProviderException provider => provider.Message,
             SkillAdmissionException =>
                 "An activated skill was not admitted for this turn.",
+            SkillContentResolutionException =>
+                "Required skill context could not be resolved safely.",
+            RuntimeMemoryIntegrationException =>
+                "The runtime-managed memory operation failed.",
+            GameContextAdvancementException =>
+                "The authoritative game-context transition was rejected.",
+            DurableExecutionPolicyMismatchException =>
+                "The executable runtime policy changed before admission.",
             _ when cancellationRequested => "The run was cancelled.",
             _ => "The runtime failed. Inspect the structured trace."
         };
+        var terminalError = new DurableTerminalOutcome(
+            code,
+            category,
+            safeMessage);
+        var terminalErrorExtensions =
+            TerminalOutcomeJournalCodec.Extensions(terminalError);
 
         try
         {
@@ -2862,6 +5630,34 @@ public sealed class DurableAgentRuntime :
                             completionIntent: cancellationRequested
                                 ? CompletionIntents.Cancelled
                                 : CompletionIntents.Failed,
+                            cancellationToken: CancellationToken.None,
+                            eventExtensions: terminalErrorExtensions)
+                        .ConfigureAwait(false);
+                }
+                else if (cancellationRequested
+                         && string.Equals(
+                             run.State,
+                             RunStates.Reconciling,
+                             StringComparison.Ordinal)
+                         && run.CompletionIntent is null)
+                {
+                    await _journal.CommitTransitionAndMutationAsync(
+                            run,
+                            RunStates.Cancelling,
+                            RuntimeEventKinds.RunCheckpoint,
+                            next => UpdateDuration(next, startedAt),
+                            completionIntent: CompletionIntents.Cancelled,
+                            turnId: run.CurrentTurnId,
+                            cancellationToken: CancellationToken.None,
+                            eventExtensions: terminalErrorExtensions)
+                        .ConfigureAwait(false);
+                    await _journal.CommitTransitionAndMutationAsync(
+                            run,
+                            RunStates.Reconciling,
+                            RuntimeEventKinds.ActionReconciling,
+                            next => UpdateDuration(next, startedAt),
+                            completionIntent: CompletionIntents.Cancelled,
+                            turnId: run.CurrentTurnId,
                             cancellationToken: CancellationToken.None)
                         .ConfigureAwait(false);
                 }
@@ -2874,7 +5670,8 @@ public sealed class DurableAgentRuntime :
                             run,
                             RunControlKinds.Cancel,
                             startedAt,
-                            CancellationToken.None)
+                            CancellationToken.None,
+                            terminalError)
                         .ConfigureAwait(false);
                 }
                 else
@@ -2903,7 +5700,8 @@ public sealed class DurableAgentRuntime :
                             },
                             terminalReason: code,
                             completionIntent: CompletionIntents.Failed,
-                            cancellationToken: CancellationToken.None)
+                            cancellationToken: CancellationToken.None,
+                            eventExtensions: terminalErrorExtensions)
                         .ConfigureAwait(false);
                 }
             }
@@ -2942,14 +5740,27 @@ public sealed class DurableAgentRuntime :
                 ModelStreamEventKinds.TextDelta,
                 StringComparison.Ordinal))
         {
-            payload = JsonArrayBuilder.Object(
-                ("kind", JsonArrayBuilder.String(item.Kind)),
-                ("text", JsonArrayBuilder.String(item.TextDelta ?? string.Empty)));
+            payload = _finalOutputAdmission is null
+                ? JsonArrayBuilder.Object(
+                    ("kind", JsonArrayBuilder.String(item.Kind)),
+                    ("text", JsonArrayBuilder.String(
+                        item.TextDelta ?? string.Empty)))
+                : JsonArrayBuilder.Object(
+                    ("kind", JsonArrayBuilder.String(item.Kind)),
+                    ("text", JsonArrayBuilder.String(
+                        item.TextDelta ?? string.Empty)),
+                    ("presentationState", JsonArrayBuilder.String(
+                        "provisional")));
         }
         else
         {
-            payload = JsonArrayBuilder.Object(
-                ("kind", JsonArrayBuilder.String(item.Kind)));
+            payload = _finalOutputAdmission is null
+                ? JsonArrayBuilder.Object(
+                    ("kind", JsonArrayBuilder.String(item.Kind)))
+                : JsonArrayBuilder.Object(
+                    ("kind", JsonArrayBuilder.String(item.Kind)),
+                    ("presentationState", JsonArrayBuilder.String(
+                        "provisional")));
         }
 
         _journal.PublishEphemeral(
@@ -2970,8 +5781,14 @@ public sealed class DurableAgentRuntime :
         var payload = JsonArrayBuilder.Object(
             ("providerId", JsonArrayBuilder.String(notice.ProviderId)),
             ("nextProviderId", notice.NextProviderId is null
-                ? ProtocolJson.ParseElement("null")
+                ? JsonArrayBuilder.Null()
                 : JsonArrayBuilder.String(notice.NextProviderId)),
+            ("providerAttemptId", notice.ProviderAttemptId is null
+                ? JsonArrayBuilder.Null()
+                : JsonArrayBuilder.String(notice.ProviderAttemptId)),
+            ("streamAttemptId", notice.StreamAttemptId is null
+                ? JsonArrayBuilder.Null()
+                : JsonArrayBuilder.String(notice.StreamAttemptId)),
             ("attemptNumber", JsonArrayBuilder.Number(
                 notice.AttemptNumber)),
             ("errorCode", JsonArrayBuilder.String(notice.ErrorCode)),
@@ -2989,8 +5806,8 @@ public sealed class DurableAgentRuntime :
                 : RuntimeEventKinds.ProviderFallback,
             payload,
             run.CurrentTurnId,
-            attemptId: null,
-            streamAttemptId: null,
+            attemptId: notice.ProviderAttemptId,
+            streamAttemptId: notice.StreamAttemptId,
             Interlocked.Increment(ref _ephemeralSequence) - 1);
     }
 
@@ -3037,6 +5854,66 @@ public sealed class DurableAgentRuntime :
         return result;
     }
 
+    private static IReadOnlyList<SkillActivationStateRecord>
+        ReconcileActiveSkillState(
+            IReadOnlyList<SkillReference> activeSkills,
+            IReadOnlyList<SkillActivationStateRecord> priorState,
+            SkillCatalogSnapshot snapshot)
+    {
+        var priorByReference = new Dictionary<
+            string,
+            SkillActivationStateRecord>(StringComparer.Ordinal);
+        foreach (var record in priorState)
+        {
+            if (!priorByReference.TryAdd(record.Reference, record))
+            {
+                throw new InvalidDataException(
+                    "The active-skill state contains duplicate references.");
+            }
+        }
+
+        var result = new List<SkillActivationStateRecord>(
+            activeSkills.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var reference in activeSkills)
+        {
+            if (!seen.Add(reference.Value))
+            {
+                throw new ArgumentException(
+                    "The active-skill list contains duplicate references.",
+                    nameof(activeSkills));
+            }
+
+            if (!snapshot.TryGet(
+                    reference.SkillId,
+                    reference.Version,
+                    out var skill)
+                || skill is null)
+            {
+                throw new KeyNotFoundException(
+                    $"Skill '{reference.Value}' is not in this snapshot.");
+            }
+
+            if (priorByReference.TryGetValue(
+                    reference.Value,
+                    out var prior)
+                && !prior.Matches(skill))
+            {
+                throw new SkillAdmissionException(
+                    SkillAdmissionReasonCodes.CatalogEntryChanged);
+            }
+
+            result.Add(
+                prior?.Clone()
+                ?? new SkillActivationStateRecord(
+                    skill.SkillId,
+                    skill.Version,
+                    skill.ContentDigest));
+        }
+
+        return result;
+    }
+
     private static bool IsSkillDisclosureMessage(NormalizedMessage message)
     {
         if (!string.Equals(
@@ -3062,6 +5939,66 @@ public sealed class DurableAgentRuntime :
             if (string.Equals(
                     contentType.GetString(),
                     "application/vnd.game-agent.skills+json",
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsRuntimeContextMessage(NormalizedMessage message)
+    {
+        if (!string.Equals(
+                message.Role,
+                NormalizedRoles.User,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var part in message.Parts)
+        {
+            if (part.Json.HasValue
+                && part.Json.Value.ValueKind == JsonValueKind.Object
+                && part.Json.Value.TryGetProperty(
+                    "contentType",
+                    out var contentType)
+                && contentType.ValueKind == JsonValueKind.String
+                && string.Equals(
+                    contentType.GetString(),
+                    "application/vnd.game-agent.context+json",
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsSkillContentMessage(NormalizedMessage message)
+    {
+        if (!string.Equals(
+                message.Role,
+                NormalizedRoles.User,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var part in message.Parts)
+        {
+            if (part.Json.HasValue
+                && part.Json.Value.ValueKind == JsonValueKind.Object
+                && part.Json.Value.TryGetProperty(
+                    "contentType",
+                    out var contentType)
+                && contentType.ValueKind == JsonValueKind.String
+                && string.Equals(
+                    contentType.GetString(),
+                    "application/vnd.game-agent.skill-content+json",
                     StringComparison.Ordinal))
             {
                 return true;
@@ -3118,7 +6055,8 @@ public sealed class DurableAgentRuntime :
             cancellationToken);
         DurableRunInputJournalCodec.ValidateEncodedSize(
             contextSnapshot,
-            activeSkillSnapshot);
+            activeSkillSnapshot,
+            request.WorkloadClass);
         var transcriptInput = RuntimeInputGuard.CopyBounded(
             transcript,
             _options.MaxTranscriptMessages,
@@ -3131,7 +6069,8 @@ public sealed class DurableAgentRuntime :
             Array.Empty<ToolDescriptor>(),
             _options.MaxTranscriptMessages,
             _options.MaxPromptUtf8Bytes,
-            _options.EstimatedPromptBytesPerToken);
+            _options.EstimatedPromptBytesPerToken,
+            _tokenEstimator);
         var transcriptSnapshot = RuntimeInputGuard.CopyBounded(
             transcriptInput,
             _options.MaxTranscriptMessages,
@@ -3160,7 +6099,12 @@ public sealed class DurableAgentRuntime :
             Context = contextSnapshot,
             ActiveSkills = activeSkillSnapshot,
             InitialTranscript = transcriptSnapshot,
-            LaneId = request.LaneId
+            LaneId = request.LaneId,
+            WorkloadClass = ProviderWorkloadClasses.Normalize(
+                request.WorkloadClass,
+                nameof(request.WorkloadClass)),
+            FinalOutputContract =
+                request.FinalOutputContract?.Snapshot()
         };
     }
 
@@ -3176,6 +6120,15 @@ public sealed class DurableAgentRuntime :
             ?? throw new ArgumentException(
                 "A durable continuation requires an active-skill collection.",
                 nameof(continuation));
+        var activeSkillSnapshot = RuntimeInputGuard.CopyBounded(
+            activeSkills,
+            DurableRunInputJournalCodec.MaxActiveSkills,
+            Snapshot,
+            nameof(continuation.ActiveSkills),
+            "activated_skill_count_exceeded",
+            cancellationToken);
+        DurableRunInputJournalCodec.ValidateUniqueActiveSkills(
+            activeSkillSnapshot);
         return new DurableRunContinuation
         {
             Context = RuntimeInputGuard.CopyBounded(
@@ -3195,16 +6148,248 @@ public sealed class DurableAgentRuntime :
                 nameof(continuation.Context),
                 "context_candidate_count_exceeded",
                 cancellationToken),
-            ActiveSkills = RuntimeInputGuard.CopyBounded(
-                activeSkills,
-                DurableRunInputJournalCodec.MaxActiveSkills,
-                Snapshot,
-                nameof(continuation.ActiveSkills),
-                "activated_skill_count_exceeded",
-                cancellationToken),
+            ActiveSkills = activeSkillSnapshot,
             ReplaceActiveSkills = continuation.ReplaceActiveSkills,
-            LaneId = continuation.LaneId
+            LaneId = continuation.LaneId,
+            WorkloadClass = continuation.WorkloadClass is null
+                ? null
+                : ProviderWorkloadClasses.Normalize(
+                    continuation.WorkloadClass,
+                    nameof(continuation.WorkloadClass)),
+            RequestCancellation = continuation.RequestCancellation,
+            FinalOutputContract =
+                continuation.FinalOutputContract?.Snapshot()
         };
+    }
+
+    private static DurableRunResumeGuard Snapshot(
+        DurableRunResumeGuard guard)
+    {
+        var expectedBatchId = guard.ExpectedBatchId is null
+            ? null
+            : RuntimeGuard.RequiredId(
+                guard.ExpectedBatchId,
+                nameof(guard.ExpectedBatchId));
+        var expectedAgentId = guard.ExpectedAgentId is null
+            ? null
+            : RuntimeGuard.RequiredId(
+                guard.ExpectedAgentId,
+                nameof(guard.ExpectedAgentId));
+        var expectedDecisionKey = guard.ExpectedDecisionKey is null
+            ? null
+            : MultiActorDecisionCoordinator.RequiredDecisionKey(
+                guard.ExpectedDecisionKey,
+                nameof(guard.ExpectedDecisionKey));
+        var extensionName = guard.RequiredInt32ExtensionName is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(
+                guard.RequiredInt32ExtensionName,
+                128,
+                nameof(guard.RequiredInt32ExtensionName));
+        var hasInt32Constraints =
+            guard.ExpectedInt32ExtensionValue.HasValue
+            || guard.MinimumInt32ExtensionValue != int.MinValue
+            || guard.MaximumInt32ExtensionValue != int.MaxValue;
+        if (extensionName is null && hasInt32Constraints)
+        {
+            throw new ArgumentException(
+                "An Int32 extension name is required when Int32 constraints are set.",
+                nameof(guard.RequiredInt32ExtensionName));
+        }
+
+        if (guard.MinimumInt32ExtensionValue
+            > guard.MaximumInt32ExtensionValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(guard.MinimumInt32ExtensionValue),
+                "The minimum extension value cannot exceed the maximum.");
+        }
+
+        if (guard.ExpectedInt32ExtensionValue is int expected
+            && (expected < guard.MinimumInt32ExtensionValue
+                || expected > guard.MaximumInt32ExtensionValue))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(guard.ExpectedInt32ExtensionValue),
+                "The expected extension value must be inside the allowed range.");
+        }
+
+        var semanticExtensionName = guard.SemanticExtensionName is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(
+                guard.SemanticExtensionName,
+                128,
+                nameof(guard.SemanticExtensionName));
+        var semanticDigest = guard.ExpectedSemanticExtensionSha256;
+        if ((semanticExtensionName is null) != (semanticDigest is null))
+        {
+            throw new ArgumentException(
+                "A semantic extension name and expected SHA-256 digest must be supplied together.",
+                semanticExtensionName is null
+                    ? nameof(guard.SemanticExtensionName)
+                    : nameof(guard.ExpectedSemanticExtensionSha256));
+        }
+
+        if (semanticDigest is not null
+            && !CanonicalJsonDigest.IsSha256(semanticDigest))
+        {
+            throw new ArgumentException(
+                "The expected semantic extension digest must contain exactly 64 lowercase hexadecimal characters.",
+                nameof(guard.ExpectedSemanticExtensionSha256));
+        }
+
+        if (expectedBatchId is null
+            && expectedAgentId is null
+            && expectedDecisionKey is null
+            && extensionName is null
+            && semanticExtensionName is null)
+        {
+            throw new ArgumentException(
+                "At least one durable resume expectation is required.",
+                nameof(guard));
+        }
+
+        return new DurableRunResumeGuard
+        {
+            ExpectedBatchId = expectedBatchId,
+            ExpectedAgentId = expectedAgentId,
+            ExpectedDecisionKey = expectedDecisionKey,
+            RequiredInt32ExtensionName = extensionName,
+            MinimumInt32ExtensionValue =
+                guard.MinimumInt32ExtensionValue,
+            MaximumInt32ExtensionValue =
+                guard.MaximumInt32ExtensionValue,
+            ExpectedInt32ExtensionValue =
+                guard.ExpectedInt32ExtensionValue,
+            SemanticExtensionName = semanticExtensionName,
+            ExpectedSemanticExtensionSha256 = semanticDigest
+        };
+    }
+
+    private static void EnsureResumeGuard(
+        AgentRun run,
+        string requestedRunId,
+        DurableRunResumeGuard guard)
+    {
+        if (!string.Equals(
+                run.RunId,
+                requestedRunId,
+                StringComparison.Ordinal))
+        {
+            throw ResumeGuardFailure(
+                DurableRunResumeGuardReasonCodes.RunIdMismatch);
+        }
+
+        if (guard.ExpectedBatchId is not null
+            && !string.Equals(
+                run.BatchId,
+                guard.ExpectedBatchId,
+                StringComparison.Ordinal))
+        {
+            throw ResumeGuardFailure(
+                DurableRunResumeGuardReasonCodes.BatchIdMismatch);
+        }
+
+        if (guard.ExpectedAgentId is not null
+            && !string.Equals(
+                run.AgentId,
+                guard.ExpectedAgentId,
+                StringComparison.Ordinal))
+        {
+            throw ResumeGuardFailure(
+                DurableRunResumeGuardReasonCodes.AgentIdMismatch);
+        }
+
+        if (guard.ExpectedDecisionKey is not null
+            && !string.Equals(
+                run.DecisionKey,
+                guard.ExpectedDecisionKey,
+                StringComparison.Ordinal))
+        {
+            throw ResumeGuardFailure(
+                DurableRunResumeGuardReasonCodes.DecisionKeyMismatch);
+        }
+
+        if (guard.RequiredInt32ExtensionName is not null)
+        {
+            if (run.Extensions is null
+                || !run.Extensions.TryGetValue(
+                    guard.RequiredInt32ExtensionName,
+                    out var extension))
+            {
+                throw ResumeGuardFailure(
+                    DurableRunResumeGuardReasonCodes.ExtensionMissing);
+            }
+
+            if (extension.ValueKind != JsonValueKind.Number
+                || !extension.TryGetInt32(out var extensionValue))
+            {
+                throw ResumeGuardFailure(
+                    DurableRunResumeGuardReasonCodes.ExtensionNotInt32);
+            }
+
+            if (extensionValue < guard.MinimumInt32ExtensionValue
+                || extensionValue > guard.MaximumInt32ExtensionValue)
+            {
+                throw ResumeGuardFailure(
+                    DurableRunResumeGuardReasonCodes.ExtensionOutOfRange);
+            }
+
+            if (guard.ExpectedInt32ExtensionValue is int expected
+                && extensionValue != expected)
+            {
+                throw ResumeGuardFailure(
+                    DurableRunResumeGuardReasonCodes.ExtensionValueMismatch);
+            }
+        }
+
+        if (guard.SemanticExtensionName is not null)
+        {
+            if (run.Extensions is null
+                || !run.Extensions.TryGetValue(
+                    guard.SemanticExtensionName,
+                    out var semanticExtension))
+            {
+                throw ResumeGuardFailure(
+                    DurableRunResumeGuardReasonCodes
+                        .SemanticExtensionMissing);
+            }
+
+            var actualDigest =
+                CanonicalJsonDigest.ComputeSha256(semanticExtension);
+            if (!string.Equals(
+                    actualDigest,
+                    guard.ExpectedSemanticExtensionSha256,
+                    StringComparison.Ordinal))
+            {
+                throw ResumeGuardFailure(
+                    DurableRunResumeGuardReasonCodes
+                        .SemanticExtensionDigestMismatch);
+            }
+        }
+    }
+
+    private static DurableRunResumeGuardException ResumeGuardFailure(
+        string reasonCode)
+    {
+        return new DurableRunResumeGuardException(reasonCode);
+    }
+
+    private void EnsureContextObservationsVisibleToRun(
+        IReadOnlyList<ContextCandidate> context,
+        AgentRun run)
+    {
+        foreach (var candidate in context)
+        {
+            if (candidate.ObservationAdmissionMetadata is not null)
+            {
+                ObservationAdmission.EnsureVisibleToRun(
+                    candidate.ObservationAdmissionMetadata,
+                    run,
+                    _options
+                        .RequireAudienceIncarnationForRestrictedObservations);
+            }
+        }
     }
 
     private static ContextCandidate Snapshot(ContextCandidate candidate)
@@ -3216,38 +6401,7 @@ public sealed class DurableAgentRuntime :
                 nameof(candidate));
         }
 
-        if (candidate.Content.HasValue)
-        {
-            return new ContextCandidate(
-                candidate.Id,
-                candidate.Category,
-                candidate.Content.Value,
-                candidate.Priority,
-                candidate.Required,
-                candidate.CanDefer,
-                candidate.EstimatedTokens,
-                candidate.ExpiresAt,
-                candidate.Provenance);
-        }
-
-        var resource = candidate.Resource
-            ?? throw new ArgumentException(
-                "A context candidate requires content or a resource.",
-                nameof(candidate));
-        return new ContextCandidate(
-            candidate.Id,
-            candidate.Category,
-            new ContextResourceReference(
-                resource.Uri,
-                resource.MediaType,
-                resource.Digest,
-                resource.SizeBytes),
-            candidate.Priority,
-            candidate.Required,
-            candidate.CanDefer,
-            candidate.EstimatedTokens,
-            candidate.ExpiresAt,
-            candidate.Provenance);
+        return candidate.Clone();
     }
 
     private static SkillReference Snapshot(SkillReference skill)
@@ -3275,17 +6429,148 @@ public sealed class DurableAgentRuntime :
             NormalizedMessageJournalCodec.Encode(message));
     }
 
+    private void BindNewRunFinalOutputAdmission(
+        AgentRun run,
+        FinalOutputContract? contract)
+    {
+        if (_finalOutputAdmission is null)
+        {
+            if (contract is not null)
+            {
+                throw new ArgumentException(
+                    "A final-output contract requires strict final-output "
+                    + "admission.",
+                    nameof(contract));
+            }
+
+            if (run.Extensions.ContainsKey(
+                    FinalOutputAdmissionBinding.ExtensionName))
+            {
+                throw new ArgumentException(
+                    "A new run cannot supply a runtime-owned final-output "
+                    + "admission extension.",
+                    nameof(run));
+            }
+
+            return;
+        }
+
+        if (run.Extensions.ContainsKey(
+                FinalOutputAdmissionBinding.ExtensionName))
+        {
+            throw new ArgumentException(
+                "A new run cannot supply a runtime-owned final-output "
+                + "admission extension.",
+                nameof(run));
+        }
+
+        var binding = new FinalOutputAdmissionBinding(
+            _finalOutputAdmission.PolicyId,
+            _finalOutputAdmission.PolicyVersion,
+            _finalOutputAdmission.OptionsDigest,
+            contract);
+        run.Extensions[FinalOutputAdmissionBinding.ExtensionName] =
+            binding.ToJson();
+        var encoded = ProtocolJson.ToElement(run);
+        JsonValueInspector.ValidateAndMeasure(
+            encoded,
+            DurableRunJsonLimits,
+            nameof(run));
+    }
+
+    private FinalOutputAdmissionBinding?
+        EnsureRecoveredFinalOutputAdmission(
+            RecoveredRun recovered,
+            FinalOutputContract? requestedContract)
+    {
+        var durable = FinalOutputAdmissionBinding.Read(recovered.Run);
+        if (durable is null)
+        {
+            if (_finalOutputAdmission is not null)
+            {
+                throw new InvalidDataException(
+                    "A non-admitted run cannot be resumed by a strict "
+                    + "final-output runtime.");
+            }
+
+            if (requestedContract is not null)
+            {
+                throw new InvalidDataException(
+                    "Resume cannot add a final-output contract to an "
+                    + "existing run.");
+            }
+
+            return null;
+        }
+
+        if (_finalOutputAdmission is null)
+        {
+            throw new InvalidDataException(
+                "A strict final-output run cannot be resumed by a runtime "
+                + "without its admission policy.");
+        }
+
+        var current = new FinalOutputAdmissionBinding(
+            _finalOutputAdmission.PolicyId,
+            _finalOutputAdmission.PolicyVersion,
+            _finalOutputAdmission.OptionsDigest,
+            durable.Contract);
+        if (!durable.Matches(current))
+        {
+            throw new InvalidDataException(
+                "The final-output admission policy or limits do not match "
+                + "the durable run.");
+        }
+
+        if (requestedContract is not null
+            && (durable.Contract is null
+                || !durable.Contract.Matches(requestedContract)))
+        {
+            throw new InvalidDataException(
+                "The requested final-output contract does not match the "
+                + "durable run.");
+        }
+
+        return durable;
+    }
+
+    private static void EnsureTerminalOutputWasAdmitted(
+        RecoveredRun recovered,
+        FinalOutputAdmissionBinding? admission)
+    {
+        if (admission is null || !recovered.FinalOutput.HasValue)
+        {
+            return;
+        }
+
+        if (!recovered.FinalOutputAdmissionEvidence.HasValue)
+        {
+            throw new InvalidDataException(
+                "A strict terminal run has no durable final-output "
+                + "admission evidence.");
+        }
+    }
+
     private static DurableRunOutcome Outcome(
         AgentRun run,
         IReadOnlyList<NormalizedMessage> transcript,
-        JsonElement? finalOutput = null)
+        JsonElement? finalOutput = null,
+        DurableTerminalOutcome? terminalOutcome = null)
     {
-        return new DurableRunOutcome
+        var outcome = new DurableRunOutcome
         {
             Run = run,
             FinalOutput = finalOutput?.Clone(),
             Transcript = transcript.ToArray()
         };
+        if (terminalOutcome is not null)
+        {
+            outcome.ErrorCode = terminalOutcome.Code;
+            outcome.ErrorCategory = terminalOutcome.Category;
+            outcome.SafeErrorMessage = terminalOutcome.SafeMessage;
+        }
+
+        return outcome;
     }
 
     private static string LaneId(AgentRun run, string? requested)
@@ -3318,6 +6603,27 @@ public sealed class DurableAgentRuntime :
                 maxDurationMs,
                 (long)TimeSpan.FromDays(3650).TotalMilliseconds));
         return startedAt.AddMilliseconds(bounded);
+    }
+
+    private static DateTimeOffset BackdateDuration(
+        DateTimeOffset now,
+        long durationMs)
+    {
+        if (durationMs <= 0)
+        {
+            return now;
+        }
+
+        var availableMilliseconds =
+            (now.UtcDateTime.Ticks - DateTime.MinValue.Ticks)
+            / TimeSpan.TicksPerMillisecond;
+        if (durationMs >= availableMilliseconds)
+        {
+            return DateTimeOffset.MinValue;
+        }
+
+        return now.AddTicks(
+            -durationMs * TimeSpan.TicksPerMillisecond);
     }
 
     private static string? CompletionState(string? intent)
@@ -3372,28 +6678,503 @@ public sealed class DurableAgentRuntime :
         drained?.TrySetResult(true);
     }
 
+    private RuntimeLoopRecoveryState CreateRuntimeLoopRecoveryState(
+        RecoveredRun recovered,
+        string? replaySafeCheckpointTurnId)
+    {
+        string? disclosedSkillAdmissionDigest = null;
+        ProviderCacheKey? previousProviderCacheKey = null;
+        var snapshot = recovered.LastTurnSnapshot;
+        if (snapshot is not null)
+        {
+            var durableFinalOutputAdmission =
+                FinalOutputAdmissionBinding.Read(recovered.Run);
+            var hasSnapshotFinalOutputAdmission =
+                snapshot.Extensions.TryGetValue(
+                    FinalOutputAdmissionBinding.TurnSnapshotExtensionName,
+                    out var snapshotFinalOutputAdmission);
+            if (durableFinalOutputAdmission is null)
+            {
+                if (hasSnapshotFinalOutputAdmission)
+                {
+                    throw new InvalidDataException(
+                        "A recovered turn has an unexpected final-output "
+                        + "admission binding.");
+                }
+            }
+            else if (!hasSnapshotFinalOutputAdmission
+                     || !durableFinalOutputAdmission.Matches(
+                         FinalOutputAdmissionBinding.FromJson(
+                             snapshotFinalOutputAdmission)))
+            {
+                throw new InvalidDataException(
+                    "A recovered turn does not match the durable "
+                    + "final-output admission binding.");
+            }
+
+            if (snapshot.Extensions.TryGetValue(
+                    "skillAdmission",
+                    out var admission))
+            {
+                if (admission.ValueKind != JsonValueKind.Object
+                    || !admission.TryGetProperty(
+                        "admissionDigest",
+                        out var admissionDigest)
+                    || admissionDigest.ValueKind != JsonValueKind.String
+                    || !CanonicalJsonDigest.IsSha256(
+                        admissionDigest.GetString()))
+                {
+                    throw new InvalidDataException(
+                        "A recovered skill admission digest is invalid.");
+                }
+
+                disclosedSkillAdmissionDigest =
+                    admissionDigest.GetString();
+            }
+
+            if (snapshot.Extensions.TryGetValue(
+                    ProviderCacheTelemetry.KeyExtensionName,
+                    out var cacheKey))
+            {
+                previousProviderCacheKey =
+                    ProviderCacheKey.FromJson(cacheKey);
+            }
+
+            if (replaySafeCheckpointTurnId is not null
+                && string.Equals(
+                    replaySafeCheckpointTurnId,
+                    snapshot.TurnId,
+                    StringComparison.Ordinal)
+                && snapshot.Extensions.TryGetValue(
+                    ConversationContextView.CheckpointExtensionName,
+                    out var checkpoint))
+            {
+                try
+                {
+                    _conversationContext.RegisterCheckpoint(checkpoint);
+                }
+                catch (RuntimeContentLimitException)
+                {
+                    // Capacity pressure degrades to deterministic
+                    // recompaction. It must not make a valid run
+                    // unrecoverable.
+                }
+            }
+        }
+
+        return new RuntimeLoopRecoveryState(
+            disclosedSkillAdmissionDigest,
+            previousProviderCacheKey,
+            recovered.ProviderOpaqueContinuationState,
+            recovered.FinalOutputCommittedEvidence,
+            recovered.FinalOutputAdmissionAttempts);
+    }
+
+    private static void TryAttachConversationContextCheckpoint(
+        TurnSnapshot snapshot,
+        ConversationContextView contextView)
+    {
+        try
+        {
+            snapshot.Extensions[
+                    ConversationContextView.CheckpointExtensionName] =
+                contextView.CreateCheckpoint(snapshot.RunId);
+        }
+        catch (RuntimeContentLimitException exception)
+        {
+            snapshot.Extensions["conversationContextCheckpointStatus"] =
+                JsonArrayBuilder.Object(
+                    ("available", JsonArrayBuilder.Boolean(false)),
+                    ("reasonCode",
+                        JsonArrayBuilder.String(exception.LimitCode)));
+        }
+    }
+
+    private static string ProviderCacheCompactionDigest(
+        ConversationContextReport report)
+    {
+        var digest = new CanonicalDigestBuilder();
+        digest.Add("type", "provider-cache-compaction.v1");
+        digest.Add("compacted", report.Compacted ? "true" : "false");
+        digest.Add(
+            "viewDigest",
+            report.Compacted ? report.ViewDigest : "not-compacted");
+        return digest.Finish();
+    }
+
+    private static string ProviderCacheDynamicRequestDigest(
+        string promptDigest,
+        ProviderOpaqueContinuationState? continuationState)
+    {
+        var digest = new CanonicalDigestBuilder();
+        digest.Add("type", "provider-cache-dynamic-request.v1");
+        digest.Add("promptDigest", promptDigest);
+        if (continuationState is null)
+        {
+            digest.Add("providerContinuation", "absent");
+        }
+        else
+        {
+            digest.Add("providerContinuation", "present");
+            digest.Add("providerId", continuationState.ProviderId);
+            digest.Add(
+                "providerRouteDigest",
+                continuationState.ProviderRouteDigest);
+            digest.Add("stateVersion", continuationState.StateVersion);
+            digest.Add("payloadDigest", continuationState.PayloadDigest);
+        }
+
+        return digest.Finish();
+    }
+
+    private sealed class RuntimeExecutionPolicyLease
+    {
+        public RuntimeExecutionPolicyLease(
+            ToolCatalogSnapshot tools,
+            SkillCatalogSnapshot skills,
+            ProviderRoutePlan providerRoutes,
+            DurableExecutionPolicyIdentity identity)
+        {
+            Tools = tools ?? throw new ArgumentNullException(nameof(tools));
+            Skills =
+                skills ?? throw new ArgumentNullException(nameof(skills));
+            ProviderRoutes = providerRoutes
+                             ?? throw new ArgumentNullException(
+                                 nameof(providerRoutes));
+            Identity = identity
+                       ?? throw new ArgumentNullException(nameof(identity));
+        }
+
+        public ToolCatalogSnapshot Tools { get; }
+
+        public SkillCatalogSnapshot Skills { get; }
+
+        public ProviderRoutePlan ProviderRoutes { get; }
+
+        public DurableExecutionPolicyIdentity Identity { get; }
+    }
+
+    private sealed class RuntimeLoopRecoveryState
+    {
+        public RuntimeLoopRecoveryState(
+            string? disclosedSkillAdmissionDigest,
+            ProviderCacheKey? previousProviderCacheKey,
+            ProviderOpaqueContinuationState? providerOpaqueContinuationState,
+            IReadOnlyList<FinalOutputCommittedEvidence>
+                finalOutputCommittedEvidence,
+            int finalOutputAdmissionAttempts)
+        {
+            DisclosedSkillAdmissionDigest =
+                disclosedSkillAdmissionDigest;
+            PreviousProviderCacheKey = previousProviderCacheKey;
+            ProviderOpaqueContinuationState =
+                providerOpaqueContinuationState?.Snapshot();
+            FinalOutputCommittedEvidence =
+                finalOutputCommittedEvidence.ToArray();
+            FinalOutputAdmissionAttempts =
+                finalOutputAdmissionAttempts;
+        }
+
+        public string? DisclosedSkillAdmissionDigest { get; }
+
+        public ProviderCacheKey? PreviousProviderCacheKey { get; }
+
+        public ProviderOpaqueContinuationState?
+            ProviderOpaqueContinuationState
+        { get; }
+
+        public IReadOnlyList<FinalOutputCommittedEvidence>
+            FinalOutputCommittedEvidence
+        { get; }
+
+        public int FinalOutputAdmissionAttempts { get; }
+    }
+
     private async Task CompleteStopAsync(
         Task drainTask,
         TaskCompletionSource<bool> completion)
     {
         try
         {
-            await drainTask.ConfigureAwait(false);
-            var detachedDrained =
-                await _toolScheduler.DrainDetachedExecutionsAsync(
-                        _toolScheduler.DetachedShutdownDrainTimeout,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
+            var activeRunsDrained = ReferenceEquals(
+                await Task.WhenAny(
+                        drainTask,
+                        Task.Delay(_options.ShutdownDrainTimeout))
+                    .ConfigureAwait(false),
+                drainTask);
             Volatile.Write(
-                ref _detachedShutdownDrainResult,
-                detachedDrained ? 1 : 2);
-            _providerSlots.Dispose();
+                ref _activeRunShutdownDrainResult,
+                activeRunsDrained ? 1 : 2);
+            if (activeRunsDrained)
+            {
+                await drainTask.ConfigureAwait(false);
+                var boundedCleanup = Volatile.Read(
+                    ref _shutdownBoundedCleanupTask)
+                    ?? throw new InvalidOperationException(
+                        "Runtime shutdown cleanup was not initialized.");
+                await boundedCleanup.ConfigureAwait(false);
+            }
+            else
+            {
+                Interlocked.CompareExchange(
+                    ref _detachedToolShutdownDrainResult,
+                    2,
+                    0);
+                Interlocked.CompareExchange(
+                    ref _detachedConversationShutdownDrainResult,
+                    2,
+                    0);
+                if (_finalOutputAdmission is not null)
+                {
+                    Interlocked.CompareExchange(
+                        ref _finalOutputAdmissionShutdownDrainResult,
+                        2,
+                        0);
+                }
+                Interlocked.CompareExchange(
+                    ref _detachedProviderShutdownDrainResult,
+                    2,
+                    0);
+            }
+
             Volatile.Write(ref _lifecycleState, 2);
             completion.TrySetResult(true);
         }
         catch (Exception exception)
         {
             completion.TrySetException(exception);
+        }
+    }
+
+    private async Task CompleteShutdownResourceCleanupAsync(
+        Task activeRunsDrained,
+        TaskCompletionSource<bool> boundedCleanupCompletion,
+        Task shutdownCancellationCleanup)
+    {
+        try
+        {
+            // Stop accepting resolver work and request cancellation before
+            // waiting for active runs. A resolver that ignores cancellation
+            // remains isolated behind the bounded resolver-call cap.
+            var skillContent = _skillContent
+                .StopAsync()
+                .AsTask();
+            await activeRunsDrained.ConfigureAwait(false);
+            var finalOutputAdmission = _finalOutputAdmission is null
+                ? Task.FromResult(true)
+                : _finalOutputAdmission.StopAsync().AsTask();
+
+            // Provider admission is used only by active run leases. It must
+            // remain alive until the final lease exits, but can close before
+            // detached provider-owned stream cleanup settles.
+            _providerAdmission.Dispose();
+
+            var detachedTools = _toolScheduler
+                .DrainDetachedExecutionsAsync(
+                    _toolScheduler.DetachedShutdownDrainTimeout,
+                    CancellationToken.None)
+                .AsTask();
+            var conversationContext = _conversationContext
+                .StopAsync()
+                .AsTask();
+            var metrics = _metrics.StopAsync().AsTask();
+            var detachedProviders = DrainDetachedProviderCleanupsAsync(
+                _options.ShutdownDrainTimeout);
+
+            await Task.WhenAll(
+                    detachedTools,
+                    conversationContext,
+                    skillContent,
+                    finalOutputAdmission,
+                    metrics)
+                .ConfigureAwait(false);
+
+            var detachedToolsDrained = detachedTools.Result;
+            var conversationContextDrained = conversationContext.Result;
+            var skillContentResolversDrained = skillContent.Result;
+            var finalOutputAdmissionPoliciesDrained =
+                finalOutputAdmission.Result;
+            Interlocked.CompareExchange(
+                ref _detachedToolShutdownDrainResult,
+                detachedToolsDrained ? 1 : 2,
+                0);
+            Interlocked.CompareExchange(
+                ref _detachedConversationShutdownDrainResult,
+                conversationContextDrained ? 1 : 2,
+                0);
+            Interlocked.CompareExchange(
+                ref _skillContentResolverShutdownDrainResult,
+                skillContentResolversDrained ? 1 : 2,
+                0);
+            if (_finalOutputAdmission is not null)
+            {
+                Interlocked.CompareExchange(
+                    ref _finalOutputAdmissionShutdownDrainResult,
+                    finalOutputAdmissionPoliciesDrained ? 1 : 2,
+                    0);
+            }
+            boundedCleanupCompletion.TrySetResult(true);
+
+            Task conversationCleanup = Task.CompletedTask;
+            if (!conversationContextDrained)
+            {
+                conversationCleanup =
+                    RetryConversationContextCleanupAsync();
+                Volatile.Write(
+                    ref _conversationContextCleanupTask,
+                    conversationCleanup);
+            }
+
+            var detachedProvidersDrained =
+                await detachedProviders.ConfigureAwait(false);
+            Interlocked.CompareExchange(
+                ref _detachedProviderShutdownDrainResult,
+                detachedProvidersDrained ? 1 : 2,
+                0);
+            Task providerCleanup = Task.CompletedTask;
+            if (!detachedProvidersDrained)
+            {
+                providerCleanup =
+                    WaitForDetachedProviderCleanupsAsync();
+            }
+
+            await Task.WhenAll(conversationCleanup, providerCleanup)
+                .ConfigureAwait(false);
+            await shutdownCancellationCleanup.ConfigureAwait(false);
+            Volatile.Write(ref _shutdownResourceCleanupCompleted, 1);
+        }
+        catch (Exception exception)
+        {
+            boundedCleanupCompletion.TrySetException(exception);
+            throw;
+        }
+    }
+
+    private async Task RetryConversationContextCleanupAsync()
+    {
+        var retryDelayMs = 10;
+        while (true)
+        {
+            try
+            {
+                if (await _conversationContext.StopAsync()
+                        .ConfigureAwait(false))
+                {
+                    return;
+                }
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                _ = exception;
+            }
+
+            await Task.Delay(retryDelayMs).ConfigureAwait(false);
+            retryDelayMs = Math.Min(250, retryDelayMs * 2);
+        }
+    }
+
+    private void TrackDetachedProviderCleanup(Task cleanup)
+    {
+        if (cleanup is null)
+        {
+            return;
+        }
+
+        lock (_detachedProviderCleanupSync)
+        {
+            if (_detachedProviderCleanupCount == 0)
+            {
+                _detachedProviderCleanupsDrained = NewCompletion();
+            }
+
+            _detachedProviderCleanupCount =
+                checked(_detachedProviderCleanupCount + 1);
+        }
+
+        _ = ObserveDetachedProviderCleanupAsync(cleanup);
+    }
+
+    private async Task ObserveDetachedProviderCleanupAsync(Task cleanup)
+    {
+        try
+        {
+            await cleanup.ConfigureAwait(false);
+        }
+        catch
+        {
+            Interlocked.Increment(
+                ref _detachedProviderCleanupFailureCount);
+            ObserveTaskFailure(cleanup);
+        }
+        finally
+        {
+            TaskCompletionSource<bool>? drained = null;
+            lock (_detachedProviderCleanupSync)
+            {
+                _detachedProviderCleanupCount--;
+                if (_detachedProviderCleanupCount == 0)
+                {
+                    drained = _detachedProviderCleanupsDrained;
+                    _detachedProviderCleanupsDrained = null;
+                }
+            }
+
+            Interlocked.Increment(
+                ref _detachedProviderCleanupCompletedCount);
+            drained?.TrySetResult(true);
+        }
+    }
+
+    private async Task<bool> DrainDetachedProviderCleanupsAsync(
+        TimeSpan timeout)
+    {
+        Task drain;
+        lock (_detachedProviderCleanupSync)
+        {
+            drain = _detachedProviderCleanupCount == 0
+                ? Task.CompletedTask
+                : _detachedProviderCleanupsDrained!.Task;
+        }
+
+        if (drain.IsCompleted)
+        {
+            await drain.ConfigureAwait(false);
+            return true;
+        }
+
+        using var deadlineCancellation = new CancellationTokenSource();
+        var deadline = Task.Delay(timeout, deadlineCancellation.Token);
+        var completed = await Task.WhenAny(drain, deadline)
+            .ConfigureAwait(false);
+        if (ReferenceEquals(completed, drain))
+        {
+            deadlineCancellation.Cancel();
+            try
+            {
+                await deadline.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // The drain won; cancellation only releases the timer.
+            }
+
+            await drain.ConfigureAwait(false);
+            return true;
+        }
+
+        await deadline.ConfigureAwait(false);
+        return false;
+    }
+
+    private Task WaitForDetachedProviderCleanupsAsync()
+    {
+        lock (_detachedProviderCleanupSync)
+        {
+            return _detachedProviderCleanupCount == 0
+                ? Task.CompletedTask
+                : _detachedProviderCleanupsDrained!.Task;
         }
     }
 
@@ -3426,26 +7207,34 @@ public sealed class DurableAgentRuntime :
             TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private static async Task ReleaseProviderSlotAfterCleanupAsync(
-        Task cleanup,
-        SemaphoreSlim providerSlots)
+    private static void ObserveTaskFailure(Task task)
     {
-        try
+        _ = task.ContinueWith(
+            completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted
+            | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static async Task WaitForSharedTaskAsync(
+        Task task,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!cancellationToken.CanBeCanceled || task.IsCompleted)
         {
-            await cleanup.ConfigureAwait(false);
+            await task.ConfigureAwait(false);
+            return;
         }
-        finally
-        {
-            try
-            {
-                providerSlots.Release();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Runtime shutdown closes admission before forcing transport
-                // disposal. A late quarantined attempt cannot reopen it.
-            }
-        }
+
+        var cancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            () => cancelled.TrySetCanceled(cancellationToken));
+        var completed = await Task.WhenAny(task, cancelled.Task)
+            .ConfigureAwait(false);
+        await completed.ConfigureAwait(false);
     }
 
     private sealed class ActiveRunLease : IDisposable
@@ -3488,12 +7277,14 @@ public sealed class DurableAgentRuntime :
             ModelToolCall toolCall,
             ToolExecutionRequest? execution,
             NormalizedMessage? immediateMessage,
-            PreparedToolActivation? activation = null)
+            PreparedToolActivation? activation = null,
+            PreparedSkillActivation? skillActivation = null)
         {
             ToolCall = toolCall;
             Execution = execution;
             ImmediateMessage = immediateMessage;
             Activation = activation;
+            SkillActivation = skillActivation;
         }
 
         public ModelToolCall ToolCall { get; }
@@ -3503,6 +7294,8 @@ public sealed class DurableAgentRuntime :
         public NormalizedMessage? ImmediateMessage { get; }
 
         public PreparedToolActivation? Activation { get; }
+
+        public PreparedSkillActivation? SkillActivation { get; }
     }
 
     private sealed class PreparedToolActivation

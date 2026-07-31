@@ -34,6 +34,28 @@ public sealed class RuntimeControlPlaneTests
     }
 
     [Fact]
+    public void AcceptedInterruptSynchronouslyClosesTheDispatchGate()
+    {
+        var plane = new RuntimeControlPlane();
+        using var registration = plane.Register("run-1");
+        using var step = registration.BeginStep(default);
+
+        Assert.True(step.TryAcquireDispatchPermit());
+        Assert.True(
+            plane.TryPost(
+                "run-1",
+                new RunControlCommand
+                {
+                    CommandId = "control-before-dispatch",
+                    Kind = RunControlKinds.Steer,
+                    Observation = Observation(),
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                }));
+
+        Assert.False(step.TryAcquireDispatchPermit());
+    }
+
+    [Fact]
     public void FollowUpWaitsForBoundaryAndMailboxDoesNotLeakSignals()
     {
         var plane = new RuntimeControlPlane();
@@ -54,6 +76,54 @@ public sealed class RuntimeControlPlaneTests
         Assert.False(step.CancellationToken.IsCancellationRequested);
         Assert.Single(registration.Drain());
         Assert.Empty(registration.Drain());
+    }
+
+    [Fact]
+    public async Task ControlQueuedBeforeStepFencesTheStepAtAdmission()
+    {
+        var plane = new RuntimeControlPlane();
+        using var registration = plane.Register("run-1");
+        Assert.True(
+            plane.TryPost(
+                "run-1",
+                new RunControlCommand
+                {
+                    CommandId = "control-before-step",
+                    Kind = RunControlKinds.Steer,
+                    Observation = Observation(),
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                }));
+
+        using var step = registration.BeginStep(default);
+
+        Assert.True(step.PendingControlAtStart);
+        Assert.False(step.TryAcquireDispatchPermit());
+        await WaitUntilAsync(
+            () => step.CancellationToken.IsCancellationRequested);
+        Assert.Single(registration.Drain());
+    }
+
+    [Fact]
+    public void FollowUpQueuedBeforeStepDoesNotFenceTheStep()
+    {
+        var plane = new RuntimeControlPlane();
+        using var registration = plane.Register("run-1");
+        Assert.True(
+            plane.TryPost(
+                "run-1",
+                new RunControlCommand
+                {
+                    CommandId = "follow-up-before-step",
+                    Kind = RunControlKinds.FollowUp,
+                    Observation = Observation(),
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                }));
+
+        using var step = registration.BeginStep(default);
+
+        Assert.False(step.PendingControlAtStart);
+        Assert.False(step.CancellationToken.IsCancellationRequested);
+        Assert.Single(registration.Drain());
     }
 
     [Fact]
@@ -251,6 +321,164 @@ public sealed class RuntimeControlPlaneTests
     }
 
     [Fact]
+    public async Task RunBoundRegistrationRejectsInvisibleControlsBeforeInterruptingStep()
+    {
+        var plane = new RuntimeControlPlane();
+        var run = new AgentRun
+        {
+            RunId = "run-identity",
+            AgentId = "agent-1",
+            WorldId = "world-1",
+            SessionId = "session-1"
+        };
+        using var registration = plane.Register(run);
+        using var step = registration.BeginStep(default);
+        var wrongSession = Observation();
+        wrongSession.SessionId = "session-2";
+
+        Assert.False(
+            plane.TryPost(
+                run.RunId,
+                new RunControlCommand
+                {
+                    CommandId = "wrong-session-control",
+                    Kind = RunControlKinds.Steer,
+                    Observation = wrongSession,
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                }));
+
+        var wrongAudience = Observation();
+        wrongAudience.SessionId = run.SessionId;
+        wrongAudience.Visibility = new VisibilityRule
+        {
+            Scope = ObservationVisibilityScopes.Agent,
+            AudienceIds = new List<string> { "agent-2" }
+        };
+        Assert.False(
+            plane.TryPost(
+                run.RunId,
+                new RunControlCommand
+                {
+                    CommandId = "wrong-audience-control",
+                    Kind = RunControlKinds.Steer,
+                    Observation = wrongAudience,
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                }));
+
+        await Task.Delay(25);
+        Assert.False(step.CancellationToken.IsCancellationRequested);
+        Assert.Empty(registration.Drain());
+    }
+
+    [Fact]
+    public async Task StrictRunRegistrationRejectsStaleIncarnationBeforeInterrupt()
+    {
+        var plane = new RuntimeControlPlane();
+        var run = new AgentRun
+        {
+            RunId = "run-incarnation",
+            AgentId = "agent-1",
+            WorldId = "world-1",
+            SessionId = "session-1"
+        };
+        GameContextEnvelope.Attach(
+            run,
+            new GameContextCoordinate(
+                run.WorldId,
+                "prime",
+                saveRevision: 1,
+                observer: new GameEntityIdentity("npc-1", 2)));
+        using var registration = plane.Register(
+            run,
+            requireAudienceIncarnation: true);
+        using var step = registration.BeginStep(default);
+        var observation = Observation();
+        observation.SessionId = run.SessionId;
+        observation.Visibility = new VisibilityRule
+        {
+            Scope = ObservationVisibilityScopes.Private,
+            AudienceIds = new List<string> { run.AgentId }
+        };
+        ObservationAudienceIncarnations.Attach(
+            observation,
+            new[]
+            {
+                new ObservationAudienceIncarnationBinding(
+                    run.AgentId,
+                    new GameEntityIdentity("npc-1", 1))
+            });
+
+        Assert.False(
+            plane.TryPost(
+                run.RunId,
+                new RunControlCommand
+                {
+                    CommandId = "stale-incarnation-control",
+                    Kind = RunControlKinds.FollowUp,
+                    Observation = observation,
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                },
+                out var rejectionReason));
+        Assert.Equal(
+            ObservationAdmissionReasonCodes.AudienceIncarnationMismatch,
+            rejectionReason);
+
+        await Task.Delay(25);
+        Assert.False(step.CancellationToken.IsCancellationRequested);
+        Assert.Empty(registration.Drain());
+    }
+
+    [Fact]
+    public void StrictRunRegistrationAcceptsMatchingIncarnation()
+    {
+        var plane = new RuntimeControlPlane();
+        var run = new AgentRun
+        {
+            RunId = "run-incarnation",
+            AgentId = "agent-1",
+            WorldId = "world-1",
+            SessionId = "session-1"
+        };
+        GameContextEnvelope.Attach(
+            run,
+            new GameContextCoordinate(
+                run.WorldId,
+                "prime",
+                saveRevision: 1,
+                observer: new GameEntityIdentity("npc-1", 2)));
+        using var registration = plane.Register(
+            run,
+            requireAudienceIncarnation: true);
+        var observation = Observation();
+        observation.SessionId = run.SessionId;
+        observation.Visibility = new VisibilityRule
+        {
+            Scope = ObservationVisibilityScopes.Private,
+            AudienceIds = new List<string> { run.AgentId }
+        };
+        ObservationAudienceIncarnations.Attach(
+            observation,
+            new[]
+            {
+                new ObservationAudienceIncarnationBinding(
+                    run.AgentId,
+                    new GameEntityIdentity("npc-1", 2))
+            });
+
+        Assert.True(
+            plane.TryPost(
+                run.RunId,
+                new RunControlCommand
+                {
+                    CommandId = "matching-incarnation-control",
+                    Kind = RunControlKinds.FollowUp,
+                    Observation = observation,
+                    CreatedAt = DateTimeOffset.UnixEpoch
+                }));
+        Assert.Single(registration.Drain());
+    }
+
+    [Fact]
     public void ObservationTextIsBoundedBeforeMailboxSnapshot()
     {
         var plane = new RuntimeControlPlane(
@@ -323,7 +551,7 @@ public sealed class RuntimeControlPlaneTests
             ObservationId = Guid.NewGuid().ToString("N"),
             WorldId = "world-1",
             Source = "test",
-            Kind = "control",
+            Kind = ObservationKinds.Event,
             Payload = document.RootElement.Clone(),
             ObservedAt = DateTimeOffset.UnixEpoch
         };

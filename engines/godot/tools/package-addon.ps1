@@ -171,6 +171,54 @@ function New-CanonicalZipArchive {
     }
 }
 
+function Publish-FileAtomically {
+    param(
+        [Parameter(Mandatory)]
+        [string]$StagedPath,
+
+        [Parameter(Mandatory)]
+        [string]$Destination
+    )
+
+    $resolvedStaged = [IO.Path]::GetFullPath($StagedPath)
+    $resolvedDestination = [IO.Path]::GetFullPath($Destination)
+    if (-not (Test-Path -LiteralPath $resolvedStaged -PathType Leaf)) {
+        throw "The staged package archive does not exist."
+    }
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($resolvedStaged),
+            [IO.Path]::GetDirectoryName($resolvedDestination),
+            $script:pathComparison)) {
+        throw "The staged and published archives must be on the same directory."
+    }
+
+    if (Test-Path -LiteralPath $resolvedDestination) {
+        $destinationItem = Get-Item -LiteralPath $resolvedDestination
+        if ($destinationItem.PSIsContainer `
+            -or ($destinationItem.Attributes `
+                -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The published archive must be a regular file."
+        }
+        $backup = $resolvedDestination `
+            + "." `
+            + [Guid]::NewGuid().ToString("N") `
+            + ".previous"
+        [IO.File]::Replace(
+            $resolvedStaged,
+            $resolvedDestination,
+            $backup)
+        try {
+            Remove-Item -LiteralPath $backup -Force
+        }
+        catch {
+            Write-Warning "The previous Godot package backup could not be removed: '$backup'."
+        }
+    }
+    else {
+        [IO.File]::Move($resolvedStaged, $resolvedDestination)
+    }
+}
+
 $godotRoot = [IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot ".."))
 $repositoryRoot = [IO.Path]::GetFullPath(
@@ -193,8 +241,21 @@ $addonTarget = [IO.Path]::GetFullPath(
     (Join-Path $packageRoot "addons\game_agent_runtime"))
 $libraryTarget = [IO.Path]::GetFullPath(
     (Join-Path $addonTarget "lib\netstandard2.1"))
+$worldSchemaSource = [IO.Path]::GetFullPath(
+    (Join-Path $repositoryRoot "schemas\world-v1"))
+$worldSchemaTarget = [IO.Path]::GetFullPath(
+    (Join-Path $addonTarget "authoring\schemas\world-v1"))
+$worldExampleSource = [IO.Path]::GetFullPath(
+    (Join-Path $repositoryRoot "fixtures\world-v1\interactive-smoke"))
+$worldExampleTarget = [IO.Path]::GetFullPath(
+    (Join-Path $addonTarget "authoring\examples\interactive-smoke"))
 $archivePath = [IO.Path]::GetFullPath(
     (Join-Path $artifactsRoot "game-agent-runtime-godot-$Version.zip"))
+$stagedArchivePath = [IO.Path]::GetFullPath(
+    (Join-Path $artifactsRoot (
+        ".game-agent-runtime-godot-$Version." +
+        [Guid]::NewGuid().ToString("N") +
+        ".tmp")))
 
 if ($Version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$") {
     throw "Version must be a filename-safe semantic version."
@@ -213,17 +274,28 @@ if (-not (Test-PathWithin -Path $stagingRoot -Parent $systemTemporaryRoot)) {
 }
 if (-not (Test-PathWithin -Path $packageRoot -Parent $stagingRoot) `
     -or -not (Test-PathWithin -Path $addonTarget -Parent $packageRoot) `
-    -or -not (Test-PathWithin -Path $libraryTarget -Parent $addonTarget)) {
+    -or -not (Test-PathWithin -Path $libraryTarget -Parent $addonTarget) `
+    -or -not (Test-PathWithin -Path $worldSchemaTarget -Parent $addonTarget) `
+    -or -not (Test-PathWithin -Path $worldExampleTarget -Parent $addonTarget)) {
     throw "Package staging paths are invalid."
 }
 if (-not (Test-PathWithin -Path $archivePath -Parent $artifactsRoot)) {
     throw "Archive must be inside the Godot artifacts directory."
 }
+if (-not (Test-PathWithin -Path $stagedArchivePath -Parent $artifactsRoot)) {
+    throw "Staged archive must be inside the Godot artifacts directory."
+}
 if (-not (Test-Path -LiteralPath $addonSource -PathType Container)) {
     throw "Godot addon source directory does not exist."
 }
+if (-not (Test-Path -LiteralPath $worldSchemaSource -PathType Container) `
+    -or -not (Test-Path -LiteralPath $worldExampleSource -PathType Container)) {
+    throw "Native-world authoring assets do not exist."
+}
 
 Assert-NoFileSystemLinks -Root $addonSource
+Assert-NoFileSystemLinks -Root $worldSchemaSource
+Assert-NoFileSystemLinks -Root $worldExampleSource
 
 try {
     New-Item -ItemType Directory -Path $libraryTarget -Force | Out-Null
@@ -243,10 +315,34 @@ try {
     }
 
     & dotnet build (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Compatibility\GameAgent.Compatibility.csproj")
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Compatibility build failed."
+    }
+
+    & dotnet build (
+        Join-Path $repositoryRoot "src\GameAgent.World\GameAgent.World.csproj"
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.World build failed."
+    }
+
+    & dotnet build (
         Join-Path $repositoryRoot "src\GameAgent.Persistence\GameAgent.Persistence.csproj"
     ) -c $Configuration
     if ($LASTEXITCODE -ne 0) {
         throw "GameAgent.Persistence build failed."
+    }
+
+    & dotnet build (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Providers.Anthropic\" +
+            "GameAgent.Providers.Anthropic.csproj")
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Providers.Anthropic build failed."
     }
 
     & dotnet build (
@@ -265,17 +361,40 @@ try {
         throw "GameAgent.Runtime build failed."
     }
 
+    & dotnet build (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Workflow\GameAgent.Workflow.csproj")
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Workflow build failed."
+    }
+
     Get-ChildItem -LiteralPath $addonSource -Force |
         Copy-Item -Destination $addonTarget -Recurse -Force
+    New-Item -ItemType Directory `
+        -Path $worldSchemaTarget, $worldExampleTarget `
+        -Force |
+        Out-Null
+    Get-ChildItem -LiteralPath $worldSchemaSource -File -Force |
+        Copy-Item -Destination $worldSchemaTarget -Force
+    Get-ChildItem -LiteralPath $worldExampleSource -File -Force |
+        Copy-Item -Destination $worldExampleTarget -Force
     $pluginManifest = Join-Path $addonTarget "plugin.cfg"
     $pluginText = [IO.File]::ReadAllText($pluginManifest)
-    if ($pluginText -notmatch '(?m)^version="[^"]+"$') {
-        throw "The staged Godot plugin manifest has no version field."
+    $versionPattern =
+        '(?m)^version="(?<version>[^"\r\n]+)"(?<cr>\r?)$'
+    $versionMatches = [regex]::Matches($pluginText, $versionPattern)
+    if ($versionMatches.Count -ne 1) {
+        throw "The staged Godot plugin manifest must contain one version field."
     }
-    $pluginText = [regex]::Replace(
-        $pluginText,
-        '(?m)^version="[^"]+"$',
-        ('version="' + $Version + '"'))
+    $versionMatch = $versionMatches[0]
+    $versionReplacement =
+        'version="' + $Version + '"' + $versionMatch.Groups['cr'].Value
+    $pluginText = $pluginText.Remove(
+        $versionMatch.Index,
+        $versionMatch.Length).Insert(
+            $versionMatch.Index,
+            $versionReplacement)
     [IO.File]::WriteAllText(
         $pluginManifest,
         $pluginText,
@@ -296,6 +415,11 @@ try {
     ) -Destination $libraryTarget
     Copy-Item -LiteralPath (
         Join-Path $repositoryRoot (
+            "src\GameAgent.Providers.Anthropic\bin\$Configuration\" +
+            "netstandard2.1\GameAgent.Providers.Anthropic.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
             "src\GameAgent.Providers.OpenAICompatible\bin\$Configuration\" +
             "netstandard2.1\GameAgent.Providers.OpenAICompatible.dll")
     ) -Destination $libraryTarget
@@ -303,18 +427,40 @@ try {
         Join-Path $repositoryRoot (
             "src\GameAgent.Runtime\bin\$Configuration\netstandard2.1\GameAgent.Runtime.dll")
     ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Workflow\bin\$Configuration\netstandard2.1\GameAgent.Workflow.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.World\bin\$Configuration\netstandard2.1\GameAgent.World.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Compatibility\bin\$Configuration\netstandard2.1\GameAgent.Compatibility.dll")
+    ) -Destination $libraryTarget
 
     New-Item -ItemType Directory -Path $artifactsRoot -Force | Out-Null
-    if (Test-Path -LiteralPath $archivePath) {
-        Remove-Item -LiteralPath $archivePath -Force
+    $artifactsItem = Get-Item -LiteralPath $artifactsRoot
+    if (($artifactsItem.Attributes `
+            -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The Godot artifacts directory must not be a filesystem link."
     }
-
     New-CanonicalZipArchive `
         -SourceRoot $packageRoot `
+        -Destination $stagedArchivePath
+    Publish-FileAtomically `
+        -StagedPath $stagedArchivePath `
         -Destination $archivePath
     Write-Output $archivePath
 }
 finally {
+    if ((Test-PathWithin `
+            -Path $stagedArchivePath `
+            -Parent $artifactsRoot) `
+        -and (Test-Path -LiteralPath $stagedArchivePath -PathType Leaf)) {
+        Remove-Item -LiteralPath $stagedArchivePath -Force
+    }
     $resolvedStaging = [IO.Path]::GetFullPath($stagingRoot)
     $isExpectedStagingDirectory = (
         Test-PathWithin `

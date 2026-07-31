@@ -21,6 +21,11 @@ Not implemented yet:
 
 Game code implements `IGameAgentHostBoundary`. Incoming action requests cross the wire as UTF-8 JSON, are validated before queue admission, and are queued through `FGameAgentMainThreadDispatcher`. The router may be called from any producer thread; the host method itself always runs on the GameThread.
 
+The generic JSON parser remains usable for bounded game payload objects, while
+the protocol decoder applies the stricter contract to envelope extensions:
+64 properties are accepted and 65 are rejected before the extension object is
+copied into a decoded request, observation, receipt, or runtime event.
+
 A host must invoke each action completion. It may complete asynchronously; the
 transport adapter must therefore accept completion from any thread and preserve
 the operation identifier and receipt revision. The router forwards only the

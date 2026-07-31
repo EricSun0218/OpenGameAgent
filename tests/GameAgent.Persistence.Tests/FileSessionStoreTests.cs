@@ -7,6 +7,65 @@ namespace GameAgent.Persistence.Tests;
 public sealed class FileSessionStoreTests
 {
     [Fact]
+    public async Task SharedReaderCanReadWhileJournalWriterIsActive()
+    {
+        var path = CreateJournalPath();
+        try
+        {
+            await using var store = new FileSessionStore(path);
+            _ = await store.AppendAtomicAsync(
+                CreateEvent("shared-reader-event", "shared-reader-run"),
+                expectedRunRevision: 0);
+            await store.FlushAsync();
+
+            await using var reader = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var copy = new MemoryStream();
+            await reader.CopyToAsync(copy);
+
+            Assert.NotEmpty(copy.ToArray());
+            Assert.True(File.Exists(path + ".writer.lock"));
+        }
+        finally
+        {
+            DeleteJournalDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task EquivalentPathCannotAcquireASecondJournalWriter()
+    {
+        var path = CreateJournalPath();
+        var equivalent = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(path)!,
+            ".",
+            System.IO.Path.GetFileName(path));
+        try
+        {
+            var first = new FileSessionStore(path);
+            try
+            {
+                _ = Assert.Throws<IOException>(
+                    () => new FileSessionStore(equivalent));
+            }
+            finally
+            {
+                await first.DisposeAsync();
+            }
+
+            await using var reopened = new FileSessionStore(equivalent);
+            Assert.Equal(System.IO.Path.GetFullPath(path), reopened.Path);
+        }
+        finally
+        {
+            DeleteJournalDirectory(path);
+        }
+    }
+
+    [Fact]
     public async Task AppendAssignsPerRunSequenceAndRevisionAndRecoversThem()
     {
         var path = CreateJournalPath();
@@ -99,6 +158,150 @@ public sealed class FileSessionStoreTests
                             CancellationToken.None))
                         .Select(item => item.Sequence));
             }
+        }
+        finally
+        {
+            DeleteJournalDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task CancellationBeforeAdmissionLeavesJournalEmpty()
+    {
+        var path = CreateJournalPath();
+        try
+        {
+            await using var store = new FileSessionStore(path);
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => store.AppendAtomicAsync(
+                        CreateEvent("cancelled", "run-1"),
+                        cancellationToken: cancellation.Token)
+                    .AsTask());
+
+            Assert.Equal(0, new FileInfo(path).Length);
+            Assert.Empty(
+                await store.ReadRunAsync(
+                    "run-1",
+                    CancellationToken.None));
+        }
+        finally
+        {
+            DeleteJournalDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task CancellationAfterWriteAdmissionCommitsWithoutAmbiguity()
+    {
+        var path = CreateJournalPath();
+        try
+        {
+            using var cancellation = new CancellationTokenSource();
+            await using (var store = new FileSessionStore(
+                             path,
+                             new FileJournalOptions
+                             {
+                                 FaultInjector =
+                                     new CancelAtWriteBoundaryFaultInjector(
+                                         cancellation)
+                             }))
+            {
+                var append = await store.AppendAtomicAsync(
+                    CreateEvent("committed", "run-1"),
+                    expectedRunRevision: 0,
+                    cancellationToken: cancellation.Token);
+
+                Assert.True(cancellation.IsCancellationRequested);
+                Assert.Equal(0, append.Sequence);
+                Assert.Equal(1, append.Revision);
+                Assert.Single(
+                    await store.ReadRunAsync(
+                        "run-1",
+                        CancellationToken.None));
+            }
+
+            await using var recovered = new FileSessionStore(path);
+            var events = await recovered.ReadRunAsync(
+                "run-1",
+                CancellationToken.None);
+            Assert.Equal(
+                new[] { "committed" },
+                events.Select(item => item.EventId));
+        }
+        finally
+        {
+            DeleteJournalDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task CancellationAfterBatchAdmissionCommitsWholeBatch()
+    {
+        var path = CreateJournalPath();
+        try
+        {
+            using var cancellation = new CancellationTokenSource();
+            await using (var store = new FileSessionStore(
+                             path,
+                             new FileJournalOptions
+                             {
+                                 FaultInjector =
+                                     new CancelAtWriteBoundaryFaultInjector(
+                                         cancellation)
+                             }))
+            {
+                var appends = await store.AppendAtomicBatchAsync(
+                    new[]
+                    {
+                        CreateEvent("batch-1", "run-1"),
+                        CreateEvent("batch-2", "run-1")
+                    },
+                    expectedRunRevision: 0,
+                    cancellationToken: cancellation.Token);
+
+                Assert.True(cancellation.IsCancellationRequested);
+                Assert.Equal(2, appends.Count);
+                Assert.Equal(2, (await store.ReadRunAsync(
+                    "run-1",
+                    CancellationToken.None)).Count);
+            }
+
+            await using var recovered = new FileSessionStore(path);
+            Assert.Equal(
+                new[] { "batch-1", "batch-2" },
+                (await recovered.ReadRunAsync(
+                        "run-1",
+                        CancellationToken.None))
+                    .Select(item => item.EventId));
+        }
+        finally
+        {
+            DeleteJournalDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task BatchInputIsSnapshottedByIndexWithoutEnumeration()
+    {
+        var path = CreateJournalPath();
+        try
+        {
+            var batch = new IndexedOnlyEventList(
+                CreateEvent("indexed-1", "run-1"),
+                CreateEvent("indexed-2", "run-1"));
+            await using var store = new FileSessionStore(path);
+
+            var appends = await store.AppendAtomicBatchAsync(
+                batch,
+                expectedRunRevision: 0);
+
+            Assert.Equal(2, appends.Count);
+            Assert.Equal(1, batch.CountReads);
+            Assert.Equal(2, batch.IndexReads);
+            Assert.Equal(0, batch.EnumerationAttempts);
         }
         finally
         {
@@ -227,6 +430,7 @@ public sealed class FileSessionStoreTests
             await using var store = new FileSessionStore(
                 path,
                 new FileJournalOptions { FaultInjector = injector });
+            _ = await AppendRunStartedAsync(store, "receipt-run");
             var request = CreateActionRequest("snapshot-operation", "receipt-run");
             await store.AppendAtomicAsync(
                 CreateEvent(
@@ -234,7 +438,7 @@ public sealed class FileSessionStoreTests
                     "receipt-run",
                     RuntimeEventKinds.ActionRequested,
                     ProtocolJson.ToElement(request)),
-                expectedRunRevision: 0);
+                expectedRunRevision: 1);
 
             injector.Arm();
             var blocker = Task.Run(
@@ -253,7 +457,7 @@ public sealed class FileSessionStoreTests
                 ProtocolJson.ToElement(receipt));
             var pending = store.ReconcileReceiptAsync(
                     candidate,
-                    expectedRunRevision: 1)
+                    expectedRunRevision: 2)
                 .AsTask();
             candidate.EventId = "mutated-receipt-event";
             candidate.RunId = "mutated-run";
@@ -410,6 +614,11 @@ public sealed class FileSessionStoreTests
                     ProtocolJson.ToElement(secondRequest))
             };
 
+            await using (var initial = new FileSessionStore(path))
+            {
+                _ = await AppendRunStartedAsync(initial, "run-1");
+            }
+
             await using (var faulted = new FileSessionStore(
                              path,
                              new FileJournalOptions
@@ -420,20 +629,22 @@ public sealed class FileSessionStoreTests
                 await Assert.ThrowsAsync<IOException>(
                     () => faulted.AppendAtomicBatchAsync(
                             batch,
-                            expectedRunRevision: 0)
+                            expectedRunRevision: 1)
                         .AsTask());
             }
 
             await using (var recovered = new FileSessionStore(path))
             {
-                Assert.Empty(await recovered.ReadRunAsync("run-1", default));
+                var checkpoint = Assert.Single(
+                    await recovered.ReadRunAsync("run-1", default));
+                Assert.Equal(RuntimeEventKinds.RunStarted, checkpoint.Kind);
                 Assert.Empty(
                     await recovered.ReadPendingOperationsAsync(
                         "run-1",
                         default));
                 var cursor = await recovered.GetRunCursorAsync("run-1");
-                Assert.Equal(0, cursor.NextSequence);
-                Assert.Equal(0, cursor.Revision);
+                Assert.Equal(1, cursor.NextSequence);
+                Assert.Equal(1, cursor.Revision);
             }
         }
         finally
@@ -453,6 +664,7 @@ public sealed class FileSessionStoreTests
             secondRequest.ToolCallId = "call-2";
             await using (var store = new FileSessionStore(path))
             {
+                _ = await AppendRunStartedAsync(store, "run-1");
                 var results = await store.AppendAtomicBatchAsync(
                     new[]
                     {
@@ -467,15 +679,15 @@ public sealed class FileSessionStoreTests
                             RuntimeEventKinds.ActionRequested,
                             ProtocolJson.ToElement(secondRequest))
                     },
-                    expectedRunRevision: 0);
-                Assert.Equal(new long[] { 0, 1 }, results.Select(x => x.Sequence));
-                Assert.Equal(new long[] { 1, 2 }, results.Select(x => x.Revision));
+                    expectedRunRevision: 1);
+                Assert.Equal(new long[] { 1, 2 }, results.Select(x => x.Sequence));
+                Assert.Equal(new long[] { 2, 3 }, results.Select(x => x.Revision));
             }
 
             await using (var recovered = new FileSessionStore(path))
             {
                 Assert.Equal(
-                    new long[] { 0, 1 },
+                    new long[] { 0, 1, 2 },
                     (await recovered.ReadRunAsync("run-1", default))
                     .Select(item => item.Sequence));
                 Assert.Equal(
@@ -486,7 +698,7 @@ public sealed class FileSessionStoreTests
                     .Select(item => item.OperationId)
                     .OrderBy(item => item, StringComparer.Ordinal));
                 Assert.Equal(
-                    2,
+                    3,
                     (await recovered.GetRunCursorAsync("run-1")).Revision);
             }
         }
@@ -518,6 +730,11 @@ public sealed class FileSessionStoreTests
                     RuntimeEventKinds.ActionRequested,
                     ProtocolJson.ToElement(secondRequest))
             };
+            await using (var initial = new FileSessionStore(path))
+            {
+                _ = await AppendRunStartedAsync(initial, "run-1");
+            }
+
             await using (var uncertain = new FileSessionStore(
                              path,
                              new FileJournalOptions
@@ -529,7 +746,7 @@ public sealed class FileSessionStoreTests
                 await Assert.ThrowsAsync<InjectedJournalException>(
                     () => uncertain.AppendAtomicBatchAsync(
                             batch,
-                            expectedRunRevision: 0)
+                            expectedRunRevision: 1)
                         .AsTask());
             }
 
@@ -537,16 +754,16 @@ public sealed class FileSessionStoreTests
             {
                 var retry = await recovered.AppendAtomicBatchAsync(
                     batch,
-                    expectedRunRevision: 0);
+                    expectedRunRevision: 1);
                 Assert.All(retry, item => Assert.True(item.WasDuplicate));
                 Assert.Equal(
-                    new long[] { 0, 1 },
+                    new long[] { 1, 2 },
                     retry.Select(item => item.Sequence));
                 Assert.Equal(
-                    new long[] { 1, 2 },
+                    new long[] { 2, 3 },
                     retry.Select(item => item.Revision));
                 Assert.Equal(
-                    2,
+                    3,
                     (await recovered.GetRunCursorAsync("run-1")).Revision);
                 Assert.Equal(
                     2,
@@ -570,13 +787,14 @@ public sealed class FileSessionStoreTests
             var request = CreateActionRequest("operation-1", "run-1");
             await using (var store = new FileSessionStore(path))
             {
+                _ = await AppendRunStartedAsync(store, "run-1");
                 var first = await store.AppendAtomicAsync(
                     CreateEvent(
                         "request-event-1",
                         "run-1",
                         RuntimeEventKinds.ActionRequested,
                         ProtocolJson.ToElement(request)),
-                    expectedRunRevision: 0);
+                    expectedRunRevision: 1);
                 Assert.False(first.WasDuplicate);
 
                 var duplicate = await store.AppendAtomicAsync(
@@ -585,7 +803,7 @@ public sealed class FileSessionStoreTests
                         "run-1",
                         RuntimeEventKinds.ActionRequested,
                         ProtocolJson.ToElement(request)),
-                    expectedRunRevision: 0);
+                    expectedRunRevision: 1);
                 Assert.True(duplicate.WasDuplicate);
                 Assert.Equal(first.Sequence, duplicate.Sequence);
                 Assert.Equal(first.Revision, duplicate.Revision);
@@ -605,7 +823,7 @@ public sealed class FileSessionStoreTests
                         "run-1",
                         RuntimeEventKinds.ActionReceived,
                         ProtocolJson.ToElement(unknown)),
-                    expectedRunRevision: 1);
+                    expectedRunRevision: 2);
                 Assert.True(unknownResult.Operation.IsPending);
 
                 var duplicateUnknown = await store.ReconcileReceiptAsync(
@@ -615,7 +833,7 @@ public sealed class FileSessionStoreTests
                         RuntimeEventKinds.ActionReceived,
                         ProtocolJson.ToElement(
                             CopyReceiptWithLaterReceiveTime(unknown))),
-                    expectedRunRevision: 1);
+                    expectedRunRevision: 2);
                 Assert.True(duplicateUnknown.Append.WasDuplicate);
 
                 var succeeded = CreateReceipt(
@@ -628,9 +846,9 @@ public sealed class FileSessionStoreTests
                         "run-1",
                         RuntimeEventKinds.ActionReceived,
                         ProtocolJson.ToElement(succeeded)),
-                    expectedRunRevision: 2);
+                    expectedRunRevision: 3);
                 Assert.False(final.Operation.IsPending);
-                Assert.Equal(3, final.Append.Revision);
+                Assert.Equal(4, final.Append.Revision);
                 Assert.Empty(
                     await store.ReadPendingOperationsAsync("run-1"));
             }
@@ -645,7 +863,9 @@ public sealed class FileSessionStoreTests
                     ReceiptStatuses.Succeeded,
                     operation.LatestReceipt!.Status);
                 Assert.Equal(1, operation.LatestReceipt.Revision);
-                Assert.Equal(3, (await recovered.GetRunCursorAsync("run-1")).Revision);
+                Assert.Equal(
+                    4,
+                    (await recovered.GetRunCursorAsync("run-1")).Revision);
             }
         }
         finally
@@ -661,6 +881,7 @@ public sealed class FileSessionStoreTests
         try
         {
             await using var store = new FileSessionStore(path);
+            _ = await AppendRunStartedAsync(store, "run-1");
             var request = CreateActionRequest("operation-1", "run-1");
             _ = await store.AppendAtomicAsync(
                 CreateEvent(
@@ -668,7 +889,7 @@ public sealed class FileSessionStoreTests
                     "run-1",
                     RuntimeEventKinds.ActionRequested,
                     ProtocolJson.ToElement(request)),
-                expectedRunRevision: 0);
+                expectedRunRevision: 1);
             var receipt = CreateReceipt(
                 request.OperationId,
                 revision: 0,
@@ -689,7 +910,7 @@ public sealed class FileSessionStoreTests
 
             var first = await store.AppendAtomicBatchAsync(
                 original,
-                expectedRunRevision: 1);
+                expectedRunRevision: 2);
 
             Assert.All(first, item => Assert.False(item.WasDuplicate));
             var receivedLater = CopyReceiptWithLaterReceiveTime(receipt);
@@ -707,7 +928,7 @@ public sealed class FileSessionStoreTests
                         RuntimeEventKinds.ToolCompleted,
                         ProtocolJson.ToElement(receivedLater))
                 },
-                expectedRunRevision: 1);
+                expectedRunRevision: 2);
 
             Assert.All(duplicate, item => Assert.True(item.WasDuplicate));
             Assert.Equal(
@@ -734,7 +955,7 @@ public sealed class FileSessionStoreTests
                                 RuntimeEventKinds.ToolCompleted,
                                 ProtocolJson.ToElement(conflicting))
                         },
-                        expectedRunRevision: 3)
+                        expectedRunRevision: 4)
                     .AsTask());
         }
         finally
@@ -750,6 +971,7 @@ public sealed class FileSessionStoreTests
         try
         {
             await using var store = new FileSessionStore(path);
+            _ = await AppendRunStartedAsync(store, "run-1");
             var request = CreateActionRequest("operation-1", "run-1");
             _ = await store.AppendAtomicAsync(
                 CreateEvent(
@@ -757,7 +979,7 @@ public sealed class FileSessionStoreTests
                     "run-1",
                     RuntimeEventKinds.ActionRequested,
                     ProtocolJson.ToElement(request)),
-                expectedRunRevision: 0);
+                expectedRunRevision: 1);
 
             var conflictingRequest = CreateActionRequest(
                 "operation-1",
@@ -770,7 +992,7 @@ public sealed class FileSessionStoreTests
                             "run-1",
                             RuntimeEventKinds.ActionRequested,
                             ProtocolJson.ToElement(conflictingRequest)),
-                        expectedRunRevision: 1)
+                        expectedRunRevision: 2)
                     .AsTask());
 
             var unknown = CreateReceipt(
@@ -783,7 +1005,7 @@ public sealed class FileSessionStoreTests
                     "run-1",
                     RuntimeEventKinds.ActionReceived,
                     ProtocolJson.ToElement(unknown)),
-                expectedRunRevision: 1);
+                expectedRunRevision: 2);
 
             var conflictingReceipt = CreateReceipt(
                 "operation-1",
@@ -796,7 +1018,7 @@ public sealed class FileSessionStoreTests
                             "run-1",
                             RuntimeEventKinds.ActionReceived,
                             ProtocolJson.ToElement(conflictingReceipt)),
-                        expectedRunRevision: 2)
+                        expectedRunRevision: 3)
                     .AsTask());
 
             await Assert.ThrowsAsync<OperationLedgerConflictException>(
@@ -806,7 +1028,7 @@ public sealed class FileSessionStoreTests
                             "run-1",
                             RuntimeEventKinds.ActionReceived,
                             ProtocolJson.ToElement(conflictingReceipt)),
-                        expectedRunRevision: 2)
+                        expectedRunRevision: 3)
                     .AsTask());
 
             var succeeded = CreateReceipt(
@@ -819,7 +1041,7 @@ public sealed class FileSessionStoreTests
                     "run-1",
                     RuntimeEventKinds.ActionReceived,
                     ProtocolJson.ToElement(succeeded)),
-                expectedRunRevision: 2);
+                expectedRunRevision: 3);
 
             var regressing = CreateReceipt(
                 "operation-1",
@@ -832,7 +1054,7 @@ public sealed class FileSessionStoreTests
                             "run-1",
                             RuntimeEventKinds.ActionReceived,
                             ProtocolJson.ToElement(regressing)),
-                        expectedRunRevision: 3)
+                        expectedRunRevision: 4)
                     .AsTask());
         }
         finally
@@ -853,6 +1075,18 @@ public sealed class FileSessionStoreTests
         try
         {
             await using var store = new FileSessionStore(path);
+            _ = await AppendRunStartedAsync(store, "run-1");
+            _ = await store.AppendAtomicAsync(
+                CreateEvent(
+                    "run-ready:run-1",
+                    "run-1",
+                    RuntimeEventKinds.RunCheckpoint,
+                    ProtocolJson.ToElement(
+                        CreateRun(
+                            "run-1",
+                            RunStates.Running,
+                            revision: 2))),
+                expectedRunRevision: 1);
             var original = CreateEvent(
                 "provider-dispatch-1",
                 "run-1",
@@ -861,9 +1095,14 @@ public sealed class FileSessionStoreTests
             original.StreamAttemptId = "stream-1";
             original.ProviderId = "provider-1";
             original.TurnId = "turn-1";
+            original.Payload = ProtocolJson.ToElement(
+                CreateRun(
+                    "run-1",
+                    RunStates.Running,
+                    revision: 3));
             _ = await store.AppendAtomicAsync(
                 original,
-                expectedRunRevision: 0);
+                expectedRunRevision: 2);
 
             var conflicting = ProtocolJson.DeserializeRuntimeEvent(
                 ProtocolJson.Serialize(original));
@@ -886,7 +1125,7 @@ public sealed class FileSessionStoreTests
             await Assert.ThrowsAsync<JournalEntryConflictException>(
                 () => store.AppendAtomicAsync(
                         conflicting,
-                        expectedRunRevision: 1)
+                        expectedRunRevision: 3)
                     .AsTask());
         }
         finally
@@ -969,6 +1208,49 @@ public sealed class FileSessionStoreTests
         }
     }
 
+    private static ValueTask<JournalAppendResult> AppendRunStartedAsync(
+        FileSessionStore store,
+        string runId)
+    {
+        return store.AppendAtomicAsync(
+            CreateEvent(
+                "run-started:" + runId,
+                runId,
+                RuntimeEventKinds.RunStarted,
+                ProtocolJson.ToElement(
+                    CreateRun(
+                        runId,
+                        RunStates.Preparing,
+                        revision: 1))),
+            expectedRunRevision: 0);
+    }
+
+    private static AgentRun CreateRun(
+        string runId,
+        string state,
+        long revision)
+    {
+        var timestamp = new DateTimeOffset(
+            2026,
+            7,
+            28,
+            0,
+            0,
+            0,
+            TimeSpan.Zero);
+        return new AgentRun
+        {
+            RunId = runId,
+            AgentId = "agent-1",
+            WorldId = "world-1",
+            State = state,
+            Revision = revision,
+            RuntimeGeneration = 1,
+            CreatedAt = timestamp,
+            UpdatedAt = timestamp
+        };
+    }
+
     private static RuntimeEvent CreateEvent(
         string eventId,
         string runId,
@@ -979,6 +1261,24 @@ public sealed class FileSessionStoreTests
         {
             EventId = eventId,
             RunId = runId,
+            TurnId = string.Equals(
+                         kind,
+                         RuntimeEventKinds.ActionRequested,
+                         StringComparison.Ordinal)
+                     || string.Equals(
+                         kind,
+                         RuntimeEventKinds.ActionReceived,
+                         StringComparison.Ordinal)
+                     || string.Equals(
+                         kind,
+                         RuntimeEventKinds.ToolCompleted,
+                         StringComparison.Ordinal)
+                     || string.Equals(
+                         kind,
+                         RuntimeEventKinds.ToolFailed,
+                         StringComparison.Ordinal)
+                ? "turn-1"
+                : null,
             Sequence = 999,
             Kind = kind,
             Durability = EventDurabilities.Durable,
@@ -1070,6 +1370,80 @@ public sealed class FileSessionStoreTests
         if (directory is not null && Directory.Exists(directory))
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private sealed class IndexedOnlyEventList :
+        IReadOnlyList<RuntimeEvent>
+    {
+        private readonly RuntimeEvent[] _events;
+
+        public IndexedOnlyEventList(params RuntimeEvent[] events)
+        {
+            _events = events;
+        }
+
+        public int Count
+        {
+            get
+            {
+                CountReads++;
+                return _events.Length;
+            }
+        }
+
+        public RuntimeEvent this[int index]
+        {
+            get
+            {
+                IndexReads++;
+                return _events[index];
+            }
+        }
+
+        public int CountReads { get; private set; }
+
+        public int IndexReads { get; private set; }
+
+        public int EnumerationAttempts { get; private set; }
+
+        public IEnumerator<RuntimeEvent> GetEnumerator()
+        {
+            EnumerationAttempts++;
+            throw new NotSupportedException(
+                "The journal batch cannot be enumerated.");
+        }
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+    }
+
+    private sealed class CancelAtWriteBoundaryFaultInjector :
+        IJournalFaultInjector
+    {
+        private readonly CancellationTokenSource _cancellation;
+
+        public CancelAtWriteBoundaryFaultInjector(
+            CancellationTokenSource cancellation)
+        {
+            _cancellation = cancellation;
+        }
+
+        public int GetWriteLength(int frameLength)
+        {
+            return frameLength;
+        }
+
+        public void OnWriteStage(
+            JournalWriteStage stage,
+            int bytesWritten,
+            int frameLength)
+        {
+            if (stage == JournalWriteStage.BeforeWrite)
+            {
+                _cancellation.Cancel();
+            }
         }
     }
 

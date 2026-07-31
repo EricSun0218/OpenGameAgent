@@ -1,0 +1,38 @@
+{
+  "contract": "game-agent.world-definition.v1",
+  "worldId": "interactive-smoke",
+  "defaultTimelineId": "main",
+  "entityStateRootPath": "/entities",
+  "relationshipRootPath": "/relationships",
+  "initialState": {
+    "entities": {
+      "mira": {
+        "tags": [
+          "npc",
+          "gardener"
+        ],
+        "trust": "1000"
+      },
+      "ren": {
+        "tags": [
+          "npc",
+          "visitor"
+        ],
+        "trust": "500"
+      }
+    },
+    "relationships": {}
+  },
+  "entityIncarnations": {
+    "mira": "1",
+    "ren": "1"
+  },
+  "catalogs": {
+    "clocks": "clocks.json",
+    "numerics": "numerics.json",
+    "events": "events.json",
+    "interactions": "interactions.json",
+    "agents": "agents.json",
+    "knowledge": "knowledge.json"
+  }
+}

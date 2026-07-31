@@ -26,6 +26,44 @@ New-Item -ItemType Directory -Path $resultsDirectory -Force |
     Out-Null
 $editModeResults = Join-Path $resultsDirectory "editmode.xml"
 $playModeResults = Join-Path $resultsDirectory "playmode.xml"
+$editModeLog = Join-Path $resultsDirectory "editmode.log"
+$playModeLog = Join-Path $resultsDirectory "playmode.log"
+$monoLog = Join-Path $resultsDirectory "mono-player-gate.log"
+$il2CppLog = Join-Path $resultsDirectory "il2cpp-player-gate.log"
+
+function Invoke-UnityEditor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $argumentLine = [string]::Join(
+        " ",
+        @(
+            $Arguments | ForEach-Object {
+                '"' + $_.Replace('"', '\"') + '"'
+            }
+        ))
+    $process = Start-Process `
+        -FilePath $editor `
+        -ArgumentList $argumentLine `
+        -Wait `
+        -PassThru `
+        -WindowStyle Hidden
+    return $process.ExitCode
+}
+
+function Read-UnityLogTail {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return "No Unity log was produced."
+    }
+
+    return [string]::Join(
+        [Environment]::NewLine,
+        @(Get-Content -LiteralPath $Path -Tail 80))
+}
 
 function Assert-UnityTestResults {
     param(
@@ -54,40 +92,74 @@ function Assert-UnityTestResults {
 }
 
 Remove-Item -LiteralPath $editModeResults -Force -ErrorAction SilentlyContinue
-& $editor -batchmode -nographics `
-    -projectPath $project `
-    -runTests -testPlatform EditMode `
-    -testResults $editModeResults
-if ($LASTEXITCODE -ne 0) {
-    throw "Unity EditMode tests failed with exit code $LASTEXITCODE."
+$exitCode = Invoke-UnityEditor -Arguments @(
+    "-batchmode",
+    "-nographics",
+    "-projectPath",
+    $project,
+    "-runTests",
+    "-testPlatform",
+    "EditMode",
+    "-testResults",
+    $editModeResults,
+    "-logFile",
+    $editModeLog)
+if ($exitCode -ne 0) {
+    throw "Unity EditMode tests failed with exit code $exitCode. " +
+        (Read-UnityLogTail -Path $editModeLog)
 }
 Assert-UnityTestResults -Path $editModeResults -Label "EditMode"
 
 Remove-Item -LiteralPath $playModeResults -Force -ErrorAction SilentlyContinue
-& $editor -batchmode -nographics `
-    -projectPath $project `
-    -runTests -testPlatform PlayMode `
-    -testResults $playModeResults
-if ($LASTEXITCODE -ne 0) {
-    throw "Unity PlayMode tests failed with exit code $LASTEXITCODE."
+$exitCode = Invoke-UnityEditor -Arguments @(
+    "-batchmode",
+    "-nographics",
+    "-projectPath",
+    $project,
+    "-runTests",
+    "-testPlatform",
+    "PlayMode",
+    "-testResults",
+    $playModeResults,
+    "-logFile",
+    $playModeLog)
+if ($exitCode -ne 0) {
+    throw "Unity PlayMode tests failed with exit code $exitCode. " +
+        (Read-UnityLogTail -Path $playModeLog)
 }
 Assert-UnityTestResults -Path $playModeResults -Label "PlayMode"
 
 if ($Backend -eq "Mono" -or $Backend -eq "Both") {
-    & $editor -batchmode -nographics -quit `
-        -projectPath $project `
-        -executeMethod GameAgent.Unity.Tests.UnityPlayerBuildGate.BuildWindowsMono
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unity Mono Player build failed with exit code $LASTEXITCODE."
+    $exitCode = Invoke-UnityEditor -Arguments @(
+        "-batchmode",
+        "-nographics",
+        "-quit",
+        "-projectPath",
+        $project,
+        "-executeMethod",
+        "GameAgent.Unity.Tests.UnityPlayerBuildGate.BuildWindowsMono",
+        "-logFile",
+        $monoLog)
+    if ($exitCode -ne 0) {
+        throw "Unity Mono Player build failed with exit code $exitCode. " +
+            (Read-UnityLogTail -Path $monoLog)
     }
 }
 
 if ($Backend -eq "IL2CPP" -or $Backend -eq "Both") {
-    & $editor -batchmode -nographics -quit `
-        -projectPath $project `
-        -executeMethod GameAgent.Unity.Tests.UnityPlayerBuildGate.BuildWindowsIl2Cpp
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unity IL2CPP Player build failed with exit code $LASTEXITCODE."
+    $exitCode = Invoke-UnityEditor -Arguments @(
+        "-batchmode",
+        "-nographics",
+        "-quit",
+        "-projectPath",
+        $project,
+        "-executeMethod",
+        "GameAgent.Unity.Tests.UnityPlayerBuildGate.BuildWindowsIl2Cpp",
+        "-logFile",
+        $il2CppLog)
+    if ($exitCode -ne 0) {
+        throw "Unity IL2CPP Player build failed with exit code $exitCode. " +
+            (Read-UnityLogTail -Path $il2CppLog)
     }
 }
 

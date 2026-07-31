@@ -54,6 +54,14 @@
       "minLength": 1,
       "maxLength": 128
     },
+    "decisionKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "batchId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
     "expectedEffects": {
       "type": "array",
       "items": {

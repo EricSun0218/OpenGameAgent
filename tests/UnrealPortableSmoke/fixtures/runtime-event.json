@@ -5,14 +5,20 @@
   "runId": "run-demo-0001",
   "turnId": "turn-0001",
   "sequence": 7,
-  "kind": "action.requested",
+  "kind": "provider.dispatch_started",
   "durability": "durable",
   "runtimeGeneration": 1,
   "attemptId": "attempt-0001",
   "streamAttemptId": "stream-attempt-0001",
+  "providerId": "provider-primary",
+  "modelId": "model-gameplay-v1",
+  "transportDialect": "chat-completions",
+  "providerCapabilityDigest": "capability-digest-v1",
+  "providerRouteDigest": "route-digest-v1",
+  "reasonCode": "provider_dispatch",
   "timestamp": "2026-07-28T00:00:01Z",
   "payload": {
-    "operationId": "operation-0001"
+    "providerAttemptId": "attempt-0001"
   },
   "extensions": {}
 }

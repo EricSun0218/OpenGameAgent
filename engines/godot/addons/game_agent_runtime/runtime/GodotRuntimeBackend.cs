@@ -31,6 +31,53 @@ public interface IGodotDurableRuntimeBackend
     ValueTask StopAsync(CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Optional capability for backends that can report a stable control
+/// rejection reason.
+/// </summary>
+public interface IGodotControlRejectionBackend
+{
+    bool TryPostControl(
+        string runId,
+        RunControlCommand command,
+        out string? rejectionReason);
+}
+
+/// <summary>
+/// Optional durable-backend capability for a resume guard that is evaluated
+/// before provider, reconciler, or game-host work.
+/// </summary>
+public interface IGodotGuardedDurableRuntimeBackend
+    : IGodotDurableRuntimeBackend
+{
+    bool SupportsGuardedResume { get; }
+
+    ValueTask<DurableRunOutcome> ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken,
+        DurableRunResumeGuard guard);
+}
+
+public sealed class GodotDurableResumeOptions
+{
+    public DurableRunContinuation? Continuation { get; set; }
+
+    public IGameOperationReconciler? Reconciler { get; set; }
+
+    public DurableRunResumeGuard? Guard { get; set; }
+}
+
+public sealed class GodotParticipantResumeOptions
+{
+    public DurableRunContinuation? Continuation { get; set; }
+
+    public IGameOperationReconciler? Reconciler { get; set; }
+
+    public DurableRunSemanticExpectation? SemanticExpectation { get; set; }
+}
+
 internal static class GodotShutdownWait
 {
     private static int _pendingTimeoutCount;
@@ -236,7 +283,9 @@ internal sealed class HeadlessGodotRuntimeBackend : IGodotRuntimeBackend
     }
 }
 
-public sealed class GodotDurableRuntimeBackend : IGodotDurableRuntimeBackend
+public sealed class GodotDurableRuntimeBackend
+    : IGodotGuardedDurableRuntimeBackend,
+      IGodotControlRejectionBackend
 {
     private readonly IDurableAgentRuntime _runtime;
     private readonly IDurableSessionStore _store;
@@ -275,6 +324,9 @@ public sealed class GodotDurableRuntimeBackend : IGodotDurableRuntimeBackend
         CancellationToken cancellationToken) =>
         _runtime.RunAsync(request, cancellationToken);
 
+    public bool SupportsGuardedResume =>
+        _runtime is IGuardedDurableAgentRuntime;
+
     public ValueTask<DurableRunOutcome> ResumeAsync(
         string runId,
         DurableRunContinuation? continuation,
@@ -286,8 +338,27 @@ public sealed class GodotDurableRuntimeBackend : IGodotDurableRuntimeBackend
             reconciler,
             cancellationToken);
 
+    public ValueTask<DurableRunOutcome> ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken,
+        DurableRunResumeGuard guard) =>
+        _runtime.ResumeAsync(
+            runId,
+            continuation,
+            reconciler,
+            cancellationToken,
+            guard);
+
     public bool TryPostControl(string runId, RunControlCommand command) =>
         _runtime.Controls.TryPost(runId, command);
+
+    public bool TryPostControl(
+        string runId,
+        RunControlCommand command,
+        out string? rejectionReason) =>
+        _runtime.Controls.TryPost(runId, command, out rejectionReason);
 
     public ValueTask StopAsync(CancellationToken cancellationToken)
     {
@@ -341,7 +412,9 @@ public sealed class GodotDurableRuntimeBackend : IGodotDurableRuntimeBackend
     }
 }
 
-public sealed class GodotBuiltRuntimeBackend : IGodotDurableRuntimeBackend
+public sealed class GodotBuiltRuntimeBackend
+    : IGodotGuardedDurableRuntimeBackend,
+      IGodotControlRejectionBackend
 {
     private readonly BuiltGameAgentRuntime _built;
     private readonly object _stopGate = new();
@@ -358,6 +431,8 @@ public sealed class GodotBuiltRuntimeBackend : IGodotDurableRuntimeBackend
         CancellationToken cancellationToken) =>
         _built.Runtime.RunAsync(request, cancellationToken);
 
+    public bool SupportsGuardedResume => true;
+
     public ValueTask<DurableRunOutcome> ResumeAsync(
         string runId,
         DurableRunContinuation? continuation,
@@ -369,8 +444,30 @@ public sealed class GodotBuiltRuntimeBackend : IGodotDurableRuntimeBackend
             reconciler,
             cancellationToken);
 
+    public ValueTask<DurableRunOutcome> ResumeAsync(
+        string runId,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken,
+        DurableRunResumeGuard guard) =>
+        _built.Runtime.ResumeAsync(
+            runId,
+            continuation,
+            reconciler,
+            cancellationToken,
+            guard);
+
     public bool TryPostControl(string runId, RunControlCommand command) =>
         _built.Runtime.Controls.TryPost(runId, command);
+
+    public bool TryPostControl(
+        string runId,
+        RunControlCommand command,
+        out string? rejectionReason) =>
+        _built.Runtime.Controls.TryPost(
+            runId,
+            command,
+            out rejectionReason);
 
     public ValueTask StopAsync(CancellationToken cancellationToken)
     {
@@ -495,17 +592,40 @@ public sealed class GodotRuntimeHost
         bool disposeRuntimeOnShutdown = false,
         bool disposeStoreOnShutdown = false)
     {
-        ConfigureDurable(
+        if (runtime is null)
+        {
+            throw new ArgumentNullException(nameof(runtime));
+        }
+
+        _node.ConfigureDurableBackend(
             new GodotDurableRuntimeBackend(
                 runtime,
                 store,
                 disposeRuntimeOnShutdown,
-                disposeStoreOnShutdown));
+                disposeStoreOnShutdown),
+            runtime);
     }
 
     public void ConfigureDurable(BuiltGameAgentRuntime built)
     {
-        ConfigureDurable(new GodotBuiltRuntimeBackend(built));
+        if (built is null)
+        {
+            throw new ArgumentNullException(nameof(built));
+        }
+
+        _node.ConfigureDurableBackend(
+            new GodotBuiltRuntimeBackend(built),
+            built.Runtime);
+    }
+
+    /// <summary>
+    /// Enables Core multi-actor coordination for a custom durable backend.
+    /// The supplied runtime must be the same durable identity owner used by
+    /// that backend.
+    /// </summary>
+    public void ConfigureMultiActor(IDurableAgentRuntime runtime)
+    {
+        _node.ConfigureMultiActorRuntime(runtime);
     }
 
     public void ConfigureHeadless(
@@ -565,6 +685,89 @@ public sealed class GodotRuntimeHost
         DurableRunContinuation? continuation = null,
         IGameOperationReconciler? reconciler = null) =>
         _node.ResumeTypedDurableRun(runId, continuation, reconciler);
+
+    public string ResumeRun(
+        string runId,
+        DurableRunResumeGuard guard,
+        DurableRunContinuation? continuation = null,
+        IGameOperationReconciler? reconciler = null) =>
+        _node.ResumeTypedDurableRun(
+            runId,
+            continuation,
+            reconciler,
+            guard);
+
+    public string ResumeRun(
+        string runId,
+        GodotDurableResumeOptions options)
+    {
+        if (options is null)
+        {
+            throw new ArgumentNullException(nameof(options));
+        }
+
+        return _node.ResumeTypedDurableRun(
+            runId,
+            options.Continuation,
+            options.Reconciler,
+            options.Guard);
+    }
+
+    public string StartBatch(MultiActorDecisionBatch batch) =>
+        _node.StartTypedActorBatch(batch);
+
+    public string ResumeBatchParticipant(
+        string batchId,
+        MultiActorBatchParticipant participant,
+        DurableRunContinuation? continuation = null,
+        IGameOperationReconciler? reconciler = null) =>
+        _node.ResumeTypedActorBatchParticipant(
+            batchId,
+            participant,
+            continuation,
+            reconciler);
+
+    public string ResumeBatchParticipant(
+        string batchId,
+        MultiActorBatchParticipant participant,
+        DurableRunSemanticExpectation semanticExpectation,
+        DurableRunContinuation? continuation = null,
+        IGameOperationReconciler? reconciler = null) =>
+        _node.ResumeTypedActorBatchParticipant(
+            batchId,
+            participant,
+            continuation,
+            reconciler,
+            semanticExpectation);
+
+    public string ResumeBatchParticipant(
+        string batchId,
+        MultiActorBatchParticipant participant,
+        GodotParticipantResumeOptions options)
+    {
+        if (options is null)
+        {
+            throw new ArgumentNullException(nameof(options));
+        }
+
+        return _node.ResumeTypedActorBatchParticipant(
+            batchId,
+            participant,
+            options.Continuation,
+            options.Reconciler,
+            options.SemanticExpectation);
+    }
+
+    public string AbandonBatchParticipant(
+        string batchId,
+        MultiActorBatchParticipant participant,
+        string reasonCode,
+        IGameOperationReconciler? reconciler = null) =>
+        _node.AbandonTypedActorBatchParticipant(
+            batchId,
+            participant,
+            reasonCode,
+            reconciler);
 
     public bool TryPostControl(string runId, RunControlCommand command) =>
         _node.TryPostTypedControl(runId, command);

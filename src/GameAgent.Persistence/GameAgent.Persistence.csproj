@@ -2,10 +2,11 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <RootNamespace>GameAgent.Persistence</RootNamespace>
-    <Description>Crash-tolerant append-only local journal and operation ledger for game agent sessions.</Description>
+    <Description>Crash-tolerant local journals, operation ledgers, and persistent memory for game agent sessions.</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
     <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+    <ProjectReference Include="..\GameAgent.World\GameAgent.World.csproj" />
   </ItemGroup>
 </Project>

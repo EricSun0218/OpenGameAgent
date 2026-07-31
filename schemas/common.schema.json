@@ -32,6 +32,7 @@
     },
     "extensions": {
       "type": "object",
+      "maxProperties": 64,
       "additionalProperties": true
     },
     "resourceRef": {
@@ -43,6 +44,8 @@
       "properties": {
         "uri": {
           "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
           "format": "uri-reference"
         },
         "mediaType": {
@@ -52,6 +55,7 @@
         },
         "digest": {
           "type": "string",
+          "minLength": 1,
           "maxLength": 256
         },
         "sizeBytes": {

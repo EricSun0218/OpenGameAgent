@@ -56,4 +56,5 @@ add_test(
     NAME GameAgent.Unreal.PortableWire
     COMMAND GameAgentUnrealPortableSmoke
         "${CMAKE_CURRENT_SOURCE_DIR}/../../fixtures/v0.2/valid/json-only-tool-loop"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../fixtures/v0.2/invalid"
         "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/runtime-event.json")

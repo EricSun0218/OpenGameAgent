@@ -299,6 +299,50 @@ namespace GameAgent.Unity
             return task;
         }
 
+        public Task<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunResumeGuard guard,
+            DurableRunContinuation continuation = null,
+            IGameOperationReconciler reconciler = null,
+            CancellationToken cancellationToken =
+                default(CancellationToken))
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before resuming a run.");
+            }
+
+            var task = _facade.ResumeAsync(
+                runId,
+                guard,
+                continuation,
+                reconciler,
+                cancellationToken);
+            _ = PublishDurableRunResultAsync(task);
+            return task;
+        }
+
+        /// <summary>
+        /// Creates a multi-actor coordinator over this host's tracked durable
+        /// runtime. Participant runs therefore share the host's capacity,
+        /// cancellation, and shutdown lifecycle while Core retains ownership
+        /// of batch concurrency and guarded participant recovery.
+        /// </summary>
+        public MultiActorDecisionCoordinator CreateMultiActorCoordinator(
+            MultiActorCoordinatorOptions options = null,
+            IMultiActorDecisionLifecycle lifecycle = null)
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before creating "
+                    + "a multi-actor coordinator.");
+            }
+
+            return _facade.CreateMultiActorCoordinator(options, lifecycle);
+        }
+
         public void CancelActiveRuns()
         {
             if (_facade != null)

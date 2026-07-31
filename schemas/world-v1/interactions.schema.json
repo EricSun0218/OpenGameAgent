@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/world-v1/interactions.schema.json",
+  "title": "Native World Interactions v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "interactions"
+  ],
+  "properties": {
+    "contract": {
+      "const": "game-agent.world-interactions.v1"
+    },
+    "interactions": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": {
+        "type": "object",
+        "required": [
+          "interactionId",
+          "version",
+          "contentRevision",
+          "priority",
+          "parameterSchemaId",
+          "parameterSchemaVersion",
+          "parameterSchema",
+          "availability",
+          "effects"
+        ],
+        "properties": {
+          "interactionId": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "version": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "contentRevision": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "parameterSchemaId": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "parameterSchemaVersion": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "parameterSchema": {
+            "$ref": "native-world-common.schema.json#/$defs/parameterSchemaNode"
+          },
+          "target": {
+            "type": "object",
+            "required": [
+              "schemaId",
+              "minimumTargets",
+              "maximumTargets"
+            ],
+            "properties": {
+              "schemaId": {
+                "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+              },
+              "minimumTargets": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              },
+              "maximumTargets": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64
+              }
+            },
+            "additionalProperties": false
+          },
+          "channelIds": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+            }
+          },
+          "requiredCapabilities": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+            }
+          },
+          "availability": {
+            "$ref": "native-world-common.schema.json#/$defs/condition"
+          },
+          "effects": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 512,
+            "items": {
+              "$ref": "native-world-common.schema.json#/$defs/interactionEffect"
+            }
+          },
+          "readResourceKeys": {
+            "$ref": "native-world-common.schema.json#/$defs/resourceKeys"
+          },
+          "writeResourceKeys": {
+            "$ref": "native-world-common.schema.json#/$defs/resourceKeys"
+          },
+          "presentation": {
+            "type": "object",
+            "maxProperties": 128,
+            "propertyNames": {
+              "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "extensions": {
+      "$ref": "native-world-common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

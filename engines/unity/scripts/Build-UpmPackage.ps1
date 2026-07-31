@@ -13,50 +13,158 @@ $unityRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $unityRoot "..\.."))
 $templatePath = Join-Path $unityRoot "com.gameagent.runtime.unity"
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $unityRoot "artifacts"))
-$outputPath = [IO.Path]::GetFullPath(
+$publishedOutputPath = [IO.Path]::GetFullPath(
     (Join-Path $artifactRoot "com.gameagent.runtime.unity"))
+$stagingName = ".com.gameagent.runtime.unity." `
+    + [Guid]::NewGuid().ToString("N") `
+    + ".staging"
+$outputPath = [IO.Path]::GetFullPath(
+    (Join-Path $artifactRoot $stagingName))
 $smokeProject = Join-Path $repositoryRoot `
     "tests\UnityCompileSmoke\UnityCompileSmoke.csproj"
 $smokeOutput = Join-Path $repositoryRoot `
     "tests\UnityCompileSmoke\bin\$Configuration\netstandard2.1"
+$worldSchemaSource = Join-Path $repositoryRoot "schemas\world-v1"
+$worldExampleSource = Join-Path $repositoryRoot `
+    "fixtures\world-v1\interactive-smoke"
 
-if (Test-Path -LiteralPath $outputPath) {
+if (-not (Test-Path -LiteralPath $worldSchemaSource -PathType Container) `
+    -or -not (Test-Path -LiteralPath $worldExampleSource -PathType Container)) {
+    throw "Native-world authoring assets are missing."
+}
+
+if (Test-Path -LiteralPath $publishedOutputPath) {
     if (-not $Force) {
-        throw "Artifact already exists at '$outputPath'. Pass -Force to rebuild."
+        throw "Artifact already exists at '$publishedOutputPath'. Pass -Force to rebuild."
     }
 
     $requiredPrefix = $artifactRoot.TrimEnd(
         [IO.Path]::DirectorySeparatorChar) `
         + [IO.Path]::DirectorySeparatorChar
-    if (-not $outputPath.StartsWith(
+    if (-not $publishedOutputPath.StartsWith(
             $requiredPrefix,
             [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to replace an output outside '$artifactRoot'."
     }
-
-    Remove-Item -LiteralPath $outputPath -Recurse -Force
 }
 
-& dotnet build $smokeProject -c $Configuration
+function Publish-DirectoryAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string]$StagedPath,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $resolvedStaged = [IO.Path]::GetFullPath($StagedPath)
+    $resolvedDestination = [IO.Path]::GetFullPath($Destination)
+    if (-not (Test-Path -LiteralPath $resolvedStaged -PathType Container)) {
+        throw "The staged Unity package does not exist."
+    }
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($resolvedStaged),
+            [IO.Path]::GetDirectoryName($resolvedDestination),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The staged and published Unity packages must share a directory."
+    }
+
+    if (-not (Test-Path -LiteralPath $resolvedDestination)) {
+        [IO.Directory]::Move($resolvedStaged, $resolvedDestination)
+        return
+    }
+
+    $destinationItem = Get-Item -LiteralPath $resolvedDestination
+    if (-not $destinationItem.PSIsContainer `
+        -or ($destinationItem.Attributes `
+            -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The published Unity package must be a regular directory."
+    }
+
+    $backup = [IO.Path]::GetFullPath(
+        (Join-Path ([IO.Path]::GetDirectoryName($resolvedDestination)) (
+            "." +
+            [IO.Path]::GetFileName($resolvedDestination) +
+            "." +
+            [Guid]::NewGuid().ToString("N") +
+            ".previous")))
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($backup),
+            [IO.Path]::GetDirectoryName($resolvedDestination),
+            [StringComparison]::OrdinalIgnoreCase) `
+        -or (Test-Path -LiteralPath $backup)) {
+        throw "The Unity package backup path is unsafe."
+    }
+    [IO.Directory]::Move($resolvedDestination, $backup)
+    try {
+        [IO.Directory]::Move($resolvedStaged, $resolvedDestination)
+    }
+    catch {
+        if (-not (Test-Path -LiteralPath $resolvedDestination) `
+            -and (Test-Path -LiteralPath $backup -PathType Container)) {
+            [IO.Directory]::Move($backup, $resolvedDestination)
+        }
+        throw
+    }
+
+    try {
+        Remove-Item -LiteralPath $backup -Recurse -Force
+    }
+    catch {
+        Write-Warning "The previous Unity package backup could not be removed: '$backup'."
+    }
+}
+
+New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+$artifactRootItem = Get-Item -LiteralPath $artifactRoot
+if (($artifactRootItem.Attributes `
+        -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The Unity artifacts directory must not be a filesystem link."
+}
+try {
+$buildArguments = @(
+    "build",
+    $smokeProject,
+    "-c",
+    $Configuration)
+if ($IncludeSymbols) {
+    $buildArguments += @(
+        "--no-incremental",
+        "-p:DebugType=portable",
+        "-p:DebugSymbols=true",
+        "-p:EnableSourceLink=false")
+}
+& dotnet @buildArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Unity compile-smoke build failed with exit code $LASTEXITCODE."
 }
 
-New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
+New-Item -ItemType Directory -Path $outputPath | Out-Null
 Get-ChildItem -LiteralPath $templatePath -Force | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName `
         -Destination $outputPath -Recurse -Force
 }
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "LICENSE") `
     -Destination (Join-Path $outputPath "LICENSE.md") -Force
+$worldSchemaTarget = Join-Path $outputPath `
+    "Documentation~\Schemas\world-v1"
+$worldExampleTarget = Join-Path $outputPath `
+    "Samples~\InteractiveWorld\World"
+New-Item -ItemType Directory `
+    -Path $worldSchemaTarget, $worldExampleTarget `
+    -Force |
+    Out-Null
+Get-ChildItem -LiteralPath $worldSchemaSource -File -Force |
+    Copy-Item -Destination $worldSchemaTarget -Force
+Get-ChildItem -LiteralPath $worldExampleSource -File -Force |
+    Copy-Item -Destination $worldExampleTarget -Force
 
 $pluginsPath = Join-Path $outputPath "Runtime\Plugins"
 New-Item -ItemType Directory -Path $pluginsPath -Force | Out-Null
 
 $dependencyAssemblies = @(
+    "GameAgent.Compatibility.dll",
     "GameAgent.Protocol.dll",
     "GameAgent.Core.dll",
     "GameAgent.Persistence.dll",
+    "GameAgent.Providers.Anthropic.dll",
     "GameAgent.Providers.OpenAICompatible.dll",
     "Microsoft.Bcl.AsyncInterfaces.dll",
     "System.Buffers.dll",
@@ -66,7 +174,9 @@ $dependencyAssemblies = @(
     "System.Text.Encodings.Web.dll",
     "System.Text.Json.dll",
     "System.Threading.Tasks.Extensions.dll",
-    "GameAgent.Runtime.dll"
+    "GameAgent.Runtime.dll",
+    "GameAgent.Workflow.dll",
+    "GameAgent.World.dll"
 )
 
 $depsPath = Join-Path $smokeOutput "GameAgent.Unity.CompileSmoke.deps.json"
@@ -112,16 +222,22 @@ foreach ($assembly in $dependencyAssemblies) {
 
 if ($IncludeSymbols) {
     foreach ($symbol in @(
+            "GameAgent.Compatibility.pdb",
             "GameAgent.Protocol.pdb",
             "GameAgent.Core.pdb",
             "GameAgent.Persistence.pdb",
+            "GameAgent.Providers.Anthropic.pdb",
             "GameAgent.Providers.OpenAICompatible.pdb",
-            "GameAgent.Runtime.pdb")) {
+            "GameAgent.Runtime.pdb",
+            "GameAgent.Workflow.pdb",
+            "GameAgent.World.pdb")) {
         $source = Join-Path $smokeOutput $symbol
-        if (Test-Path -LiteralPath $source) {
-            Copy-Item -LiteralPath $source `
-                -Destination $pluginsPath -Force
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Required managed symbol is missing: '$source'."
         }
+
+        Copy-Item -LiteralPath $source `
+            -Destination $pluginsPath -Force
     }
 }
 
@@ -287,4 +403,29 @@ if ($manifest.name -ne "com.gameagent.runtime.unity") {
     throw "The staged UPM manifest has an unexpected package name."
 }
 
-Write-Host "UPM artifact ready: $outputPath"
+Publish-DirectoryAtomically `
+    -StagedPath $outputPath `
+    -Destination $publishedOutputPath
+Write-Host "UPM artifact ready: $publishedOutputPath"
+}
+finally {
+    $resolvedStagingPath = [IO.Path]::GetFullPath($outputPath)
+    $requiredPrefix = $artifactRoot.TrimEnd(
+        [IO.Path]::DirectorySeparatorChar) `
+        + [IO.Path]::DirectorySeparatorChar
+    $safeStagingName = [IO.Path]::GetFileName(
+        $resolvedStagingPath).StartsWith(
+            ".com.gameagent.runtime.unity.",
+            [StringComparison]::Ordinal) `
+        -and [IO.Path]::GetFileName(
+            $resolvedStagingPath).EndsWith(
+            ".staging",
+            [StringComparison]::Ordinal)
+    if ($safeStagingName `
+        -and $resolvedStagingPath.StartsWith(
+            $requiredPrefix,
+            [StringComparison]::OrdinalIgnoreCase) `
+        -and (Test-Path -LiteralPath $resolvedStagingPath -PathType Container)) {
+        Remove-Item -LiteralPath $resolvedStagingPath -Recurse -Force
+    }
+}

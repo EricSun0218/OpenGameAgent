@@ -497,6 +497,17 @@ FGameAgentActionDispatchResult FGameAgentHostRouter::DispatchActionJson(
                         return;
                     }
 
+                    if (Receipt.AuthoritativeObservations.size() >
+                        game_agent::wire::MaxAuthoritativeObservationsPerReceipt)
+                    {
+                        RouterState->Complete(
+                            PendingId,
+                            MakeUnknownReceipt(
+                                *Request,
+                                "receipt_invalid"));
+                        return;
+                    }
+
                     const auto Validated =
                         game_agent::wire::ParseActionReceipt(
                             game_agent::wire::SerializeActionReceipt(

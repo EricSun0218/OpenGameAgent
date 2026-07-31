@@ -19,6 +19,27 @@ negative conformance fixtures in [`fixtures`](../fixtures).
 | `TurnSnapshot` | Immutable prompt/tool/skill generation record |
 | `RuntimeEvent` | Ordered durable or ephemeral trace event |
 
+An `ActionRequest` can carry `batchId`, `decisionKey`, and
+`basedOnStateVersion`. These fields let a game stage actions from actors that
+decided against the same snapshot, deduplicate a decision, and reject stale
+proposals. They are evidence for game code; the protocol does not define a
+conflict winner. Additional structured simulation coordinates can travel in the
+`gameContext` extension.
+
+A terminal `ActionReceipt` may carry `extensions.resultingGameContext`.
+`GameContextReceiptEnvelope.AttachResulting` is the typed helper for producing
+it. The runtime leaves the run coordinate unchanged when this extension is
+absent and rejects it on an `unknown` receipt. A missing receipt-coordinate
+`sessionId` inherits the current run session; an explicit value must match it.
+Once every operation in the decision window is terminal, all supplied results
+must agree on one final coordinate. The runtime then records
+`game_context_advanced`: its payload is the updated full `AgentRun`, while its
+extensions bind the exact previous and resulting coordinates plus the sorted
+supporting operation IDs. This checkpoint is committed before memory derivation
+and before another provider turn. Recovery replays neither inference nor host
+actions for an already committed advance; it verifies the checkpoint against
+the original requests and receipts.
+
 `AgentUsage.inputTokens`, `outputTokens`, and `costUsd` contain provider usage
 that has been observed and durably charged. `hasUnaccountedUsage` and
 `unaccountedProviderAttempts` make cancellation or transport failures explicit
@@ -35,10 +56,32 @@ when either usage or the billed response is unresolved.
 Every `provider.dispatch_started` event also records the actual route selected
 for that attempt: `providerId`, `modelId`, `transportDialect`,
 `providerCapabilityDigest`, and `providerRouteDigest`. Built-in providers expose
-this metadata directly. A custom provider should implement
+this metadata directly. The reserved
+`extensions.providerRoutePolicyVersion` and
+`extensions.providerRoutePolicyDigest` values bind a versioned provider policy
+digest into `providerRouteDigest`; recovery still accepts legacy route events
+that predate those extension values and rejects partial or tampered pairs. A
+custom provider should implement
 `IProviderRouteMetadataSource`; providers that omit it are recorded with the
 explicit `unspecified` model and `custom.streaming.v1` dialect rather than an
 inferred identity.
+
+Dispatch extensions also carry a complete versioned
+`providerDialectContract`, its semantic digest, and
+`providerWireRequestEvidence`. Available wire evidence contains only the
+SHA-256 digest, byte length, and content type of the prepared request; an
+explicit unavailable reason is used when a provider does not expose final
+bytes. The evidence and its canonical integrity digest are all-or-none and
+route-bound during recovery. Built-in prepared transports compute it over the
+exact byte array sent. Evidence supplied by third-party providers is validated
+but remains that provider's assertion.
+
+`AgentUsage` carries optional `cacheReadTokens`, `cacheWriteTokens`,
+`cacheMissTokens`, `reasoningTokens`, and `providerTotalTokens`, plus the number
+of contributing `providerUsageSamples`. Missing token fields remain unavailable
+instead of being rewritten to zero. Its `availability` value states whether
+`costUsd` is a complete total (`cost_available`) or only known exact subtotals
+within an otherwise unavailable total (`cost_unavailable`).
 
 The runtime orders durable skill-system material before turn-specific messages
 when constructing a provider request. `TurnSnapshot.stablePrefixHash` covers
@@ -46,6 +89,28 @@ only that semantic leading prefix plus the prompt-layout version, so it stays
 unchanged while the prefix is unchanged. The `extensions.promptDigest` value
 covers the complete turn transcript and effective tool/skill catalogs. This
 separates cache-prefix identity from the dynamic request identity.
+
+The snapshot's `providerCacheKey` extension binds the layout, stable prefix,
+effective tool catalog, admitted skills, planned primary route, memory recall,
+compaction, and dynamic request as separate digests. Its paired
+`providerCacheDecision` reports stable-prefix break reasons separately from
+dynamic-tail changes. A dynamic-tail change does not by itself make
+`prefixReusable` false. Each provider-backed `budget.updated` event carries
+`providerCacheUsage`: absent provider counters mean `unknown`; three explicit
+zeros mean `no_activity`; positive counters produce `hit`, `write`, or `miss`.
+
+`TurnSnapshot.extensions.conversationContextCheckpoint` is the durable,
+integrity-protected identity of the exact derived provider message view. It
+stores ordered message IDs and an optional runtime-created summary with source
+lineage, not another copy of retained transcript content. Recovery can reuse it
+only for the same run and exact admitted transcript.
+
+Provider result extensions may contain
+`providerOpaqueContinuationState` only when the application enabled durable
+continuations and the provider declared the bounded envelope
+`durable_non_secret`. The envelope is bound to provider, exact route digest,
+and dialect state version. Absence of a new update clears prior local state;
+terminal completion does not persist a new envelope.
 
 ## Versioning
 
@@ -70,6 +135,33 @@ An observation carries exactly one of:
 
 - inline JSON `payload`;
 - a `resourceRef` with URI, media type, optional digest, and optional size.
+
+Resource URIs and media types are non-empty. When supplied, the optional digest
+must also be non-empty. A game that has not calculated one omits the field.
+
+Observation admission is identity-aware. `worldId` must exactly match the run.
+When an observation supplies `sessionId`, it must match the run session.
+World-scoped observations may have an empty audience; every other scope must
+include the run's `agentId`, and private scope must name exactly one audience.
+The control plane applies these checks before accepting a steer or follow-up
+and before cancelling an active provider step. Rejected controls therefore
+cannot interrupt a run and then fail later during context compilation.
+
+Games that reuse agent or entity IDs can additionally bind a restricted
+observation to one exact entity lifetime. Call
+`ObservationAudienceIncarnations.Attach` with one binding for every
+`visibility.audienceIds` entry, and enable
+`DurableAgentRuntimeOptions.RequireAudienceIncarnationForRestrictedObservations`.
+The runtime then requires the active run's `gameContext.observer` to exactly
+match the entity ID and incarnation associated with its `agentId`. This check
+also runs for durable initial/continuation context, steer/follow-up controls,
+and authoritative host observations before journal or provider-visible context
+is produced. Public world observations remain unaffected. Missing, mismatched,
+and malformed bindings report
+`observation_audience_incarnation_missing`,
+`observation_audience_incarnation_mismatch`, and
+`observation_audience_incarnation_invalid` respectively. The option defaults
+to `false` for compatibility.
 
 The context compiler selects required items first, applies stable priority
 ordering, removes expired items, and fails closed if required context cannot fit.
@@ -112,6 +204,16 @@ progress are ephemeral. A bounded notification consumer may drop events under
 backpressure. Durable events remain available for replay from the journal;
 ephemeral events do not. Consumers that need authoritative state must use the
 journal rather than the live queue alone.
+
+Engine UI should route provider deltas through the Core attempt-safe
+presentation coordinator. Presentation chunks carry run, turn,
+provider-attempt, and stream-attempt identity. Retry and fallback notices name
+the abandoned attempt and cause an explicit supersede/reset; the first text
+from every replacement attempt is also marked `ReplacesPriorText`. The
+coordinator's bounded sequence cursor can bridge a short-lived local disconnect
+while the process remains alive. An expired cursor fails explicitly and
+requires rebuilding the view from durable state; this convenience does not make
+provider token deltas durable protocol events.
 
 Deferred-tool activation changes are durable `tool.disclosure_changed` events.
 An activation requested by the model is atomically paired with its tool-result

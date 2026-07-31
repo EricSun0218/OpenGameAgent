@@ -53,6 +53,7 @@
     },
     "conflictScopes": {
       "type": "array",
+      "maxItems": 32,
       "items": {
         "type": "string",
         "minLength": 1,

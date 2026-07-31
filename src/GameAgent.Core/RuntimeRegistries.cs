@@ -269,7 +269,12 @@ public sealed class ToolCatalogRegistry
             }
 
             var entry = new ToolCatalogEntry(descriptor, _limits);
-            if (ToolDisclosureControlNames.IsReserved(entry.Name))
+            if (ToolDisclosureControlNames.IsReserved(entry.Name)
+                || SkillRuntimeControlNames.IsReserved(entry.Name)
+                || string.Equals(
+                    entry.Name,
+                    FinalOutputAdmissionControl.SubmitToolName,
+                    StringComparison.Ordinal))
             {
                 throw new ArgumentException(
                     $"Tool name '{entry.Name}' is reserved by the runtime.",

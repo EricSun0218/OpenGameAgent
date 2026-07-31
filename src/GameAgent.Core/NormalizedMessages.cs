@@ -178,6 +178,21 @@ public static class NormalizedTranscript
         ActionReceipt receipt,
         DateTimeOffset createdAt)
     {
+        return ToolResult(
+            messageId,
+            toolCallId,
+            toolName,
+            ProtocolJson.ToElement(receipt),
+            createdAt);
+    }
+
+    internal static NormalizedMessage ToolResult(
+        string messageId,
+        string toolCallId,
+        string toolName,
+        JsonElement result,
+        DateTimeOffset createdAt)
+    {
         return new NormalizedMessage
         {
             MessageId = messageId,
@@ -188,7 +203,7 @@ public static class NormalizedTranscript
                 NormalizedContentPart.FromToolResult(
                     toolCallId,
                     toolName,
-                    ProtocolJson.ToElement(receipt))
+                    result)
             }
         };
     }
@@ -216,6 +231,33 @@ public static class JsonArrayBuilder
         }
 
         return JsonDocument.Parse(buffer.WrittenMemory).RootElement.Clone();
+    }
+
+    public static JsonElement Boolean(bool value)
+    {
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteBooleanValue(value);
+        }
+
+        return JsonDocument.Parse(buffer.WrittenMemory).RootElement.Clone();
+    }
+
+    public static JsonElement Null()
+    {
+        using var document = JsonDocument.Parse("null");
+        return document.RootElement.Clone();
+    }
+
+    public static JsonElement Strings(IEnumerable<string> values)
+    {
+        if (values is null)
+        {
+            throw new ArgumentNullException(nameof(values));
+        }
+
+        return Array(values.Select(String));
     }
 
     public static JsonElement Array(IEnumerable<JsonElement> values)

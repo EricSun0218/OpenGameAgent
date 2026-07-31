@@ -93,7 +93,14 @@ public sealed class ModelResponse
         {
             InputTokens = usage.InputTokens,
             OutputTokens = usage.OutputTokens,
-            CostUsd = usage.CostUsd
+            CostUsd = usage.CostUsd,
+            ProviderUsageSamples = usage.Samples,
+            CacheReadTokens = usage.CacheReadTokens,
+            CacheWriteTokens = usage.CacheWriteTokens,
+            CacheMissTokens = usage.CacheMissTokens,
+            ReasoningTokens = usage.ReasoningTokens,
+            ProviderTotalTokens = usage.ProviderTotalTokens,
+            Availability = usage.Availability
         };
         if (ProtocolValidator.Validate(protocolUsage).Count != 0
             || !decimal.TryParse(
@@ -101,11 +108,17 @@ public sealed class ModelResponse
                 NumberStyles.AllowDecimalPoint,
                 CultureInfo.InvariantCulture,
                 out var cost)
-            || cost < 0)
+            || cost < 0
+            || usage.Samples < 1
+            || usage.CacheReadTokens.HasValue
+               && usage.CacheMissTokens.HasValue
+               && (long)usage.CacheReadTokens.Value
+                  + usage.CacheMissTokens.Value
+                  != usage.InputTokens)
         {
             throw new ArgumentException(
-                "Provider usage must contain non-negative token counts "
-                + "and a representable canonical cost.",
+                "Provider usage must contain consistent non-negative token "
+                + "counts and a representable canonical cost.",
                 nameof(usage));
         }
 
@@ -113,7 +126,14 @@ public sealed class ModelResponse
         {
             InputTokens = usage.InputTokens,
             OutputTokens = usage.OutputTokens,
-            CostUsd = usage.CostUsd
+            CostUsd = usage.CostUsd,
+            Samples = usage.Samples,
+            CacheReadTokens = usage.CacheReadTokens,
+            CacheWriteTokens = usage.CacheWriteTokens,
+            CacheMissTokens = usage.CacheMissTokens,
+            ReasoningTokens = usage.ReasoningTokens,
+            ProviderTotalTokens = usage.ProviderTotalTokens,
+            Availability = usage.Availability
         };
     }
 }

@@ -9,6 +9,68 @@ namespace GameAgent.Persistence.Tests;
 public sealed class ToolDisclosureTests
 {
     [Fact]
+    public async Task DeferredSearchUsesParameterNamesAndKeepsExactNameBoost()
+    {
+        var exact = Tool(
+            "world.weather",
+            ToolVisibilities.Deferred,
+            description: "Read the current conditions.");
+        var noisy = Tool(
+            "world.weather.details",
+            ToolVisibilities.Deferred,
+            description: string.Join(
+                " ",
+                Enumerable.Repeat("world weather forecast", 40)));
+        var parameterMatch = Tool(
+            "world.sensor.read",
+            ToolVisibilities.Deferred,
+            description: "Read one sensor.");
+        parameterMatch.ParametersSchema = Json(
+            """
+            {
+              "type": "object",
+              "properties": {
+                "weatherStationId": { "type": "string" }
+              },
+              "required": [ "weatherStationId" ],
+              "additionalProperties": false
+            }
+            """);
+        await using var rig = new RuntimeRig(
+            new[] { noisy, parameterMatch, exact },
+            Array.Empty<SkillManifest>(),
+            _ => new ScriptedProvider(
+                request => ToolCalls(
+                    request,
+                    new Call(
+                        "exact-search",
+                        ToolDisclosureControlNames.Search,
+                        """{"query":"world.weather","limit":3}"""),
+                    new Call(
+                        "parameter-search",
+                        ToolDisclosureControlNames.Search,
+                        """{"query":"station","limit":3}""")),
+                Final),
+            host: new SucceedingHost());
+
+        var outcome = await rig.Runtime.RunAsync(
+            new DurableRunRequest { Run = Run() });
+
+        var exactResults = ToolResult(outcome, "exact-search")
+            .GetProperty("results");
+        Assert.Equal(
+            "world.weather",
+            exactResults[0].GetProperty("name").GetString());
+        var parameterResults = ToolResult(outcome, "parameter-search")
+            .GetProperty("results");
+        Assert.Equal(
+            "world.sensor.read",
+            Assert.Single(parameterResults.EnumerateArray())
+                .GetProperty("name")
+                .GetString());
+    }
+
+    [Fact]
     public async Task SearchActivationAndExecutionProgressAcrossProviderTurns()
     {
         var weather = Tool(
@@ -440,7 +502,7 @@ public sealed class ToolDisclosureTests
     }
 
     [Fact]
-    public async Task CatalogReplacementLeavesExactActivationInactive()
+    public async Task CatalogReplacementWaitsForNextLoopInvocation()
     {
         await using var rig = new RuntimeRig(
             new[] { Tool("world.map", ToolVisibilities.Deferred) },
@@ -472,18 +534,25 @@ public sealed class ToolDisclosureTests
                                         descriptorDigest = original.Digest
                                     })));
                     },
+                    Final,
                     Final);
             });
 
         var outcome = await rig.Runtime.RunAsync(
             new DurableRunRequest { Run = Run() });
+        var nextOutcome = await rig.Runtime.RunAsync(
+            new DurableRunRequest { Run = Run() });
 
         Assert.Equal(RunStates.Completed, outcome.Run.State);
-        Assert.DoesNotContain(
-            rig.Provider.Requests[1].Tools,
-            item => item.Name == "world.map");
+        Assert.Equal(RunStates.Completed, nextOutcome.Run.State);
         Assert.Contains(
             rig.Provider.Requests[1].Tools,
+            item => item.Name == "world.map");
+        Assert.DoesNotContain(
+            rig.Provider.Requests[2].Tools,
+            item => item.Name == "world.map");
+        Assert.Contains(
+            rig.Provider.Requests[2].Tools,
             item => item.Name == ToolDisclosureControlNames.Activate);
         var snapshots = (await rig.Store.ReadRunAsync(
                 outcome.Run.RunId,
@@ -493,15 +562,15 @@ public sealed class ToolDisclosureTests
         var secondDisclosure = snapshots[1].Payload
             .GetProperty("extensions")
             .GetProperty("toolDisclosure");
-        Assert.Empty(
+        Assert.Single(
             secondDisclosure
                 .GetProperty("activatedDeferred")
                 .EnumerateArray());
-        Assert.Empty(
+        Assert.Single(
             secondDisclosure
                 .GetProperty("requestedActivations")
                 .EnumerateArray());
-        Assert.Contains(
+        Assert.DoesNotContain(
             secondDisclosure.GetProperty("reasonCodes").EnumerateArray(),
             item => item.GetString()
                     == ToolDisclosureReasonCodes.CatalogEntryChanged);

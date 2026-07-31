@@ -68,6 +68,7 @@
     },
     "contentTypes": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -77,6 +78,7 @@
     },
     "codecs": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -86,6 +88,7 @@
     },
     "transports": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -113,6 +116,7 @@
     },
     "toolEffects": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "enum": [
           "pure_read",
@@ -125,6 +129,7 @@
     },
     "threadAffinities": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "enum": [
           "any_thread",
@@ -138,10 +143,16 @@
       "type": "boolean"
     },
     "providerCapabilities": {
-      "type": "object"
+      "type": "object",
+      "maxProperties": 2048
     },
     "extensions": {
-      "$ref": "common.schema.json#/$defs/extensions"
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
     }
   },
   "additionalProperties": false

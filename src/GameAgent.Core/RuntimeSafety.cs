@@ -7,6 +7,19 @@ using GameAgent.Protocol;
 
 namespace GameAgent.Core;
 
+internal static class StrictUtf8Encoding
+{
+    private static readonly UTF8Encoding Encoder = new(
+        encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
+
+    public static int GetByteCount(string value) =>
+        Encoder.GetByteCount(value);
+
+    public static byte[] GetBytes(string value) =>
+        Encoder.GetBytes(value);
+}
+
 public sealed class JsonValueLimits
 {
     public JsonValueLimits(
@@ -339,6 +352,15 @@ internal static class RuntimeProtocolInputGuard
                     InputTokens = value.Usage.InputTokens,
                     OutputTokens = value.Usage.OutputTokens,
                     CostUsd = value.Usage.CostUsd,
+                    ProviderUsageSamples =
+                        value.Usage.ProviderUsageSamples,
+                    CacheReadTokens = value.Usage.CacheReadTokens,
+                    CacheWriteTokens = value.Usage.CacheWriteTokens,
+                    CacheMissTokens = value.Usage.CacheMissTokens,
+                    ReasoningTokens = value.Usage.ReasoningTokens,
+                    ProviderTotalTokens =
+                        value.Usage.ProviderTotalTokens,
+                    Availability = value.Usage.Availability,
                     Actions = value.Usage.Actions,
                     HasUnaccountedUsage =
                         value.Usage.HasUnaccountedUsage,
@@ -604,7 +626,18 @@ internal static class RuntimeProtocolInputGuard
                 ThrowByteLimit();
             }
 
-            var rawUtf8Bytes = Encoding.UTF8.GetByteCount(value);
+            int rawUtf8Bytes;
+            try
+            {
+                rawUtf8Bytes = StrictUtf8Encoding.GetByteCount(value);
+            }
+            catch (EncoderFallbackException)
+            {
+                throw new RuntimeContentLimitException(
+                    _parameterName,
+                    "invalid_unicode",
+                    "A protocol string contains invalid Unicode.");
+            }
             if (rawUtf8Bytes > _limits.MaxStringUtf8Bytes)
             {
                 throw new RuntimeContentLimitException(
@@ -720,6 +753,15 @@ public static class JsonValueInspector
         JsonValueLimits limits,
         string parameterName)
     {
+        return ValidateAndMeasureDetailed(value, limits, parameterName)
+            .Utf8Bytes;
+    }
+
+    internal static JsonValueMeasurement ValidateAndMeasureDetailed(
+        JsonElement value,
+        JsonValueLimits limits,
+        string parameterName)
+    {
         if (limits is null)
         {
             throw new ArgumentNullException(nameof(limits));
@@ -739,7 +781,7 @@ public static class JsonValueInspector
             parameterName);
         var state = new InspectionState(limits, parameterName);
         Inspect(value, 1, state);
-        return exactUtf8Bytes;
+        return new JsonValueMeasurement(exactUtf8Bytes, state.Nodes);
     }
 
     private static int MeasureBounded(
@@ -868,7 +910,18 @@ public static class JsonValueInspector
 
     private static void AddStringBytes(string value, InspectionState state)
     {
-        var bytes = Encoding.UTF8.GetByteCount(value);
+        int bytes;
+        try
+        {
+            bytes = StrictUtf8Encoding.GetByteCount(value);
+        }
+        catch (EncoderFallbackException)
+        {
+            throw new RuntimeContentLimitException(
+                state.ParameterName,
+                "json_invalid_unicode",
+                "A JSON string contains invalid Unicode.");
+        }
         if (bytes > state.Limits.MaxStringUtf8Bytes)
         {
             throw new RuntimeContentLimitException(
@@ -1011,8 +1064,31 @@ public static class JsonValueInspector
     }
 }
 
+internal readonly struct JsonValueMeasurement
+{
+    public JsonValueMeasurement(int utf8Bytes, int nodes)
+    {
+        Utf8Bytes = utf8Bytes;
+        Nodes = nodes;
+    }
+
+    public int Utf8Bytes { get; }
+
+    public int Nodes { get; }
+}
+
 internal static class RuntimeGuard
 {
+    public static string RequiredReasonCode(
+        string? value,
+        string parameterName)
+    {
+        return RequiredUtf8(
+            value,
+            ProtocolLimits.MaxRuntimeEventReasonCodeUnicodeScalars,
+            parameterName);
+    }
+
     public static string RequiredId(string? value, string parameterName)
     {
         var validated = RequiredUtf8(value, 128, parameterName);
@@ -1040,7 +1116,19 @@ internal static class RuntimeGuard
             throw new ArgumentException("A non-empty value is required.", parameterName);
         }
 
-        if (Encoding.UTF8.GetByteCount(value) > maxUtf8Bytes)
+        int byteCount;
+        try
+        {
+            byteCount = StrictUtf8Encoding.GetByteCount(value);
+        }
+        catch (EncoderFallbackException)
+        {
+            throw new ArgumentException(
+                "The value must contain well-formed Unicode.",
+                parameterName);
+        }
+
+        if (byteCount > maxUtf8Bytes)
         {
             throw new RuntimeContentLimitException(
                 parameterName,
@@ -1211,25 +1299,41 @@ internal static class RuntimeGuard
 
 internal sealed class CanonicalDigestBuilder
 {
-    private readonly StringBuilder _builder = new();
+    private const string SchemePreamble = "game-agent-digest\0v2\0";
+
+    private readonly StringBuilder _builder = new(SchemePreamble);
 
     public void Add(string name, string? value)
     {
+        _builder.Append('S');
         AppendLengthPrefixed(name);
-        AppendLengthPrefixed(value ?? string.Empty);
+        if (value is null)
+        {
+            _builder.Append('0');
+            return;
+        }
+
+        _builder.Append('1');
+        AppendLengthPrefixed(value);
     }
 
     public void Add(string name, long value)
     {
-        Add(name, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        _builder.Append('I');
+        AppendLengthPrefixed(name);
+        AppendLengthPrefixed(
+            value.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
     }
 
     public void Add(string name, IEnumerable<string> values)
     {
+        _builder.Append('L');
         AppendLengthPrefixed(name);
         var materialized = values as IReadOnlyCollection<string> ?? values.ToArray();
-        _builder.Append(materialized.Count);
-        _builder.Append(':');
+        AppendLengthPrefixed(
+            materialized.Count.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
         foreach (var value in materialized)
         {
             AppendLengthPrefixed(value);
@@ -1238,14 +1342,17 @@ internal sealed class CanonicalDigestBuilder
 
     public void Add(string name, JsonElement value)
     {
+        _builder.Append('J');
         AppendLengthPrefixed(name);
-        WriteCanonicalJson(_builder, value);
+        var canonical = new StringBuilder();
+        CanonicalJsonDigest.AppendCanonical(canonical, value);
+        AppendLengthPrefixed(canonical.ToString());
     }
 
     public string Finish()
     {
         using var sha = SHA256.Create();
-        var bytes = Encoding.UTF8.GetBytes(_builder.ToString());
+        var bytes = StrictUtf8Encoding.GetBytes(_builder.ToString());
         var digest = sha.ComputeHash(bytes);
         var result = new StringBuilder(digest.Length * 2);
         foreach (var item in digest)
@@ -1258,117 +1365,10 @@ internal sealed class CanonicalDigestBuilder
 
     private void AppendLengthPrefixed(string value)
     {
-        var bytes = Encoding.UTF8.GetByteCount(value);
+        var bytes = StrictUtf8Encoding.GetByteCount(value);
         _builder.Append(bytes);
         _builder.Append(':');
         _builder.Append(value);
     }
 
-    private static void WriteCanonicalJson(StringBuilder output, JsonElement value)
-    {
-        switch (value.ValueKind)
-        {
-            case JsonValueKind.Object:
-                output.Append('{');
-                var firstProperty = true;
-                foreach (var property in value
-                             .EnumerateObject()
-                             .OrderBy(item => item.Name, StringComparer.Ordinal))
-                {
-                    if (!firstProperty)
-                    {
-                        output.Append(',');
-                    }
-
-                    firstProperty = false;
-                    WriteJsonString(output, property.Name);
-                    output.Append(':');
-                    WriteCanonicalJson(output, property.Value);
-                }
-
-                output.Append('}');
-                break;
-            case JsonValueKind.Array:
-                output.Append('[');
-                var firstItem = true;
-                foreach (var item in value.EnumerateArray())
-                {
-                    if (!firstItem)
-                    {
-                        output.Append(',');
-                    }
-
-                    firstItem = false;
-                    WriteCanonicalJson(output, item);
-                }
-
-                output.Append(']');
-                break;
-            case JsonValueKind.String:
-                WriteJsonString(output, value.GetString() ?? string.Empty);
-                break;
-            case JsonValueKind.Number:
-                output.Append(value.GetRawText());
-                break;
-            case JsonValueKind.True:
-                output.Append("true");
-                break;
-            case JsonValueKind.False:
-                output.Append("false");
-                break;
-            case JsonValueKind.Null:
-                output.Append("null");
-                break;
-            default:
-                throw new ArgumentException("Undefined JSON cannot be canonicalized.", nameof(value));
-        }
-    }
-
-    private static void WriteJsonString(StringBuilder output, string value)
-    {
-        output.Append('"');
-        foreach (var character in value)
-        {
-            switch (character)
-            {
-                case '"':
-                    output.Append("\\\"");
-                    break;
-                case '\\':
-                    output.Append("\\\\");
-                    break;
-                case '\b':
-                    output.Append("\\b");
-                    break;
-                case '\f':
-                    output.Append("\\f");
-                    break;
-                case '\n':
-                    output.Append("\\n");
-                    break;
-                case '\r':
-                    output.Append("\\r");
-                    break;
-                case '\t':
-                    output.Append("\\t");
-                    break;
-                default:
-                    if (character < 0x20)
-                    {
-                        output.Append("\\u");
-                        output.Append(((int)character).ToString(
-                            "x4",
-                            System.Globalization.CultureInfo.InvariantCulture));
-                    }
-                    else
-                    {
-                        output.Append(character);
-                    }
-
-                    break;
-            }
-        }
-
-        output.Append('"');
-    }
 }

@@ -2,8 +2,11 @@ using System;
 using GameAgent.Core;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
+using GameAgent.Providers.Anthropic;
 using GameAgent.Providers.OpenAICompatible;
 using GameAgent.Runtime;
+using GameAgent.Workflow;
+using GameAgent.World;
 
 namespace GameAgent.Unity
 {
@@ -16,8 +19,12 @@ namespace GameAgent.Unity
                 typeof(AgentRun),
                 typeof(HeadlessAgentRuntimeLimits),
                 typeof(FileJournalOptions),
+                typeof(AnthropicProviderOptions),
                 typeof(OpenAiCompatibleProviderOptions),
-                typeof(GameAgentRuntimeBuilder)
+                typeof(GameAgentRuntimeBuilder),
+                typeof(WorkflowCompiler),
+                typeof(InteractiveWorldFacade),
+                typeof(UnityInteractiveWorldFacade)
             };
         }
     }

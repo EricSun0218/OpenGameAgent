@@ -5,10 +5,14 @@ until its real engine or toolchain gate has passed.
 
 | Component | Intended target | Current evidence |
 | --- | --- | --- |
-| Shared libraries | .NET Standard 2.1 | Built and tested with the .NET 8 SDK on Windows; CI covers Windows, Linux, and macOS |
+| Shared libraries | .NET Standard 2.1 | Windows CI runs the repository build, test, package, and performance smoke; Linux builds and tests the complete portable solution |
 | Godot host | Godot 4.7.1 .NET on Windows desktop and headless | Real Godot executable, isolated addon package, C# build, scene startup, signals, structured context, durable run/resume/control, main-thread action dispatch, and shutdown are exercised |
 | Unity host | Unity 2022.3 LTS or newer, Mono or IL2CPP | Package source and samples compile as .NET Standard 2.1; host conformance and package assembly gates pass without an Editor |
 | Unreal module | Unreal Engine 5 compatibility probe | Portable C++17 wire/ABI tests pass with warnings as errors; the module includes Editor automation tests but has not yet passed an Unreal Build Tool or Editor run |
+
+macOS is not a supported or CI target. Linux validates the portable .NET
+solution and the portable Unreal boundary; it is not a second full
+engine-release matrix.
 
 ## Unity validation boundary
 
@@ -19,28 +23,88 @@ The current claim therefore covers the package contract and host implementation,
 not verified Player compatibility. Mobile, WebGL, and console targets are not
 claimed.
 
+Unity DTO conversion and the Unreal closed-world wire parser preserve the
+optional `decisionKey` and `batchId` fields used to stage simultaneous actor
+actions.
+
+Godot and Unity expose optional guarded durable resume. A semantic extension
+digest is validated after journal recovery and before ownership, provider,
+reconciler, or host work. Custom engine backends must advertise and implement
+the guarded capability end to end; requesting it through an older backend
+fails closed.
+
 ## Unreal validation boundary
 
 The module defines strict bounded wire parsing, a GameThread dispatcher, host
-routing, and a versioned C ABI surface. Portable tests validate those pieces
-outside the engine. Packaging against a named Unreal Engine version, running
-the automation suite in the Editor, and implementing a production transport
-remain future work.
+routing, and a versioned C ABI surface. Portable tests validate the wire parser
+and C ABI outside the engine. The dispatcher and host router are covered by
+automation test source but still require an Unreal Build Tool build and Editor
+run. Packaging against a named Unreal Engine version and implementing a
+production transport also remain future work.
 
 ## Provider compatibility
 
-The bundled adapter targets streaming chat-completions APIs that use the common
-OpenAI-compatible event shape. Providers vary in authentication, streaming
-details, tool-call behavior, and usage reporting. Each configured provider must
-be exercised before shipping a game. A provider token belongs in a server relay
-or a short-lived scoped credential for consumer builds.
+The bundled adapters target streaming chat-completions APIs that use the common
+OpenAI-compatible event shape and the native Anthropic Messages API. Providers
+vary in authentication, streaming details, tool-call behavior, and usage
+reporting. Each configured provider must be exercised before shipping a game. A
+provider token belongs in a server relay or a short-lived scoped credential for
+consumer builds.
+
+`GameAgent.Providers.Anthropic` implements the named Messages SSE flow with
+client `tool_use` and `tool_result` blocks and pins the verified `2023-06-01`
+API version. Its current dialect is deliberately limited to text and client
+tools: reasoning, media, fallback blocks, and server-side tools are rejected
+explicitly. Tool-input JSON is accumulated incrementally and parsed only when
+its content block closes. Usage is emitted once from final cumulative counters;
+cache reads, writes, and misses remain unavailable when the response does not
+supply a complete cache-counter pair.
+Configured cost remains unavailable for nonzero cache creation unless the
+response also supplies the exact 5-minute/1-hour breakdown and every applicable
+rate is configured.
+The direct transport requires HTTPS, disables redirects, sends credentials only
+through `x-api-key`, and fixes the request path to `/v1/messages`.
 
 Custom streaming providers should also implement
 `IProviderRouteMetadataSource` with their exact model identifier and versioned
-transport dialect. The runtime combines that metadata with the capability
-snapshot used for the attempt and journals a deterministic route digest. If the
-optional metadata interface is absent, the durable dispatch explicitly records
-`unspecified` and `custom.streaming.v1`; it never guesses a fallback model.
+transport dialect. Route-sensitive providers should use the four-argument
+`ProviderRouteMetadata` constructor and supply a versioned, non-secret SHA-256
+policy digest covering endpoint identity and request, response-accounting, and
+pricing policy. If the route implements `IProviderPromptTokenEstimator`, the
+digest should also cover its estimator identity and version. The runtime
+combines that policy identity with the capability
+snapshot used for the attempt and journals a deterministic route digest. A
+change to any covered policy therefore produces a different durable route
+identity. The two-argument constructor remains compatible and marks the policy
+as explicitly unspecified. If the optional metadata interface is absent, the
+durable dispatch records `unspecified` and `custom.streaming.v1`; it never
+guesses a fallback model.
+
+A provider may additionally implement `IProviderRequestAdapter`. The adapter
+receives a deep-snapshotted, request-only view and a capability profile. It may
+remove unsupported reasoning or repair provider-required tool pairs, but it
+cannot change run/turn/attempt identity, replace the authorized tool set, or
+increase an output-token limit. `ProviderCapabilities` also carries bounded
+tool-count and aggregate schema-byte limits so an incompatible fallback is
+rejected before network dispatch.
+
+Custom adapters return transformed output through
+`ProviderRequestPreparationContext.CreatePreparedRequest`. That public factory
+binds the evidence report to the runtime-owned input baseline and computes both
+digests; `ProviderRequestPreparationChanges` carries only non-negative repair
+counters. Adapter invocation, output validation, and the final deep copy share
+one timeout and one quarantine slot.
+
+Provider input is rejected before deep snapshotting when it exceeds 4,096
+messages, 65,536 content parts, 4,096 tools, 131,072 JSON nodes, or 8 MiB of
+measured content. Adapter output is checked against the same bounds before it
+is deep-copied. Adapter-owned message and tool lists are first frozen through
+one exact, bounded indexed read: their enumerators are never trusted and their
+`Count` values are never re-read. Limit checks, protected-field digests,
+preparation evidence, sanitization, and dispatch then consume only
+runtime-owned snapshots. The bundled HTTP adapter additionally caps the fully
+JSON-escaped request body at 8 MiB, so escaping cannot turn a bounded logical
+request into an unbounded transport allocation.
 
 Retries require trustworthy usage semantics. Explicitly rejected requests may be
 declared known-zero. A failed attempt with reported usage is charged before the
@@ -48,6 +112,41 @@ next attempt. A dispatched attempt with unknown usage fails closed and is marked
 as unaccounted in the durable run instead of silently moving to another provider.
 The dispatch intent itself is journaled before provider code runs, so a process
 crash before the usage callback is also detected during recovery.
+
+Custom providers classify failures with `ProviderFailureDisposition`.
+`AbortRun` is for request-wide validation, policy, and other failures that no
+route can safely repair. `Failover` is for a route-local rejection that should
+not be repeated on the same route. `RetryThenFailover` is for transient
+route-local failures. The legacy Boolean `retryable` constructor remains source
+compatible and maps to `AbortRun` or `RetryThenFailover`.
+
+The bundled HTTP adapter treats credential rejection, exhausted balance,
+missing or retired endpoints, and rejected redirects as route-local known-zero
+failures. Invalid request payloads remain request-fatal. Ambiguous timeouts and
+server failures still fail closed when no trustworthy usage report exists.
+
+Route-local failures feed a bounded, process-local circuit keyed by route
+digest. `ProviderRouteResilienceOptions` configures the initial cooldown,
+maximum exponential cooldown, and maximum tracked routes. Only one half-open
+probe is admitted after a cooldown; other concurrent NPC runs continue to
+fallback routes. Set `Enabled = false` only when an application deliberately
+wants every run to try the primary route again.
+
+Provider usage keeps cache-read, cache-write, cache-miss, reasoning, and
+provider-total token counts as nullable values. `null` means the provider did
+not report that dimension; zero means it explicitly reported zero. Aggregation
+keeps a dimension only when every contributing sample supplied it. The
+`availability` field applies to the total cost: `cost_available` is
+authoritative, while `cost_unavailable` means `costUsd` is at most the sum of
+known exact subtotals and must not be used as the total. Both runtimes fail the
+cost budget closed when total cost is unavailable.
+
+The bundled adapter never converts a missing cache breakdown into a cache miss.
+It derives an exact configured cost only when the read/miss split is available
+or both configured input rates are identical. An optional cache-write rate can
+be configured with `InputCacheWriteUsdPerMillionTokens`; when that rate is
+configured, the corresponding write-token count must be present for total cost
+to be available.
 
 ## In-process callback boundary
 
@@ -105,3 +204,15 @@ same run concurrently.
 The framework is pre-1.0. Protocol schemas carry explicit versions, but source
 and wire compatibility may change between alpha releases. Pin exact package
 versions and run the repository conformance fixtures when upgrading.
+
+Composite semantic identities use a versioned, typed, length-delimited digest
+scheme across the runtime, independent of the durable-store implementation.
+Strings must be well-formed Unicode and are encoded with strict UTF-8, so
+replacement fallback cannot alias distinct invalid inputs.
+The current file store writes format 3 frames and can read format 1 and 2
+history. Completed older history remains available for audit, and a store may
+append a new format 3 run after that history. A nonterminal older run whose
+resume contract contains a digest from the previous scheme fails closed;
+create a new run instead of rewriting or silently migrating its identity.
+Custom durable stores must enforce the same restart rule even though they do
+not use the file-journal frame format.

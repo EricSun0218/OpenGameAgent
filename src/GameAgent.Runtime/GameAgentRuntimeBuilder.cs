@@ -13,6 +13,10 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     private readonly List<IDisposable> _ownedDisposables = new();
     private IReadOnlyList<ToolDescriptor> _tools = Array.Empty<ToolDescriptor>();
     private IReadOnlyList<SkillManifest> _skills = Array.Empty<SkillManifest>();
+    private ToolCatalogRegistry? _toolRegistry;
+    private SkillCatalogRegistry? _skillRegistry;
+    private bool _toolsConfigured;
+    private bool _skillsConfigured;
     private IDurableSessionStore? _store;
     private IOperationLedger? _ledger;
     private bool _ownsStore;
@@ -20,12 +24,27 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     private IRuntimeIdGenerator _ids = new GuidRuntimeIdGenerator();
     private IRuntimeEventPublisher? _publisher;
     private ISkillAdmissionPolicy? _skillAdmissionPolicy;
+    private ISkillContentResolver? _skillContentResolver;
     private IToolDisclosurePolicy? _toolDisclosurePolicy;
+    private IFinalOutputAdmissionPolicy? _finalOutputAdmissionPolicy;
+    private FinalOutputAdmissionOptions? _worldAgentJobOptions;
+    private IConversationCompactor? _conversationCompactor;
+    private RuntimeMemoryLifecycle? _memoryLifecycle;
+    private IRuntimeMemoryPolicy? _memoryPolicy;
+    private RuntimeMemoryIntegrationOptions? _memoryOptions;
+    private bool _ownsMemoryLifecycle;
     private ProviderRetryPolicy _retryPolicy = new();
+    private ProviderRouteResilienceOptions _providerRouteResilience = new();
     private DurableAgentRuntimeOptions _runtimeOptions = new();
+    private RunRecoveryOptions _recoveryOptions = new();
     private ContextCompilerOptions _contextOptions = new();
+    private IRuntimeTokenEstimator _tokenEstimator =
+        ScriptAwareTokenEstimator.Shared;
+    private IRuntimeMetricsSink? _metricsSink;
+    private RuntimeMetricsOptions? _metricsOptions;
     private ToolSchedulerLimits _schedulerLimits = new();
     private readonly object _disposeSync = new();
+    private int _disposeRetryRequired;
     private Task? _disposeTask;
     private int _finished;
 
@@ -106,11 +125,18 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         IEnumerable<ToolDescriptor> tools)
     {
         ThrowIfFinished();
+        if (_toolRegistry is not null)
+        {
+            throw new InvalidOperationException(
+                "A tool registry is already configured.");
+        }
+
         _tools = CopyCatalogBounded(
             tools,
             RegistryLimits.DefaultMaxTools,
             nameof(tools),
             "tool_count_exceeded");
+        _toolsConfigured = true;
         return this;
     }
 
@@ -118,11 +144,60 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         IEnumerable<SkillManifest> skills)
     {
         ThrowIfFinished();
+        if (_skillRegistry is not null)
+        {
+            throw new InvalidOperationException(
+                "A skill registry is already configured.");
+        }
+
         _skills = CopyCatalogBounded(
             skills,
             RegistryLimits.DefaultMaxSkills,
             nameof(skills),
             "skill_count_exceeded");
+        _skillsConfigured = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Uses a host-owned tool registry without replacing its current
+    /// snapshot. Explicit catalog reloads become visible to the next
+    /// RunAsync or ResumeAsync agent-loop invocation; an active invocation
+    /// keeps one immutable catalog for all of its turns.
+    /// </summary>
+    public GameAgentRuntimeBuilder WithToolRegistry(
+        ToolCatalogRegistry registry)
+    {
+        ThrowIfFinished();
+        if (_toolsConfigured)
+        {
+            throw new InvalidOperationException(
+                "A static tool catalog is already configured.");
+        }
+
+        _toolRegistry =
+            registry ?? throw new ArgumentNullException(nameof(registry));
+        return this;
+    }
+
+    /// <summary>
+    /// Uses a host-owned skill registry without replacing its current
+    /// snapshot. A local package catalog can bind this same registry and act
+    /// as the configured content resolver, so an atomic reload is visible to
+    /// subsequent RunAsync or ResumeAsync agent-loop invocations.
+    /// </summary>
+    public GameAgentRuntimeBuilder WithSkillRegistry(
+        SkillCatalogRegistry registry)
+    {
+        ThrowIfFinished();
+        if (_skillsConfigured)
+        {
+            throw new InvalidOperationException(
+                "A static skill catalog is already configured.");
+        }
+
+        _skillRegistry =
+            registry ?? throw new ArgumentNullException(nameof(registry));
         return this;
     }
 
@@ -163,6 +238,15 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         return this;
     }
 
+    public GameAgentRuntimeBuilder WithSkillContentResolver(
+        ISkillContentResolver resolver)
+    {
+        ThrowIfFinished();
+        _skillContentResolver =
+            resolver ?? throw new ArgumentNullException(nameof(resolver));
+        return this;
+    }
+
     public GameAgentRuntimeBuilder WithToolDisclosurePolicy(
         IToolDisclosurePolicy policy)
     {
@@ -170,6 +254,76 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         _toolDisclosurePolicy =
             policy ?? throw new ArgumentNullException(nameof(policy));
         return this;
+    }
+
+    public GameAgentRuntimeBuilder WithFinalOutputAdmissionPolicy(
+        IFinalOutputAdmissionPolicy policy)
+    {
+        ThrowIfFinished();
+        _finalOutputAdmissionPolicy =
+            policy ?? throw new ArgumentNullException(nameof(policy));
+        return this;
+    }
+
+    /// <summary>
+    /// Enables strict structured final output for interactive-world
+    /// understanding, selection, and narration jobs.
+    /// </summary>
+    public GameAgentRuntimeBuilder EnableWorldAgentJobs(
+        FinalOutputAdmissionOptions? options = null)
+    {
+        ThrowIfFinished();
+        var source = options ?? new FinalOutputAdmissionOptions();
+        _worldAgentJobOptions = CopyWorldAgentJobOptions(source);
+        ApplyWorldAgentJobOptions();
+        _finalOutputAdmissionPolicy =
+            new WorldAgentFinalOutputAdmissionPolicy();
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithConversationCompactor(
+        IConversationCompactor compactor)
+    {
+        ThrowIfFinished();
+        _conversationCompactor =
+            compactor ?? throw new ArgumentNullException(nameof(compactor));
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithRuntimeMemory(
+        RuntimeMemoryLifecycle lifecycle,
+        IRuntimeMemoryPolicy policy,
+        RuntimeMemoryIntegrationOptions? options = null,
+        bool disposeOnShutdown = false)
+    {
+        ThrowIfFinished();
+        if (_memoryLifecycle is not null)
+        {
+            throw new InvalidOperationException(
+                "Runtime-managed memory is already configured.");
+        }
+
+        _memoryLifecycle = lifecycle
+                           ?? throw new ArgumentNullException(
+                               nameof(lifecycle));
+        _memoryPolicy = policy
+                        ?? throw new ArgumentNullException(nameof(policy));
+        _memoryOptions = options;
+        _ownsMemoryLifecycle = disposeOnShutdown;
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithMemory(
+        RuntimeMemoryLifecycle lifecycle,
+        IRuntimeMemoryPolicy policy,
+        RuntimeMemoryIntegrationOptions? options = null,
+        bool disposeOnShutdown = false)
+    {
+        return WithRuntimeMemory(
+            lifecycle,
+            policy,
+            options,
+            disposeOnShutdown);
     }
 
     public GameAgentRuntimeBuilder WithRetryPolicy(
@@ -180,11 +334,61 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         return this;
     }
 
+    public GameAgentRuntimeBuilder WithProviderRouteResilience(
+        ProviderRouteResilienceOptions options)
+    {
+        ThrowIfFinished();
+        _providerRouteResilience =
+            options ?? throw new ArgumentNullException(nameof(options));
+        return this;
+    }
+
     public GameAgentRuntimeBuilder WithRuntimeOptions(
         DurableAgentRuntimeOptions options)
     {
         ThrowIfFinished();
         _runtimeOptions =
+            options ?? throw new ArgumentNullException(nameof(options));
+        ApplyWorldAgentJobOptions();
+        return this;
+    }
+
+    private void ApplyWorldAgentJobOptions()
+    {
+        if (_worldAgentJobOptions is null)
+        {
+            return;
+        }
+
+        _runtimeOptions.FinalOutputAdmission =
+            CopyWorldAgentJobOptions(_worldAgentJobOptions);
+    }
+
+    private static FinalOutputAdmissionOptions CopyWorldAgentJobOptions(
+        FinalOutputAdmissionOptions source)
+    {
+        return new FinalOutputAdmissionOptions
+        {
+            Enabled = true,
+            MaxAttempts = source.MaxAttempts,
+            MaxOutputUtf8Bytes = source.MaxOutputUtf8Bytes,
+            MaxEvidenceItems = source.MaxEvidenceItems,
+            MaxEvidenceUtf8Bytes = source.MaxEvidenceUtf8Bytes,
+            MaxJsonDepth = source.MaxJsonDepth,
+            MaxJsonNodes = source.MaxJsonNodes,
+            MaxPolicyFeedbackUtf8Bytes =
+                source.MaxPolicyFeedbackUtf8Bytes,
+            MaxConcurrentEvaluations =
+                source.MaxConcurrentEvaluations,
+            PolicyTimeout = source.PolicyTimeout
+        };
+    }
+
+    public GameAgentRuntimeBuilder WithRecoveryOptions(
+        RunRecoveryOptions options)
+    {
+        ThrowIfFinished();
+        _recoveryOptions =
             options ?? throw new ArgumentNullException(nameof(options));
         return this;
     }
@@ -195,6 +399,15 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         ThrowIfFinished();
         _contextOptions =
             options ?? throw new ArgumentNullException(nameof(options));
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithTokenEstimator(
+        IRuntimeTokenEstimator estimator)
+    {
+        ThrowIfFinished();
+        _tokenEstimator =
+            estimator ?? throw new ArgumentNullException(nameof(estimator));
         return this;
     }
 
@@ -214,6 +427,17 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         ThrowIfFinished();
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _ids = ids ?? throw new ArgumentNullException(nameof(ids));
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithMetrics(
+        IRuntimeMetricsSink sink,
+        RuntimeMetricsOptions? options = null)
+    {
+        ThrowIfFinished();
+        _metricsSink = sink
+                       ?? throw new ArgumentNullException(nameof(sink));
+        _metricsOptions = options;
         return this;
     }
 
@@ -243,10 +467,18 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
                     "A durable store and operation ledger are required.");
             }
 
-            var toolRegistry = new ToolCatalogRegistry();
-            toolRegistry.Replace(_tools);
-            var skillRegistry = new SkillCatalogRegistry();
-            skillRegistry.Replace(_skills);
+            var toolRegistry = _toolRegistry ?? new ToolCatalogRegistry();
+            if (_toolRegistry is null)
+            {
+                toolRegistry.Replace(_tools);
+            }
+
+            var skillRegistry = _skillRegistry
+                                ?? new SkillCatalogRegistry();
+            if (_skillRegistry is null)
+            {
+                skillRegistry.Replace(_skills);
+            }
             var journal = new JournalCoordinator(
                 _store,
                 _ledger,
@@ -259,31 +491,55 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
                     _providers.ToArray(),
                     _retryPolicy,
                     new SystemRuntimeDelay(),
-                    _ids),
+                    _ids,
+                    routeResilienceOptions: _providerRouteResilience,
+                    clock: _clock),
                 _host,
                 journal,
-                new RunRecovery(_store, _ledger, journal),
+                new RunRecovery(
+                    _store,
+                    _ledger,
+                    journal,
+                    _recoveryOptions),
                 toolRegistry,
                 skillRegistry,
-                new ContextCompiler(_contextOptions),
+                new ContextCompiler(
+                    _contextOptions,
+                    _tokenEstimator),
                 new ToolBatchPlanner(_schedulerLimits),
                 new ToolBatchScheduler(_schedulerLimits),
                 _clock,
                 _ids,
                 _runtimeOptions,
                 skillAdmissionPolicy: _skillAdmissionPolicy,
-                toolDisclosurePolicy: _toolDisclosurePolicy);
+                toolDisclosurePolicy: _toolDisclosurePolicy,
+                conversationCompactor: _conversationCompactor,
+                memoryLifecycle: _memoryLifecycle,
+                memoryPolicy: _memoryPolicy,
+                memoryOptions: _memoryOptions,
+                skillContentResolver: _skillContentResolver,
+                finalOutputAdmissionPolicy:
+                    _finalOutputAdmissionPolicy,
+                tokenEstimator: _tokenEstimator,
+                metricsSink: _metricsSink,
+                metricsOptions: _metricsOptions);
             var result = new BuiltGameAgentRuntime(
                 runtime,
                 toolRegistry,
                 skillRegistry,
                 _store,
                 _ownsStore,
-                _ownedDisposables.ToArray());
+                _ownedDisposables.ToArray(),
+                _memoryLifecycle,
+                _ownsMemoryLifecycle);
 
             _store = null;
             _ledger = null;
             _ownsStore = false;
+            _memoryLifecycle = null;
+            _memoryPolicy = null;
+            _memoryOptions = null;
+            _ownsMemoryLifecycle = false;
             _ownedDisposables.Clear();
             Interlocked.Exchange(ref _finished, 1);
             return result;
@@ -291,7 +547,7 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         catch
         {
             Interlocked.Exchange(ref _finished, 1);
-            DisposeOwnedDisposables();
+            _ = DisposeAsync();
             throw;
         }
     }
@@ -299,10 +555,25 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         Task dispose;
+        TaskCompletionSource<bool>? launch = null;
         lock (_disposeSync)
         {
-            _disposeTask ??= DisposeCoreAsync();
+            if (_disposeTask is null
+                || (_disposeTask.IsCompleted
+                    && Volatile.Read(ref _disposeRetryRequired) != 0))
+            {
+                Volatile.Write(ref _disposeRetryRequired, 0);
+                launch = new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                _disposeTask = launch.Task;
+            }
             dispose = _disposeTask;
+        }
+
+        if (launch is not null)
+        {
+            ObserveDisposeFailure(dispose);
+            _ = CompleteSharedDisposeAsync(launch);
         }
 
         return new ValueTask(dispose);
@@ -311,6 +582,22 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     private async Task DisposeCoreAsync()
     {
         Interlocked.Exchange(ref _finished, 1);
+
+        if (_ownsMemoryLifecycle && _memoryLifecycle is not null)
+        {
+            try
+            {
+                await _memoryLifecycle
+                    .WaitForShutdownDrainAsync()
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                Volatile.Write(ref _disposeRetryRequired, 1);
+                throw;
+            }
+        }
+
         DisposeOwnedDisposables();
 
         if (_ownsStore && _store is not null)
@@ -328,6 +615,34 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         _store = null;
         _ledger = null;
         _ownsStore = false;
+        _memoryLifecycle = null;
+        _memoryPolicy = null;
+        _memoryOptions = null;
+        _ownsMemoryLifecycle = false;
+    }
+
+    private async Task CompleteSharedDisposeAsync(
+        TaskCompletionSource<bool> completion)
+    {
+        try
+        {
+            await DisposeCoreAsync().ConfigureAwait(false);
+            completion.TrySetResult(true);
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+    }
+
+    private static void ObserveDisposeFailure(Task dispose)
+    {
+        _ = dispose.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously
+            | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     private void DisposeOwnedDisposables()
@@ -361,6 +676,8 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
     private readonly IDurableSessionStore _store;
     private readonly bool _ownsStore;
     private readonly IReadOnlyList<IDisposable> _ownedDisposables;
+    private readonly RuntimeMemoryLifecycle? _memoryLifecycle;
+    private readonly bool _ownsMemoryLifecycle;
     private readonly object _shutdownSync = new();
     private int _shutdownRetryRequired;
     private Task? _shutdownTask;
@@ -371,7 +688,9 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         SkillCatalogRegistry skills,
         IDurableSessionStore store,
         bool ownsStore,
-        IReadOnlyList<IDisposable> ownedDisposables)
+        IReadOnlyList<IDisposable> ownedDisposables,
+        RuntimeMemoryLifecycle? memoryLifecycle,
+        bool ownsMemoryLifecycle)
     {
         Runtime = runtime;
         Tools = tools;
@@ -379,6 +698,8 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         _store = store;
         _ownsStore = ownsStore;
         _ownedDisposables = ownedDisposables;
+        _memoryLifecycle = memoryLifecycle;
+        _ownsMemoryLifecycle = ownsMemoryLifecycle;
     }
 
     public DurableAgentRuntime Runtime { get; }
@@ -389,9 +710,24 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
 
     public IDurableSessionStore SessionStore => _store;
 
+    public RuntimeMemoryLifecycle? Memory => _memoryLifecycle;
+
+    public bool OwnsMemoryLifecycle => _ownsMemoryLifecycle;
+
+    /// <summary>
+    /// Reports whether detached provider calls drained when an owned memory
+    /// lifecycle was stopped. Null means memory is external, not configured,
+    /// or shutdown has not completed.
+    /// </summary>
+    public bool? MemoryProviderCallsDrainedOnStop =>
+        _ownsMemoryLifecycle
+            ? _memoryLifecycle?.DetachedProviderCallsDrainedOnDispose
+            : null;
+
     public ValueTask StopAsync(CancellationToken cancellationToken = default)
     {
         Task shutdown;
+        TaskCompletionSource<bool>? launch = null;
         lock (_shutdownSync)
         {
             if (_shutdownTask is null
@@ -399,9 +735,17 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
                     && Volatile.Read(ref _shutdownRetryRequired) != 0))
             {
                 Volatile.Write(ref _shutdownRetryRequired, 0);
-                _shutdownTask = StopCoreAsync();
+                launch = new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                _shutdownTask = launch.Task;
             }
             shutdown = _shutdownTask;
+        }
+
+        if (launch is not null)
+        {
+            ObserveShutdownFailure(shutdown);
+            _ = CompleteSharedShutdownAsync(launch);
         }
 
         return cancellationToken.CanBeCanceled
@@ -416,7 +760,7 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         List<Exception>? errors = null;
         try
         {
-            await Runtime.StopAsync().ConfigureAwait(false);
+            await Runtime.WaitForShutdownDrainAsync().ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -431,6 +775,21 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         catch (Exception exception)
         {
             (errors ??= new List<Exception>()).Add(exception);
+        }
+
+        if (_ownsMemoryLifecycle && _memoryLifecycle is not null)
+        {
+            try
+            {
+                await _memoryLifecycle
+                    .WaitForShutdownDrainAsync()
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                Volatile.Write(ref _shutdownRetryRequired, 1);
+                throw;
+            }
         }
 
         foreach (var disposable in _ownedDisposables.Reverse())
@@ -470,6 +829,30 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         throw new AggregateException(
             "One or more runtime resources failed to shut down.",
             errors);
+    }
+
+    private async Task CompleteSharedShutdownAsync(
+        TaskCompletionSource<bool> completion)
+    {
+        try
+        {
+            await StopCoreAsync().ConfigureAwait(false);
+            completion.TrySetResult(true);
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+    }
+
+    private static void ObserveShutdownFailure(Task shutdown)
+    {
+        _ = shutdown.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously
+            | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     private static async Task WaitForShutdownAsync(

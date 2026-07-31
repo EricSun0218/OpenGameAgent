@@ -97,6 +97,30 @@ public sealed class RunControlMailbox : IDisposable
         }
     }
 
+    internal bool HasStepInterruptingCommand
+    {
+        get
+        {
+            lock (_sync)
+            {
+                for (var node = _commands.First;
+                     node is not null;
+                     node = node.Next)
+                {
+                    if (!string.Equals(
+                            node.Value.Command.Kind,
+                            RunControlKinds.FollowUp,
+                            StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
+    }
+
     public void Post(RunControlCommand command)
     {
         if (!TryPost(command))

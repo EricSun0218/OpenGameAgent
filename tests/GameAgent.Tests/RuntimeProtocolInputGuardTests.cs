@@ -479,7 +479,7 @@ public sealed class RuntimeProtocolInputGuardTests
             Trust = "trusted",
             Visibility = new VisibilityRule
             {
-                Scope = "audience",
+                Scope = ObservationVisibilityScopes.Agent,
                 AudienceIds = new List<string> { "agent-1" }
             },
             Priority = 9,

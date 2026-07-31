@@ -295,7 +295,9 @@ public sealed class JournalCoordinatorTests
                 await store.ReadRunAsync(run.RunId, default),
                 item => item.Kind == RuntimeEventKinds.ToolFailed
                         && item.EventId
-                            == "tool-result-event:operation-2:0");
+                            == RuntimeEventIdDerivation.Derive(
+                                run.RunId,
+                                "tool-result-event:operation-2:0"));
 
             var eventCount = (await store.ReadRunAsync(run.RunId, default))
                 .Count;
@@ -503,13 +505,13 @@ public sealed class JournalCoordinatorTests
             budgetSnapshot.Usage.OutputTokens = 23;
             budgetSnapshot.Usage.CostUsd = "0.125";
             budgetSnapshot.Usage.DurationMs = 4_321;
-            await journal.AppendDurableAsync(
+            await journal.AppendBuiltInDurableAsync(
                 run,
                 RuntimeEventKinds.BudgetUpdated,
                 ProtocolJson.ToElement(budgetSnapshot),
                 turnId: null,
                 attemptId: null);
-            await journal.AppendDurableAsync(
+            await journal.AppendBuiltInDurableAsync(
                 run,
                 RuntimeEventKinds.ToolStarted,
                 Json("""{"call":"later"}"""),
@@ -584,7 +586,10 @@ public sealed class JournalCoordinatorTests
                 Assert.DoesNotContain(
                     events,
                     item => item.Kind == RuntimeEventKinds.TranscriptMessage
-                            && item.EventId == "transcript:assistant-final");
+                            && item.EventId
+                                == RuntimeEventIdDerivation.Derive(
+                                    "run-1",
+                                    "transcript:assistant-final"));
                 Assert.DoesNotContain(
                     events,
                     item => item.Kind == RuntimeEventKinds.AssistantCompleted);
@@ -1069,11 +1074,33 @@ public sealed class JournalCoordinatorTests
                         }
                     },
                     clock.UtcNow);
-                await journal.AppendTranscriptAsync(
+                await journal.CommitRunMutationAsync(
+                    run,
+                    RuntimeEventKinds.ProviderDispatchStarted,
+                    _ => { },
+                    "turn-1",
+                    "attempt-1",
+                    default,
+                    eventId: "provider-dispatch:stream-1",
+                    streamAttemptId: "stream-1",
+                    providerId: "provider-1");
+                await journal.CommitRunMutationAsync(
+                    run,
+                    RuntimeEventKinds.BudgetUpdated,
+                    _ => { },
+                    "turn-1",
+                    "attempt-1",
+                    default,
+                    eventId: "provider-usage:stream-1",
+                    streamAttemptId: "stream-1",
+                    providerId: "provider-1");
+                await journal.CommitProviderResultAsync(
                     run,
                     assistant,
                     "turn-1",
+                    "provider-1",
                     "attempt-1",
+                    "stream-1",
                     default);
                 await journal.CommitTransitionAsync(
                     run,
@@ -1148,6 +1175,215 @@ public sealed class JournalCoordinatorTests
     }
 
     [Fact]
+    public void DerivedEventIdsAreBoundedStableAndCollisionResistant()
+    {
+        var runId = new string('r', 128);
+        var semanticId = new string('s', 128);
+        var candidate = "provider-result-committed:" + semanticId;
+
+        var derived = RuntimeEventIdDerivation.Derive(runId, candidate);
+
+        Assert.Equal(
+            derived,
+            RuntimeEventIdDerivation.Derive(runId, candidate));
+        Assert.StartsWith(
+            "provider-result-committed:sha256:",
+            derived,
+            StringComparison.Ordinal);
+        Assert.InRange(
+            derived.Length,
+            1,
+            RuntimeEventIdDerivation.MaximumLength);
+        Assert.Matches("^[A-Za-z0-9._:-]+$", derived);
+        Assert.Equal(64, derived[(derived.LastIndexOf(':') + 1)..].Length);
+        Assert.NotEqual(
+            derived,
+            RuntimeEventIdDerivation.Derive(
+                runId,
+                "provider-result-committed:"
+                + new string('s', 127)
+                + "t"));
+        Assert.NotEqual(
+            derived,
+            RuntimeEventIdDerivation.Derive(
+                new string('q', 128),
+                candidate));
+
+        var arbitrarySemanticId = RuntimeEventIdDerivation.Derive(
+            runId,
+            "transcript:消息/slot 1");
+        Assert.StartsWith(
+            "transcript:sha256:",
+            arbitrarySemanticId,
+            StringComparison.Ordinal);
+        Assert.Matches("^[A-Za-z0-9._:-]+$", arbitrarySemanticId);
+    }
+
+    [Fact]
+    public async Task LongActionRequestIdRemainsStableAcrossIdempotentReplay()
+    {
+        var directory = TempDirectory();
+        var path = Path.Combine(directory, "session.journal");
+        try
+        {
+            await using var store = new FileSessionStore(path);
+            var clock = new Clock();
+            var journal = new JournalCoordinator(
+                store,
+                store,
+                clock,
+                new Ids());
+            var run = Run();
+            var operationId = new string('o', 128);
+            var request = Request(
+                run,
+                operationId,
+                "call-1",
+                clock.UtcNow);
+
+            await journal.CommitRunStartAsync(
+                run,
+                Array.Empty<NormalizedMessage>(),
+                default);
+            await journal.AppendActionRequestAsync(
+                run,
+                request,
+                "attempt-1",
+                default);
+            var firstRevision = run.Revision;
+            await journal.AppendActionRequestAsync(
+                run,
+                request,
+                "attempt-retry",
+                default);
+
+            Assert.Equal(firstRevision, run.Revision);
+            var runtimeEvent = Assert.Single(
+                await store.ReadRunAsync(run.RunId, default),
+                item => item.Kind == RuntimeEventKinds.ActionRequested);
+            Assert.Equal(
+                RuntimeEventIdDerivation.Derive(
+                    run.RunId,
+                    "action-request:" + operationId),
+                runtimeEvent.EventId);
+            Assert.InRange(
+                runtimeEvent.EventId.Length,
+                1,
+                RuntimeEventIdDerivation.MaximumLength);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunScopedEventIdsAllowSharedMessageAndToolCallIds()
+    {
+        var directory = TempDirectory();
+        var path = Path.Combine(directory, "session.journal");
+        try
+        {
+            await using var store = new FileSessionStore(path);
+            var clock = new Clock();
+            var journal = new JournalCoordinator(
+                store,
+                store,
+                clock,
+                new Ids());
+            var firstRun = Run("run-1");
+            var secondRun = Run("run-2");
+            var sharedMessage = new NormalizedMessage
+            {
+                MessageId = "shared/message 消息",
+                Role = NormalizedRoles.User,
+                CreatedAt = clock.UtcNow,
+                Parts = new List<NormalizedContentPart>
+                {
+                    NormalizedContentPart.FromText("hello")
+                }
+            };
+
+            await journal.CommitRunStartAsync(
+                firstRun,
+                new[] { sharedMessage },
+                default);
+            await journal.CommitRunStartAsync(
+                secondRun,
+                new[] { sharedMessage },
+                default);
+
+            const string sharedToolCallId = "shared/tool call 工具";
+            await journal.AppendBuiltInDurableAsync(
+                firstRun,
+                RuntimeEventKinds.ToolStarted,
+                Json("""{"toolCallId":"shared"}"""),
+                "turn-1",
+                "attempt-1",
+                eventId: "tool-start:" + sharedToolCallId,
+                cancellationToken: default);
+            await journal.AppendBuiltInDurableAsync(
+                secondRun,
+                RuntimeEventKinds.ToolStarted,
+                Json("""{"toolCallId":"shared"}"""),
+                "turn-1",
+                "attempt-1",
+                eventId: "tool-start:" + sharedToolCallId,
+                cancellationToken: default);
+
+            var firstEvents = await store.ReadRunAsync(
+                firstRun.RunId,
+                default);
+            var secondEvents = await store.ReadRunAsync(
+                secondRun.RunId,
+                default);
+            var firstTranscript = Assert.Single(
+                firstEvents,
+                item => item.Kind == RuntimeEventKinds.TranscriptMessage);
+            var secondTranscript = Assert.Single(
+                secondEvents,
+                item => item.Kind == RuntimeEventKinds.TranscriptMessage);
+            var firstTool = Assert.Single(
+                firstEvents,
+                item => item.Kind == RuntimeEventKinds.ToolStarted);
+            var secondTool = Assert.Single(
+                secondEvents,
+                item => item.Kind == RuntimeEventKinds.ToolStarted);
+
+            Assert.NotEqual(firstTranscript.EventId, secondTranscript.EventId);
+            Assert.NotEqual(firstTool.EventId, secondTool.EventId);
+            Assert.StartsWith(
+                "transcript:sha256:",
+                firstTranscript.EventId,
+                StringComparison.Ordinal);
+            Assert.StartsWith(
+                "tool-start:sha256:",
+                firstTool.EventId,
+                StringComparison.Ordinal);
+            Assert.All(
+                new[]
+                {
+                    firstTranscript.EventId,
+                    secondTranscript.EventId,
+                    firstTool.EventId,
+                    secondTool.EventId
+                },
+                eventId =>
+                {
+                    Assert.InRange(
+                        eventId.Length,
+                        1,
+                        RuntimeEventIdDerivation.MaximumLength);
+                    Assert.Matches("^[A-Za-z0-9._:-]+$", eventId);
+                });
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void BoundedBusDropsIncomingNotificationWithoutBlockingPublisher()
     {
         using var bus = new BoundedRuntimeEventBus(capacity: 2);
@@ -1178,11 +1414,11 @@ public sealed class JournalCoordinatorTests
             () => NormalizedMessageJournalCodec.Decode(invalid));
     }
 
-    private static AgentRun Run()
+    private static AgentRun Run(string runId = "run-1")
     {
         return new AgentRun
         {
-            RunId = "run-1",
+            RunId = runId,
             AgentId = "agent-1",
             WorldId = "world-1",
             SessionId = "session-1",

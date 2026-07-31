@@ -88,6 +88,128 @@ function Get-RequiredMatch {
     return $matches[0].Groups['version'].Value
 }
 
+function Get-WorkflowReleaseVersionDeclarations {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $pattern = @'
+(?m)(?:^[ \t? -]*|[{,][ \t]*)(?:"RELEASE_VERSION"|'RELEASE_VERSION'|RELEASE_VERSION)[ \t]*:[ \t]*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<plain>[^#,\s}\r\n]+))
+'@.Trim()
+    foreach ($match in [regex]::Matches(
+            $Text.Replace("`r`n", "`n"),
+            $pattern)) {
+        $version = if ($match.Groups['double'].Success) {
+            $match.Groups['double'].Value
+        }
+        elseif ($match.Groups['single'].Success) {
+            $match.Groups['single'].Value
+        }
+        else {
+            $match.Groups['plain'].Value
+        }
+
+        [pscustomobject]@{
+            Index = $match.Index
+            Version = $version
+        }
+    }
+}
+
+function Assert-LiteralWorkflowReleaseVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Text,
+
+        [Parameter(Mandatory)]
+        [string]$Label
+    )
+
+    $declarations = @(
+        Get-WorkflowReleaseVersionDeclarations -Text $Text)
+    if ($declarations.Count -ne 1) {
+        throw "$Label must contain exactly one RELEASE_VERSION mapping."
+    }
+
+    $canonicalVersion = Get-RequiredMatch `
+        -Text $Text `
+        -Pattern '^[ ]{2}RELEASE_VERSION:[ ]*["'']?(?<version>[^"''\s#]+)["'']?[ ]*(?:#.*)?$' `
+        -Label $Label
+    if (-not [string]::Equals(
+            $declarations[0].Version,
+            $canonicalVersion,
+            [StringComparison]::Ordinal)) {
+        throw "$Label contains a non-canonical RELEASE_VERSION mapping."
+    }
+    Assert-ReleaseVersion $Label $canonicalVersion
+}
+
+function Assert-TrustedWorkflowReleaseVersionFlow {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $normalized = $Text.Replace("`r`n", "`n")
+    $expression = '${{ needs.source_privacy.outputs.release_version }}'
+    $expectedJobs = @(
+        'quality',
+        'godot',
+        'privacy',
+        'validate_nuget',
+        'validate_unity',
+        'validate_godot')
+    $declarations = @(
+        Get-WorkflowReleaseVersionDeclarations -Text $normalized)
+    if ($declarations.Count -ne $expectedJobs.Count -or
+        @($declarations | Where-Object {
+                -not [string]::Equals(
+                    $_.Version,
+                    $expression,
+                    [StringComparison]::Ordinal)
+            }).Count -ne 0) {
+        throw (
+            'The trusted release gate must derive every RELEASE_VERSION ' +
+            'mapping from the validated candidate output.')
+    }
+
+    foreach ($job in $expectedJobs) {
+        $jobMatch = [regex]::Match(
+            $normalized,
+            '(?ms)^  ' + [regex]::Escape($job) +
+                ':[ \t]*\n(?<body>.*?)(?=^  [A-Za-z0-9_-]+:[ \t]*$|\z)')
+        if (-not $jobMatch.Success) {
+            throw "The trusted release gate is missing the '$job' job."
+        }
+
+        $body = $jobMatch.Groups['body'].Value
+        if ($body -notmatch '(?m)^      - source_privacy[ \t]*$' -or
+            $body -notmatch (
+                '(?m)^      RELEASE_VERSION:[ \t]*"' +
+                [regex]::Escape($expression) +
+                '"[ \t]*$')) {
+            throw (
+                "Trusted job '$job' must depend on source_privacy and " +
+                'consume its exact release_version output.')
+        }
+    }
+
+    $sourcePrivacyMatch = [regex]::Match(
+        $normalized,
+        '(?ms)^  source_privacy:[ \t]*\n(?<body>.*?)(?=^  [A-Za-z0-9_-]+:[ \t]*$|\z)')
+    if (-not $sourcePrivacyMatch.Success -or
+        $sourcePrivacyMatch.Groups['body'].Value -notmatch (
+            '(?m)^      release_version:[ \t]*' +
+            [regex]::Escape(
+                '${{ steps.release.outputs.release_version }}') +
+            '[ \t]*$') -or
+        $sourcePrivacyMatch.Groups['body'].Value -notmatch
+            '(?m)^        id:[ \t]*release[ \t]*$') {
+        throw (
+            'The trusted source_privacy job must expose the validated ' +
+            'release_version output from its release step.')
+    }
+
+    if ($normalized -match '(?i)\$env:RELEASE_VERSION[ \t]*=') {
+        throw 'The trusted release gate must not assign RELEASE_VERSION at runtime.'
+    }
+}
+
 function Get-FirstMatch {
     param(
         [Parameter(Mandatory)]
@@ -263,10 +385,13 @@ catch {
 }
 Assert-ReleaseVersion 'Godot package default' $godotPackageVersion
 
-$ciVersion = Get-RequiredMatch `
-    -Text (Read-RequiredText '.github\workflows\ci.yml') `
-    -Pattern '^[ ]{2}RELEASE_VERSION:[ ]*["'']?(?<version>[^"''\s#]+)["'']?[ ]*(?:#.*)?$' `
+$ciWorkflowText = Read-RequiredText '.github\workflows\ci.yml'
+Assert-LiteralWorkflowReleaseVersion `
+    -Text $ciWorkflowText `
     -Label 'CI release artifact'
-Assert-ReleaseVersion 'CI release artifact' $ciVersion
+
+$trustedWorkflowText = Read-RequiredText (
+    '.github\workflows\trusted-source-privacy.yml')
+Assert-TrustedWorkflowReleaseVersionFlow -Text $trustedWorkflowText
 
 Write-Output "RELEASE_VERSION_CONSISTENCY_PASS version=$expectedVersion"

@@ -160,7 +160,7 @@ public sealed class ToolDisclosureDecision
     private ToolDisclosureDecision(bool allowed, string reasonCode)
     {
         Allowed = allowed;
-        ReasonCode = RuntimeGuard.RequiredId(
+        ReasonCode = RuntimeGuard.RequiredReasonCode(
             reasonCode,
             nameof(reasonCode));
     }
@@ -320,6 +320,21 @@ internal sealed class ToolDisclosurePlan
 {
     private const string ModelOrigin = "model";
     private const string SkillOriginPrefix = "skill:";
+    private const int MaxSearchDocuments = 4_096;
+    private const int MaxSearchQueryTerms = 256;
+    private const int MaxParameterNames = 512;
+    private const int MaxParameterNameUtf8Bytes = 32_768;
+    private const int MaxParameterSchemaNodes = 8_192;
+    private static readonly DeterministicUnicodeTokenizer
+        ToolDocumentTokenizer = new(
+            new DeterministicUnicodeTokenizerLimits(
+                maxInputUtf8Bytes: 262_144,
+                maxTextSegments: 1_024,
+                maxTerms: 16_384,
+                maxUniqueTerms: 8_192,
+                maxTermUtf8Bytes: 1_024));
+    private static readonly DeterministicBm25Scorer ToolSearchScorer =
+        new(k1: 1.2, scoreScale: 1_000, maxFieldsPerTerm: 4);
     private readonly ToolCatalogSnapshot _snapshot;
     private readonly ToolDisclosureLimits _limits;
     private readonly IReadOnlyDictionary<string, ToolDisclosurePolicyResult>
@@ -486,12 +501,88 @@ internal sealed class ToolDisclosurePlan
         int limit)
     {
         var normalizedQuery = Normalize(query);
-        var queryTokens = Tokenize(normalizedQuery);
-        return SearchableHiddenTools
+        var queryTokenizer = new DeterministicUnicodeTokenizer(
+            new DeterministicUnicodeTokenizerLimits(
+                _limits.MaxSearchQueryUtf8Bytes,
+                maxTextSegments: 1,
+                maxTerms: 32_768,
+                maxUniqueTerms: 16_384,
+                maxTermUtf8Bytes: 1_024));
+        IReadOnlyList<string> tokenOccurrences;
+        try
+        {
+            tokenOccurrences = queryTokenizer.Tokenize(normalizedQuery);
+        }
+        catch (LexicalSearchLimitException)
+        {
+            // Exact and substring boosts remain available for a valid,
+            // byte-bounded query containing an overlong lexical term.
+            tokenOccurrences = Array.Empty<string>();
+        }
+
+        var queryTerms = tokenOccurrences
+            .Distinct(StringComparer.Ordinal)
+            .Take(MaxSearchQueryTerms)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        var documents = SearchableHiddenTools
+            .Take(MaxSearchDocuments)
+            .Select(CreateSearchDocument)
+            .ToArray();
+        if (documents.Length == 0)
+        {
+            return Array.Empty<ToolDisclosureSearchHit>();
+        }
+
+        var documentFrequencies = new Dictionary<string, int>(
+            StringComparer.Ordinal);
+        long totalNameTerms = 0;
+        long totalDescriptionTerms = 0;
+        long totalToolsetTerms = 0;
+        long totalParameterTerms = 0;
+        foreach (var document in documents)
+        {
+            totalNameTerms += document.Name.TermCount;
+            totalDescriptionTerms += document.Description.TermCount;
+            totalToolsetTerms += document.Toolset.TermCount;
+            totalParameterTerms += document.Parameters.TermCount;
+            var unique = new HashSet<string>(
+                document.Name.Frequencies.Keys,
+                StringComparer.Ordinal);
+            unique.UnionWith(document.Description.Frequencies.Keys);
+            unique.UnionWith(document.Toolset.Frequencies.Keys);
+            unique.UnionWith(document.Parameters.Frequencies.Keys);
+            foreach (var term in unique)
+            {
+                documentFrequencies[term] =
+                    documentFrequencies.TryGetValue(
+                        term,
+                        out var frequency)
+                        ? checked(frequency + 1)
+                        : 1;
+            }
+        }
+
+        var averages = new[]
+        {
+            Math.Max(1.0, totalNameTerms / (double)documents.Length),
+            Math.Max(
+                1.0,
+                totalDescriptionTerms / (double)documents.Length),
+            Math.Max(1.0, totalToolsetTerms / (double)documents.Length),
+            Math.Max(1.0, totalParameterTerms / (double)documents.Length)
+        };
+        return documents
             .Select(
-                tool => new ToolDisclosureSearchHit(
-                    tool,
-                    Score(tool, normalizedQuery, queryTokens)))
+                document => new ToolDisclosureSearchHit(
+                    document.Tool,
+                    Score(
+                        document,
+                        normalizedQuery,
+                        queryTerms,
+                        documentFrequencies,
+                        averages,
+                        documents.Length)))
             .Where(hit => hit.Score > 0)
             .OrderByDescending(hit => hit.Score)
             .ThenBy(hit => hit.Tool.Name, StringComparer.Ordinal)
@@ -920,19 +1011,19 @@ internal sealed class ToolDisclosurePlan
     }
 
     private static int Score(
-        ToolCatalogEntry tool,
+        ToolSearchDocument document,
         string normalizedQuery,
-        IReadOnlyCollection<string> queryTokens)
+        IReadOnlyList<string> queryTerms,
+        IReadOnlyDictionary<string, int> documentFrequencies,
+        IReadOnlyList<double> averageFieldLengths,
+        int documentCount)
     {
+        var tool = document.Tool;
         var reference = Normalize(tool.Name + "@" + tool.Version);
         var name = Normalize(tool.Name);
         var description = Normalize(tool.Description);
         var source = Normalize(tool.Toolset);
-        var combined = name + " " + description + " " + source;
-        var candidateTokens = new HashSet<string>(
-            Tokenize(combined),
-            StringComparer.Ordinal);
-        var score = 0;
+        var score = 0L;
         if (string.Equals(
                 normalizedQuery,
                 reference,
@@ -942,39 +1033,77 @@ internal sealed class ToolDisclosurePlan
                 name,
                 StringComparison.Ordinal))
         {
-            score += 100_000;
+            score += 10_000_000;
         }
 
         if (name.Contains(normalizedQuery, StringComparison.Ordinal))
         {
-            score += 20_000;
+            score += 2_000_000;
         }
 
         if (description.Contains(
                 normalizedQuery,
                 StringComparison.Ordinal))
         {
-            score += 8_000;
+            score += 800_000;
         }
 
         if (source.Contains(normalizedQuery, StringComparison.Ordinal))
         {
-            score += 4_000;
+            score += 400_000;
         }
 
-        foreach (var token in queryTokens)
+        foreach (var term in queryTerms)
         {
-            if (candidateTokens.Contains(token))
+            var nameFrequency = Frequency(document.Name, term);
+            var descriptionFrequency = Frequency(
+                document.Description,
+                term);
+            var toolsetFrequency = Frequency(document.Toolset, term);
+            var parameterFrequency = Frequency(document.Parameters, term);
+            if (nameFrequency == 0
+                && descriptionFrequency == 0
+                && toolsetFrequency == 0
+                && parameterFrequency == 0)
             {
-                score += 1_000;
+                continue;
             }
-            else if (combined.Contains(token, StringComparison.Ordinal))
-            {
-                score += 250;
-            }
+
+            score += ToolSearchScorer.ScoreTerm(
+                documentCount,
+                documentFrequencies[term],
+                new[]
+                {
+                    new Bm25FieldMatch(
+                        nameFrequency,
+                        document.Name.TermCount,
+                        averageFieldLengths[0],
+                        weight: 8,
+                        lengthNormalization: 0.2),
+                    new Bm25FieldMatch(
+                        descriptionFrequency,
+                        document.Description.TermCount,
+                        averageFieldLengths[1],
+                        weight: 1,
+                        lengthNormalization: 0.75),
+                    new Bm25FieldMatch(
+                        toolsetFrequency,
+                        document.Toolset.TermCount,
+                        averageFieldLengths[2],
+                        weight: 3,
+                        lengthNormalization: 0.25),
+                    new Bm25FieldMatch(
+                        parameterFrequency,
+                        document.Parameters.TermCount,
+                        averageFieldLengths[3],
+                        weight: 2,
+                        lengthNormalization: 0.5)
+                });
         }
 
-        return score;
+        return score >= int.MaxValue
+            ? int.MaxValue
+            : checked((int)score);
     }
 
     private static string Normalize(string value)
@@ -982,32 +1111,223 @@ internal sealed class ToolDisclosurePlan
         return value.Normalize(NormalizationForm.FormKC).ToLowerInvariant();
     }
 
-    private static IReadOnlyList<string> Tokenize(string value)
+    private static int Frequency(TokenizedTerms field, string term)
     {
-        var tokens = new List<string>();
-        var current = new StringBuilder();
-        foreach (var character in value)
+        return field.Frequencies.TryGetValue(term, out var frequency)
+            ? frequency
+            : 0;
+    }
+
+    private static ToolSearchDocument CreateSearchDocument(
+        ToolCatalogEntry tool)
+    {
+        return new ToolSearchDocument(
+            tool,
+            TokenizeToolField(new[] { tool.Name }),
+            TokenizeToolField(new[] { tool.Description }),
+            TokenizeToolField(new[] { tool.Toolset }),
+            TokenizeToolField(ParameterNames(tool.ParametersSchema)));
+    }
+
+    private static TokenizedTerms TokenizeToolField(
+        IEnumerable<string> values)
+    {
+        try
         {
-            if (char.IsLetterOrDigit(character))
-            {
-                current.Append(character);
-            }
-            else if (current.Length > 0)
-            {
-                tokens.Add(current.ToString());
-                current.Clear();
-            }
+            return ToolDocumentTokenizer.TokenizeTextSegments(
+                values,
+                "tool");
+        }
+        catch (LexicalSearchLimitException)
+        {
+            return new TokenizedTerms(
+                new Dictionary<string, int>(StringComparer.Ordinal),
+                termCount: 0,
+                inputUtf8Bytes: 0);
+        }
+    }
+
+    private static IReadOnlyList<string> ParameterNames(JsonElement schema)
+    {
+        var names = new List<string>();
+        var utf8Bytes = 0;
+        var nodes = 0;
+        CollectParameterNames(
+            schema,
+            names,
+            ref utf8Bytes,
+            ref nodes,
+            depth: 0);
+        return names;
+    }
+
+    private static void CollectParameterNames(
+        JsonElement value,
+        ICollection<string> names,
+        ref int utf8Bytes,
+        ref int nodes,
+        int depth)
+    {
+        if (depth > 64
+            || nodes >= MaxParameterSchemaNodes
+            || names.Count >= MaxParameterNames)
+        {
+            return;
         }
 
-        if (current.Length > 0)
+        nodes++;
+        if (value.ValueKind == JsonValueKind.Object)
         {
-            tokens.Add(current.ToString());
+            foreach (var property in value.EnumerateObject())
+            {
+                if (names.Count >= MaxParameterNames
+                    || nodes >= MaxParameterSchemaNodes)
+                {
+                    return;
+                }
+
+                if (string.Equals(
+                        property.Name,
+                        "properties",
+                        StringComparison.Ordinal)
+                    && property.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var parameter in
+                             property.Value.EnumerateObject())
+                    {
+                        if (!TryAddParameterName(
+                                parameter.Name,
+                                names,
+                                ref utf8Bytes))
+                        {
+                            return;
+                        }
+
+                        var expanded = ExpandIdentifier(
+                            parameter.Name);
+                        if (!string.Equals(
+                                expanded,
+                                parameter.Name,
+                                StringComparison.Ordinal)
+                            && !TryAddParameterName(
+                                expanded,
+                                names,
+                                ref utf8Bytes))
+                        {
+                            return;
+                        }
+
+                        CollectParameterNames(
+                            parameter.Value,
+                            names,
+                            ref utf8Bytes,
+                            ref nodes,
+                            depth + 1);
+                    }
+
+                    continue;
+                }
+
+                CollectParameterNames(
+                    property.Value,
+                    names,
+                    ref utf8Bytes,
+                    ref nodes,
+                    depth + 1);
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in value.EnumerateArray())
+            {
+                CollectParameterNames(
+                    item,
+                    names,
+                    ref utf8Bytes,
+                    ref nodes,
+                    depth + 1);
+            }
+        }
+    }
+
+    private static bool TryAddParameterName(
+        string value,
+        ICollection<string> names,
+        ref int utf8Bytes)
+    {
+        if (names.Count >= MaxParameterNames)
+        {
+            return false;
         }
 
-        return tokens
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(token => token, StringComparer.Ordinal)
-            .ToArray();
+        var bytes = Encoding.UTF8.GetByteCount(value);
+        if (utf8Bytes > MaxParameterNameUtf8Bytes - bytes)
+        {
+            return false;
+        }
+
+        names.Add(value);
+        utf8Bytes += bytes;
+        return true;
+    }
+
+    private static string ExpandIdentifier(string value)
+    {
+        var expanded = new StringBuilder(value.Length + 8);
+        for (var index = 0; index < value.Length; index++)
+        {
+            var current = value[index];
+            if (index > 0)
+            {
+                var previous = value[index - 1];
+                var nextIsLower =
+                    index + 1 < value.Length
+                    && char.IsLower(value[index + 1]);
+                var caseBoundary =
+                    char.IsUpper(current)
+                    && (char.IsLower(previous)
+                        || char.IsUpper(previous) && nextIsLower);
+                var digitBoundary =
+                    char.IsDigit(current) != char.IsDigit(previous)
+                    && (char.IsLetterOrDigit(current)
+                        && char.IsLetterOrDigit(previous));
+                if (caseBoundary || digitBoundary)
+                {
+                    expanded.Append(' ');
+                }
+            }
+
+            expanded.Append(current);
+        }
+
+        return expanded.ToString();
+    }
+
+    private sealed class ToolSearchDocument
+    {
+        public ToolSearchDocument(
+            ToolCatalogEntry tool,
+            TokenizedTerms name,
+            TokenizedTerms description,
+            TokenizedTerms toolset,
+            TokenizedTerms parameters)
+        {
+            Tool = tool;
+            Name = name;
+            Description = description;
+            Toolset = toolset;
+            Parameters = parameters;
+        }
+
+        public ToolCatalogEntry Tool { get; }
+
+        public TokenizedTerms Name { get; }
+
+        public TokenizedTerms Description { get; }
+
+        public TokenizedTerms Toolset { get; }
+
+        public TokenizedTerms Parameters { get; }
     }
 
     private static ToolDescriptor CreateSearchDescriptor(

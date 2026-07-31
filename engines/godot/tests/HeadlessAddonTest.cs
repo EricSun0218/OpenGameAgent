@@ -41,13 +41,17 @@ public partial class HeadlessAddonTest : global::Godot.Node
         var runtime = GetNode<GameAgentRuntimeNode>("/root/GameAgentRuntime");
         Assert(runtime.IsInsideTree(), "Autoload did not enter the SceneTree.");
         VerifyBoundSurface(runtime);
+        VerifyResultingGameContextReceiptRoundTrip();
 
         await VerifyDispatcherBoundsAsync(runtime);
         await VerifyNodeWaitsForStartedActionHandlersAsync();
         await VerifyFacadeErrorAsync(runtime);
-        VerifyEventPumpBounds();
+        await VerifyEventPumpBoundsAsync();
+        VerifyMultiActorUncertaintyErrorSurface();
         await VerifyDurableShutdownOrderAsync();
         await VerifyTypedContinuationSnapshotAsync();
+        await VerifyVariantDurableOptionsAsync();
+        await VerifyVariantMultiActorAsync();
         await VerifyBackendWaitsForRuntimeBeforeFlushAsync();
         await VerifyBackendWaitCancellationDoesNotPoisonShutdownAsync();
         await VerifyShutdownWaitCleansTimeoutOwnershipAsync();
@@ -64,6 +68,8 @@ public partial class HeadlessAddonTest : global::Godot.Node
 
         var fixture = SampleRuntimeFactory.Configure(runtime);
         VerifyGodotJsonNumberCompatibility(fixture);
+        VerifyHeadlessMapperCollectionBounds(fixture);
+        VerifyVariantIngressBounds(fixture);
         runtime.RuntimeEventPublished += OnRuntimeEvent;
         runtime.RunCompleted += OnRunCompleted;
         runtime.RunFailed += OnRunFailed;
@@ -85,6 +91,46 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             fixture.Store.IsDisposed,
             "Owned durable store was not disposed during shutdown.");
+    }
+
+    private static void VerifyResultingGameContextReceiptRoundTrip()
+    {
+        var receipt = new ActionReceipt
+        {
+            OperationId = "godot-coordinate-operation",
+            Revision = 1,
+            Status = ReceiptStatuses.Succeeded,
+            ReceivedAt = DateTimeOffset.UnixEpoch,
+            CommittedAt = DateTimeOffset.UnixEpoch
+        };
+        GameContextReceiptEnvelope.AttachResulting(
+            receipt,
+            new GameContextCoordinate(
+                "world-1",
+                "timeline-1",
+                2,
+                new GameEntityIdentity("npc-1", 5),
+                stateVersion: "state-2",
+                gameTime: new GameTimePoint(
+                    "world-clock",
+                    "timeline-1",
+                    2,
+                    40),
+                sessionId: "session-1"));
+
+        var restored = GodotProtocolVariantMapper.ToActionReceipt(
+            GodotProtocolVariantMapper.ToDictionary(receipt));
+
+        Assert(
+            GameContextReceiptEnvelope.TryReadResulting(
+                restored,
+                out var coordinate)
+            && coordinate!.StateVersion == "state-2"
+            && coordinate.SessionId == "session-1"
+            && coordinate.Observer!.EntityId == "npc-1"
+            && coordinate.Observer.Incarnation == 5,
+            "Godot receipt mapping lost the resulting game-context "
+            + "extension.");
     }
 
     private async Task VerifyNodeRejectsReentryAsync()
@@ -125,7 +171,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
         {
             "start_run",
             "start_agent_run",
+            "start_agent_run_with_options",
             "resume_agent_run",
+            "resume_agent_run_with_options",
+            "start_agent_batch",
+            "resume_agent_batch_participant",
+            "abandon_agent_batch_participant",
             "cancel_run",
             "interrupt_run",
             "steer_run",
@@ -141,6 +192,50 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             runtime.HasSignal(GameAgentRuntimeNode.SignalName.RunCompleted),
             "run_completed signal was not bound.");
+        Assert(
+            runtime.HasSignal(GameAgentRuntimeNode.SignalName.BatchCompleted)
+            && runtime.HasSignal(
+                GameAgentRuntimeNode.SignalName.BatchParticipantCompleted)
+            && runtime.HasSignal(GameAgentRuntimeNode.SignalName.BatchFailed)
+            && runtime.HasSignal(GameAgentRuntimeNode.SignalName.BatchStarted)
+            && runtime.HasSignal(GameAgentRuntimeNode.SignalName.ActorFinished)
+            && runtime.HasSignal(GameAgentRuntimeNode.SignalName.BatchAborted),
+            "Multi-actor lifecycle or completion signals were not bound.");
+    }
+
+    private static void VerifyMultiActorUncertaintyErrorSurface()
+    {
+        var error = GameAgentRuntimeNode.ToErrorDictionary(
+            new GodotEventMessage
+            {
+                RequestId = "request-uncertain",
+                Code = "batch_execution_uncertain",
+                Category = "reconciliation",
+                Message = "The lifecycle result is uncertain.",
+                ReconciliationRequired = true,
+                Phase = "participant_execution",
+                BatchId = "batch-7",
+                ParticipantRunId = "run-2",
+                ParticipantAgentId = "npc-2",
+                ParticipantDecisionKey = "decision-2",
+                ParticipantInputIndex = 2,
+                AffectedRunIds = new[] { "run-2", "run-3" }
+            });
+        var affected = error["affected_run_ids"].AsGodotArray();
+
+        Assert(
+            error["reconciliation_required"].AsBool()
+            && error["phase"].AsString() == "participant_execution"
+            && error["batch_id"].AsString() == "batch-7"
+            && error["participant_run_id"].AsString() == "run-2"
+            && error["participant_agent_id"].AsString() == "npc-2"
+            && error["participant_decision_key"].AsString()
+                == "decision-2"
+            && error["participant_input_index"].AsInt32() == 2
+            && affected.Count == 2
+            && affected[0].AsString() == "run-2"
+            && affected[1].AsString() == "run-3",
+            "Multi-actor uncertainty lost its reconciliation identity.");
     }
 
     private async Task VerifyDurableToolLoopAsync(
@@ -675,36 +770,45 @@ public partial class HeadlessAddonTest : global::Godot.Node
         }
     }
 
-    private static void VerifyEventPumpBounds()
+    private static async Task VerifyEventPumpBoundsAsync()
     {
-        var pump = new GodotEventPump(2);
-        Assert(
-            pump.TryPublish(new GodotEventMessage
+        var sink = new MetricsSink();
+        var metrics = new RuntimeMetricsEmitter(sink);
+        var pump = new GodotEventPump(2, metrics);
+        for (var index = 0; index < 1_000; index++)
+        {
+            var accepted = pump.TryPublish(new GodotEventMessage
             {
                 Kind = GodotEventKinds.RuntimeStarted
-            }),
-            "Event pump rejected its first event.");
-        Assert(
-            pump.TryPublish(new GodotEventMessage
-            {
-                Kind = GodotEventKinds.RuntimeStarted
-            }),
-            "Event pump rejected an event below capacity.");
-        Assert(
-            !pump.TryPublish(new GodotEventMessage
-            {
-                Kind = GodotEventKinds.RuntimeStarted
-            }),
-            "Event pump exceeded its configured capacity.");
+            });
+            Assert(
+                accepted == (index < 2),
+                "Event pump did not enforce its configured flood bound.");
+        }
 
         var messages = new List<GodotEventMessage>();
         pump.Drain(3, TimeSpan.FromMilliseconds(10), messages.Add);
         Assert(messages.Count == 3, "Event pump did not report and drain overflow.");
         Assert(
             messages[0].Kind == GodotEventKinds.PumpOverflow
-            && messages[0].Count == 1,
+            && messages[0].Count == 998,
             "Event pump did not coalesce overflow diagnostics.");
         pump.StopAccepting();
+        Assert(
+            await metrics.StopAsync(),
+            "Event-pump metrics did not drain.");
+        Assert(
+            sink.Records.Any(
+                item => item.Name == RuntimeMetricNames.EventPumpDropped
+                        && item.Value == 998
+                        && item.Dimensions.Engine == "godot"),
+            "Event-pump drop metrics were not emitted.");
+        Assert(
+            sink.Records.Count(
+                item => item.Name
+                        == RuntimeMetricNames
+                            .EventPumpDispatchLatencyMilliseconds) == 2,
+            "Event-pump latency metrics did not cover dispatched events.");
     }
 
     private static async Task VerifyDurableShutdownOrderAsync()
@@ -795,7 +899,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
             {
                 ActiveSkills = Array.Empty<SkillReference>(),
                 ReplaceActiveSkills = true,
-                LaneId = "continuation-snapshot-lane"
+                LaneId = "continuation-snapshot-lane",
+                WorkloadClass = ProviderWorkloadClasses.Background,
+                RequestCancellation = true
             });
         var captured = await runtime.ContinuationReceived
             .WaitAsync(TimeSpan.FromSeconds(2));
@@ -810,6 +916,820 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             captured.LaneId == "continuation-snapshot-lane",
             "Godot changed the typed continuation lane.");
+        Assert(
+            captured.WorkloadClass == ProviderWorkloadClasses.Background,
+            "Godot dropped the typed continuation workload class.");
+        Assert(
+            captured.RequestCancellation,
+            "Godot dropped the typed durable-cancellation request.");
+
+        await node.Typed.StopAsync(
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        node.QueueFree();
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+    }
+
+    private async Task VerifyVariantDurableOptionsAsync()
+    {
+        var tree = GetTree();
+        var captureRuntime = new ContinuationCaptureRuntime();
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "VariantDurableOptionsRuntime"
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.ConfigureDurable(
+            captureRuntime,
+            new LifecycleStore(new List<string>(), failFlush: false));
+
+        var now = DateTimeOffset.Parse(
+            "2026-07-30T00:00:00Z",
+            System.Globalization.CultureInfo.InvariantCulture);
+        var run = SampleRuntimeFactory.CreateRun(
+            "variant-options-run",
+            "variant-options-world",
+            now);
+        var startOptions = global::Godot.Json.ParseString(
+            """
+            {
+              "active_skills": [
+                {
+                  "skill_id": "npc-navigation",
+                  "version": "1"
+                }
+              ],
+              "workload_class": "background",
+              "lane_id": "npc-background-lane",
+              "initial_transcript": [
+                {
+                  "messageId": "seed-1",
+                  "role": "user",
+                  "createdAt": "2026-07-30T00:00:00Z",
+                  "parts": [
+                    {
+                      "type": "json",
+                      "json": {
+                        "goal": "patrol"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+            """).AsGodotDictionary();
+        var startRequestId = node.start_agent_run_with_options(
+            GodotProtocolVariantMapper.ToDictionary(run),
+            new GodotArray(),
+            startOptions);
+        Assert(
+            !string.IsNullOrWhiteSpace(startRequestId),
+            "The advanced GDScript start surface rejected valid options.");
+
+        var request = await captureRuntime.RequestReceived
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            request.ActiveSkills.Count == 1
+            && request.ActiveSkills[0].Value == "npc-navigation@1",
+            "The advanced GDScript start surface lost active skills.");
+        Assert(
+            request.WorkloadClass == ProviderWorkloadClasses.Background,
+            "The advanced GDScript start surface lost workload class.");
+        Assert(
+            request.LaneId == "npc-background-lane",
+            "The advanced GDScript start surface lost lane id.");
+        Assert(
+            request.InitialTranscript.Count == 1
+            && request.InitialTranscript[0].MessageId == "seed-1",
+            "The advanced GDScript start surface lost the initial transcript.");
+
+        var resumeOptions = global::Godot.Json.ParseString(
+            """
+            {
+              "context": [
+                {
+                  "id": "continued-state",
+                  "category": "state",
+                  "content": {
+                    "danger": 7
+                  },
+                  "priority": 30,
+                  "required": true,
+                  "can_defer": false,
+                  "estimated_tokens": 8,
+                  "expires_at": "2026-07-30T01:00:00Z",
+                  "provenance": "trusted-host"
+                }
+              ],
+              "active_skills": [
+                {
+                  "skill_id": "npc-combat",
+                  "version": "2"
+                }
+              ],
+              "replace_active_skills": true,
+              "lane_id": "npc-urgent-lane",
+              "workload_class": "interactive"
+            }
+            """).AsGodotDictionary();
+        var resumeRequestId = node.resume_agent_run_with_options(
+            "variant-options-run",
+            resumeOptions);
+        Assert(
+            !string.IsNullOrWhiteSpace(resumeRequestId),
+            "The advanced GDScript resume surface rejected valid options.");
+
+        var continuation = await captureRuntime.ContinuationReceived
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            continuation is not null
+            && continuation.Context.Count == 1
+            && continuation.Context[0].Id == "continued-state"
+            && continuation.Context[0].Required
+            && !continuation.Context[0].CanDefer,
+            "The advanced GDScript resume surface lost continuation context.");
+        Assert(
+            continuation!.ActiveSkills.Count == 1
+            && continuation.ActiveSkills[0].Value == "npc-combat@2"
+            && continuation.ReplaceActiveSkills,
+            "The advanced GDScript resume surface lost skill replacement.");
+        Assert(
+            continuation.LaneId == "npc-urgent-lane"
+            && continuation.WorkloadClass
+                == ProviderWorkloadClasses.Interactive,
+            "The advanced GDScript resume surface lost scheduling options.");
+
+        var semanticValue = ProtocolJson.ParseElement(
+            """{"revision":12,"timeline":"prime"}""");
+        var semanticDigest =
+            CanonicalJsonDigest.ComputeSha256(semanticValue);
+        var guardedResumeId = node.resume_agent_run_with_options(
+            "variant-options-run",
+            global::Godot.Json.ParseString(
+                $$"""
+                {
+                  "resume_guard": {
+                    "semantic_extension_name": "game.coordinate",
+                    "expected_semantic_extension_sha256": "{{semanticDigest}}"
+                  }
+                }
+                """).AsGodotDictionary());
+        Assert(
+            !string.IsNullOrWhiteSpace(guardedResumeId),
+            "The GDScript resume surface rejected a semantic guard.");
+        var capturedGuard = await captureRuntime.GuardReceived
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            capturedGuard.SemanticExtensionName == "game.coordinate"
+            && capturedGuard.ExpectedSemanticExtensionSha256
+                == semanticDigest,
+            "The GDScript resume surface lost its semantic guard.");
+
+        var runCalls = captureRuntime.RunCallCount;
+        var resumeCalls = captureRuntime.ResumeCallCount;
+        Assert(
+            string.IsNullOrEmpty(
+                node.start_agent_run_with_options(
+                    GodotProtocolVariantMapper.ToDictionary(run),
+                    new GodotArray(),
+                    new GodotDictionary
+                    {
+                        ["unknown_option"] = true
+                    })),
+            "The advanced start surface accepted an unknown option.");
+        Assert(
+            string.IsNullOrEmpty(
+                node.resume_agent_run_with_options(
+                    "variant-options-run",
+                    new GodotDictionary
+                    {
+                        ["replace_active_skills"] = "yes"
+                    })),
+            "The advanced resume surface accepted a non-Boolean replacement.");
+        Assert(
+            string.IsNullOrEmpty(
+                node.resume_agent_run_with_options(
+                    "variant-options-run",
+                    new GodotDictionary
+                    {
+                        ["lane_id"] = new string('x', 257)
+                    })),
+            "The advanced resume surface accepted an oversized lane id.");
+        Assert(
+            string.IsNullOrEmpty(
+                node.resume_agent_run_with_options(
+                    "variant-options-run",
+                    global::Godot.Json.ParseString(
+                        """
+                        {
+                          "resume_guard": {
+                            "semantic_extension_name": "game.coordinate",
+                            "expected_semantic_extension_sha256":
+                              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                          }
+                        }
+                        """).AsGodotDictionary())),
+            "The advanced resume surface accepted a noncanonical digest.");
+        Assert(
+            string.IsNullOrEmpty(
+                node.start_agent_run_with_options(
+                    GodotProtocolVariantMapper.ToDictionary(run),
+                    new GodotArray(),
+                    global::Godot.Json.ParseString(
+                        """
+                        {
+                          "initial_transcript": [
+                            {
+                              "messageId": "invalid-role",
+                              "role": "operator",
+                              "createdAt": "2026-07-30T00:00:00Z",
+                              "parts": [
+                                {
+                                  "type": "text",
+                                  "text": "invalid"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                        """).AsGodotDictionary())),
+            "The advanced start surface accepted an unsupported message role.");
+        Assert(
+            string.IsNullOrEmpty(
+                node.resume_agent_run_with_options(
+                    "variant-options-run",
+                    global::Godot.Json.ParseString(
+                        """
+                        {
+                          "context": [
+                            {
+                              "id": "ambiguous-context",
+                              "category": "state",
+                              "content": {},
+                              "resource": {
+                                "uri": "game://state",
+                                "media_type": "application/json"
+                              }
+                            }
+                          ]
+                        }
+                        """).AsGodotDictionary())),
+            "The advanced resume surface accepted ambiguous context content.");
+
+        var excessiveSkills = new GodotArray();
+        for (var index = 0; index < 129; index++)
+        {
+            excessiveSkills.Add(
+                new GodotDictionary
+                {
+                    ["skill_id"] = $"skill-{index}",
+                    ["version"] = "1"
+                });
+        }
+
+        Assert(
+            string.IsNullOrEmpty(
+                node.start_agent_run_with_options(
+                    GodotProtocolVariantMapper.ToDictionary(run),
+                    new GodotArray(),
+                    new GodotDictionary
+                    {
+                        ["active_skills"] = excessiveSkills
+                    })),
+            "The advanced start surface accepted too many active skills.");
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        Assert(
+            captureRuntime.RunCallCount == runCalls
+            && captureRuntime.ResumeCallCount == resumeCalls,
+            "Invalid advanced options reached the durable backend.");
+
+        await node.Typed.StopAsync(
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        node.QueueFree();
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+
+        var unsupportedNode = new GameAgentRuntimeNode
+        {
+            Name = "UnguardedDurableRuntime"
+        };
+        tree.Root.AddChild(unsupportedNode);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        unsupportedNode.Typed.ConfigureDurable(
+            new UnguardedDurableBackend());
+        DurableRunResumeGuardException? unsupported = null;
+        try
+        {
+            unsupportedNode.Typed.ResumeRun(
+                "unsupported-run",
+                new DurableRunResumeGuard
+                {
+                    SemanticExtensionName = "game.coordinate",
+                    ExpectedSemanticExtensionSha256 = semanticDigest
+                });
+        }
+        catch (DurableRunResumeGuardException exception)
+        {
+            unsupported = exception;
+        }
+
+        Assert(
+            unsupported?.ReasonCode
+                == DurableRunResumeGuardReasonCodes.NotSupported,
+            "A guard crossed a Godot backend without guarded-resume support.");
+        await unsupportedNode.Typed.StopAsync(
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        unsupportedNode.QueueFree();
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+    }
+
+    private async Task VerifyVariantMultiActorAsync()
+    {
+        var tree = GetTree();
+        var captureRuntime = new MultiActorCaptureRuntime(
+            initialParticipantCount: 4);
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "VariantMultiActorRuntime",
+            MaxActorBatchSize = 8,
+            MaxConcurrentActorRuns = 3,
+            MaxConcurrentActorBatches = 1
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.ConfigureDurable(
+            captureRuntime,
+            new LifecycleStore(new List<string>(), failFlush: false));
+
+        var batchCompletions = new ConcurrentDictionary<
+            string,
+            TaskCompletionSource<GodotDictionary>>(StringComparer.Ordinal);
+        var participantCompletions = new ConcurrentDictionary<
+            string,
+            TaskCompletionSource<GodotDictionary>>(StringComparer.Ordinal);
+        var batchFailures = new ConcurrentDictionary<
+            string,
+            TaskCompletionSource<GodotDictionary>>(StringComparer.Ordinal);
+        var aborts = new ConcurrentDictionary<
+            string,
+            TaskCompletionSource<GodotDictionary>>(StringComparer.Ordinal);
+        var lifecycleOrder = new List<string>();
+        var actorFinishedAgents = new List<string>();
+
+        TaskCompletionSource<GodotDictionary> CompletionFor(
+            ConcurrentDictionary<
+                string,
+                TaskCompletionSource<GodotDictionary>> completions,
+            string key) =>
+            completions.GetOrAdd(
+                key,
+                static _ => new TaskCompletionSource<GodotDictionary>(
+                    TaskCreationOptions.RunContinuationsAsynchronously));
+
+        node.BatchCompleted += outcome =>
+            CompletionFor(
+                    batchCompletions,
+                    outcome["request_id"].AsString())
+                .TrySetResult(outcome);
+        node.BatchParticipantCompleted += result =>
+            CompletionFor(
+                    participantCompletions,
+                    result["request_id"].AsString())
+                .TrySetResult(result);
+        node.BatchFailed += error =>
+            CompletionFor(
+                    batchFailures,
+                    error["request_id"].AsString())
+                .TrySetResult(error);
+        node.BatchStarted += manifest =>
+        {
+            lifecycleOrder.Add(
+                $"started:{manifest["batch_id"].AsString()}");
+        };
+        node.ActorFinished += result =>
+        {
+            var agentId = result["agent_id"].AsString();
+            actorFinishedAgents.Add(agentId);
+            lifecycleOrder.Add($"finished:{agentId}");
+        };
+        node.BatchAborted += error =>
+        {
+            var batchId = error["batch_id"].AsString();
+            lifecycleOrder.Add($"aborted:{batchId}");
+            CompletionFor(aborts, batchId).TrySetResult(error);
+        };
+
+        var now = DateTimeOffset.Parse(
+            "2026-07-30T00:00:00Z",
+            System.Globalization.CultureInfo.InvariantCulture);
+        var runEntries = new GodotArray();
+        for (var index = 0; index < 4; index++)
+        {
+            var run = SampleRuntimeFactory.CreateRun(
+                $"multi-run-{index}",
+                "multi-world",
+                now);
+            run.AgentId = $"npc-{index}";
+            run.DecisionKey = $"decision-{index}";
+            runEntries.Add(
+                new GodotDictionary
+                {
+                    ["run"] =
+                        GodotProtocolVariantMapper.ToDictionary(run),
+                    ["observations"] = new GodotArray(),
+                    ["options"] = new GodotDictionary
+                    {
+                        ["workload_class"] = index == 0
+                            ? "interactive"
+                            : "background",
+                        ["lane_id"] = $"npc-lane-{index}"
+                    }
+                });
+        }
+
+        var batchInput = new GodotDictionary
+        {
+            ["batch_id"] = "village-tick-7",
+            ["coordinate"] = new GodotDictionary
+            {
+                ["world_id"] = "multi-world",
+                ["timeline_id"] = "main-timeline",
+                ["save_revision"] = 7,
+                ["session_id"] = "godot-sample-session",
+                ["scene_id"] = "village",
+                ["region_id"] = "north",
+                ["state_version"] = "state-7",
+                ["game_time"] = new GodotDictionary
+                {
+                    ["clock_id"] = "world-clock",
+                    ["timeline_id"] = "main-timeline",
+                    ["epoch"] = 1,
+                    ["tick"] = 700
+                },
+                ["causality"] = new GodotDictionary
+                {
+                    ["event_id"] = "tick-7",
+                    ["based_on_state_version"] = "state-7",
+                    ["parent_event_ids"] = new GodotArray
+                    {
+                        "tick-6"
+                    }
+                }
+            },
+            ["aggregate_budget"] = new GodotDictionary
+            {
+                ["max_tokens"] = 32_000,
+                ["max_actions"] = 16,
+                ["max_duration_ms"] = 120_000,
+                ["max_cost_usd"] = "4"
+            },
+            ["runs"] = runEntries
+        };
+        for (var iteration = 0; iteration < 64; iteration++)
+        {
+            var mapped =
+                GodotMultiActorVariantMapper.ToDecisionBatch(
+                    batchInput,
+                    maximumBatchSize: 8);
+            Assert(
+                mapped.Runs.Count == 4
+                && mapped.Runs[0].Run.RunId == "multi-run-0"
+                && mapped.Runs[3].LaneId == "npc-lane-3"
+                && mapped.Coordinate.SessionId
+                    == "godot-sample-session",
+                "Repeated multi-actor Variant conversion lost participant "
+                + "or shared-session data.");
+        }
+
+        var batchRequestId = node
+            .Call("start_agent_batch", batchInput)
+            .AsString();
+        Assert(
+            !string.IsNullOrWhiteSpace(batchRequestId),
+            "The GDScript multi-actor surface rejected a valid batch.");
+
+        await captureRuntime.InitialConcurrencyReached
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            lifecycleOrder.Count > 0
+            && lifecycleOrder[0] == "started:village-tick-7",
+            "BatchStarted did not settle before participant execution.");
+        Assert(
+            captureRuntime.MaximumConcurrentRuns == 3,
+            "The Core coordinator did not apply bounded actor concurrency.");
+
+        var queuedRun = SampleRuntimeFactory.CreateRun(
+            "multi-run-queued",
+            "multi-world",
+            now);
+        queuedRun.AgentId = "npc-queued";
+        queuedRun.DecisionKey = "decision-queued";
+        var queuedBatch = new GodotDictionary
+        {
+            ["batch_id"] = "village-tick-7-queued",
+            ["coordinate"] = new GodotDictionary
+            {
+                ["world_id"] = "multi-world",
+                ["timeline_id"] = "main-timeline",
+                ["save_revision"] = 7,
+                ["session_id"] = "godot-sample-session"
+            },
+            ["runs"] = new GodotArray
+            {
+                new GodotDictionary
+                {
+                    ["run"] =
+                        GodotProtocolVariantMapper.ToDictionary(queuedRun),
+                    ["observations"] = new GodotArray()
+                }
+            }
+        };
+        var queuedRequestId = node
+            .Call("start_agent_batch", queuedBatch)
+            .AsString();
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        Assert(
+            captureRuntime.RunCallCount == 3
+            && !lifecycleOrder.Contains(
+                "started:village-tick-7-queued",
+                StringComparer.Ordinal),
+            "A second batch bypassed global Godot batch admission.");
+        captureRuntime.ReleaseInitialParticipants();
+
+        var batchOutcome = await CompletionFor(
+                batchCompletions,
+                batchRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        _ = await CompletionFor(batchCompletions, queuedRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        var manifest = batchOutcome["manifest"].AsGodotDictionary();
+        var participants = manifest["participants"].AsGodotArray();
+        var results = batchOutcome["results"].AsGodotArray();
+        Assert(
+            manifest["batch_id"].AsString() == "village-tick-7"
+            && participants.Count == 4,
+            "The batch completion did not return its durable manifest.");
+        Assert(
+            manifest["coordinate"]
+                    .AsGodotDictionary()["game_time"]
+                    .AsGodotDictionary()["tick"]
+                    .AsInt64()
+                == 700
+            && manifest["coordinate"]
+                    .AsGodotDictionary()["session_id"]
+                    .AsString()
+                == "godot-sample-session",
+            "The batch manifest lost a shared coordinate field.");
+        var budgetReservation =
+            manifest["budget_reservation"].AsGodotDictionary();
+        Assert(
+            budgetReservation["reserved_tokens"].AsInt64() == 32_000
+            && budgetReservation["reserved_actions"].AsInt64() == 16
+            && budgetReservation["reserved_duration_ms"].AsInt64()
+                == 120_000
+            && budgetReservation["reserved_cost_usd"].AsString() == "4",
+            "The batch manifest lost its aggregate budget reservation.");
+        for (var index = 0; index < results.Count; index++)
+        {
+            Assert(
+                results[index]
+                        .AsGodotDictionary()["input_index"]
+                        .AsInt32()
+                    == index,
+                "Concurrent batch results did not retain input order.");
+        }
+        Assert(
+            results[1]
+                    .AsGodotDictionary()["outcome"]
+                    .AsGodotDictionary()["final_output_omitted"]
+                    .AsBool()
+            && results[1]
+                    .AsGodotDictionary()["outcome"]
+                    .AsGodotDictionary()["final_output"]
+                    .VariantType
+                == global::Godot.Variant.Type.Nil,
+            "The batch result surface did not bound a large final output.");
+
+        Assert(
+            actorFinishedAgents.SequenceEqual(new[] { "npc-1" }),
+            "Initial lifecycle settlement included a nonterminal participant.");
+
+        var reconcilingParticipant =
+            participants[0].AsGodotDictionary();
+        var reconcileRequestId = node
+            .Call(
+                "resume_agent_batch_participant",
+                "village-tick-7",
+                reconcilingParticipant,
+                new GodotDictionary
+                {
+                    ["lane_id"] = "needs-reconciler"
+                })
+            .AsString();
+        var reconcileResult = await CompletionFor(
+                participantCompletions,
+                reconcileRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        var reconcileOutcome =
+            reconcileResult["outcome"].AsGodotDictionary();
+        Assert(
+            reconcileResult["operation"].AsString() == "resume"
+            && reconcileOutcome["reconciliation_required"].AsBool()
+            && !reconcileOutcome["terminal"].AsBool(),
+            "A pending participant did not return explicit reconciliation state.");
+        Assert(
+            actorFinishedAgents.SequenceEqual(new[] { "npc-1" }),
+            "A reconciling participant was incorrectly marked finished.");
+
+        var resumedParticipant = participants[3].AsGodotDictionary();
+        var participantCoordinate = new GameContextCoordinate(
+            "multi-world",
+            "main-timeline",
+            saveRevision: 7,
+            sceneId: "village",
+            regionId: "north",
+            stateVersion: "state-7",
+            gameTime: new GameTimePoint(
+                "world-clock",
+                "main-timeline",
+                epoch: 1,
+                tick: 700),
+            causality: new GameCausalityStamp(
+                "tick-7",
+                "state-7",
+                new[] { "tick-6" }),
+            sessionId: "godot-sample-session");
+        var participantSemanticDigest =
+            CanonicalJsonDigest.ComputeSha256(
+                GameContextEnvelope.ToJson(participantCoordinate));
+        var resumeRequestId = node
+            .Call(
+                "resume_agent_batch_participant",
+                "village-tick-7",
+                resumedParticipant,
+                global::Godot.Json.ParseString(
+                    $$"""
+                    {
+                      "semantic_expectation": {
+                        "extension_name": "{{GameContextEnvelope.ExtensionName}}",
+                        "expected_sha256": "{{participantSemanticDigest}}"
+                      }
+                    }
+                    """).AsGodotDictionary())
+            .AsString();
+        var resumeResult = await CompletionFor(
+                participantCompletions,
+                resumeRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            resumeResult["outcome"]
+                    .AsGodotDictionary()["run"]
+                    .AsGodotDictionary()["state"]
+                    .AsString()
+                == RunStates.Completed
+            && actorFinishedAgents.Contains(
+                "npc-3",
+                StringComparer.Ordinal),
+            "Guarded participant resume did not settle its lifecycle.");
+
+        var abandonedParticipant =
+            participants[2].AsGodotDictionary();
+        var abandonRequestId = node
+            .Call(
+                "abandon_agent_batch_participant",
+                "village-tick-7",
+                abandonedParticipant,
+                "npc_despawned")
+            .AsString();
+        var abandonResult = await CompletionFor(
+                participantCompletions,
+                abandonRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            abandonResult["operation"].AsString() == "abandon"
+            && abandonResult["outcome"]
+                    .AsGodotDictionary()["run"]
+                    .AsGodotDictionary()["state"]
+                    .AsString()
+                == RunStates.Cancelled
+            && abandonResult["error"]
+                    .AsGodotDictionary()["code"]
+                    .AsString()
+                == "participant_abandoned"
+            && actorFinishedAgents.Contains(
+                "npc-2",
+                StringComparer.Ordinal),
+            "Durable participant abandonment did not settle its lifecycle.");
+
+        var forgedParticipant = global::Godot.Json
+            .ParseString(global::Godot.Json.Stringify(resumedParticipant))
+            .AsGodotDictionary();
+        forgedParticipant["agent_id"] = "forged-agent";
+        var sideEffectsBeforeForgery =
+            captureRuntime.GuardedResumeSideEffectCount;
+        var forgedRequestId = node
+            .Call(
+                "resume_agent_batch_participant",
+                "village-tick-7",
+                forgedParticipant,
+                new GodotDictionary())
+            .AsString();
+        var forgedFailure = await CompletionFor(
+                batchFailures,
+                forgedRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(
+            forgedFailure["code"].AsString()
+                == "participant_guard_failed"
+            && captureRuntime.GuardedResumeSideEffectCount
+                == sideEffectsBeforeForgery,
+            "A forged manifest participant crossed the guarded resume fence.");
+
+        var abortRun = SampleRuntimeFactory.CreateRun(
+            "multi-run-throws",
+            "multi-world",
+            now);
+        abortRun.AgentId = "npc-throws";
+        abortRun.DecisionKey = "decision-throws";
+        var abortBatch = new GodotDictionary
+        {
+            ["batch_id"] = "village-tick-8",
+            ["coordinate"] = new GodotDictionary
+            {
+                ["world_id"] = "multi-world",
+                ["timeline_id"] = "main-timeline",
+                ["save_revision"] = 8,
+                ["session_id"] = "godot-sample-session"
+            },
+            ["runs"] = new GodotArray
+            {
+                new GodotDictionary
+                {
+                    ["run"] =
+                        GodotProtocolVariantMapper.ToDictionary(abortRun),
+                    ["observations"] = new GodotArray()
+                }
+            }
+        };
+        var abortedRequestId = node
+            .Call("start_agent_batch", abortBatch)
+            .AsString();
+        var aborted = await CompletionFor(aborts, "village-tick-8")
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        var abortedFailure = await CompletionFor(
+                batchFailures,
+                abortedRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        var uncertainRuns =
+            abortedFailure["affected_run_ids"].AsGodotArray();
+        Assert(
+            aborted["reason_code"].AsString()
+                == "batch_execution_failed"
+            && abortedFailure["code"].AsString()
+                == "batch_execution_uncertain"
+            && abortedFailure["reconciliation_required"].AsBool()
+            && abortedFailure["phase"].AsString()
+                == "participant_execution"
+            && abortedFailure["batch_id"].AsString()
+                == "village-tick-8"
+            && uncertainRuns.Count == 1
+            && uncertainRuns[0].AsString() == "multi-run-throws",
+            "A failed batch did not expose its verifiable abort and "
+            + "reconciliation identities.");
+
+        var runCallsBeforeInvalid = captureRuntime.RunCallCount;
+        batchInput["unknown_field"] = true;
+        Assert(
+            string.IsNullOrEmpty(
+                node.Call("start_agent_batch", batchInput).AsString())
+            && captureRuntime.RunCallCount == runCallsBeforeInvalid,
+            "An invalid batch schema reached the durable runtime.");
 
         await node.Typed.StopAsync(
             TimeSpan.FromSeconds(2),
@@ -1750,6 +2670,192 @@ public partial class HeadlessAddonTest : global::Godot.Node
             "Observation-to-context mapping lost its required boundary.");
     }
 
+    private static void VerifyHeadlessMapperCollectionBounds(
+        SampleRuntimeFixture fixture)
+    {
+        var run = GodotProtocolVariantMapper.ToDictionary(
+            fixture.Request.Run);
+        var observation = GodotProtocolVariantMapper.ToDictionary(
+            fixture.Observations[0]);
+        var tool = GodotProtocolVariantMapper.ToDictionary(
+            new ToolDescriptor
+            {
+                Name = "observe",
+                Version = "1",
+                Description = "Observe the current game state.",
+                ParametersSchema = ProtocolJson.ParseElement(
+                    """{"type":"object"}"""),
+                Effect = ToolEffects.PureRead
+            });
+        var observations = new GodotArray();
+        var tools = new GodotArray();
+        for (var index = 0; index < 512; index++)
+        {
+            observations.Add(observation);
+            tools.Add(tool);
+        }
+
+        var accepted = GodotProtocolVariantMapper.ToRunRequest(
+            run,
+            observations,
+            tools);
+        Assert(
+            accepted.Observations.Count == 512
+            && accepted.Tools.Count == 512,
+            "The documented headless collection boundary was rejected.");
+
+        observations.Add(observation);
+        AssertJsonFailure(
+            () => GodotProtocolVariantMapper.ToRunRequest(
+                run,
+                observations,
+                tools),
+            "513 observations were allocated by the headless mapper.");
+        observations.RemoveAt(observations.Count - 1);
+        tools.Add(tool);
+        AssertJsonFailure(
+            () => GodotProtocolVariantMapper.ToRunRequest(
+                run,
+                observations,
+                tools),
+            "513 tools were allocated by the headless mapper.");
+    }
+
+    private static void VerifyVariantIngressBounds(
+        SampleRuntimeFixture fixture)
+    {
+        using (var observation =
+               GodotProtocolVariantMapper.ToDictionary(
+                   fixture.Observations[0]))
+        using (var oversizedPayload = new GodotDictionary
+        {
+            ["value"] = new string('x', 65_536)
+        })
+        {
+            observation["payload"] = oversizedPayload;
+            var boundary =
+                GodotProtocolVariantMapper.ToObservation(observation);
+            Assert(
+                boundary.Payload!.Value
+                    .GetProperty("value")
+                    .GetString()!
+                    .Length == 65_536,
+                "The Variant string UTF-8 boundary was not preserved.");
+            oversizedPayload["value"] = new string('x', 65_537);
+            AssertJsonFailure(
+                () => GodotProtocolVariantMapper.ToObservation(
+                    observation),
+                "An oversized Variant string reached Godot JSON serialization.");
+        }
+
+        using (var observation =
+               GodotProtocolVariantMapper.ToDictionary(
+                   fixture.Observations[0]))
+        using (var widePayload = new GodotArray())
+        {
+            for (var index = 0; index < 2_048; index++)
+            {
+                widePayload.Add(index);
+            }
+
+            observation["payload"] = widePayload;
+            var boundary =
+                GodotProtocolVariantMapper.ToObservation(observation);
+            Assert(
+                boundary.Payload!.Value.GetArrayLength() == 2_048,
+                "The Variant container boundary was not preserved.");
+            widePayload.Add(2_048);
+            AssertJsonFailure(
+                () => GodotProtocolVariantMapper.ToObservation(
+                    observation),
+                "A wide Variant container reached Godot JSON serialization.");
+        }
+
+        using (var observation =
+               GodotProtocolVariantMapper.ToDictionary(
+                   fixture.Observations[0]))
+        {
+            var arrays = new List<GodotArray>();
+            try
+            {
+                var root = new GodotArray();
+                arrays.Add(root);
+                var current = root;
+                for (var depth = 1; depth < 65; depth++)
+                {
+                    var child = new GodotArray();
+                    arrays.Add(child);
+                    current.Add(child);
+                    current = child;
+                }
+
+                observation["payload"] = root;
+                AssertJsonFailure(
+                    () => GodotProtocolVariantMapper.ToObservation(
+                        observation),
+                    "A deeply nested Variant graph reached Godot JSON serialization.");
+                observation.Remove("payload");
+            }
+            finally
+            {
+                foreach (var array in arrays)
+                {
+                    array.Clear();
+                }
+
+                foreach (var array in arrays)
+                {
+                    array.Dispose();
+                }
+            }
+        }
+
+        using (var observation =
+               GodotProtocolVariantMapper.ToDictionary(
+                   fixture.Observations[0]))
+        using (var batch = new GodotDictionary())
+        using (var cycle = new GodotArray())
+        {
+            cycle.Add(cycle);
+            observation["payload"] = cycle;
+            batch["cycle"] = cycle;
+            try
+            {
+                AssertJsonFailure(
+                    () => GodotProtocolVariantMapper.ToObservation(
+                        observation),
+                    "A circular Variant graph reached Godot JSON serialization.");
+                AssertJsonFailure(
+                    () => GodotMultiActorVariantMapper.ToDecisionBatch(
+                        batch,
+                        maximumBatchSize: 1),
+                    "A circular batch Variant graph reached Godot JSON serialization.");
+            }
+            finally
+            {
+                observation.Remove("payload");
+                batch.Remove("cycle");
+                cycle.Clear();
+            }
+        }
+    }
+
+    private static void AssertJsonFailure(
+        Action action,
+        string message)
+    {
+        try
+        {
+            action();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(message);
+    }
+
     private TaskCompletionSource<GodotDictionary> Completion(
         string requestId)
     {
@@ -1888,24 +2994,319 @@ public partial class HeadlessAddonTest : global::Godot.Node
         }
     }
 
-    private sealed class ContinuationCaptureRuntime : IDurableAgentRuntime
+    private sealed class MultiActorCaptureRuntime :
+        IGuardedDurableAgentRuntime
     {
-        private readonly TaskCompletionSource<DurableRunContinuation?>
-            _continuationReceived =
-                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly int _initialConcurrencyTarget;
+        private readonly ConcurrentDictionary<string, AgentRun> _runs =
+            new(StringComparer.Ordinal);
+        private readonly TaskCompletionSource<bool> _initialConcurrencyReached =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _releaseInitial =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _activeRuns;
+        private int _maximumConcurrentRuns;
+        private int _runCallCount;
+        private int _guardedResumeSideEffectCount;
+
+        internal MultiActorCaptureRuntime(int initialParticipantCount)
+        {
+            if (initialParticipantCount < 1)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(initialParticipantCount));
+            }
+
+            _initialConcurrencyTarget = Math.Min(
+                3,
+                initialParticipantCount);
+        }
 
         public RuntimeControlPlane Controls { get; } = new();
 
+        internal Task InitialConcurrencyReached =>
+            _initialConcurrencyReached.Task;
+
+        internal int MaximumConcurrentRuns =>
+            Volatile.Read(ref _maximumConcurrentRuns);
+
+        internal int RunCallCount => Volatile.Read(ref _runCallCount);
+
+        internal int GuardedResumeSideEffectCount =>
+            Volatile.Read(ref _guardedResumeSideEffectCount);
+
+        internal void ReleaseInitialParticipants()
+        {
+            _releaseInitial.TrySetResult(true);
+        }
+
+        public async ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _runCallCount);
+            if (string.Equals(
+                    request.Run.AgentId,
+                    "npc-throws",
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Injected participant failure.");
+            }
+
+            var active = Interlocked.Increment(ref _activeRuns);
+            UpdateMaximum(active);
+            if (active >= _initialConcurrencyTarget)
+            {
+                _initialConcurrencyReached.TrySetResult(true);
+            }
+
+            try
+            {
+                await _releaseInitial.Task
+                    .WaitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var run = CloneRun(request.Run);
+                run.State = string.Equals(
+                        run.AgentId,
+                        "npc-1",
+                        StringComparison.Ordinal)
+                    ? RunStates.Completed
+                    : RunStates.WaitingForAction;
+                run.UpdatedAt = DateTimeOffset.UtcNow;
+                _runs[run.RunId] = CloneRun(run);
+                return new DurableRunOutcome
+                {
+                    Run = run,
+                    FinalOutput = string.Equals(
+                            run.AgentId,
+                            "npc-1",
+                            StringComparison.Ordinal)
+                        ? ProtocolJson.ParseElement(
+                            "{\"value\":\""
+                            + new string('x', 33_000)
+                            + "\"}")
+                        : null
+                };
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeRuns);
+            }
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation = null,
+            IGameOperationReconciler? reconciler = null,
+            CancellationToken cancellationToken = default)
+        {
+            return ResumeAsync(
+                runId,
+                continuation,
+                reconciler,
+                cancellationToken,
+                guard: null);
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard? guard)
+        {
+            _ = reconciler;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_runs.TryGetValue(runId, out var stored))
+            {
+                throw new KeyNotFoundException();
+            }
+
+            if (guard is not null)
+            {
+                ValidateGuard(stored, runId, guard);
+            }
+
+            Interlocked.Increment(ref _guardedResumeSideEffectCount);
+            var run = CloneRun(stored);
+            run.PendingOperationIds.Clear();
+            if (continuation?.RequestCancellation == true)
+            {
+                run.State = RunStates.Cancelled;
+                run.TerminalReason = "cancelled_by_host";
+            }
+            else if (string.Equals(
+                         continuation?.LaneId,
+                         "needs-reconciler",
+                         StringComparison.Ordinal))
+            {
+                run.State = RunStates.Reconciling;
+                run.PendingOperationIds.Add("operation-1");
+            }
+            else
+            {
+                run.State = RunStates.Completed;
+            }
+
+            run.UpdatedAt = DateTimeOffset.UtcNow;
+            _runs[runId] = CloneRun(run);
+            return new ValueTask<DurableRunOutcome>(
+                new DurableRunOutcome { Run = run });
+        }
+
+        private static void ValidateGuard(
+            AgentRun run,
+            string runId,
+            DurableRunResumeGuard guard)
+        {
+            if (!string.Equals(run.RunId, runId, StringComparison.Ordinal))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.RunIdMismatch);
+            }
+
+            if (!string.Equals(
+                    run.BatchId,
+                    guard.ExpectedBatchId,
+                    StringComparison.Ordinal))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.BatchIdMismatch);
+            }
+
+            if (!string.Equals(
+                    run.AgentId,
+                    guard.ExpectedAgentId,
+                    StringComparison.Ordinal))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.AgentIdMismatch);
+            }
+
+            if (!string.Equals(
+                    run.DecisionKey,
+                    guard.ExpectedDecisionKey,
+                    StringComparison.Ordinal))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.DecisionKeyMismatch);
+            }
+
+            var extensionName = guard.RequiredInt32ExtensionName
+                ?? throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.ExtensionMissing);
+            if (!run.Extensions.TryGetValue(
+                    extensionName,
+                    out var extension))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.ExtensionMissing);
+            }
+
+            if (!extension.TryGetInt32(out var value))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.ExtensionNotInt32);
+            }
+
+            if (value < guard.MinimumInt32ExtensionValue
+                || value > guard.MaximumInt32ExtensionValue)
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.ExtensionOutOfRange);
+            }
+
+            if (guard.ExpectedInt32ExtensionValue.HasValue
+                && value != guard.ExpectedInt32ExtensionValue.Value)
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.ExtensionValueMismatch);
+            }
+
+            if (guard.SemanticExtensionName is not null)
+            {
+                if (!run.Extensions.TryGetValue(
+                        guard.SemanticExtensionName,
+                        out var semanticExtension))
+                {
+                    throw new DurableRunResumeGuardException(
+                        DurableRunResumeGuardReasonCodes
+                            .SemanticExtensionMissing);
+                }
+
+                if (!string.Equals(
+                        CanonicalJsonDigest.ComputeSha256(semanticExtension),
+                        guard.ExpectedSemanticExtensionSha256,
+                        StringComparison.Ordinal))
+                {
+                    throw new DurableRunResumeGuardException(
+                        DurableRunResumeGuardReasonCodes
+                            .SemanticExtensionDigestMismatch);
+                }
+            }
+        }
+
+        private void UpdateMaximum(int value)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _maximumConcurrentRuns);
+                if (value <= current
+                    || Interlocked.CompareExchange(
+                        ref _maximumConcurrentRuns,
+                        value,
+                        current) == current)
+                {
+                    return;
+                }
+            }
+        }
+
+        private static AgentRun CloneRun(AgentRun run) =>
+            ProtocolJson.DeserializeAgentRun(ProtocolJson.Serialize(run));
+    }
+
+    private sealed class ContinuationCaptureRuntime
+        : IGuardedDurableAgentRuntime
+    {
+        private readonly TaskCompletionSource<DurableRunRequest>
+            _requestReceived =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<DurableRunContinuation?>
+            _continuationReceived =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<DurableRunResumeGuard>
+            _guardReceived =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _runCallCount;
+        private int _resumeCallCount;
+
+        public RuntimeControlPlane Controls { get; } = new();
+
+        public Task<DurableRunRequest> RequestReceived =>
+            _requestReceived.Task;
+
         public Task<DurableRunContinuation?> ContinuationReceived =>
             _continuationReceived.Task;
+
+        public Task<DurableRunResumeGuard> GuardReceived =>
+            _guardReceived.Task;
+
+        public int RunCallCount => Volatile.Read(ref _runCallCount);
+
+        public int ResumeCallCount => Volatile.Read(ref _resumeCallCount);
 
         public ValueTask<DurableRunOutcome> RunAsync(
             DurableRunRequest request,
             CancellationToken cancellationToken = default)
         {
-            _ = request;
             cancellationToken.ThrowIfCancellationRequested();
-            throw new NotSupportedException();
+            Interlocked.Increment(ref _runCallCount);
+            _requestReceived.TrySetResult(request);
+            return new ValueTask<DurableRunOutcome>(
+                CompletedOutcome(request.Run.RunId));
         }
 
         public ValueTask<DurableRunOutcome> ResumeAsync(
@@ -1916,30 +3317,82 @@ public partial class HeadlessAddonTest : global::Godot.Node
         {
             _ = reconciler;
             cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _resumeCallCount);
             _continuationReceived.TrySetResult(continuation);
-            var now = DateTimeOffset.UtcNow;
-            return new ValueTask<DurableRunOutcome>(
-                new DurableRunOutcome
-                {
-                    Run = new AgentRun
-                    {
-                        RunId = runId,
-                        AgentId = "continuation-snapshot-agent",
-                        WorldId = "continuation-snapshot-world",
-                        State = RunStates.Completed,
-                        Budget = new AgentBudget
-                        {
-                            MaxTurns = 1,
-                            MaxDurationMs = 1_000,
-                            MaxTokens = 1,
-                            MaxActions = 1,
-                            MaxCostUsd = "0"
-                        },
-                        CreatedAt = now,
-                        UpdatedAt = now
-                    }
-                });
+            return new ValueTask<DurableRunOutcome>(CompletedOutcome(runId));
         }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard? guard)
+        {
+            if (guard is null)
+            {
+                return ResumeAsync(
+                    runId,
+                    continuation,
+                    reconciler,
+                    cancellationToken);
+            }
+
+            _ = reconciler;
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _resumeCallCount);
+            _continuationReceived.TrySetResult(continuation);
+            _guardReceived.TrySetResult(guard);
+            return new ValueTask<DurableRunOutcome>(CompletedOutcome(runId));
+        }
+
+        private static DurableRunOutcome CompletedOutcome(string runId)
+        {
+            var now = DateTimeOffset.UtcNow;
+            return new DurableRunOutcome
+            {
+                Run = new AgentRun
+                {
+                    RunId = runId,
+                    AgentId = "continuation-snapshot-agent",
+                    WorldId = "continuation-snapshot-world",
+                    State = RunStates.Completed,
+                    Budget = new AgentBudget
+                    {
+                        MaxTurns = 1,
+                        MaxDurationMs = 1_000,
+                        MaxTokens = 1,
+                        MaxActions = 1,
+                        MaxCostUsd = "0"
+                    },
+                    CreatedAt = now,
+                    UpdatedAt = now
+                }
+            };
+        }
+    }
+
+    private sealed class UnguardedDurableBackend
+        : IGodotDurableRuntimeBackend
+    {
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public bool TryPostControl(
+            string runId,
+            RunControlCommand command) => false;
+
+        public ValueTask StopAsync(
+            CancellationToken cancellationToken) => default;
     }
 
     private sealed class LifecycleRuntime :
@@ -2230,6 +3683,20 @@ public partial class HeadlessAddonTest : global::Godot.Node
         public void Release()
         {
             _stopRelease.TrySetResult(true);
+        }
+    }
+
+    private sealed class MetricsSink : IRuntimeMetricsSink
+    {
+        public ConcurrentQueue<RuntimeMetric> Records { get; } = new();
+
+        public ValueTask RecordAsync(
+            RuntimeMetric metric,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Records.Enqueue(metric);
+            return ValueTask.CompletedTask;
         }
     }
 

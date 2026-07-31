@@ -13,9 +13,13 @@ Choose a narrower package only when you are building a custom composition:
 | --- | --- |
 | `GameAgent.Runtime` | Recommended composition entry point |
 | `GameAgent.Core` | Agent loop, tools, skills, context, control, and scheduling |
-| `GameAgent.Persistence` | Crash-tolerant journal and operation ledger |
+| `GameAgent.Persistence` | Crash-tolerant journal, operation ledger, and local memory store |
 | `GameAgent.Protocol` | Versioned host and wire contracts |
 | `GameAgent.Providers.OpenAICompatible` | Streaming chat-completions provider adapter |
+| `GameAgent.Providers.Anthropic` | Native Anthropic Messages streaming provider adapter |
+| `GameAgent.Workflow` | Optional bounded, durable workflow composition |
+| `GameAgent.World` | Engine-neutral interactive-world packages, rules, and saves |
+| `GameAgent.Compatibility` | Inert character-card and lorebook import adapters |
 | `GameAgent.Testing` | Deterministic test doubles and contract helpers |
 
 All pre-1.0 modules use exact lockstep dependencies. Upgrade their versions

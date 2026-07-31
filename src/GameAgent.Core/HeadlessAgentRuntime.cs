@@ -174,11 +174,16 @@ public sealed class HeadlessAgentRuntime
             request,
             sourceRunSnapshot,
             cancellationToken);
+        _ = GameContextEnvelope.ValidateForRun(
+            requestSnapshot.Run,
+            nameof(request));
         RunAdmission.EnsureNewRun(requestSnapshot.Run, nameof(request));
 
         foreach (var observation in requestSnapshot.Observations)
         {
-            ProtocolValidator.EnsureValid(observation);
+            ObservationAdmission.EnsureVisibleToRun(
+                observation,
+                requestSnapshot.Run);
         }
 
         foreach (var tool in requestSnapshot.Tools)
@@ -461,6 +466,7 @@ public sealed class HeadlessAgentRuntime
                         Sequence = run.Usage.Actions,
                         CreatedAt = _clock.UtcNow
                     };
+                    ProtocolValidator.EnsureValid(invocation);
 
                     await AppendAsync(
                         run,
@@ -494,10 +500,28 @@ public sealed class HeadlessAgentRuntime
                         ActionName = descriptor.Name,
                         ActionVersion = descriptor.Version,
                         Arguments = toolCall.Arguments.Clone(),
+                        DecisionKey = run.DecisionKey,
+                        BatchId = run.BatchId,
+                        ExpectedEffects =
+                            safety.ResolvedConflictKeys.ToList(),
                         RequestedAt = requestedAt,
                         Deadline = requestedAt.AddMilliseconds(
                             actionTimeoutMs)
                     };
+                    var gameContext = GameContextEnvelope.ValidateForRun(
+                        run,
+                        nameof(run));
+                    if (gameContext is not null)
+                    {
+                        actionRequest.BasedOnStateVersion =
+                            gameContext.StateVersion
+                            ?? gameContext.Causality
+                                ?.BasedOnStateVersion;
+                        actionRequest.Extensions[
+                                GameContextEnvelope.ExtensionName] =
+                            GameContextEnvelope.ToJson(gameContext);
+                    }
+
                     ProtocolValidator.EnsureValid(actionRequest);
 
                     run.PendingOperationIds.Add(operationId);
@@ -565,7 +589,8 @@ public sealed class HeadlessAgentRuntime
                     var receipt =
                         ActionReceiptIngressValidator.ValidateAndClone(
                             actionRequest,
-                            actionWait.Receipt!);
+                            actionWait.Receipt!,
+                            run);
 
                     await AppendAsync(
                         run,
@@ -795,7 +820,9 @@ public sealed class HeadlessAgentRuntime
     {
         var runtimeEvent = new RuntimeEvent
         {
-            EventId = _ids.NewId("event"),
+            EventId = RuntimeEventIdDerivation.Derive(
+                run.RunId,
+                _ids.NewId("event")),
             RunId = run.RunId,
             TurnId = turnId,
             Sequence = eventSequence.Next(),
@@ -827,7 +854,9 @@ public sealed class HeadlessAgentRuntime
         {
             var runtimeEvent = new RuntimeEvent
             {
-                EventId = _ids.NewId("event"),
+                EventId = RuntimeEventIdDerivation.Derive(
+                    run.RunId,
+                    _ids.NewId("event")),
                 RunId = run.RunId,
                 TurnId = turnId,
                 Sequence = eventSequence.Next(),
@@ -1197,6 +1226,7 @@ public sealed class HeadlessAgentRuntime
         ProviderUsage delta)
     {
         var tokenOverflow = false;
+        ProviderUsageAccounting.AccumulateDetails(usage, delta);
         usage.InputTokens = SaturatingAdd(
             usage.InputTokens,
             delta.InputTokens,
@@ -1207,10 +1237,29 @@ public sealed class HeadlessAgentRuntime
             delta.OutputTokens,
             out var outputOverflow);
         tokenOverflow |= outputOverflow;
-        usage.CostUsd = SaturatingAddCost(
-            usage.CostUsd,
-            delta.CostUsd,
-            out var costOverflow);
+        var costOverflow = false;
+        if (string.Equals(
+                usage.Availability,
+                UsageAvailabilityStates.CostAvailable,
+                StringComparison.Ordinal))
+        {
+            usage.CostUsd = SaturatingAddCost(
+                usage.CostUsd,
+                delta.CostUsd,
+                out costOverflow);
+        }
+        else
+        {
+            usage.CostUsd = SaturatingAddCost(
+                usage.CostUsd,
+                delta.CostUsd,
+                out costOverflow);
+            usage.HasUnaccountedUsage = true;
+            usage.UnaccountedProviderAttempts =
+                usage.UnaccountedProviderAttempts == int.MaxValue
+                    ? int.MaxValue
+                    : usage.UnaccountedProviderAttempts + 1;
+        }
 
         if (tokenOverflow)
         {

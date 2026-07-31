@@ -25,6 +25,29 @@ namespace GameAgent.Unity
             CancellationToken cancellationToken);
     }
 
+    /// <summary>
+    /// Optional durable-backend capability required by multi-actor participant
+    /// recovery. The guard is evaluated before a recovered run can reach a
+    /// provider, reconciler, or game-host side effect.
+    /// </summary>
+    public interface IUnityGuardedDurableAgentRuntimeBackend
+        : IUnityDurableAgentRuntimeBackend
+    {
+        /// <summary>
+        /// True only when guarded resume is supported by the entire wrapped
+        /// backend chain. Adapters must not report the capability merely
+        /// because they can defer a later not-supported exception.
+        /// </summary>
+        bool SupportsGuardedResume { get; }
+
+        ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation continuation,
+            IGameOperationReconciler reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard guard);
+    }
+
     public sealed class HeadlessUnityAgentRuntimeBackend
         : IUnityAgentRuntimeBackend<HeadlessRunRequest, HeadlessRunOutcome>
     {
@@ -46,7 +69,7 @@ namespace GameAgent.Unity
     }
 
     public sealed class DurableUnityAgentRuntimeBackend
-        : IUnityDurableAgentRuntimeBackend, IAsyncDisposable
+        : IUnityGuardedDurableAgentRuntimeBackend, IAsyncDisposable
     {
         private readonly IDurableAgentRuntime _runtime;
         private readonly bool _ownsRuntime;
@@ -61,6 +84,11 @@ namespace GameAgent.Unity
             _runtime = runtime
                 ?? throw new ArgumentNullException(nameof(runtime));
             _ownsRuntime = ownsRuntime;
+        }
+
+        public bool SupportsGuardedResume
+        {
+            get { return _runtime is IGuardedDurableAgentRuntime; }
         }
 
         public RuntimeControlPlane Controls
@@ -86,6 +114,21 @@ namespace GameAgent.Unity
                 continuation,
                 reconciler,
                 cancellationToken);
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation continuation,
+            IGameOperationReconciler reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard guard)
+        {
+            return _runtime.ResumeAsync(
+                runId,
+                continuation,
+                reconciler,
+                cancellationToken,
+                guard);
         }
 
         public ValueTask DisposeAsync()
@@ -126,7 +169,7 @@ namespace GameAgent.Unity
     }
 
     public sealed class BuiltUnityAgentRuntimeBackend
-        : IUnityDurableAgentRuntimeBackend, IAsyncDisposable
+        : IUnityGuardedDurableAgentRuntimeBackend, IAsyncDisposable
     {
         private readonly BuiltGameAgentRuntime _built;
         private readonly bool _ownsBuiltRuntime;
@@ -141,6 +184,11 @@ namespace GameAgent.Unity
             _built = built
                 ?? throw new ArgumentNullException(nameof(built));
             _ownsBuiltRuntime = ownsBuiltRuntime;
+        }
+
+        public bool SupportsGuardedResume
+        {
+            get { return true; }
         }
 
         public RuntimeControlPlane Controls
@@ -166,6 +214,21 @@ namespace GameAgent.Unity
                 continuation,
                 reconciler,
                 cancellationToken);
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation continuation,
+            IGameOperationReconciler reconciler,
+            CancellationToken cancellationToken,
+            DurableRunResumeGuard guard)
+        {
+            return _built.Runtime.ResumeAsync(
+                runId,
+                continuation,
+                reconciler,
+                cancellationToken,
+                guard);
         }
 
         public ValueTask DisposeAsync()

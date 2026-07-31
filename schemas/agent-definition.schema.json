@@ -26,7 +26,11 @@
     "version": {
       "$ref": "common.schema.json#/$defs/version"
     },
-    "identity": {},
+    "identity": {
+      "maxLength": 65536,
+      "maxItems": 2048,
+      "maxProperties": 2048
+    },
     "behaviorPolicyRef": {
       "type": "string",
       "minLength": 1,
@@ -34,6 +38,7 @@
     },
     "toolsets": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -43,6 +48,7 @@
     },
     "skills": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "$ref": "common.schema.json#/$defs/id"
       },
@@ -61,10 +67,16 @@
       "maxLength": 256
     },
     "budgets": {
-      "type": "object"
+      "type": "object",
+      "maxProperties": 2048
     },
     "extensions": {
-      "$ref": "common.schema.json#/$defs/extensions"
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
     }
   },
   "additionalProperties": false

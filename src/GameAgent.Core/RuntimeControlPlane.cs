@@ -29,12 +29,25 @@ public sealed class RuntimeControlPlane
 
     public bool TryPost(string runId, RunControlCommand command)
     {
+        return TryPost(runId, command, out _);
+    }
+
+    public bool TryPost(
+        string runId,
+        RunControlCommand command,
+        out string? rejectionReason)
+    {
         RuntimeGuard.RequiredId(runId, nameof(runId));
         var snapshot = ValidateAndSnapshot(
             command,
             _mailboxOptions);
-        return _active.TryGetValue(runId, out var control)
-               && control.Post(snapshot);
+        if (!_active.TryGetValue(runId, out var control))
+        {
+            rejectionReason = null;
+            return false;
+        }
+
+        return control.Post(snapshot, out rejectionReason);
     }
 
     internal Registration Register(string runId, string? worldId = null)
@@ -45,9 +58,57 @@ public sealed class RuntimeControlPlane
             worldId = RuntimeGuard.RequiredId(worldId, nameof(worldId));
         }
 
+        return Register(
+            runId,
+            worldId,
+            agentId: null,
+            sessionId: null,
+            observer: null,
+            requireAudienceIncarnation: false);
+    }
+
+    internal Registration Register(AgentRun run)
+    {
+        return Register(run, requireAudienceIncarnation: false);
+    }
+
+    internal Registration Register(
+        AgentRun run,
+        bool requireAudienceIncarnation)
+    {
+        if (run is null)
+        {
+            throw new ArgumentNullException(nameof(run));
+        }
+
+        var coordinate = requireAudienceIncarnation
+            ? GameContextEnvelope.ValidateForRun(run, nameof(run))
+            : null;
+        return Register(
+            RuntimeGuard.RequiredId(run.RunId, nameof(run)),
+            RuntimeGuard.RequiredId(run.WorldId, nameof(run)),
+            RuntimeGuard.RequiredId(run.AgentId, nameof(run)),
+            run.SessionId,
+            coordinate?.Observer,
+            requireAudienceIncarnation);
+    }
+
+    private Registration Register(
+        string runId,
+        string? worldId,
+        string? agentId,
+        string? sessionId,
+        GameEntityIdentity? observer,
+        bool requireAudienceIncarnation)
+    {
         var active = new ActiveRunControl(
             _mailboxOptions,
+            runId,
             worldId,
+            agentId,
+            sessionId,
+            observer,
+            requireAudienceIncarnation,
             _cancellationDispatcher);
         if (!_active.TryAdd(runId, active))
         {
@@ -179,13 +240,24 @@ public sealed class RuntimeControlPlane
 
         public StepLease(
             ActiveRunControl owner,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool pendingControlAtStart)
         {
             _owner = owner;
             CancellationToken = cancellationToken;
+            PendingControlAtStart = pendingControlAtStart;
         }
 
         public CancellationToken CancellationToken { get; }
+
+        public bool PendingControlAtStart { get; }
+
+        public bool TryAcquireDispatchPermit()
+        {
+            var owner = Volatile.Read(ref _owner);
+            return owner is not null
+                   && owner.TryAcquireDispatchPermit();
+        }
 
         public void Dispose()
         {
@@ -203,22 +275,41 @@ public sealed class RuntimeControlPlane
         private Task? _stepCancellation;
         private BoundedCancellationDispatcher.CancellationDispatchReservation?
             _stepCancellationReservation;
+        private bool _stepDispatchBlocked;
+        private readonly string _runId;
         private readonly string? _worldId;
+        private readonly string? _agentId;
+        private readonly string? _sessionId;
+        private readonly GameEntityIdentity? _observer;
+        private readonly bool _requireAudienceIncarnation;
         private bool _disposed;
 
         public ActiveRunControl(
             RunControlMailboxOptions mailboxOptions,
+            string runId,
             string? worldId,
+            string? agentId,
+            string? sessionId,
+            GameEntityIdentity? observer,
+            bool requireAudienceIncarnation,
             BoundedCancellationDispatcher cancellationDispatcher)
         {
             _mailbox = new RunControlMailbox(mailboxOptions);
+            _runId = runId;
             _worldId = worldId;
+            _agentId = agentId;
+            _sessionId = sessionId;
+            _observer = observer;
+            _requireAudienceIncarnation = requireAudienceIncarnation;
             _cancellationDispatcher = cancellationDispatcher;
         }
 
-        public bool Post(RunControlCommand command)
+        public bool Post(
+            RunControlCommand command,
+            out string? rejectionReason)
         {
             var accepted = false;
+            rejectionReason = null;
             lock (_sync)
             {
                 if (_disposed)
@@ -226,12 +317,10 @@ public sealed class RuntimeControlPlane
                     return false;
                 }
 
-                if (_worldId is not null
-                    && command.Observation is not null
-                    && !string.Equals(
-                        command.Observation.WorldId,
-                        _worldId,
-                        StringComparison.Ordinal))
+                if (command.Observation is not null
+                    && !ObservationIsVisible(
+                        command.Observation,
+                        out rejectionReason))
                 {
                     return false;
                 }
@@ -247,15 +336,62 @@ public sealed class RuntimeControlPlane
                         RunControlKinds.FollowUp,
                         StringComparison.Ordinal)
                     && _step is not null
-                    && _stepCancellation is null)
+                    )
                 {
-                    _stepCancellation =
-                        _stepCancellationReservation!
-                            .DispatchAsync(_step);
+                    _stepDispatchBlocked = true;
+                    if (_stepCancellation is null)
+                    {
+                        _stepCancellation =
+                            _stepCancellationReservation!
+                                .DispatchAsync(_step);
+                    }
                 }
             }
 
             return accepted;
+        }
+
+        private bool ObservationIsVisible(
+            ObservationEnvelope observation,
+            out string? rejectionReason)
+        {
+            rejectionReason = null;
+            if (_worldId is null)
+            {
+                return true;
+            }
+
+            if (_agentId is null)
+            {
+                var visible = string.Equals(
+                    observation.WorldId,
+                    _worldId,
+                    StringComparison.Ordinal);
+                if (!visible)
+                {
+                    rejectionReason = "observation_world_mismatch";
+                }
+
+                return visible;
+            }
+
+            try
+            {
+                ObservationAdmission.EnsureVisibleToRun(
+                    observation,
+                    _runId,
+                    _agentId,
+                    _worldId,
+                    _sessionId,
+                    _observer,
+                    _requireAudienceIncarnation);
+                return true;
+            }
+            catch (ObservationAdmissionException exception)
+            {
+                rejectionReason = exception.ReasonCode;
+                return false;
+            }
         }
 
         public StepLease BeginStep(CancellationToken cancellationToken)
@@ -286,13 +422,35 @@ public sealed class RuntimeControlPlane
                         cancellationToken);
                     _stepCancellation = null;
                     _stepCancellationReservation = cancellationReservation;
-                    return new StepLease(this, _step.Token);
+                    var pendingControlAtStart =
+                        _mailbox.HasStepInterruptingCommand;
+                    _stepDispatchBlocked = pendingControlAtStart;
+                    if (pendingControlAtStart)
+                    {
+                        _stepCancellation =
+                            cancellationReservation!.DispatchAsync(_step);
+                    }
+                    return new StepLease(
+                        this,
+                        _step.Token,
+                        pendingControlAtStart);
                 }
                 catch
                 {
                     cancellationReservation!.Dispose();
                     throw;
                 }
+            }
+        }
+
+        public bool TryAcquireDispatchPermit()
+        {
+            lock (_sync)
+            {
+                return !_disposed
+                       && _step is not null
+                       && !_stepDispatchBlocked
+                       && !_step.IsCancellationRequested;
             }
         }
 
@@ -321,6 +479,7 @@ public sealed class RuntimeControlPlane
                 _step = null;
                 _stepCancellation = null;
                 _stepCancellationReservation = null;
+                _stepDispatchBlocked = false;
             }
 
             if (step is null)
@@ -368,6 +527,7 @@ public sealed class RuntimeControlPlane
                 _step = null;
                 _stepCancellation = null;
                 _stepCancellationReservation = null;
+                _stepDispatchBlocked = true;
                 _mailbox.Dispose();
             }
 

@@ -105,6 +105,51 @@ public sealed class HostToolExecutorTests
     }
 
     [Fact]
+    public async Task PrivateObservationForAnotherAgentIsRejected()
+    {
+        var receipt = Receipt(ProtocolJson.ParseElement("""{"value":7}"""));
+        var observation = Observation("world-1", includePayload: true);
+        observation.Visibility = new VisibilityRule
+        {
+            Scope = ObservationVisibilityScopes.Private,
+            AudienceIds = new List<string> { "agent-other" }
+        };
+        receipt.AuthoritativeObservations.Add(observation);
+        var setup = Setup(
+            ProtocolJson.ParseElement("""{}"""),
+            receipt);
+
+        var error = await Assert.ThrowsAsync<ObservationAdmissionException>(
+            () => setup.Executor.ExecuteAsync(
+                    setup.Execution,
+                    CancellationToken.None)
+                .AsTask());
+
+        Assert.Equal("observation_audience_mismatch", error.ReasonCode);
+    }
+
+    [Fact]
+    public async Task ObservationForAnotherSessionIsRejected()
+    {
+        var receipt = Receipt(ProtocolJson.ParseElement("""{"value":7}"""));
+        var observation = Observation("world-1", includePayload: true);
+        observation.SessionId = "session-other";
+        receipt.AuthoritativeObservations.Add(observation);
+        var setup = Setup(
+            ProtocolJson.ParseElement("""{}"""),
+            receipt,
+            sessionId: "session-current");
+
+        var error = await Assert.ThrowsAsync<ObservationAdmissionException>(
+            () => setup.Executor.ExecuteAsync(
+                    setup.Execution,
+                    CancellationToken.None)
+                .AsTask());
+
+        Assert.Equal("observation_session_mismatch", error.ReasonCode);
+    }
+
+    [Fact]
     public async Task InvalidAuthoritativeObservationIsRejected()
     {
         var receipt = Receipt(ProtocolJson.ParseElement("""{"value":7}"""));
@@ -243,7 +288,8 @@ public sealed class HostToolExecutorTests
             new Dictionary<string, ActionRequest>(StringComparer.Ordinal)
             {
                 ["call-1"] = setup.AuthoritativeRequest
-            });
+            },
+            RunFor(setup.AuthoritativeRequest));
 
         var returned = await executor.ExecuteAsync(
             setup.Execution,
@@ -268,7 +314,8 @@ public sealed class HostToolExecutorTests
 
     private static SetupResult Setup(
         JsonElement resultSchema,
-        ActionReceipt hostReceipt)
+        ActionReceipt hostReceipt,
+        string? sessionId = null)
     {
         var registry = new ToolCatalogRegistry();
         registry.Replace(
@@ -321,8 +368,25 @@ public sealed class HostToolExecutorTests
             new Dictionary<string, ActionRequest>(StringComparer.Ordinal)
             {
                 ["call-1"] = action
-            });
+            },
+            RunFor(action, sessionId));
         return new SetupResult(executor, execution, action);
+    }
+
+    private static AgentRun RunFor(
+        ActionRequest action,
+        string? sessionId = null)
+    {
+        return new AgentRun
+        {
+            RunId = action.RunId,
+            AgentId = action.AgentId,
+            WorldId = action.WorldId,
+            SessionId = sessionId,
+            State = RunStates.Running,
+            CreatedAt = DateTimeOffset.UnixEpoch,
+            UpdatedAt = DateTimeOffset.UnixEpoch
+        };
     }
 
     private static ActionReceipt Receipt(JsonElement result)

@@ -208,6 +208,52 @@
         "costUsd": {
           "$ref": "common.schema.json#/$defs/decimal"
         },
+        "providerUsageSamples": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cacheReadTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cacheWriteTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cacheMissTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "reasoningTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "providerTotalTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "availability": {
+          "type": "string",
+          "enum": [
+            "cost_available",
+            "cost_unavailable"
+          ]
+        },
         "actions": {
           "type": "integer",
           "minimum": 0

@@ -7,15 +7,19 @@ internal sealed class DurableRunInputSnapshot
 {
     public DurableRunInputSnapshot(
         IReadOnlyList<ContextCandidate> context,
-        IReadOnlyList<SkillReference> activeSkills)
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass)
     {
         Context = context;
         ActiveSkills = activeSkills;
+        WorkloadClass = workloadClass;
     }
 
     public IReadOnlyList<ContextCandidate> Context { get; }
 
     public IReadOnlyList<SkillReference> ActiveSkills { get; }
+
+    public string WorkloadClass { get; }
 }
 
 internal static class DurableRunInputJournalCodec
@@ -30,6 +34,17 @@ internal static class DurableRunInputJournalCodec
         IReadOnlyList<ContextCandidate> context,
         IReadOnlyList<SkillReference> activeSkills)
     {
+        return Encode(
+            context,
+            activeSkills,
+            ProviderWorkloadClasses.Interactive);
+    }
+
+    public static JsonElement Encode(
+        IReadOnlyList<ContextCandidate> context,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass)
+    {
         if (context is null)
         {
             throw new ArgumentNullException(nameof(context));
@@ -40,6 +55,9 @@ internal static class DurableRunInputJournalCodec
             throw new ArgumentNullException(nameof(activeSkills));
         }
 
+        workloadClass = ProviderWorkloadClasses.Normalize(
+            workloadClass,
+            nameof(workloadClass));
         var contextSnapshot = RuntimeInputGuard.CopyBounded(
             context,
             MaxContextCandidates,
@@ -58,13 +76,18 @@ internal static class DurableRunInputJournalCodec
                          nameof(activeSkills)),
             nameof(activeSkills),
             "activated_skill_count_exceeded");
+        ValidateUniqueActiveSkills(activeSkillSnapshot);
         using var buffer = new BoundedBufferWriter(
             MaxEncodedUtf8Bytes,
             nameof(context),
             "durable_run_input_bytes_exceeded");
         using (var writer = new Utf8JsonWriter(buffer))
         {
-            WritePayload(writer, contextSnapshot, activeSkillSnapshot);
+            WritePayload(
+                writer,
+                contextSnapshot,
+                activeSkillSnapshot,
+                workloadClass);
         }
 
         using var document = JsonDocument.Parse(buffer.WrittenMemory);
@@ -83,12 +106,38 @@ internal static class DurableRunInputJournalCodec
         _ = Encode(context, activeSkills);
     }
 
+    internal static void ValidateEncodedSize(
+        IReadOnlyList<ContextCandidate> context,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass)
+    {
+        _ = Encode(context, activeSkills, workloadClass);
+    }
+
+    internal static void ValidateUniqueActiveSkills(
+        IReadOnlyList<SkillReference> activeSkills)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var skill in activeSkills)
+        {
+            if (skill is null || !seen.Add(skill.Value))
+            {
+                throw new ArgumentException(
+                    "Active-skill collections cannot contain duplicates "
+                    + "or null entries.",
+                    nameof(activeSkills));
+            }
+        }
+    }
+
     private static void WritePayload(
         Utf8JsonWriter writer,
         IReadOnlyList<ContextCandidate> context,
-        IReadOnlyList<SkillReference> activeSkills)
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass)
     {
         writer.WriteStartObject();
+        writer.WriteString("workloadClass", workloadClass);
         writer.WritePropertyName("context");
         writer.WriteStartArray();
         foreach (var candidate in context)
@@ -174,7 +223,37 @@ internal static class DurableRunInputJournalCodec
             activeSkills.Add(reference);
         }
 
-        return new DurableRunInputSnapshot(context, activeSkills);
+        var workloadClass = payload.TryGetProperty(
+                "workloadClass",
+                out var workloadClassElement)
+            ? ReadWorkloadClass(workloadClassElement)
+            : ProviderWorkloadClasses.Interactive;
+        return new DurableRunInputSnapshot(
+            context,
+            activeSkills,
+            workloadClass);
+    }
+
+    private static string ReadWorkloadClass(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException(
+                "A durable provider workload class is malformed.");
+        }
+
+        try
+        {
+            return ProviderWorkloadClasses.Normalize(
+                value.GetString(),
+                "workloadClass");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                "A durable provider workload class is not supported.",
+                exception);
+        }
     }
 
     private static void WriteContext(
@@ -209,6 +288,13 @@ internal static class DurableRunInputJournalCodec
         if (candidate.Provenance is not null)
         {
             writer.WriteString("provenance", candidate.Provenance);
+        }
+
+        if (candidate.ObservationAdmissionMetadata is not null)
+        {
+            WriteObservationAdmission(
+                writer,
+                candidate.ObservationAdmissionMetadata);
         }
 
         if (candidate.Content.HasValue)
@@ -270,6 +356,11 @@ internal static class DurableRunInputJournalCodec
             out var provenanceElement)
             ? provenanceElement.GetString()
             : null;
+        var observationAdmission = item.TryGetProperty(
+                "observationAdmission",
+                out var observationAdmissionElement)
+            ? ReadObservationAdmission(observationAdmissionElement)
+            : null;
         var hasContent = item.TryGetProperty("content", out var content);
         var hasResource = item.TryGetProperty("resource", out var resource);
         if (hasContent == hasResource)
@@ -284,12 +375,14 @@ internal static class DurableRunInputJournalCodec
                 id,
                 category,
                 content.Clone(),
+                null,
                 priority,
                 required,
                 canDefer,
                 estimatedTokens,
                 expiresAt,
-                provenance);
+                provenance,
+                observationAdmission);
         }
 
         if (resource.ValueKind != JsonValueKind.Object)
@@ -309,6 +402,7 @@ internal static class DurableRunInputJournalCodec
         return new ContextCandidate(
             id,
             category,
+            null,
             new ContextResourceReference(
                 RequiredString(resource, "uri"),
                 RequiredString(resource, "mediaType"),
@@ -319,7 +413,153 @@ internal static class DurableRunInputJournalCodec
             canDefer,
             estimatedTokens,
             expiresAt,
-            provenance);
+            provenance,
+            observationAdmission);
+    }
+
+    private static void WriteObservationAdmission(
+        Utf8JsonWriter writer,
+        ObservationAdmissionSnapshot admission)
+    {
+        writer.WritePropertyName("observationAdmission");
+        writer.WriteStartObject();
+        writer.WriteString("observationId", admission.ObservationId);
+        writer.WriteString("worldId", admission.WorldId);
+        if (admission.SessionId is not null)
+        {
+            writer.WriteString("sessionId", admission.SessionId);
+        }
+
+        writer.WriteString("scope", admission.Scope);
+        writer.WritePropertyName("audienceIds");
+        writer.WriteStartArray();
+        foreach (var audienceId in admission.AudienceIds)
+        {
+            writer.WriteStringValue(audienceId);
+        }
+
+        writer.WriteEndArray();
+        writer.WriteString(
+            "bindingState",
+            admission.BindingState switch
+            {
+                AudienceIncarnationBindingState.Missing => "missing",
+                AudienceIncarnationBindingState.Invalid => "invalid",
+                AudienceIncarnationBindingState.Valid => "valid",
+                _ => throw new InvalidOperationException(
+                    "Audience incarnation binding state is unsupported.")
+            });
+        writer.WritePropertyName("bindings");
+        writer.WriteStartArray();
+        foreach (var binding in admission.Bindings)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("audienceId", binding.AudienceId);
+            writer.WriteString("entityId", binding.Entity.EntityId);
+            writer.WriteNumber(
+                "incarnation",
+                binding.Entity.Incarnation);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+    }
+
+    private static ObservationAdmissionSnapshot ReadObservationAdmission(
+        JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("audienceIds", out var audienceIds)
+            || audienceIds.ValueKind != JsonValueKind.Array
+            || audienceIds.GetArrayLength()
+            > ObservationAudienceIncarnations.MaxBindings
+            || !value.TryGetProperty("bindingState", out var bindingState)
+            || bindingState.ValueKind != JsonValueKind.String
+            || !value.TryGetProperty("bindings", out var bindings)
+            || bindings.ValueKind != JsonValueKind.Array
+            || bindings.GetArrayLength()
+            > ObservationAudienceIncarnations.MaxBindings)
+        {
+            throw new InvalidDataException(
+                "A durable observation-admission snapshot is malformed.");
+        }
+
+        var state = bindingState.GetString() switch
+        {
+            "missing" => AudienceIncarnationBindingState.Missing,
+            "invalid" => AudienceIncarnationBindingState.Invalid,
+            "valid" => AudienceIncarnationBindingState.Valid,
+            _ => throw new InvalidDataException(
+                "A durable audience incarnation state is malformed.")
+        };
+        var audience = audienceIds
+            .EnumerateArray()
+            .Select(ReadStringValue)
+            .ToArray();
+        var parsedBindings =
+            new List<ObservationAudienceIncarnationBinding>(
+                bindings.GetArrayLength());
+        foreach (var binding in bindings.EnumerateArray())
+        {
+            if (binding.ValueKind != JsonValueKind.Object
+                || !binding.TryGetProperty(
+                    "incarnation",
+                    out var incarnation)
+                || incarnation.ValueKind != JsonValueKind.Number
+                || !incarnation.TryGetInt64(out var incarnationValue))
+            {
+                throw new InvalidDataException(
+                    "A durable audience incarnation binding is malformed.");
+            }
+
+            try
+            {
+                parsedBindings.Add(
+                    new ObservationAudienceIncarnationBinding(
+                        RequiredString(binding, "audienceId"),
+                        new GameEntityIdentity(
+                            RequiredString(binding, "entityId"),
+                            incarnationValue)));
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException(
+                    "A durable audience incarnation binding is malformed.",
+                    exception);
+            }
+        }
+
+        try
+        {
+            return new ObservationAdmissionSnapshot(
+                RequiredString(value, "observationId"),
+                RequiredString(value, "worldId"),
+                value.TryGetProperty("sessionId", out var sessionId)
+                    ? ReadStringValue(sessionId)
+                    : null,
+                RequiredString(value, "scope"),
+                audience,
+                state,
+                parsedBindings);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                "A durable observation-admission snapshot is malformed.",
+                exception);
+        }
+    }
+
+    private static string ReadStringValue(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException(
+                "A durable run-input string value is malformed.");
+        }
+
+        return value.GetString()!;
     }
 
     private static string RequiredString(JsonElement value, string property)

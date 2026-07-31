@@ -104,6 +104,14 @@ public sealed class BudgetTracker
             return Deny("max_duration");
         }
 
+        if (!string.Equals(
+                usage.Availability,
+                UsageAvailabilityStates.CostAvailable,
+                StringComparison.Ordinal))
+        {
+            return Deny("provider_cost_unavailable");
+        }
+
         var usedTokens = (long)usage.InputTokens + usage.OutputTokens;
         if (allowExactConsumption
                 ? usedTokens > _budget.MaxTokens

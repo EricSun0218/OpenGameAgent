@@ -9,6 +9,160 @@ namespace GameAgent.Tests;
 public sealed class HeadlessAgentRuntimeTests
 {
     [Fact]
+    public async Task RestartedSequentialIdsRemainUniqueAcrossRuns()
+    {
+        var store = new InMemorySessionStore();
+        var clock = new FakeRuntimeClock();
+        var firstRequest = CreateRequest();
+        firstRequest.Run.RunId = "headless-run-1";
+        var secondRequest = CreateRequest();
+        secondRequest.Run.RunId = "headless-run-2";
+        var firstRuntime = new HeadlessAgentRuntime(
+            new ScriptedModelProvider(
+                ModelResponse.Final(
+                    ProtocolJson.ParseElement("""{"done":true}"""))),
+            FakeGameHost.Returning(
+                _ => throw new InvalidOperationException(
+                    "No tool call expected.")),
+            store,
+            clock,
+            new SequentialIdGenerator());
+        var secondRuntime = new HeadlessAgentRuntime(
+            new ScriptedModelProvider(
+                ModelResponse.Final(
+                    ProtocolJson.ParseElement("""{"done":true}"""))),
+            FakeGameHost.Returning(
+                _ => throw new InvalidOperationException(
+                    "No tool call expected.")),
+            store,
+            clock,
+            new SequentialIdGenerator());
+
+        await firstRuntime.RunAsync(firstRequest);
+        await secondRuntime.RunAsync(secondRequest);
+
+        var firstIds = (await store.ReadRunAsync(
+                firstRequest.Run.RunId,
+                default))
+            .Select(item => item.EventId)
+            .ToArray();
+        var secondIds = (await store.ReadRunAsync(
+                secondRequest.Run.RunId,
+                default))
+            .Select(item => item.EventId)
+            .ToArray();
+        Assert.NotEmpty(firstIds);
+        Assert.Equal(firstIds.Length, firstIds.Distinct().Count());
+        Assert.Equal(secondIds.Length, secondIds.Distinct().Count());
+        Assert.Empty(firstIds.Intersect(secondIds, StringComparer.Ordinal));
+        Assert.All(
+            firstIds.Concat(secondIds),
+            eventId =>
+            {
+                Assert.StartsWith(
+                    "event:sha256:",
+                    eventId,
+                    StringComparison.Ordinal);
+                Assert.InRange(
+                    eventId.Length,
+                    1,
+                    RuntimeEventIdDerivation.MaximumLength);
+                Assert.Matches("^[A-Za-z0-9._:-]+$", eventId);
+            });
+    }
+
+    [Fact]
+    public async Task KnownGameContextFailsClosedBeforeProviderDispatch()
+    {
+        var store = new InMemorySessionStore();
+        var clock = new FakeRuntimeClock();
+        var provider = new ScriptedModelProvider(
+            ModelResponse.Final(
+                ProtocolJson.ParseElement("""{"done":true}""")));
+        var runtime = Runtime(provider, store, clock);
+        var cases = new[]
+        {
+            ProtocolJson.ParseElement("""{"worldId":"world"}"""),
+            GameContextEnvelope.ToJson(
+                new GameContextCoordinate(
+                    "other-world",
+                    "prime",
+                    saveRevision: 1))
+        };
+
+        foreach (var gameContext in cases)
+        {
+            var request = CreateRequest();
+            request.Run.RunId = "game-context-" + Guid.NewGuid().ToString("N");
+            request.Run.Extensions[GameContextEnvelope.ExtensionName] =
+                gameContext;
+
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => runtime.RunAsync(request).AsTask());
+        }
+
+        Assert.Equal(0, provider.CallCount);
+        Assert.Empty(store.Events);
+    }
+
+    [Fact]
+    public async Task ObservationScopeFailsClosedBeforeProviderDispatch()
+    {
+        var store = new InMemorySessionStore();
+        var clock = new FakeRuntimeClock();
+        var provider = new ScriptedModelProvider(
+            ModelResponse.Final(
+                ProtocolJson.ParseElement("""{"done":true}""")));
+        var runtime = Runtime(provider, store, clock);
+        var cases =
+            new (Action<ObservationEnvelope> Mutate, string ReasonCode)[]
+            {
+                (
+                    observation => observation.WorldId = "other-world",
+                    "observation_world_mismatch"),
+                (
+                    observation => observation.SessionId = "other-session",
+                    "observation_session_mismatch"),
+                (
+                    observation =>
+                        observation.Visibility.AudienceIds =
+                            new List<string> { "other-agent" },
+                    "observation_audience_mismatch"),
+                (
+                    observation =>
+                    {
+                        observation.Visibility.Scope =
+                            ObservationVisibilityScopes.Private;
+                        observation.Visibility.AudienceIds =
+                            new List<string>
+                            {
+                                "agent-demo",
+                                "other-agent"
+                            };
+                    },
+                    "observation_private_audience_invalid")
+            };
+
+        foreach (var testCase in cases)
+        {
+            var request = CreateRequest();
+            request.Run.RunId =
+                "observation-admission-" + Guid.NewGuid().ToString("N");
+            testCase.Mutate(request.Observations[0]);
+
+            var error = await Assert.ThrowsAsync<
+                ObservationAdmissionException>(
+                () => runtime.RunAsync(request).AsTask());
+
+            Assert.Equal(testCase.ReasonCode, error.ReasonCode);
+            Assert.Equal(0, runtime.ActiveRunCount);
+        }
+
+        Assert.Equal(0, provider.CallCount);
+        Assert.Empty(store.Events);
+    }
+
+    [Fact]
     public async Task ProtocolDtoFieldsAreBoundedBeforeSerialization()
     {
         var store = new InMemorySessionStore();
@@ -189,6 +343,62 @@ public sealed class HeadlessAgentRuntimeTests
     }
 
     [Fact]
+    public async Task GameDecisionMetadataReachesTheHostAction()
+    {
+        var store = new InMemorySessionStore();
+        var clock = new FakeRuntimeClock();
+        var provider = new ScriptedModelProvider(
+            ModelResponse.CallTools(new ModelToolCall
+            {
+                ToolCallId = "call-context",
+                Name = "gather_food",
+                Arguments = ProtocolJson.ParseElement(
+                    """{"resource":"berries"}""")
+            }),
+            ModelResponse.Final(
+                ProtocolJson.ParseElement("""{"done":true}""")));
+        var host = FakeGameHost.Returning(
+            request => SucceededReceipt(request, clock));
+        var runtime = new HeadlessAgentRuntime(
+            provider,
+            host,
+            store,
+            clock,
+            new SequentialIdGenerator());
+        var request = CreateRequest();
+        request.Run.DecisionKey = "npc decision 12 / forage";
+        request.Run.BatchId = "world-tick-12";
+        GameContextEnvelope.Attach(
+            request.Run,
+            new GameContextCoordinate(
+                request.Run.WorldId,
+                "prime",
+                saveRevision: 12,
+                stateVersion: "world-v12",
+                gameTime: new GameTimePoint(
+                    "simulation",
+                    "prime",
+                    epoch: 1,
+                    tick: 12)));
+
+        var outcome = await runtime.RunAsync(request);
+
+        Assert.True(
+            string.Equals(
+                RunStates.Completed,
+                outcome.Run.State,
+                StringComparison.Ordinal),
+            outcome.Run.TerminalReason);
+        var action = Assert.Single(host.Requests);
+        Assert.Equal("npc decision 12 / forage", action.DecisionKey);
+        Assert.Equal("world-tick-12", action.BatchId);
+        Assert.Equal("world-v12", action.BasedOnStateVersion);
+        Assert.True(
+            action.Extensions.ContainsKey(
+                GameContextEnvelope.ExtensionName));
+    }
+
+    [Fact]
     public async Task UnknownReceiptStopsForReconciliationWithoutReplayingTheModel()
     {
         var store = new InMemorySessionStore();
@@ -257,6 +467,9 @@ public sealed class HeadlessAgentRuntimeTests
 
         Assert.Equal(RunStates.Completed, outcome.Run.State);
         Assert.True(sawDurableRequest);
+        Assert.Equal(
+            new[] { "agent:agent-demo", "resource:berries" },
+            Assert.Single(host.Requests).ExpectedEffects);
 
         var requestedIndex = FindEventIndex(store.Events, RuntimeEventKinds.ActionRequested);
         var receivedIndex = FindEventIndex(store.Events, RuntimeEventKinds.ActionReceived);
@@ -1673,6 +1886,47 @@ public sealed class HeadlessAgentRuntimeTests
         Assert.Equal(RunStates.Failed, outcome.Run.State);
         Assert.Equal(RuntimeEventKinds.RunFailed, store.Events[^1].Kind);
         Assert.Equal("0", outcome.Run.Usage.CostUsd);
+    }
+
+    [Fact]
+    public async Task UnavailableProviderCostIsNotTreatedAsZeroCost()
+    {
+        var store = new InMemorySessionStore();
+        var clock = new FakeRuntimeClock();
+        var runtime = Runtime(
+            new ScriptedModelProvider(
+                ModelResponse.Final(
+                    ProtocolJson.ParseElement("""{"done":true}"""),
+                    new ProviderUsage
+                    {
+                        InputTokens = 10,
+                        OutputTokens = 2,
+                        CostUsd = "0",
+                        ProviderTotalTokens = 12,
+                        Availability =
+                            UsageAvailabilityStates.CostUnavailable
+                    })),
+            store,
+            clock);
+
+        var outcome = await runtime.RunAsync(CreateRequest());
+
+        Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
+        Assert.Equal(
+            "provider_cost_unavailable",
+            outcome.Run.TerminalReason);
+        Assert.Equal(10, outcome.Run.Usage.InputTokens);
+        Assert.Equal(2, outcome.Run.Usage.OutputTokens);
+        Assert.Equal(1, outcome.Run.Usage.ProviderUsageSamples);
+        Assert.Equal(12, outcome.Run.Usage.ProviderTotalTokens);
+        Assert.Equal("0", outcome.Run.Usage.CostUsd);
+        Assert.Equal(
+            UsageAvailabilityStates.CostUnavailable,
+            outcome.Run.Usage.Availability);
+        Assert.True(outcome.Run.Usage.HasUnaccountedUsage);
+        Assert.Equal(
+            1,
+            outcome.Run.Usage.UnaccountedProviderAttempts);
     }
 
     [Fact]

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/world-v1/world.schema.json",
+  "title": "Native World Definition v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "worldId",
+    "defaultTimelineId",
+    "initialState"
+  ],
+  "properties": {
+    "contract": {
+      "const": "game-agent.world-definition.v1"
+    },
+    "worldId": {
+      "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+    },
+    "defaultTimelineId": {
+      "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+    },
+    "entityStateRootPath": {
+      "$ref": "native-world-common.schema.json#/$defs/jsonPointer"
+    },
+    "relationshipRootPath": {
+      "$ref": "native-world-common.schema.json#/$defs/jsonPointer"
+    },
+    "initialState": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "native-world-common.schema.json#/$defs/authoritativeValue"
+      }
+    },
+    "entityIncarnations": {
+      "type": "object",
+      "maxProperties": 4096,
+      "propertyNames": {
+        "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+      },
+      "additionalProperties": {
+        "$ref": "native-world-common.schema.json#/$defs/canonicalNonNegativeInt64"
+      }
+    },
+    "catalogs": {
+      "type": "object",
+      "properties": {
+        "clocks": {
+          "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+        },
+        "numerics": {
+          "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+        },
+        "events": {
+          "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+        },
+        "interactions": {
+          "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+        },
+        "agents": {
+          "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+        },
+        "knowledge": {
+          "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "extensions": {
+      "$ref": "native-world-common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

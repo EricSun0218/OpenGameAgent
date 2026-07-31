@@ -38,6 +38,7 @@
     "stateDiff": {},
     "authoritativeObservations": {
       "type": "array",
+      "maxItems": 64,
       "items": {
         "$ref": "observation-envelope.schema.json"
       },

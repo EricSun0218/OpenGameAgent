@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using GameAgent.Core;
 using GameAgent.Protocol;
@@ -14,15 +13,20 @@ public sealed class FileSessionStore :
     private const uint CommitMagic = 0x54494D43;
     private const int HeaderSize = 12;
     private const int FooterSize = 4;
-    private const int JournalFormatVersion = 2;
+    private const int JournalFormatVersion = 3;
     private const int MinimumJournalFormatVersion = 1;
+    private const int LegacyCheckpointLifecycleFormatVersion = 2;
     private const string GlobalStreamId = "$global";
 
     private readonly string _path;
+    private readonly ExclusiveFileWriterLease _writerLease;
     private readonly FileStream _stream;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly bool _flushToDiskOnAppend;
     private readonly int _maxFramePayloadBytes;
+    private readonly long _maxJournalBytes;
+    private readonly long _maxTotalCommittedEvents;
+    private readonly int _maxEventsPerRun;
     private readonly IJournalFaultInjector? _faultInjector;
     private readonly Dictionary<string, RunStreamState> _runStreams =
         new(StringComparer.Ordinal);
@@ -30,6 +34,9 @@ public sealed class FileSessionStore :
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, StoredOperation> _operations =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AgentRun> _runCheckpoints =
+        new(StringComparer.Ordinal);
+    private long _totalCommittedEvents;
     private bool _faulted;
     private bool _disposed;
 
@@ -52,9 +59,34 @@ public sealed class FileSessionStore :
                 "MaxFramePayloadBytes must be positive.");
         }
 
+        if (options.MaxJournalBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxJournalBytes must be positive.");
+        }
+
+        if (options.MaxTotalCommittedEvents <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxTotalCommittedEvents must be positive.");
+        }
+
+        if (options.MaxEventsPerRun <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "MaxEventsPerRun must be positive.");
+        }
+
         _path = System.IO.Path.GetFullPath(path);
         _flushToDiskOnAppend = options.FlushToDiskOnAppend;
         _maxFramePayloadBytes = options.MaxFramePayloadBytes;
+        _maxJournalBytes = options.MaxJournalBytes;
+        _maxTotalCommittedEvents =
+            options.MaxTotalCommittedEvents;
+        _maxEventsPerRun = options.MaxEventsPerRun;
         _faultInjector = options.FaultInjector;
 
         var directory = System.IO.Path.GetDirectoryName(_path);
@@ -63,21 +95,17 @@ public sealed class FileSessionStore :
             Directory.CreateDirectory(directory);
         }
 
-        _stream = new FileStream(
-            _path,
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            FileShare.Read,
-            4096,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        _writerLease = ExclusiveFileWriterLease.Acquire(_path);
+        _stream = _writerLease.Stream;
 
         try
         {
+            EnsureExistingJournalCapacity();
             Recover();
         }
         catch
         {
-            _stream.Dispose();
+            _writerLease.Dispose();
             throw;
         }
     }
@@ -106,15 +134,19 @@ public sealed class FileSessionStore :
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var eventSnapshot = CloneEvent(runtimeEvent);
+        var eventSnapshot = SnapshotEventWithinFrameCapacity(
+            runtimeEvent,
+            serializedBytesBeforeEvent: 0,
+            out _);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfUnavailable();
+            cancellationToken.ThrowIfCancellationRequested();
             return await AppendUnderLockAsync(
                     eventSnapshot,
                     expectedRunRevision,
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally
@@ -134,7 +166,21 @@ public sealed class FileSessionStore :
             throw new ArgumentNullException(nameof(runtimeEvents));
         }
 
-        if (runtimeEvents.Count == 0)
+        int eventCount;
+        try
+        {
+            eventCount = runtimeEvents.Count;
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException)
+        {
+            throw new ArgumentException(
+                "The atomic journal batch did not expose a stable count.",
+                nameof(runtimeEvents),
+                exception);
+        }
+
+        if (eventCount <= 0)
         {
             throw new ArgumentException(
                 "An atomic journal batch cannot be empty.",
@@ -142,24 +188,65 @@ public sealed class FileSessionStore :
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var eventSnapshots = new RuntimeEvent[runtimeEvents.Count];
-        for (var index = 0; index < runtimeEvents.Count; index++)
+        if (eventCount > _maxEventsPerRun)
         {
-            var runtimeEvent = runtimeEvents[index]
-                               ?? throw new ArgumentException(
-                                   "A journal batch cannot contain null events.",
-                                   nameof(runtimeEvents));
-            eventSnapshots[index] = CloneEvent(runtimeEvent);
+            throw new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxEventsPerRun),
+                _maxEventsPerRun,
+                eventCount);
+        }
+
+        if (eventCount > _maxTotalCommittedEvents)
+        {
+            throw new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxTotalCommittedEvents),
+                _maxTotalCommittedEvents,
+                eventCount);
+        }
+
+        var eventSnapshots = new RuntimeEvent[eventCount];
+        var aggregateEventBytes = 0L;
+        for (var index = 0; index < eventCount; index++)
+        {
+            RuntimeEvent? runtimeEvent;
+            try
+            {
+                runtimeEvent = runtimeEvents[index];
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException)
+            {
+                throw new ArgumentException(
+                    "The atomic journal batch did not match its declared "
+                    + "count.",
+                    nameof(runtimeEvents),
+                    exception);
+            }
+
+            if (runtimeEvent is null)
+            {
+                throw new ArgumentException(
+                    "A journal batch cannot contain null events.",
+                    nameof(runtimeEvents));
+            }
+            eventSnapshots[index] = SnapshotEventWithinFrameCapacity(
+                runtimeEvent,
+                aggregateEventBytes,
+                out var serializedEventBytes);
+            aggregateEventBytes = SaturatingAdd(
+                aggregateEventBytes,
+                serializedEventBytes);
         }
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfUnavailable();
+            cancellationToken.ThrowIfCancellationRequested();
             return await AppendBatchUnderLockAsync(
                     eventSnapshots,
                     expectedRunRevision,
-                    cancellationToken)
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally
@@ -182,9 +269,14 @@ public sealed class FileSessionStore :
                 return Array.Empty<RuntimeEvent>();
             }
 
-            return stream.Entries
-                .Select(item => CloneEvent(item.Record.RuntimeEvent!))
-                .ToArray();
+            var events = new RuntimeEvent[stream.Entries.Count];
+            for (var index = 0; index < events.Length; index++)
+            {
+                events[index] = CloneEvent(
+                    stream.Entries[index].Record.RuntimeEvent!);
+            }
+
+            return events;
         }
         finally
         {
@@ -290,12 +382,21 @@ public sealed class FileSessionStore :
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var receiptSnapshot = CloneEvent(receiptEvent);
+        var receiptSnapshot = SnapshotEventWithinFrameCapacity(
+            receiptEvent,
+            serializedBytesBeforeEvent: 0,
+            out _);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfUnavailable();
-            var projection = PrepareProjection(receiptSnapshot);
+            cancellationToken.ThrowIfCancellationRequested();
+            var stream = GetRunStreamOrEmpty(
+                GetStreamId(receiptSnapshot.RunId));
+            var projection = PrepareProjection(
+                receiptSnapshot,
+                stream.NextSequence,
+                checked(stream.Revision + 1));
             if (projection.Receipt is null)
             {
                 throw new ArgumentException(
@@ -306,7 +407,7 @@ public sealed class FileSessionStore :
             var append = await AppendUnderLockAsync(
                     receiptSnapshot,
                     expectedRunRevision,
-                    cancellationToken,
+                    CancellationToken.None,
                     projection)
                 .ConfigureAwait(false);
             var operation = _operations[projection.Receipt.OperationId];
@@ -327,9 +428,10 @@ public sealed class FileSessionStore :
         try
         {
             ThrowIfUnavailable();
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                await _stream.FlushAsync(cancellationToken)
+                await _stream.FlushAsync(CancellationToken.None)
                     .ConfigureAwait(false);
                 if (_flushToDiskOnAppend)
                 {
@@ -359,7 +461,7 @@ public sealed class FileSessionStore :
             }
 
             _disposed = true;
-            _stream.Dispose();
+            _writerLease.Dispose();
         }
         finally
         {
@@ -391,14 +493,18 @@ public sealed class FileSessionStore :
             return DuplicateResult(existingEvent);
         }
 
-        var projection = preparedProjection ?? PrepareProjection(runtimeEvent);
+        var streamId = GetStreamId(runtimeEvent.RunId);
+        var stream = GetRunStreamOrEmpty(streamId);
+        var projection = preparedProjection
+                         ?? PrepareProjection(
+                             runtimeEvent,
+                             stream.NextSequence,
+                             checked(stream.Revision + 1));
         if (projection.DuplicateEntry is not null)
         {
             return DuplicateResult(projection.DuplicateEntry);
         }
 
-        var streamId = GetStreamId(runtimeEvent.RunId);
-        var stream = GetOrCreateRunStream(streamId);
         if (expectedRunRevision.HasValue
             && expectedRunRevision.Value != stream.Revision)
         {
@@ -408,7 +514,9 @@ public sealed class FileSessionStore :
                 stream.Revision);
         }
 
-        var canonicalEvent = CloneEvent(runtimeEvent);
+        EnsureEventCapacity(stream, additionalEvents: 1);
+
+        var canonicalEvent = runtimeEvent;
         canonicalEvent.Sequence = stream.NextSequence;
         var record = new JournalFrameRecord
         {
@@ -441,9 +549,14 @@ public sealed class FileSessionStore :
         var eventIds = new HashSet<string>(StringComparer.Ordinal);
         var operationIds = new HashSet<string>(StringComparer.Ordinal);
         var receiptOperationIds = new HashSet<string>(StringComparer.Ordinal);
+        var stagedReceipts = new Dictionary<string, ActionReceipt>(
+            StringComparer.Ordinal);
+        var stagedCheckpoints = new Dictionary<string, AgentRun>(
+            StringComparer.Ordinal);
         var results = new JournalAppendResult?[runtimeEvents.Count];
         var newEvents = new List<(int Index, RuntimeEvent Event)>(
             runtimeEvents.Count);
+        var stream = GetRunStreamOrEmpty(streamId);
 
         for (var index = 0; index < runtimeEvents.Count; index++)
         {
@@ -486,7 +599,12 @@ public sealed class FileSessionStore :
                 continue;
             }
 
-            var projection = PrepareProjection(runtimeEvent);
+            var projection = PrepareProjection(
+                runtimeEvent,
+                checked(stream.NextSequence + newEvents.Count),
+                checked(stream.Revision + newEvents.Count + 1),
+                stagedReceipts,
+                stagedCheckpoints);
             if (projection.DuplicateEntry is not null)
             {
                 results[index] = DuplicateResult(projection.DuplicateEntry);
@@ -510,6 +628,19 @@ public sealed class FileSessionStore :
                     + "the operation.");
             }
 
+            if (projection.Receipt is not null)
+            {
+                stagedReceipts.Add(
+                    projection.Receipt.OperationId,
+                    projection.Receipt);
+            }
+
+            if (projection.Checkpoint is not null)
+            {
+                stagedCheckpoints[projection.Checkpoint.RunId] =
+                    projection.Checkpoint;
+            }
+
             newEvents.Add((index, runtimeEvent));
         }
 
@@ -520,7 +651,13 @@ public sealed class FileSessionStore :
                 .ToArray();
         }
 
-        var stream = GetOrCreateRunStream(streamId);
+        if (newEvents.Count != runtimeEvents.Count)
+        {
+            throw new JournalEntryConflictException(
+                "An atomic journal batch cannot mix duplicate and "
+                + "new events.");
+        }
+
         if (expectedRunRevision.HasValue
             && expectedRunRevision.Value != stream.Revision)
         {
@@ -530,12 +667,14 @@ public sealed class FileSessionStore :
                 stream.Revision);
         }
 
+        EnsureEventCapacity(stream, newEvents.Count);
+
         var startSequence = stream.NextSequence;
         var startRevision = checked(stream.Revision + 1);
         var canonicalEvents = new List<RuntimeEvent>(newEvents.Count);
         for (var offset = 0; offset < newEvents.Count; offset++)
         {
-            var canonical = CloneEvent(newEvents[offset].Event);
+            var canonical = newEvents[offset].Event;
             canonical.Sequence = checked(startSequence + offset);
             canonicalEvents.Add(canonical);
         }
@@ -577,18 +716,16 @@ public sealed class FileSessionStore :
         JournalFrameRecord record,
         CancellationToken cancellationToken)
     {
-        var payload = Encoding.UTF8.GetBytes(
-            JsonSerializer.Serialize(
-                record,
-                PersistenceJsonContext.Default.JournalFrameRecord));
-        if (payload.Length > _maxFramePayloadBytes)
-        {
-            throw new InvalidOperationException(
-                $"Journal frame payload is {payload.Length} bytes; the "
-                + $"configured maximum is {_maxFramePayloadBytes} bytes.");
-        }
-
-        var frame = BuildFrame(payload);
+        using var payload = BoundedJsonPayload.Serialize(
+            record,
+            PersistenceJsonContext.Default.JournalFrameRecord,
+            _maxFramePayloadBytes,
+            attempted => new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxFramePayloadBytes),
+                _maxFramePayloadBytes,
+                attempted));
+        var frame = BuildFrame(payload.WrittenSpan);
+        EnsureJournalByteCapacity(frame.Length);
         await WriteFrameAsync(frame, cancellationToken).ConfigureAwait(false);
     }
 
@@ -682,11 +819,19 @@ public sealed class FileSessionStore :
             }
 
             var payloadLength = ReadInt32(header, 4);
-            if (payloadLength < 0 || payloadLength > _maxFramePayloadBytes)
+            if (payloadLength < 0)
             {
                 throw Corrupt(
                     frameOffset,
                     $"invalid payload length {payloadLength}.");
+            }
+
+            if (payloadLength > _maxFramePayloadBytes)
+            {
+                throw new JournalCapacityExceededException(
+                    nameof(FileJournalOptions.MaxFramePayloadBytes),
+                    _maxFramePayloadBytes,
+                    payloadLength);
             }
 
             var totalFrameLength = checked(
@@ -722,10 +867,11 @@ public sealed class FileSessionStore :
                 ApplyRecoveredFrame(record);
             }
             catch (Exception exception) when (
-                exception is JsonException
-                or ArgumentException
-                or InvalidOperationException
-                or OverflowException)
+                exception is not JournalCapacityExceededException
+                && (exception is JsonException
+                    or ArgumentException
+                    or InvalidOperationException
+                    or OverflowException))
             {
                 throw Corrupt(frameOffset, exception.Message);
             }
@@ -797,7 +943,7 @@ public sealed class FileSessionStore :
                 "Journal stream id does not match the runtime event.");
         }
 
-        var stream = GetOrCreateRunStream(record.StreamId);
+        var stream = GetRunStreamOrEmpty(record.StreamId);
         if (record.RunSequence != stream.NextSequence
             || runtimeEvent.Sequence != record.RunSequence)
         {
@@ -820,7 +966,15 @@ public sealed class FileSessionStore :
                 + $"'{runtimeEvent.EventId}'.");
         }
 
-        var projection = PrepareProjection(runtimeEvent);
+        EnsureEventCapacity(stream, additionalEvents: 1);
+
+        var projection = PrepareProjection(
+            runtimeEvent,
+            record.RunSequence,
+            record.RunRevision,
+            allowLegacyReconcilingDurationCheckpoint:
+                record.FormatVersion
+                <= LegacyCheckpointLifecycleFormatVersion);
         if (projection.DuplicateEntry is not null)
         {
             throw new InvalidOperationException(
@@ -840,8 +994,21 @@ public sealed class FileSessionStore :
         stream.NextSequence = checked(record.RunSequence + 1);
         stream.Revision = record.RunRevision;
         _eventsById.Add(runtimeEvent.EventId, stored);
+        _totalCommittedEvents = checked(_totalCommittedEvents + 1);
 
-        if (string.Equals(
+        if (RunCheckpointLifecycleValidator.IsCheckpointKind(
+                runtimeEvent.Kind))
+        {
+            var checkpoint = ValidateRunCheckpoint(
+                runtimeEvent,
+                record.RunSequence,
+                record.RunRevision,
+                allowLegacyReconcilingDurationCheckpoint:
+                    record.FormatVersion
+                    <= LegacyCheckpointLifecycleFormatVersion);
+            _runCheckpoints[checkpoint.RunId] = checkpoint;
+        }
+        else if (string.Equals(
                 runtimeEvent.Kind,
                 RuntimeEventKinds.ActionRequested,
                 StringComparison.Ordinal))
@@ -873,24 +1040,75 @@ public sealed class FileSessionStore :
         return stored;
     }
 
-    private EventProjection PrepareProjection(RuntimeEvent runtimeEvent)
+    private EventProjection PrepareProjection(
+        RuntimeEvent runtimeEvent,
+        long projectedSequence,
+        long projectedRevision,
+        IReadOnlyDictionary<string, ActionReceipt>? stagedReceipts = null,
+        IReadOnlyDictionary<string, AgentRun>? stagedCheckpoints = null,
+        bool allowLegacyReconcilingDurationCheckpoint = false)
     {
+        if (RunCheckpointLifecycleValidator.IsCheckpointKind(
+                runtimeEvent.Kind))
+        {
+            AgentRun? previous = null;
+            if (stagedCheckpoints?.TryGetValue(
+                    runtimeEvent.RunId!,
+                    out var staged) == true)
+            {
+                previous = staged;
+            }
+            else
+            {
+                _runCheckpoints.TryGetValue(
+                    runtimeEvent.RunId!,
+                    out previous);
+            }
+
+            return EventProjection.ForCheckpoint(
+                ValidateRunCheckpoint(
+                    runtimeEvent,
+                    projectedSequence,
+                    projectedRevision,
+                    previous,
+                    allowLegacyReconcilingDurationCheckpoint));
+        }
+
         if (string.Equals(
                 runtimeEvent.Kind,
                 RuntimeEventKinds.ActionRequested,
                 StringComparison.Ordinal))
         {
             var request = DeserializeActionRequest(runtimeEvent);
-            ValidateRequiredId(request.OperationId, "operationId");
-            ValidateRequiredId(request.RunId, "request.runId");
             if (!string.Equals(
                     request.RunId,
                     runtimeEvent.RunId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    request.TurnId,
+                    runtimeEvent.TurnId,
                     StringComparison.Ordinal))
             {
                 throw new OperationLedgerConflictException(
                     request.OperationId,
-                    "request runId does not match the journal event.");
+                    "request identity does not match the journal event.");
+            }
+
+            var checkpoint = RequireRunCheckpoint(
+                request.RunId,
+                request.OperationId);
+            if (!string.Equals(
+                    request.AgentId,
+                    checkpoint.AgentId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    request.WorldId,
+                    checkpoint.WorldId,
+                    StringComparison.Ordinal))
+            {
+                throw new OperationLedgerConflictException(
+                    request.OperationId,
+                    "request agent or world does not match the durable run.");
             }
 
             if (_operations.TryGetValue(
@@ -916,24 +1134,66 @@ public sealed class FileSessionStore :
 
         if (string.Equals(
                 runtimeEvent.Kind,
+                RuntimeEventKinds.ActionOutcomeUncertain,
+                StringComparison.Ordinal))
+        {
+            var uncertainty = DeserializeActionReceipt(runtimeEvent);
+            if (!string.Equals(
+                    uncertainty.Status,
+                    ReceiptStatuses.Unknown,
+                    StringComparison.Ordinal))
+            {
+                throw new OperationLedgerConflictException(
+                    uncertainty.OperationId,
+                    "an action uncertainty must have unknown status.");
+            }
+
+            if (!_operations.TryGetValue(
+                    uncertainty.OperationId,
+                    out var uncertainOperation))
+            {
+                throw new OperationLedgerConflictException(
+                    uncertainty.OperationId,
+                    "no durable action request exists.");
+            }
+
+            if (!string.Equals(
+                    uncertainOperation.Request.RunId,
+                    runtimeEvent.RunId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    uncertainOperation.Request.TurnId,
+                    runtimeEvent.TurnId,
+                    StringComparison.Ordinal))
+            {
+                throw new OperationLedgerConflictException(
+                    uncertainty.OperationId,
+                    "action uncertainty identity does not match its request.");
+            }
+
+            if (!uncertainOperation.IsPending
+                || uncertainOperation.LatestReceipt is not null)
+            {
+                throw new OperationLedgerConflictException(
+                    uncertainty.OperationId,
+                    "action uncertainty cannot follow an authoritative receipt.");
+            }
+
+            _ = ActionReceiptIngressValidator.ValidateAndClone(
+                uncertainOperation.Request,
+                uncertainty,
+                RequireRunCheckpoint(
+                    uncertainOperation.Request.RunId,
+                    uncertainty.OperationId));
+            return EventProjection.None;
+        }
+
+        if (string.Equals(
+                runtimeEvent.Kind,
                 RuntimeEventKinds.ActionReceived,
                 StringComparison.Ordinal))
         {
             var receipt = DeserializeActionReceipt(runtimeEvent);
-            ValidateRequiredId(receipt.OperationId, "operationId");
-            if (receipt.Revision < 0)
-            {
-                throw new OperationLedgerConflictException(
-                    receipt.OperationId,
-                    "receipt revision cannot be negative.");
-            }
-
-            if (!IsKnownReceiptStatus(receipt.Status))
-            {
-                throw new OperationLedgerConflictException(
-                    receipt.OperationId,
-                    $"unknown receipt status '{receipt.Status}'.");
-            }
 
             if (!_operations.TryGetValue(
                     receipt.OperationId,
@@ -953,6 +1213,23 @@ public sealed class FileSessionStore :
                     receipt.OperationId,
                     "receipt event runId does not match its request.");
             }
+
+            if (!string.Equals(
+                    operation.Request.TurnId,
+                    runtimeEvent.TurnId,
+                    StringComparison.Ordinal))
+            {
+                throw new OperationLedgerConflictException(
+                    receipt.OperationId,
+                    "receipt event turnId does not match its request.");
+            }
+
+            receipt = ActionReceiptIngressValidator.ValidateAndClone(
+                operation.Request,
+                receipt,
+                RequireRunCheckpoint(
+                    operation.Request.RunId,
+                    receipt.OperationId));
 
             if (operation.Receipts.TryGetValue(
                     receipt.Revision,
@@ -998,7 +1275,151 @@ public sealed class FileSessionStore :
             return EventProjection.ForReceipt(receipt);
         }
 
+        if (string.Equals(
+                runtimeEvent.Kind,
+                RuntimeEventKinds.ToolCompleted,
+                StringComparison.Ordinal)
+            || string.Equals(
+                runtimeEvent.Kind,
+                RuntimeEventKinds.ToolFailed,
+                StringComparison.Ordinal))
+        {
+            ValidateTerminalReceiptEvent(runtimeEvent, stagedReceipts);
+        }
+
         return EventProjection.None;
+    }
+
+    private void ValidateTerminalReceiptEvent(
+        RuntimeEvent runtimeEvent,
+        IReadOnlyDictionary<string, ActionReceipt>? stagedReceipts)
+    {
+        var receipt = DeserializeActionReceipt(runtimeEvent);
+        if (!_operations.TryGetValue(
+                receipt.OperationId,
+                out var operation))
+        {
+            throw new OperationLedgerConflictException(
+                receipt.OperationId,
+                "no durable action request exists.");
+        }
+
+        if (!string.Equals(
+                operation.Request.RunId,
+                runtimeEvent.RunId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                operation.Request.TurnId,
+                runtimeEvent.TurnId,
+                StringComparison.Ordinal))
+        {
+            throw new OperationLedgerConflictException(
+                receipt.OperationId,
+                "terminal receipt identity does not match its request.");
+        }
+
+        receipt = ActionReceiptIngressValidator.ValidateAndClone(
+            operation.Request,
+            receipt,
+            RequireRunCheckpoint(
+                operation.Request.RunId,
+                receipt.OperationId));
+        ActionReceipt? receivedReceipt = null;
+        if (operation.Receipts.TryGetValue(
+                receipt.Revision,
+                out var received))
+        {
+            receivedReceipt = received.Receipt;
+        }
+        else if (stagedReceipts is not null
+                 && stagedReceipts.TryGetValue(
+                     receipt.OperationId,
+                     out var staged)
+                 && staged.Revision == receipt.Revision)
+        {
+            receivedReceipt = staged;
+        }
+
+        if (receivedReceipt is null
+            || !ReceiptsAreEquivalent(receipt, receivedReceipt))
+        {
+            throw new OperationLedgerConflictException(
+                receipt.OperationId,
+                "terminal receipt does not match a durable received receipt.");
+        }
+
+        var statusMatchesKind =
+            string.Equals(
+                runtimeEvent.Kind,
+                RuntimeEventKinds.ToolFailed,
+                StringComparison.Ordinal)
+                ? string.Equals(
+                    receipt.Status,
+                    ReceiptStatuses.Failed,
+                    StringComparison.Ordinal)
+                : string.Equals(
+                      receipt.Status,
+                      ReceiptStatuses.Succeeded,
+                      StringComparison.Ordinal)
+                  || string.Equals(
+                      receipt.Status,
+                      ReceiptStatuses.Rejected,
+                      StringComparison.Ordinal);
+        if (!statusMatchesKind)
+        {
+            throw new OperationLedgerConflictException(
+                receipt.OperationId,
+                "terminal receipt status does not match the event kind.");
+        }
+    }
+
+    private AgentRun RequireRunCheckpoint(
+        string runId,
+        string operationId)
+    {
+        if (_runCheckpoints.TryGetValue(runId, out var checkpoint))
+        {
+            return checkpoint;
+        }
+
+        throw new OperationLedgerConflictException(
+            operationId,
+            "no durable run checkpoint exists.");
+    }
+
+    private AgentRun ValidateRunCheckpoint(
+        RuntimeEvent runtimeEvent,
+        long projectedSequence,
+        long projectedRevision,
+        AgentRun? previous = null,
+        bool allowLegacyReconcilingDurationCheckpoint = false)
+    {
+        try
+        {
+            if (previous is null)
+            {
+                _runCheckpoints.TryGetValue(
+                    runtimeEvent.RunId!,
+                    out previous);
+            }
+
+            return RunCheckpointLifecycleValidator.ValidateAndClone(
+                runtimeEvent,
+                previous,
+                projectedSequence,
+                projectedRevision,
+                allowLegacyReconcilingDurationCheckpoint);
+        }
+        catch (Exception exception) when (
+            exception is InvalidDataException
+            or InvalidOperationException)
+        {
+            throw new ArgumentException(
+                $"Event '{runtimeEvent.EventId}' has an invalid "
+                + $"{nameof(AgentRun)} checkpoint payload.",
+                nameof(runtimeEvent),
+                exception);
+        }
     }
 
     private static bool IsKnownReceiptStatus(string status)
@@ -1026,8 +1447,10 @@ public sealed class FileSessionStore :
     {
         try
         {
-            return ProtocolJson.DeserializeActionRequest(
+            var request = ProtocolJson.DeserializeActionRequest(
                 runtimeEvent.Payload.GetRawText());
+            ProtocolValidator.EnsureValid(request);
+            return request;
         }
         catch (Exception exception) when (
             exception is JsonException
@@ -1046,8 +1469,10 @@ public sealed class FileSessionStore :
     {
         try
         {
-            return ProtocolJson.DeserializeActionReceipt(
+            var receipt = ProtocolJson.DeserializeActionReceipt(
                 runtimeEvent.Payload.GetRawText());
+            ProtocolValidator.EnsureValid(receipt);
+            return receipt;
         }
         catch (Exception exception) when (
             exception is JsonException
@@ -1135,6 +1560,10 @@ public sealed class FileSessionStore :
                    StringComparison.Ordinal)
                || string.Equals(
                    runtimeEvent.Kind,
+                   RuntimeEventKinds.ActionOutcomeUncertain,
+                   StringComparison.Ordinal)
+               || string.Equals(
+                   runtimeEvent.Kind,
                    RuntimeEventKinds.ToolCompleted,
                    StringComparison.Ordinal)
                || string.Equals(
@@ -1160,6 +1589,10 @@ public sealed class FileSessionStore :
                    StringComparison.Ordinal)
                || string.Equals(
                    runtimeEvent.Kind,
+                   RuntimeEventKinds.ActionOutcomeUncertain,
+                   StringComparison.Ordinal)
+               || string.Equals(
+                   runtimeEvent.Kind,
                    RuntimeEventKinds.ToolCompleted,
                    StringComparison.Ordinal)
                || string.Equals(
@@ -1182,6 +1615,36 @@ public sealed class FileSessionStore :
     {
         return ProtocolJson.DeserializeRuntimeEvent(
             ProtocolJson.Serialize(runtimeEvent));
+    }
+
+    private RuntimeEvent SnapshotEventWithinFrameCapacity(
+        RuntimeEvent runtimeEvent,
+        long serializedBytesBeforeEvent,
+        out int serializedEventBytes)
+    {
+        var remainingCapacity = serializedBytesBeforeEvent
+                                >= _maxFramePayloadBytes
+            ? 0
+            : _maxFramePayloadBytes
+              - checked((int)serializedBytesBeforeEvent);
+        using var payload = BoundedJsonPayload.Serialize(
+            runtimeEvent,
+            ProtocolJsonContext.Default.RuntimeEvent,
+            remainingCapacity,
+            attempted => new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxFramePayloadBytes),
+                _maxFramePayloadBytes,
+                SaturatingAdd(
+                    serializedBytesBeforeEvent,
+                    attempted)));
+        serializedEventBytes = payload.WrittenCount;
+        var snapshot = JsonSerializer.Deserialize(
+                           payload.WrittenSpan,
+                           ProtocolJsonContext.Default.RuntimeEvent)
+                       ?? throw new JsonException(
+                           "The snapshotted runtime event is null.");
+        ValidateRuntimeEvent(snapshot);
+        return snapshot;
     }
 
     private static bool ReceiptsAreEquivalent(
@@ -1219,6 +1682,13 @@ public sealed class FileSessionStore :
         return stream;
     }
 
+    private RunStreamState GetRunStreamOrEmpty(string streamId)
+    {
+        return _runStreams.TryGetValue(streamId, out var stream)
+            ? stream
+            : new RunStreamState();
+    }
+
     private static string GetStreamId(string? runId)
     {
         return string.IsNullOrEmpty(runId) ? GlobalStreamId : runId;
@@ -1226,13 +1696,16 @@ public sealed class FileSessionStore :
 
     private static void ValidateRuntimeEvent(RuntimeEvent runtimeEvent)
     {
-        ValidateRequiredId(runtimeEvent.EventId, "eventId");
-        ValidateRequiredId(runtimeEvent.Kind, "kind");
-        if (runtimeEvent.Payload.ValueKind == JsonValueKind.Undefined)
+        try
+        {
+            ProtocolValidator.EnsureValid(runtimeEvent);
+        }
+        catch (JsonException exception)
         {
             throw new ArgumentException(
-                "Runtime event payload must be a JSON value.",
-                nameof(runtimeEvent));
+                "Runtime event does not satisfy the public wire contract.",
+                nameof(runtimeEvent),
+                exception);
         }
     }
 
@@ -1259,6 +1732,63 @@ public sealed class FileSessionStore :
         }
     }
 
+    private void EnsureExistingJournalCapacity()
+    {
+        if (_stream.Length > _maxJournalBytes)
+        {
+            throw new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxJournalBytes),
+                _maxJournalBytes,
+                _stream.Length);
+        }
+    }
+
+    private void EnsureJournalByteCapacity(int frameLength)
+    {
+        var attemptedLength = SaturatingAdd(_stream.Length, frameLength);
+        if (attemptedLength > _maxJournalBytes)
+        {
+            throw new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxJournalBytes),
+                _maxJournalBytes,
+                attemptedLength);
+        }
+    }
+
+    private void EnsureEventCapacity(
+        RunStreamState stream,
+        int additionalEvents)
+    {
+        var attemptedTotal = SaturatingAdd(
+            _totalCommittedEvents,
+            additionalEvents);
+        if (attemptedTotal > _maxTotalCommittedEvents)
+        {
+            throw new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxTotalCommittedEvents),
+                _maxTotalCommittedEvents,
+                attemptedTotal);
+        }
+
+        var attemptedRunEvents = SaturatingAdd(
+            stream.Entries.Count,
+            additionalEvents);
+        if (attemptedRunEvents > _maxEventsPerRun)
+        {
+            throw new JournalCapacityExceededException(
+                nameof(FileJournalOptions.MaxEventsPerRun),
+                _maxEventsPerRun,
+                attemptedRunEvents);
+        }
+    }
+
+    private static long SaturatingAdd(long value, long additional)
+    {
+        return value > long.MaxValue - additional
+            ? long.MaxValue
+            : value + additional;
+    }
+
     private void TruncateTornTail(long length)
     {
         _stream.SetLength(length);
@@ -1271,19 +1801,14 @@ public sealed class FileSessionStore :
         return new JournalCorruptionException(_path, offset, message);
     }
 
-    private static byte[] BuildFrame(byte[] payload)
+    private static byte[] BuildFrame(ReadOnlySpan<byte> payload)
     {
         var frame = new byte[
             checked(HeaderSize + payload.Length + FooterSize)];
         WriteUInt32(frame, 0, FrameMagic);
         WriteInt32(frame, 4, payload.Length);
         WriteUInt32(frame, 8, Crc32.Compute(payload));
-        Buffer.BlockCopy(
-            payload,
-            0,
-            frame,
-            HeaderSize,
-            payload.Length);
+        payload.CopyTo(frame.AsSpan(HeaderSize, payload.Length));
         WriteUInt32(
             frame,
             HeaderSize + payload.Length,
@@ -1409,7 +1934,14 @@ public sealed class FileSessionStore :
 
         public ActionReceipt? Receipt { get; private set; }
 
+        public AgentRun? Checkpoint { get; private set; }
+
         public StoredJournalEntry? DuplicateEntry { get; private set; }
+
+        public static EventProjection ForCheckpoint(AgentRun checkpoint)
+        {
+            return new EventProjection { Checkpoint = checkpoint };
+        }
 
         public static EventProjection ForRequest(ActionRequest request)
         {
@@ -1449,7 +1981,7 @@ public sealed class FileSessionStore :
         private const uint Polynomial = 0xEDB88320;
         private static readonly uint[] Table = CreateTable();
 
-        public static uint Compute(byte[] value)
+        public static uint Compute(ReadOnlySpan<byte> value)
         {
             var checksum = uint.MaxValue;
             foreach (var item in value)

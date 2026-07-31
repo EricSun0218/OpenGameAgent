@@ -36,18 +36,23 @@
     },
     "selectedIds": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "$ref": "common.schema.json#/$defs/id"
-      }
+      },
+      "uniqueItems": true
     },
     "deferredIds": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "$ref": "common.schema.json#/$defs/id"
-      }
+      },
+      "uniqueItems": true
     },
     "pruned": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "type": "object",
         "required": [
@@ -75,9 +80,11 @@
     },
     "externalized": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "$ref": "common.schema.json#/$defs/resourceRef"
-      }
+      },
+      "uniqueItems": true
     },
     "estimatedTokens": {
       "type": "integer",
@@ -93,6 +100,7 @@
     },
     "reasonCodes": {
       "type": "array",
+      "maxItems": 512,
       "items": {
         "type": "string",
         "minLength": 1,
@@ -101,7 +109,12 @@
       "uniqueItems": true
     },
     "extensions": {
-      "$ref": "common.schema.json#/$defs/extensions"
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
     }
   },
   "additionalProperties": false

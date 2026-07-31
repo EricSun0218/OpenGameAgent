@@ -145,6 +145,19 @@ public sealed class ProtocolAotTests
     }
 
     [Theory]
+    [MemberData(nameof(SchemaDtoPairs))]
+    public void TopLevelDtoRequiredFieldsExactlyMatchItsSchema(
+        string schemaFile,
+        Type dtoType)
+    {
+        using var schema = JsonDocument.Parse(
+            File.ReadAllText(
+                Path.Combine(FixtureFiles.SchemaDirectory, schemaFile)));
+
+        AssertSchemaRequiredFieldsMatchDto(schema.RootElement, dtoType);
+    }
+
+    [Theory]
     [MemberData(nameof(NestedSchemaDtoPairs))]
     public void NestedDtoFieldsExactlyMatchItsSchema(
         string schemaFile,
@@ -160,6 +173,25 @@ public sealed class ProtocolAotTests
         }
 
         AssertSchemaFieldsMatchDto(fragment.GetProperty("properties"), dtoType);
+    }
+
+    [Theory]
+    [MemberData(nameof(NestedSchemaDtoPairs))]
+    public void NestedDtoRequiredFieldsExactlyMatchItsSchema(
+        string schemaFile,
+        Type dtoType,
+        string[] fragmentPath)
+    {
+        using var schema = JsonDocument.Parse(
+            File.ReadAllText(
+                Path.Combine(FixtureFiles.SchemaDirectory, schemaFile)));
+        var fragment = schema.RootElement;
+        foreach (var segment in fragmentPath)
+        {
+            fragment = fragment.GetProperty(segment);
+        }
+
+        AssertSchemaRequiredFieldsMatchDto(fragment, dtoType);
     }
 
     private static void AssertSchemaFieldsMatchDto(
@@ -182,6 +214,40 @@ public sealed class ProtocolAotTests
             schemaFields.SetEquals(dtoFields),
             $"{dtoType.Name}: schema-only [{string.Join(", ", schemaFields.Except(dtoFields))}], "
             + $"DTO-only [{string.Join(", ", dtoFields.Except(schemaFields))}]");
+    }
+
+    private static void AssertSchemaRequiredFieldsMatchDto(
+        JsonElement schema,
+        Type dtoType)
+    {
+        var schemaRequired = schema.TryGetProperty(
+            "required",
+            out var required)
+            ? required
+                .EnumerateArray()
+                .Select(item => item.GetString()!)
+                .ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+        var dtoRequired = dtoType
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Where(
+                property =>
+                    property.GetCustomAttribute<JsonRequiredAttribute>()
+                    is not null)
+            .Select(
+                property =>
+                    property.GetCustomAttribute<JsonPropertyNameAttribute>()
+                        ?.Name)
+            .Where(name => name is not null)
+            .Cast<string>()
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.True(
+            schemaRequired.SetEquals(dtoRequired),
+            $"{dtoType.Name}: schema-required-only "
+            + $"[{string.Join(", ", schemaRequired.Except(dtoRequired))}], "
+            + "DTO-required-only "
+            + $"[{string.Join(", ", dtoRequired.Except(schemaRequired))}]");
     }
 
     [Fact]

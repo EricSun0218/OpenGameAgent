@@ -303,7 +303,7 @@ public sealed class SkillAdmissionTests
     }
 
     [Fact]
-    public async Task InactiveCatalogHotUpdateIsVisibleOnTheNextTurn()
+    public async Task InactiveCatalogHotUpdateWaitsForNextLoopInvocation()
     {
         await using var rig = new RuntimeRig(
             new[] { Tool("advance_turn", "1.0.0") },
@@ -330,29 +330,45 @@ public sealed class SkillAdmissionTests
                         "catalog-update-call",
                         "advance_turn");
                 },
+                FinalEvents,
                 FinalEvents),
             host: new SucceedingHost());
         var run = Run();
 
         var outcome = await rig.Runtime.RunAsync(
             new DurableRunRequest { Run = run });
+        var nextRun = Run();
+        var nextOutcome = await rig.Runtime.RunAsync(
+            new DurableRunRequest { Run = nextRun });
 
         Assert.Equal(RunStates.Completed, outcome.Run.State);
-        Assert.Equal(2, rig.Provider.Requests.Count);
+        Assert.Equal(RunStates.Completed, nextOutcome.Run.State);
+        Assert.Equal(3, rig.Provider.Requests.Count);
         var firstCatalog = SkillSystemPayload(rig.Provider.Requests[0]);
         var secondCatalog = SkillSystemPayload(rig.Provider.Requests[1]);
+        var nextInvocationCatalog =
+            SkillSystemPayload(rig.Provider.Requests[2]);
         Assert.Contains("CATALOG_DESCRIPTION_V1", firstCatalog);
         Assert.DoesNotContain("CATALOG_PROMPT_V1", firstCatalog);
         Assert.DoesNotContain("CATALOG_DESCRIPTION_V2", firstCatalog);
-        Assert.Contains("CATALOG_DESCRIPTION_V2", secondCatalog);
-        Assert.DoesNotContain("CATALOG_PROMPT_V2", secondCatalog);
-        Assert.DoesNotContain("CATALOG_DESCRIPTION_V1", secondCatalog);
+        Assert.Contains("CATALOG_DESCRIPTION_V1", secondCatalog);
+        Assert.DoesNotContain("CATALOG_PROMPT_V1", secondCatalog);
+        Assert.DoesNotContain("CATALOG_DESCRIPTION_V2", secondCatalog);
+        Assert.Contains(
+            "CATALOG_DESCRIPTION_V2",
+            nextInvocationCatalog);
+        Assert.DoesNotContain(
+            "CATALOG_PROMPT_V2",
+            nextInvocationCatalog);
+        Assert.DoesNotContain(
+            "CATALOG_DESCRIPTION_V1",
+            nextInvocationCatalog);
 
         var snapshots = (await rig.Store.ReadRunAsync(run.RunId, default))
             .Where(item => item.Kind == RuntimeEventKinds.TurnSnapshot)
             .ToArray();
         Assert.Equal(2, snapshots.Length);
-        Assert.NotEqual(
+        Assert.Equal(
             snapshots[0].Payload
                 .GetProperty("extensions")
                 .GetProperty("skillAdmission")

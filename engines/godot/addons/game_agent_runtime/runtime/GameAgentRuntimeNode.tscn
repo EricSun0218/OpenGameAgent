@@ -1,7 +1,12 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://addons/game_agent_runtime/runtime/GameAgentRuntimeNode.cs" id="1_runtime"]
+[ext_resource type="Script" path="res://addons/game_agent_runtime/runtime/GodotInteractiveWorldNode.cs" id="2_world"]
 
 [node name="GameAgentRuntime" type="Node"]
 process_mode = 3
 script = ExtResource("1_runtime")
+
+[node name="InteractiveWorld" type="Node" parent="."]
+process_mode = 3
+script = ExtResource("2_world")

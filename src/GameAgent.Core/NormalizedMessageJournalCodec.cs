@@ -1,10 +1,59 @@
 using System.Buffers;
+using System.Text;
 using System.Text.Json;
 
 namespace GameAgent.Core;
 
 public static class NormalizedMessageJournalCodec
 {
+    internal static NormalizedMessage CloneValidated(
+        NormalizedMessage message,
+        CancellationToken cancellationToken = default)
+    {
+        if (message is null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateCloneMessage(message, cancellationToken);
+        var parts = new List<NormalizedContentPart>(message.Parts.Count);
+        foreach (var part in message.Parts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (part.Json.HasValue
+                && part.Json.Value.ValueKind == JsonValueKind.Undefined)
+            {
+                throw new InvalidDataException(
+                    "A normalized message checkpoint contains undefined JSON.");
+            }
+
+            parts.Add(
+                new NormalizedContentPart
+                {
+                    Type = part.Type,
+                    Text = part.Text,
+                    Json = part.Json.HasValue
+                        ? part.Json.Value.Clone()
+                        : null,
+                    ToolCallId = part.ToolCallId,
+                    ToolName = part.ToolName,
+                    ToolVersion = part.ToolVersion,
+                    ToolEffect = part.ToolEffect,
+                    ToolDescriptorDigest =
+                        part.ToolDescriptorDigest
+                });
+        }
+
+        return new NormalizedMessage
+        {
+            MessageId = message.MessageId,
+            Role = message.Role,
+            CreatedAt = message.CreatedAt,
+            Parts = parts
+        };
+    }
+
     public static JsonElement Encode(NormalizedMessage message)
     {
         if (message is null)
@@ -15,63 +64,86 @@ public static class NormalizedMessageJournalCodec
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer))
         {
-            writer.WriteStartObject();
-            writer.WriteString("messageId", message.MessageId);
-            writer.WriteString("role", message.Role);
-            writer.WriteString("createdAt", message.CreatedAt);
-            writer.WritePropertyName("parts");
-            writer.WriteStartArray();
-            foreach (var part in message.Parts)
-            {
-                writer.WriteStartObject();
-                writer.WriteString("type", part.Type);
-                if (part.Text is not null)
-                {
-                    writer.WriteString("text", part.Text);
-                }
-
-                if (part.Json is not null)
-                {
-                    writer.WritePropertyName("json");
-                    part.Json.Value.WriteTo(writer);
-                }
-
-                if (part.ToolCallId is not null)
-                {
-                    writer.WriteString("toolCallId", part.ToolCallId);
-                }
-
-                if (part.ToolName is not null)
-                {
-                    writer.WriteString("toolName", part.ToolName);
-                }
-
-                if (part.ToolVersion is not null)
-                {
-                    writer.WriteString("toolVersion", part.ToolVersion);
-                }
-
-                if (part.ToolEffect is not null)
-                {
-                    writer.WriteString("toolEffect", part.ToolEffect);
-                }
-
-                if (part.ToolDescriptorDigest is not null)
-                {
-                    writer.WriteString(
-                        "toolDescriptorDigest",
-                        part.ToolDescriptorDigest);
-                }
-
-                writer.WriteEndObject();
-            }
-
-            writer.WriteEndArray();
-            writer.WriteEndObject();
+            Write(writer, message);
         }
 
         using var document = JsonDocument.Parse(buffer.WrittenMemory);
         return document.RootElement.Clone();
+    }
+
+    internal static string EncodeText(NormalizedMessage message)
+    {
+        if (message is null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            Write(writer, message);
+        }
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    private static void Write(
+        Utf8JsonWriter writer,
+        NormalizedMessage message)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("messageId", message.MessageId);
+        writer.WriteString("role", message.Role);
+        writer.WriteString("createdAt", message.CreatedAt);
+        writer.WritePropertyName("parts");
+        writer.WriteStartArray();
+        foreach (var part in message.Parts)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", part.Type);
+            if (part.Text is not null)
+            {
+                writer.WriteString("text", part.Text);
+            }
+
+            if (part.Json is not null)
+            {
+                writer.WritePropertyName("json");
+                part.Json.Value.WriteTo(writer);
+            }
+
+            if (part.ToolCallId is not null)
+            {
+                writer.WriteString("toolCallId", part.ToolCallId);
+            }
+
+            if (part.ToolName is not null)
+            {
+                writer.WriteString("toolName", part.ToolName);
+            }
+
+            if (part.ToolVersion is not null)
+            {
+                writer.WriteString("toolVersion", part.ToolVersion);
+            }
+
+            if (part.ToolEffect is not null)
+            {
+                writer.WriteString("toolEffect", part.ToolEffect);
+            }
+
+            if (part.ToolDescriptorDigest is not null)
+            {
+                writer.WriteString(
+                    "toolDescriptorDigest",
+                    part.ToolDescriptorDigest);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WriteEndObject();
     }
 
     public static NormalizedMessage Decode(JsonElement value)
@@ -143,6 +215,81 @@ public static class NormalizedMessageJournalCodec
         return message;
     }
 
+    private static void ValidateCloneMessage(
+        NormalizedMessage message,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(message.MessageId)
+            || string.IsNullOrWhiteSpace(message.Role)
+            || message.Parts is null
+            || message.Parts.Count == 0)
+        {
+            throw new InvalidDataException(
+                "A normalized message checkpoint is incomplete.");
+        }
+
+        if (message.Role is not NormalizedRoles.System
+            and not NormalizedRoles.User
+            and not NormalizedRoles.Assistant
+            and not NormalizedRoles.Tool)
+        {
+            throw new InvalidDataException(
+                "A normalized message checkpoint has an invalid role.");
+        }
+
+        foreach (var part in message.Parts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (part is null)
+            {
+                throw new InvalidDataException(
+                    "A normalized message checkpoint contains a null part.");
+            }
+
+            ValidateClonePart(part);
+        }
+    }
+
+    private static void ValidateClonePart(NormalizedContentPart part)
+    {
+        var hasJson = part.Json.HasValue
+                      && part.Json.Value.ValueKind
+                      != JsonValueKind.Undefined;
+        var hasToolIdentity =
+            !string.IsNullOrWhiteSpace(part.ToolCallId)
+            && !string.IsNullOrWhiteSpace(part.ToolName);
+        var valid = part.Type switch
+        {
+            NormalizedPartTypes.Text or NormalizedPartTypes.Reasoning =>
+                part.Text is not null
+                && !hasJson
+                && part.ToolCallId is null
+                && part.ToolName is null,
+            NormalizedPartTypes.Json =>
+                hasJson
+                && part.Text is null
+                && part.ToolCallId is null
+                && part.ToolName is null,
+            NormalizedPartTypes.ToolCall =>
+                hasJson && part.Text is null && hasToolIdentity,
+            NormalizedPartTypes.ToolResult =>
+                hasJson
+                && part.Text is null
+                && hasToolIdentity
+                && part.ToolVersion is null
+                && part.ToolEffect is null
+                && part.ToolDescriptorDigest is null,
+            _ => false
+        };
+        if (!valid)
+        {
+            throw new InvalidDataException(
+                "A normalized message checkpoint contains an invalid part.");
+        }
+
+        ValidateToolEvidence(part);
+    }
+
     private static void ValidatePart(NormalizedContentPart part)
     {
         var valid = part.Type switch
@@ -163,6 +310,11 @@ public static class NormalizedMessageJournalCodec
                 "A normalized message checkpoint contains an invalid part.");
         }
 
+        ValidateToolEvidence(part);
+    }
+
+    private static void ValidateToolEvidence(NormalizedContentPart part)
+    {
         var hasToolEvidence = part.ToolVersion is not null
                               || part.ToolEffect is not null
                               || part.ToolDescriptorDigest is not null;

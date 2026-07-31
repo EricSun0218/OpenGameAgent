@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using GameAgent.Core;
 using GameAgent.Protocol;
@@ -125,6 +126,136 @@ public sealed class RuntimeRegistryTests
         Assert.Equal("json_depth_exceeded", exception.LimitCode);
     }
 
+    [Fact]
+    public void CanonicalDigestFramesJsonFieldsWithoutLegacyBoundaryCollisions()
+    {
+        const string shortName = "extension:bbbbbbbbbbbbb";
+        var longName = shortName + "\"" + new string('x', 98) + "\\";
+        var firstFields = new[]
+        {
+            ("a", Json("1")),
+            (longName, Json("\"\""))
+        };
+        var secondFields = new[]
+        {
+            ("a", Json("11")),
+            (shortName, Json("\"" + new string('x', 98) + "\\\"\""))
+        };
+
+        Assert.Equal(
+            LegacyJsonPreimage(firstFields),
+            LegacyJsonPreimage(secondFields));
+
+        var first = new CanonicalDigestBuilder();
+        foreach (var field in firstFields)
+        {
+            first.Add(field.Item1, field.Item2);
+        }
+
+        var second = new CanonicalDigestBuilder();
+        foreach (var field in secondFields)
+        {
+            second.Add(field.Item1, field.Item2);
+        }
+
+        Assert.NotEqual(first.Finish(), second.Finish());
+    }
+
+    [Fact]
+    public void CanonicalDigestFramesFieldTypesAndNullPresence()
+    {
+        var text = new CanonicalDigestBuilder();
+        text.Add("value", string.Empty);
+        var list = new CanonicalDigestBuilder();
+        list.Add("value", Array.Empty<string>());
+        var absent = new CanonicalDigestBuilder();
+        absent.Add("value", (string?)null);
+        var integer = new CanonicalDigestBuilder();
+        integer.Add("value", 0L);
+        var json = new CanonicalDigestBuilder();
+        json.Add("value", Json("\"\""));
+
+        Assert.NotEqual(text.Finish(), list.Finish());
+        Assert.NotEqual(text.Finish(), absent.Finish());
+        Assert.NotEqual(list.Finish(), absent.Finish());
+        Assert.Equal(
+            5,
+            new[]
+            {
+                text.Finish(),
+                list.Finish(),
+                absent.Finish(),
+                integer.Finish(),
+                json.Finish()
+            }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void SkillContentDigestsSeparateFormerJsonBoundaryCollision()
+    {
+        const string shortKey = "bbbbbbbbbbbbb";
+        var longKey = shortKey + "\"" + new string('x', 98) + "\\";
+        var firstManifest = CreateSkill("collision-proof", "Prompt.");
+        firstManifest.Extensions["a"] = Json("1");
+        firstManifest.Extensions[longKey] = Json("\"\"");
+        var secondManifest = CreateSkill("collision-proof", "Prompt.");
+        secondManifest.Extensions["a"] = Json("11");
+        secondManifest.Extensions[shortKey] = Json(
+            "\"" + new string('x', 98) + "\\\"\"");
+
+        var first = new SkillCatalogRegistry()
+            .Replace(new[] { firstManifest })
+            .Skills[0];
+        var second = new SkillCatalogRegistry()
+            .Replace(new[] { secondManifest })
+            .Skills[0];
+
+        Assert.NotEqual(first.ContentDigest, second.ContentDigest);
+    }
+
+    [Fact]
+    public void RegistriesRejectIllFormedUnicodeBeforeComputingIdentity()
+    {
+        var firstTool = CreateTool(
+            "invalid-unicode-tool",
+            """{"type":"object"}""");
+        firstTool.Description = "invalid-" + '\ud800';
+        var secondTool = CreateTool(
+            "invalid-unicode-tool",
+            """{"type":"object"}""");
+        secondTool.Description = "invalid-" + '\ud801';
+        var firstSkill = CreateSkill("invalid-unicode-skill", "Prompt.");
+        firstSkill.Description = "invalid-" + '\ud800';
+        var secondSkill = CreateSkill("invalid-unicode-skill", "Prompt.");
+        secondSkill.Description = "invalid-" + '\ud801';
+
+        Assert.Throws<JsonException>(
+            () => new ToolCatalogRegistry().Replace(new[] { firstTool }));
+        Assert.Throws<JsonException>(
+            () => new ToolCatalogRegistry().Replace(new[] { secondTool }));
+        Assert.Throws<ArgumentException>(
+            () => new SkillCatalogRegistry().Replace(new[] { firstSkill }));
+        Assert.Throws<ArgumentException>(
+            () => new SkillCatalogRegistry().Replace(new[] { secondSkill }));
+        Assert.Throws<ArgumentException>(
+            () => RuntimeGuard.RequiredUtf8(
+                "\ud800",
+                16,
+                "value"));
+        Assert.Throws<ArgumentException>(
+            () => RuntimeGuard.RequiredUtf8(
+                "\ud801",
+                16,
+                "value"));
+
+        var firstDigest = new CanonicalDigestBuilder();
+        var secondDigest = new CanonicalDigestBuilder();
+        Assert.Throws<EncoderFallbackException>(
+            () => firstDigest.Add("value", "\ud800"));
+        Assert.Throws<EncoderFallbackException>(
+            () => secondDigest.Add("value", "\ud801"));
+    }
+
     [Theory]
     [InlineData(ToolDisclosureControlNames.Search)]
     [InlineData(ToolDisclosureControlNames.Activate)]
@@ -183,5 +314,20 @@ public sealed class RuntimeRegistryTests
     {
         using var document = JsonDocument.Parse(value);
         return document.RootElement.Clone();
+    }
+
+    private static string LegacyJsonPreimage(
+        IEnumerable<(string Name, JsonElement Value)> fields)
+    {
+        var output = new StringBuilder();
+        foreach (var field in fields)
+        {
+            output.Append(Encoding.UTF8.GetByteCount(field.Name));
+            output.Append(':');
+            output.Append(field.Name);
+            CanonicalJsonDigest.AppendCanonical(output, field.Value);
+        }
+
+        return output.ToString();
     }
 }

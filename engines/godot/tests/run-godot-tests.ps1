@@ -13,7 +13,13 @@ function Resolve-GodotExecutable {
     $resolved = Get-Command $Command -ErrorAction Stop
     $item = Get-Item -LiteralPath $resolved.Source
     if ($item.LinkType -and $item.Target) {
-        return [string]$item.Target[0]
+        $targets = @($item.Target)
+        $target = [string]$targets[0]
+        if ([System.IO.Path]::IsPathRooted($target)) {
+            return $target
+        }
+
+        return Join-Path $item.DirectoryName $target
     }
 
     return $resolved.Source
@@ -62,6 +68,38 @@ if ($testExitCode -ne 0) {
 }
 if ($script:LastGodotOutput -notmatch "GODOT_TEST_PASS") {
     throw "Godot headless addon tests exited without the GODOT_TEST_PASS marker."
+}
+Assert-NoGodotLeakWarning
+
+$worldTestExitCode = Invoke-Godot @(
+    "--headless",
+    "--path",
+    $projectRoot,
+    "--scene",
+    "res://tests/InteractiveWorldHeadlessTest.tscn",
+    "--quit-after",
+    "100000")
+if ($worldTestExitCode -ne 0) {
+    throw "Godot interactive-world tests failed with exit code $worldTestExitCode."
+}
+if ($script:LastGodotOutput -notmatch "GODOT_WORLD_TEST_PASS") {
+    throw "Godot interactive-world tests exited without the pass marker."
+}
+Assert-NoGodotLeakWarning
+
+$frameworkTestExitCode = Invoke-Godot @(
+    "--headless",
+    "--path",
+    $projectRoot,
+    "--scene",
+    "res://tests/InteractiveFrameworkE2ETest.tscn",
+    "--quit-after",
+    "100000")
+if ($frameworkTestExitCode -ne 0) {
+    throw "Godot interactive-framework E2E failed with exit code $frameworkTestExitCode."
+}
+if ($script:LastGodotOutput -notmatch "GODOT_FRAMEWORK_E2E_PASS") {
+    throw "Godot interactive-framework E2E exited without the pass marker."
 }
 Assert-NoGodotLeakWarning
 

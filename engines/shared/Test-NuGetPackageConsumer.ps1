@@ -75,26 +75,79 @@ Invoke-Dotnet -Arguments @(
     '--version',
     $Version,
     '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Providers.Anthropic',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Workflow',
+    '--version',
+    $Version,
+    '--no-restore')
 
 $consumerSource = @'
 using GameAgent.Core;
+using GameAgent.Compatibility;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
+using GameAgent.Providers.Anthropic;
 using GameAgent.Providers.OpenAICompatible;
 using GameAgent.Runtime;
 using GameAgent.Testing;
+using GameAgent.Workflow;
+using GameAgent.World;
 
 Type[] shippedTypes =
 [
     typeof(AgentRun),
+    typeof(CompatibilityImporter),
     typeof(HeadlessAgentRuntimeLimits),
     typeof(FileJournalOptions),
+    typeof(AnthropicProviderOptions),
     typeof(OpenAiCompatibleProviderOptions),
+    typeof(ProviderRequestPreparationChanges),
+    typeof(ConsumerRequestAdapter),
     typeof(GameAgentRuntimeBuilder),
-    typeof(FakeRuntimeClock)
+    typeof(FakeRuntimeClock),
+    typeof(WorkflowCompiler),
+    typeof(WorldPackageDefinition)
 ];
 Console.WriteLine(string.Join(Environment.NewLine, shippedTypes.Select(
     static type => type.Assembly.FullName)));
+
+sealed class ConsumerRequestAdapter : IProviderRequestAdapter
+{
+    public ValueTask<ProviderPreparedRequest> PrepareRequestAsync(
+        ProviderRequestPreparationContext context,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var source = context.Request;
+        var output = new StreamingModelRequest
+        {
+            RunId = source.RunId,
+            RunAttemptId = source.RunAttemptId,
+            TurnId = source.TurnId,
+            ProviderAttemptId = source.ProviderAttemptId,
+            StreamAttemptId = source.StreamAttemptId,
+            Messages = source.Messages,
+            Tools = source.Tools,
+            MaxOutputTokens = source.MaxOutputTokens
+        };
+        return new ValueTask<ProviderPreparedRequest>(
+            context.CreatePreparedRequest(
+                output,
+                ProviderRequestPreparationChanges.None,
+                cancellationToken));
+    }
+}
 '@
 [IO.File]::WriteAllText(
     (Join-Path $workingRoot 'Program.cs'),
@@ -143,7 +196,7 @@ $restoredPackages = @(
         -LiteralPath $packagesPath `
         -Directory `
         -Filter 'gameagent.*')
-if ($restoredPackages.Count -ne 6) {
+if ($restoredPackages.Count -ne 10) {
     throw 'The normalized NuGet consumer did not restore the complete package set.'
 }
 foreach ($restoredPackage in $restoredPackages) {

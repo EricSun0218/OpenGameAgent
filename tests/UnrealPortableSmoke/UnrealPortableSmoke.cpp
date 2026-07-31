@@ -39,6 +39,132 @@ std::string ReadAll(const std::filesystem::path& Path)
     return Buffer.str();
 }
 
+std::string RepeatUnicodeScalar(const std::size_t Count)
+{
+    std::string Result;
+    Result.reserve(Count * 3U);
+    for (std::size_t Index = 0U; Index < Count; ++Index)
+    {
+        Result += "\xE7\x95\x8C";
+    }
+    return Result;
+}
+
+std::string ActionReceiptWithObservations(const std::size_t Count)
+{
+    constexpr std::string_view Observation = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "observationId":"observation-shared",
+        "worldId":"world-1",
+        "source":"game.world",
+        "kind":"event",
+        "contentType":"application/json",
+        "payload":{},
+        "observedAt":"2026-07-28T00:00:00Z",
+        "trust":"authoritative",
+        "visibility":{"scope":"world","audienceIds":[]}
+    })";
+    std::string Json = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "operationId":"operation-observations",
+        "revision":0,
+        "status":"succeeded",
+        "authoritativeObservations":[)";
+    for (std::size_t Index = 0U; Index < Count; ++Index)
+    {
+        if (Index != 0U)
+        {
+            Json += ',';
+        }
+        Json += Observation;
+    }
+    Json += R"(],
+        "retryable":false,
+        "receivedAt":"2026-07-28T00:00:00Z"
+    })";
+    return Json;
+}
+
+std::string ActionReceiptWithObservation(
+    const std::string_view Observation)
+{
+    std::string Json = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "operationId":"operation-nested-observation",
+        "revision":1,
+        "status":"succeeded",
+        "authoritativeObservations":[)";
+    Json += Observation;
+    Json += R"(],
+        "retryable":false,
+        "receivedAt":"2026-07-28T00:00:01Z"
+    })";
+    return Json;
+}
+
+std::string ActionRequestWithExtensions(const std::size_t Count)
+{
+    std::string Json = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "extensions":{)";
+    for (std::size_t Index = 0U; Index < Count; ++Index)
+    {
+        if (Index != 0U)
+        {
+            Json += ',';
+        }
+        Json += "\"extension_" + std::to_string(Index) + "\":true";
+    }
+    Json += R"(},
+        "operationId":"operation-extensions",
+        "runId":"run-extensions",
+        "turnId":"turn-extensions",
+        "toolCallId":"call-extensions",
+        "agentId":"agent-extensions",
+        "worldId":"world-extensions",
+        "actionName":"read_state",
+        "actionVersion":"1",
+        "arguments":{},
+        "requestedAt":"2026-07-28T00:00:00Z"
+    })";
+    return Json;
+}
+
+void CheckRuntimeEventFieldLimit(
+    const std::string& Fixture,
+    const std::string& Original,
+    const std::size_t Maximum)
+{
+    const auto Offset = Fixture.find(Original);
+    Expect(
+        Offset != std::string::npos,
+        "provider lifecycle fixture should contain its bounded field");
+    if (Offset == std::string::npos)
+    {
+        return;
+    }
+
+    const std::string Boundary = RepeatUnicodeScalar(Maximum);
+    std::string AtLimit = Fixture;
+    AtLimit.replace(Offset, Original.size(), Boundary);
+    Expect(
+        game_agent::wire::ParseRuntimeEvent(AtLimit).Ok,
+        "runtime event field should accept its Unicode scalar boundary");
+
+    std::string OverLimit = AtLimit;
+    OverLimit.replace(
+        Offset,
+        Boundary.size(),
+        Boundary + "\xE7\x95\x8C");
+    Expect(
+        !game_agent::wire::ParseRuntimeEvent(OverLimit).Ok,
+        "runtime event field should reject one Unicode scalar over its boundary");
+}
+
 int32_t GAR_CALL FakeCreate(
     const GAR_RuntimeConfigV1* Config,
     const GAR_CallbacksV1*,
@@ -142,6 +268,14 @@ void CheckActionRequest(const std::filesystem::path& FixtureRoot)
 
     Expect(Result.Value.OperationId == "operation-0001", "operation id should be preserved");
     Expect(Result.Value.ActionName == "gather_food", "action name should be preserved");
+    Expect(
+        Result.Value.DecisionKey.has_value() &&
+            *Result.Value.DecisionKey == "npc gather decision",
+        "decision key should be preserved");
+    Expect(
+        Result.Value.BatchId.has_value() &&
+            *Result.Value.BatchId == "world-tick-42",
+        "batch id should be preserved");
     const auto* Arguments = Result.Value.Arguments.AsObject();
     Expect(Arguments != nullptr, "action arguments should remain structured JSON");
     if (Arguments != nullptr)
@@ -153,6 +287,37 @@ void CheckActionRequest(const std::filesystem::path& FixtureRoot)
                 Resource->second.AsString() != nullptr &&
                 *Resource->second.AsString() == "berries",
             "action argument value should be preserved");
+    }
+
+    const std::string OriginalDecision = "npc gather decision";
+    const auto DecisionOffset = Json.find(OriginalDecision);
+    Expect(
+        DecisionOffset != std::string::npos,
+        "action fixture should contain its decision key");
+    if (DecisionOffset != std::string::npos)
+    {
+        std::string Boundary;
+        for (std::size_t Index = 0U; Index < 256U; ++Index)
+        {
+            Boundary += "\xE7\x95\x8C";
+        }
+
+        std::string UnicodeJson = Json;
+        UnicodeJson.replace(
+            DecisionOffset,
+            OriginalDecision.size(),
+            Boundary);
+        Expect(
+            game_agent::wire::ParseActionRequest(UnicodeJson).Ok,
+            "256 Unicode scalar decision keys should parse");
+
+        UnicodeJson.replace(
+            DecisionOffset,
+            Boundary.size(),
+            Boundary + "\xE7\x95\x8C");
+        Expect(
+            !game_agent::wire::ParseActionRequest(UnicodeJson).Ok,
+            "257 Unicode scalar decision keys should fail");
     }
 }
 
@@ -179,6 +344,22 @@ void CheckActionReceipt(const std::filesystem::path& FixtureRoot)
     Expect(
         RoundTrip.Ok && RoundTrip.Value.OperationId == Result.Value.OperationId,
         "serialized action receipt should preserve operation id");
+
+    const auto AtObservationLimit =
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservations(64U));
+    Expect(
+        AtObservationLimit.Ok,
+        "64 authoritative observations should parse");
+    Expect(
+        AtObservationLimit.Ok &&
+            AtObservationLimit.Value.AuthoritativeObservations.size() == 64U,
+        "all 64 authoritative observations should be preserved");
+    Expect(
+        !game_agent::wire::ParseActionReceipt(
+             ActionReceiptWithObservations(65U))
+             .Ok,
+        "65 authoritative observations should fail before item decoding");
 }
 
 void CheckObservation(const std::filesystem::path& FixtureRoot)
@@ -199,6 +380,133 @@ void CheckObservation(const std::filesystem::path& FixtureRoot)
     Expect(Result.Value.Visibility.Scope == "agent", "visibility scope should be preserved");
 }
 
+void CheckObservationSemanticContracts(
+    const std::filesystem::path& FixtureRoot,
+    const std::filesystem::path& InvalidFixtureRoot)
+{
+    const std::string ResourceJson =
+        ReadAll(FixtureRoot / "resource-observation.json");
+    Expect(
+        !ResourceJson.empty(),
+        "resource observation fixture should be readable");
+    const auto Resource =
+        game_agent::wire::ParseObservationEnvelope(ResourceJson);
+    Expect(Resource.Ok, "valid resource observation fixture should parse");
+    Expect(
+        Resource.Ok &&
+            Resource.Value.ResourceRef.has_value() &&
+            Resource.Value.ResourceRef->Digest.has_value(),
+        "resource observation fields should be preserved");
+    Expect(
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservation(ResourceJson))
+            .Ok,
+        "valid nested resource observations should parse");
+
+    constexpr std::string_view OriginalUri =
+        "game://state/actors/agent-demo";
+    const auto UriOffset = ResourceJson.find(OriginalUri);
+    Expect(
+        UriOffset != std::string::npos,
+        "resource fixture should contain its URI");
+    if (UriOffset != std::string::npos)
+    {
+        const std::string AtLimitUri =
+            "game:" + std::string(2043U, 'a');
+        std::string AtLimit = ResourceJson;
+        AtLimit.replace(
+            UriOffset,
+            OriginalUri.size(),
+            AtLimitUri);
+        Expect(
+            game_agent::wire::ParseObservationEnvelope(AtLimit).Ok,
+            "2048 Unicode scalar resource URIs should parse");
+
+        std::string OverLimit = AtLimit;
+        OverLimit.replace(
+            UriOffset,
+            AtLimitUri.size(),
+            AtLimitUri + "a");
+        Expect(
+            !game_agent::wire::ParseObservationEnvelope(OverLimit).Ok,
+            "2049 Unicode scalar resource URIs should fail");
+    }
+
+    const std::string MalformedUri =
+        ReadAll(
+            InvalidFixtureRoot /
+            "observation-resource-malformed-uri.json");
+    Expect(
+        !game_agent::wire::ParseObservationEnvelope(MalformedUri).Ok,
+        "malformed resource URI references should fail");
+    Expect(
+        !game_agent::wire::ParseActionReceipt(
+             ActionReceiptWithObservation(MalformedUri))
+             .Ok,
+        "nested malformed resource URI references should fail");
+
+    const std::string EmptyDigest =
+        ReadAll(
+            InvalidFixtureRoot /
+            "observation-resource-empty-digest.json");
+    Expect(
+        !game_agent::wire::ParseObservationEnvelope(EmptyDigest).Ok,
+        "present empty resource digests should fail");
+    Expect(
+        !game_agent::wire::ParseActionReceipt(
+             ActionReceiptWithObservation(EmptyDigest))
+             .Ok,
+        "nested empty resource digests should fail");
+
+    const std::string PatchWithoutStateVersion =
+        ReadAll(
+            InvalidFixtureRoot /
+            "observation-patch-missing-state-version.json");
+    std::string PatchWithStateVersion = PatchWithoutStateVersion;
+    constexpr std::string_view TrustField =
+        "\"trust\": \"authoritative\"";
+    const auto TrustOffset = PatchWithStateVersion.find(TrustField);
+    Expect(
+        TrustOffset != std::string::npos,
+        "patch fixture should contain its trust field");
+    if (TrustOffset != std::string::npos)
+    {
+        PatchWithStateVersion.insert(
+            TrustOffset,
+            "\"stateVersion\": \"world-rev-43\",\n  ");
+        Expect(
+            game_agent::wire::ParseObservationEnvelope(
+                PatchWithStateVersion)
+                .Ok,
+            "patch observations with stateVersion should parse");
+        Expect(
+            game_agent::wire::ParseActionReceipt(
+                ActionReceiptWithObservation(PatchWithStateVersion))
+                .Ok,
+            "nested patch observations with stateVersion should parse");
+    }
+    Expect(
+        !game_agent::wire::ParseObservationEnvelope(
+             PatchWithoutStateVersion)
+             .Ok,
+        "patch observations without stateVersion should fail");
+    Expect(
+        !game_agent::wire::ParseActionReceipt(
+             ActionReceiptWithObservation(PatchWithoutStateVersion))
+             .Ok,
+        "nested patch observations without stateVersion should fail");
+
+    const std::string NestedPatchWithoutStateVersion =
+        ReadAll(
+            InvalidFixtureRoot /
+            "receipt-patch-missing-state-version.json");
+    Expect(
+        !game_agent::wire::ParseActionReceipt(
+             NestedPatchWithoutStateVersion)
+             .Ok,
+        "nested patch fixture without stateVersion should fail");
+}
+
 void CheckRuntimeEvent(const std::filesystem::path& Fixture)
 {
     const std::string Json = ReadAll(Fixture);
@@ -214,6 +522,50 @@ void CheckRuntimeEvent(const std::filesystem::path& Fixture)
     Expect(
         Result.Value.Durability == game_agent::wire::EventDurability::Durable,
         "runtime event durability should be preserved");
+    Expect(
+        Result.Value.ProviderId.has_value() &&
+            *Result.Value.ProviderId == "provider-primary",
+        "runtime event provider id should be preserved");
+    Expect(
+        Result.Value.ModelId.has_value() &&
+            *Result.Value.ModelId == "model-gameplay-v1",
+        "runtime event model id should be preserved");
+    Expect(
+        Result.Value.TransportDialect.has_value() &&
+            *Result.Value.TransportDialect == "chat-completions",
+        "runtime event transport dialect should be preserved");
+    Expect(
+        Result.Value.ProviderCapabilityDigest.has_value() &&
+            *Result.Value.ProviderCapabilityDigest == "capability-digest-v1",
+        "runtime event provider capability digest should be preserved");
+    Expect(
+        Result.Value.ProviderRouteDigest.has_value() &&
+            *Result.Value.ProviderRouteDigest == "route-digest-v1",
+        "runtime event provider route digest should be preserved");
+    Expect(
+        Result.Value.ReasonCode.has_value() &&
+            *Result.Value.ReasonCode == "provider_dispatch",
+        "runtime event reason code should be preserved");
+
+    CheckRuntimeEventFieldLimit(Json, "provider-primary", 128U);
+    CheckRuntimeEventFieldLimit(Json, "model-gameplay-v1", 256U);
+    CheckRuntimeEventFieldLimit(Json, "chat-completions", 128U);
+    CheckRuntimeEventFieldLimit(Json, "capability-digest-v1", 256U);
+    CheckRuntimeEventFieldLimit(Json, "route-digest-v1", 256U);
+    CheckRuntimeEventFieldLimit(Json, "provider_dispatch", 96U);
+
+    std::string EmptyProviderId = Json;
+    const auto ProviderOffset = EmptyProviderId.find("provider-primary");
+    if (ProviderOffset != std::string::npos)
+    {
+        EmptyProviderId.replace(
+            ProviderOffset,
+            std::string("provider-primary").size(),
+            "");
+        Expect(
+            !game_agent::wire::ParseRuntimeEvent(EmptyProviderId).Ok,
+            "present provider lifecycle fields must be non-empty");
+    }
 }
 
 void CheckParserGuards()
@@ -232,6 +584,24 @@ void CheckParserGuards()
     Limits.MaxInputBytes = 4U;
     const auto Oversized = game_agent::wire::ParseJson(R"({"value":1})", Limits);
     Expect(!Oversized, "configured input byte limits should be enforced");
+
+    const auto ExtensionsAtLimit =
+        game_agent::wire::ParseActionRequest(
+            ActionRequestWithExtensions(
+                game_agent::wire::MaxProtocolExtensions));
+    Expect(
+        ExtensionsAtLimit.Ok &&
+            ExtensionsAtLimit.Value.Extensions.size() ==
+                game_agent::wire::MaxProtocolExtensions,
+        "64 protocol extensions should be accepted");
+
+    const auto ExtensionsOverLimit =
+        game_agent::wire::ParseActionRequest(
+            ActionRequestWithExtensions(
+                game_agent::wire::MaxProtocolExtensions + 1U));
+    Expect(
+        !ExtensionsOverLimit,
+        "65 protocol extensions should be rejected before copying");
 
     const auto UnknownField = game_agent::wire::ParseActionRequest(
         R"({
@@ -286,6 +656,43 @@ void CheckParserGuards()
             }
         })");
     Expect(!DuplicateAudience, "duplicate visibility audience ids should be rejected");
+
+    const auto EmptySchemaReference =
+        game_agent::wire::ParseObservationEnvelope(
+            R"({
+                "protocolVersion":"0.2",
+                "schemaVersion":"0.2",
+                "observationId":"observation-resource",
+                "worldId":"world-1",
+                "source":"game.world",
+                "kind":"resource_ref",
+                "contentType":"application/octet-stream",
+                "schemaRef":"",
+                "resourceRef":{
+                    "uri":"game://state/actor-1",
+                    "mediaType":"application/octet-stream",
+                    "digest":"sha256:actor-1"
+                },
+                "observedAt":"2026-07-28T00:00:00Z",
+                "trust":"trusted",
+                "visibility":{"scope":"world","audienceIds":[]}
+            })");
+    Expect(
+        EmptySchemaReference.Ok,
+        "an empty optional schema URI reference should parse");
+    if (!EmptySchemaReference)
+    {
+        std::cerr << EmptySchemaReference.Error.Message << '\n';
+    }
+    Expect(
+        EmptySchemaReference.Ok &&
+            EmptySchemaReference.Value.SchemaRef.has_value() &&
+            EmptySchemaReference.Value.SchemaRef->empty() &&
+            EmptySchemaReference.Value.ResourceRef.has_value() &&
+            EmptySchemaReference.Value.ResourceRef->Digest.has_value() &&
+            *EmptySchemaReference.Value.ResourceRef->Digest ==
+                "sha256:actor-1",
+        "empty schema references and non-empty digests should be preserved");
 
     const auto OverflowingRevision = game_agent::wire::ParseActionReceipt(
         R"({
@@ -447,9 +854,12 @@ void CheckParserGuards()
 
 int main(int ArgumentCount, char** Arguments)
 {
-    if (ArgumentCount != 3)
+    if (ArgumentCount != 4)
     {
-        std::cerr << "Usage: GameAgentUnrealPortableSmoke <protocol-fixture-dir> <runtime-event-fixture>\n";
+        std::cerr
+            << "Usage: GameAgentUnrealPortableSmoke "
+               "<protocol-fixture-dir> <invalid-fixture-dir> "
+               "<runtime-event-fixture>\n";
         return 2;
     }
 
@@ -457,7 +867,8 @@ int main(int ArgumentCount, char** Arguments)
     CheckActionRequest(Arguments[1]);
     CheckActionReceipt(Arguments[1]);
     CheckObservation(Arguments[1]);
-    CheckRuntimeEvent(Arguments[2]);
+    CheckObservationSemanticContracts(Arguments[1], Arguments[2]);
+    CheckRuntimeEvent(Arguments[3]);
     CheckParserGuards();
 
     if (Failures != 0)

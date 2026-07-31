@@ -13,7 +13,8 @@ internal static class RuntimePromptBuilder
         IReadOnlyList<ToolDescriptor> tools,
         int maxMessages,
         int maxUtf8Bytes,
-        int estimatedBytesPerToken)
+        int estimatedBytesPerToken,
+        IRuntimeTokenEstimator? tokenEstimator = null)
     {
         if (transcript is null)
         {
@@ -35,6 +36,7 @@ internal static class RuntimePromptBuilder
 
         var messageIds = new HashSet<string>(StringComparer.Ordinal);
         long utf8Bytes = 2;
+        long estimatedTokens = 0;
         foreach (var message in transcript)
         {
             if (message is null)
@@ -54,8 +56,15 @@ internal static class RuntimePromptBuilder
             PreflightMessage(message, maxUtf8Bytes);
             var encoded = NormalizedMessageJournalCodec.Encode(message);
             _ = NormalizedMessageJournalCodec.Decode(encoded);
+            var raw = encoded.GetRawText();
             utf8Bytes = checked(
-                utf8Bytes + Encoding.UTF8.GetByteCount(encoded.GetRawText()));
+                utf8Bytes + Encoding.UTF8.GetByteCount(raw));
+            if (tokenEstimator is not null)
+            {
+                estimatedTokens = checked(
+                    estimatedTokens
+                    + tokenEstimator.EstimateTokens(raw));
+            }
             EnsurePromptBytes(utf8Bytes, maxUtf8Bytes, nameof(transcript));
         }
 
@@ -69,17 +78,30 @@ internal static class RuntimePromptBuilder
             }
 
             var encoded = ProtocolJson.ToElement(tool);
+            var raw = encoded.GetRawText();
             utf8Bytes = checked(
-                utf8Bytes + Encoding.UTF8.GetByteCount(encoded.GetRawText()));
+                utf8Bytes + Encoding.UTF8.GetByteCount(raw));
+            if (tokenEstimator is not null)
+            {
+                estimatedTokens = checked(
+                    estimatedTokens
+                    + tokenEstimator.EstimateTokens(raw));
+            }
             EnsurePromptBytes(utf8Bytes, maxUtf8Bytes, nameof(tools));
         }
 
-        var estimatedTokens = Math.Max(
-            1,
-            checked(
-                (int)((utf8Bytes + estimatedBytesPerToken - 1)
-                      / estimatedBytesPerToken)));
-        return new PromptMeasurement((int)utf8Bytes, estimatedTokens);
+        var measuredTokens = tokenEstimator is null
+            ? Math.Max(
+                1,
+                checked(
+                    (int)((utf8Bytes + estimatedBytesPerToken - 1)
+                          / estimatedBytesPerToken)))
+            : checked((int)Math.Max(1, estimatedTokens));
+        return new PromptMeasurement(
+            (int)utf8Bytes,
+            measuredTokens,
+            tokenEstimator?.EstimatorId ?? "utf8-ratio",
+            tokenEstimator?.Version ?? "1");
     }
 
     private static void PreflightMessage(
@@ -163,6 +185,12 @@ internal static class RuntimePromptBuilder
             writer.WriteNumber(
                 "estimatedTokens",
                 measurement.EstimatedTokens);
+            writer.WriteString(
+                "estimatorId",
+                measurement.EstimatorId);
+            writer.WriteString(
+                "estimatorVersion",
+                measurement.EstimatorVersion);
             writer.WriteEndObject();
         }
 
@@ -297,6 +325,52 @@ internal static class RuntimePromptBuilder
         return Message(
             messageId,
             NormalizedRoles.System,
+            JsonDocument.Parse(buffer.WrittenMemory).RootElement.Clone(),
+            createdAt);
+    }
+
+    public static NormalizedMessage SkillContentMessage(
+        string messageId,
+        SkillContentResolutionSelection selection,
+        DateTimeOffset createdAt)
+    {
+        if (selection is null)
+        {
+            throw new ArgumentNullException(nameof(selection));
+        }
+
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString(
+                "contentType",
+                "application/vnd.game-agent.skill-content+json");
+            writer.WriteString("authority", "non_authoritative");
+            writer.WriteString("usage", "context_only");
+            writer.WriteBoolean("truncated", selection.Truncated);
+            writer.WritePropertyName("items");
+            writer.WriteStartArray();
+            foreach (var item in selection.Items)
+            {
+                SkillContentResolutionSelection.WriteIdentity(writer, item);
+                writer.WriteString("authority", "non_authoritative");
+                if (item.Content.HasValue)
+                {
+                    writer.WritePropertyName("content");
+                    item.Content.Value.WriteTo(writer);
+                }
+
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        return Message(
+            messageId,
+            NormalizedRoles.User,
             JsonDocument.Parse(buffer.WrittenMemory).RootElement.Clone(),
             createdAt);
     }
@@ -546,13 +620,29 @@ internal static class RuntimePromptBuilder
 
 internal sealed class PromptMeasurement
 {
-    public PromptMeasurement(int utf8Bytes, int estimatedTokens)
+    public PromptMeasurement(
+        int utf8Bytes,
+        int estimatedTokens,
+        string estimatorId,
+        string estimatorVersion)
     {
         Utf8Bytes = utf8Bytes;
         EstimatedTokens = estimatedTokens;
+        EstimatorId = RuntimeGuard.RequiredUtf8(
+            estimatorId,
+            128,
+            nameof(estimatorId));
+        EstimatorVersion = RuntimeGuard.RequiredUtf8(
+            estimatorVersion,
+            64,
+            nameof(estimatorVersion));
     }
 
     public int Utf8Bytes { get; }
 
     public int EstimatedTokens { get; }
+
+    public string EstimatorId { get; }
+
+    public string EstimatorVersion { get; }
 }

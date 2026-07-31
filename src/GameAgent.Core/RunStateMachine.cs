@@ -70,6 +70,7 @@ public static class RunStateMachine
                 RunStates.Reconciling),
             [RunStates.Reconciling] = Set(
                 RunStates.Running,
+                RunStates.Cancelling,
                 RunStates.Completed,
                 RunStates.Cancelled,
                 RunStates.Interrupted,
@@ -157,6 +158,16 @@ public static class RunStateMachine
             || state == RunStates.Interrupted
             || state == RunStates.Cancelled
             || state == RunStates.Failed;
+    }
+
+    internal static bool IsStateTransitionAllowed(
+        string fromState,
+        string toState)
+    {
+        return AllowedTransitions.TryGetValue(
+                   fromState,
+                   out var targets)
+               && targets.Contains(toState);
     }
 
     private static HashSet<string> Set(params string[] states)

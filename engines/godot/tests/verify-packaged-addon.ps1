@@ -2,7 +2,8 @@ param(
     [string]$Archive = (
         Join-Path (Split-Path -Parent $PSScriptRoot) (
             "artifacts\game-agent-runtime-godot-0.1.0-test.zip")),
-    [string]$Godot = "godot"
+    [string]$Godot = "godot",
+    [string]$ExpectedVersion
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,15 +19,6 @@ $packageRoot = Join-Path $artifactsRoot (
     "package-" + [System.Guid]::NewGuid().ToString("N"))
 . (Join-Path $PSScriptRoot "GodotProcess.ps1")
 
-$resolved = Get-Command $Godot -ErrorAction Stop
-$item = Get-Item -LiteralPath $resolved.Source
-$godotExecutable = if ($item.LinkType -and $item.Target) {
-    [string]$item.Target[0]
-}
-else {
-    $resolved.Source
-}
-
 function Invoke-Godot {
     param([string[]]$Arguments)
 
@@ -36,8 +28,52 @@ function Invoke-Godot {
         -TimeoutSeconds 300
 }
 
+function Test-WindowsPortablePathSegment {
+    param([Parameter(Mandatory)][string]$Segment)
+
+    if ([string]::IsNullOrEmpty($Segment) `
+        -or $Segment.Length -gt 255 `
+        -or $Segment -match '[<>:"/\\|?*\x00-\x1f]' `
+        -or $Segment -match '[. ]$') {
+        return $false
+    }
+
+    $stem = $Segment.Split('.')[0].TrimEnd([char[]]@(' ', '.'))
+    return $stem -notmatch (
+        '^(?i:CON|PRN|AUX|NUL|CLOCK[$]|CONIN[$]|CONOUT[$]|' +
+        'COM[0-9¹²³]|LPT[0-9¹²³])$')
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) `
+    -and $ExpectedVersion -notmatch (
+        '^[0-9]+\.[0-9]+\.[0-9]+' +
+        '(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$')) {
+    throw "The expected Godot package version is invalid."
+}
+
 $Archive = [IO.Path]::GetFullPath(
     (Resolve-Path -LiteralPath $Archive).Path)
+$archiveName = [IO.Path]::GetFileNameWithoutExtension($Archive)
+$archivePrefix = "game-agent-runtime-godot-"
+if (-not $archiveName.StartsWith(
+        $archivePrefix,
+        [StringComparison]::Ordinal)) {
+    throw "Packaged addon archive has an invalid name."
+}
+$archiveVersion = $archiveName.Substring($archivePrefix.Length)
+if ($archiveVersion -notmatch (
+        '^[0-9]+\.[0-9]+\.[0-9]+' +
+        '(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$')) {
+    throw "Packaged addon archive has an invalid version."
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) `
+    -and -not [string]::Equals(
+        $archiveVersion,
+        $ExpectedVersion,
+        [StringComparison]::Ordinal)) {
+    throw "Packaged addon archive does not match the expected release version."
+}
+
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $packageArchive = [IO.Compression.ZipFile]::OpenRead($Archive)
 try {
@@ -59,7 +95,8 @@ try {
             -or @($segments | Where-Object {
                     [string]::IsNullOrEmpty($_) -or
                     $_ -eq '.' -or
-                    $_ -eq '..'
+                    $_ -eq '..' -or
+                    -not (Test-WindowsPortablePathSegment -Segment $_)
                 }).Count -ne 0 `
             -or (-not [string]::Equals(
                     $entryName,
@@ -74,9 +111,161 @@ try {
             throw "Packaged addon archive contains duplicate entries."
         }
     }
+
+    $libraryPrefix =
+        'addons/game_agent_runtime/lib/netstandard2.1/'
+    $expectedLibraryEntries = @(
+        'GameAgent.Compatibility.dll',
+        'GameAgent.Core.dll',
+        'GameAgent.Persistence.dll',
+        'GameAgent.Protocol.dll',
+        'GameAgent.Providers.Anthropic.dll',
+        'GameAgent.Providers.OpenAICompatible.dll',
+        'GameAgent.Runtime.dll',
+        'GameAgent.Workflow.dll',
+        'GameAgent.World.dll'
+    ) | ForEach-Object { $libraryPrefix + $_ }
+    $actualLibraryEntries = @(
+        $packageArchive.Entries |
+            Where-Object {
+                [string]::Equals(
+                    [IO.Path]::GetExtension($_.FullName),
+                    '.dll',
+                    [StringComparison]::OrdinalIgnoreCase)
+            } |
+            ForEach-Object { $_.FullName } |
+            Sort-Object
+    )
+    if ([string]::Join("`n", $actualLibraryEntries) -cne
+        [string]::Join(
+            "`n",
+            @($expectedLibraryEntries | Sort-Object))) {
+        throw "Packaged addon managed-library set is incomplete or unexpected."
+    }
+
+    $symbolEntries = @(
+        $packageArchive.Entries |
+            Where-Object {
+                [string]::Equals(
+                    [IO.Path]::GetExtension($_.FullName),
+                    '.pdb',
+                    [StringComparison]::OrdinalIgnoreCase)
+            })
+    if ($symbolEntries.Count -ne 0) {
+        throw "Packaged addon managed-symbol set is unexpected."
+    }
+
+    $unsupportedExecutableEntries = @(
+        $packageArchive.Entries |
+            Where-Object {
+                $_.FullName -match
+                    '(?i)(?:[.]exe|[.]dylib|[.]bundle|[.]so(?:[.][0-9]+)*)$'
+            })
+    if ($unsupportedExecutableEntries.Count -ne 0) {
+        throw "Packaged addon contains an unsupported executable binary."
+    }
+
+    $authoringBridgeEntry =
+        'addons/game_agent_runtime/authoring/GodotWorldAuthoringBridge.cs'
+    if (-not $entryNames.Contains($authoringBridgeEntry)) {
+        throw "Packaged addon is missing the native-world authoring bridge."
+    }
+
+    $schemaPrefix =
+        'addons/game_agent_runtime/authoring/schemas/world-v1/'
+    $expectedSchemaEntries = @(
+        'agents.schema.json',
+        'clocks.schema.json',
+        'events.schema.json',
+        'interactions.schema.json',
+        'knowledge.schema.json',
+        'native-world-common.schema.json',
+        'numerics.schema.json',
+        'world.schema.json'
+    ) | ForEach-Object { $schemaPrefix + $_ }
+    $actualSchemaEntries = @(
+        $packageArchive.Entries |
+            Where-Object {
+                $_.FullName.StartsWith(
+                    $schemaPrefix,
+                    [StringComparison]::Ordinal) -and
+                $_.FullName.EndsWith(
+                    '.json',
+                    [StringComparison]::Ordinal)
+            } |
+            ForEach-Object { $_.FullName } |
+            Sort-Object
+    )
+    if ([string]::Join("`n", $actualSchemaEntries) -cne
+        [string]::Join("`n", @($expectedSchemaEntries | Sort-Object))) {
+        throw "Packaged addon native-world schema set is incomplete or unexpected."
+    }
+
+    $schemaDirectoryEntries = @(
+        $packageArchive.Entries |
+            Where-Object {
+                $_.FullName.StartsWith(
+                    $schemaPrefix,
+                    [StringComparison]::Ordinal)
+            } |
+            ForEach-Object { $_.FullName } |
+            Sort-Object
+    )
+    $allowedSchemaDirectoryEntries = @(
+        $expectedSchemaEntries
+        $schemaPrefix + 'README.md'
+    ) | Sort-Object
+    if (@(
+            $schemaDirectoryEntries |
+                Where-Object { $_ -cnotin $allowedSchemaDirectoryEntries }
+        ).Count -ne 0) {
+        throw "Packaged addon native-world schema directory contains unexpected files."
+    }
+
+    $examplePrefix =
+        'addons/game_agent_runtime/authoring/examples/interactive-smoke/'
+    $expectedExampleEntries = @(
+        'agents.json',
+        'clocks.json',
+        'events.json',
+        'interactions.json',
+        'knowledge.json',
+        'numerics.json',
+        'world.json'
+    ) | ForEach-Object { $examplePrefix + $_ }
+    $actualExampleEntries = @(
+        $packageArchive.Entries |
+            Where-Object {
+                $_.FullName.StartsWith(
+                    $examplePrefix,
+                    [StringComparison]::Ordinal)
+            } |
+            ForEach-Object { $_.FullName } |
+            Sort-Object
+    )
+    if ([string]::Join("`n", $actualExampleEntries) -cne
+        [string]::Join("`n", @($expectedExampleEntries | Sort-Object))) {
+        throw "Packaged addon native-world example set is incomplete or unexpected."
+    }
 }
 finally {
     $packageArchive.Dispose()
+}
+
+$resolved = Get-Command $Godot -ErrorAction Stop
+$item = Get-Item -LiteralPath $resolved.Source
+$godotExecutable = if ($item.LinkType -and $item.Target) {
+    $targets = @($item.Target)
+    $target = [string]$targets[0]
+    if ([System.IO.Path]::IsPathRooted($target)) {
+        $target
+    }
+    else {
+        Join-Path $item.DirectoryName $target
+    }
+}
+else {
+    $resolved.Source
 }
 
 New-Item `
@@ -95,19 +284,14 @@ try {
     Copy-Item `
         -LiteralPath (Join-Path $packageRoot 'LICENSE') `
         -Destination (Join-Path $consumerRoot 'LICENSE')
-    $archiveName = [IO.Path]::GetFileNameWithoutExtension($Archive)
-    $archivePrefix = "game-agent-runtime-godot-"
-    if (-not $archiveName.StartsWith(
-            $archivePrefix,
-            [StringComparison]::Ordinal)) {
-        throw "Packaged addon archive has an invalid name."
-    }
-    $expectedVersion = $archiveName.Substring($archivePrefix.Length)
     $pluginManifest = Join-Path $consumerRoot `
         "addons\game_agent_runtime\plugin.cfg"
     $pluginText = Get-Content -LiteralPath $pluginManifest -Raw
-    if ($pluginText -notmatch '(?m)^version="([^"]+)"$' `
-        -or $Matches[1] -ne $expectedVersion) {
+    $versionPattern =
+        '(?m)^version="(?<version>[^"\r\n]+)"\r?$'
+    $versionMatches = [regex]::Matches($pluginText, $versionPattern)
+    if ($versionMatches.Count -ne 1 `
+        -or $versionMatches[0].Groups['version'].Value -cne $archiveVersion) {
         throw "Packaged addon version does not match its archive name."
     }
     $licensePath = Join-Path $consumerRoot "LICENSE"
@@ -127,8 +311,25 @@ try {
         "--build-solutions",
         "--quit-after",
         "10")
+    $buildOutput = $script:LastGodotOutput
     if ($buildExitCode -ne 0) {
         throw "Packaged addon build failed with exit code $buildExitCode."
+    }
+
+    $editorExitCode = Invoke-Godot @(
+        "--headless",
+        "--editor",
+        "--path",
+        $consumerRoot,
+        "--quit-after",
+        "30")
+    $editorOutput = $script:LastGodotOutput
+    if ($editorExitCode -ne 0) {
+        throw "Packaged addon editor-plugin load failed with exit code $editorExitCode."
+    }
+    if (($buildOutput + "`n" + $editorOutput) -match
+        '(?im)(^ERROR:|SCRIPT ERROR:|Parse Error:|PACKAGED_[A-Z_]*FAIL|Failed to (load|instantiate)|Cannot load)') {
+        throw "Packaged addon editor-plugin load emitted an error."
     }
 
     $runExitCode = Invoke-Godot @(
@@ -137,11 +338,16 @@ try {
         $consumerRoot,
         "--quit-after",
         "100000")
+    $runOutput = $script:LastGodotOutput
     if ($runExitCode -ne 0) {
         throw "Packaged addon headless smoke failed with exit code $runExitCode."
     }
-    if ($script:LastGodotOutput -notmatch "PACKAGED_CONSUMER_PASS") {
+    if ($runOutput -notmatch "PACKAGED_CONSUMER_PASS") {
         throw "Packaged addon smoke exited without the PACKAGED_CONSUMER_PASS marker."
+    }
+    if ($runOutput -match
+        '(?im)(^ERROR:|SCRIPT ERROR:|Parse Error:|PACKAGED_[A-Z_]*FAIL|Failed to (load|instantiate)|Cannot load)') {
+        throw "Packaged addon headless smoke emitted an error."
     }
 
     & (Join-Path $repositoryRoot `

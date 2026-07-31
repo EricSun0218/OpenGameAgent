@@ -5,6 +5,9 @@
 #include "GameAgentWireProtocol.h"
 #include "Misc/AutomationTest.h"
 
+#include <array>
+#include <utility>
+
 namespace
 {
 constexpr std::string_view ValidActionJson = R"({
@@ -19,8 +22,161 @@ constexpr std::string_view ValidActionJson = R"({
     "actionName":"read_state",
     "actionVersion":"1",
     "arguments":{"region":"north"},
+    "decisionKey":"npc read decision",
+    "batchId":"world-tick-1",
     "requestedAt":"2026-07-28T00:00:00Z"
 })";
+
+constexpr std::string_view ValidProviderLifecycleEventJson = R"({
+    "protocolVersion":"0.2",
+    "schemaVersion":"0.2",
+    "eventId":"event-provider-1",
+    "runId":"run-1",
+    "turnId":"turn-1",
+    "sequence":7,
+    "kind":"provider.dispatch_started",
+    "durability":"durable",
+    "runtimeGeneration":1,
+    "attemptId":"attempt-1",
+    "streamAttemptId":"stream-1",
+    "providerId":"provider-primary",
+    "modelId":"model-gameplay-v1",
+    "transportDialect":"chat-completions",
+    "providerCapabilityDigest":"capability-digest-v1",
+    "providerRouteDigest":"route-digest-v1",
+    "reasonCode":"provider_dispatch",
+    "timestamp":"2026-07-28T00:00:01Z",
+    "payload":{"providerAttemptId":"attempt-1"},
+    "extensions":{}
+})";
+
+constexpr std::string_view ValidResourceObservationJson = R"({
+    "protocolVersion":"0.2",
+    "schemaVersion":"0.2",
+    "observationId":"observation-resource",
+    "worldId":"world-1",
+    "source":"game.resource",
+    "kind":"resource_ref",
+    "contentType":"application/octet-stream",
+    "schemaRef":"",
+    "resourceRef":{
+        "uri":"game://state/actor-1",
+        "mediaType":"application/octet-stream",
+        "digest":"sha256:actor-1"
+    },
+    "observedAt":"2026-07-28T00:00:00Z",
+    "trust":"trusted",
+    "visibility":{"scope":"world","audienceIds":[]}
+})";
+
+constexpr std::string_view PatchWithoutStateVersionJson = R"({
+    "protocolVersion":"0.2",
+    "schemaVersion":"0.2",
+    "observationId":"observation-patch",
+    "worldId":"world-1",
+    "source":"game.world",
+    "kind":"patch",
+    "contentType":"application/json",
+    "payload":{"hungerDelta":-1},
+    "observedAt":"2026-07-28T00:00:00Z",
+    "trust":"authoritative",
+    "visibility":{"scope":"world","audienceIds":[]}
+})";
+
+std::string RepeatUnicodeScalar(const std::size_t Count)
+{
+    std::string Result;
+    Result.reserve(Count * 3U);
+    for (std::size_t Index = 0U; Index < Count; ++Index)
+    {
+        Result += "\xE7\x95\x8C";
+    }
+    return Result;
+}
+
+std::string ActionReceiptWithObservations(const std::size_t Count)
+{
+    constexpr std::string_view Observation = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "observationId":"observation-shared",
+        "worldId":"world-1",
+        "source":"game.world",
+        "kind":"event",
+        "contentType":"application/json",
+        "payload":{},
+        "observedAt":"2026-07-28T00:00:00Z",
+        "trust":"authoritative",
+        "visibility":{"scope":"world","audienceIds":[]}
+    })";
+    std::string Json = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "operationId":"operation-observations",
+        "revision":0,
+        "status":"succeeded",
+        "authoritativeObservations":[)";
+    for (std::size_t Index = 0U; Index < Count; ++Index)
+    {
+        if (Index != 0U)
+        {
+            Json += ',';
+        }
+        Json += Observation;
+    }
+    Json += R"(],
+        "retryable":false,
+        "receivedAt":"2026-07-28T00:00:00Z"
+    })";
+    return Json;
+}
+
+std::string ActionReceiptWithObservation(
+    const std::string_view Observation)
+{
+    std::string Json = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "operationId":"operation-nested-observation",
+        "revision":1,
+        "status":"succeeded",
+        "authoritativeObservations":[)";
+    Json += Observation;
+    Json += R"(],
+        "retryable":false,
+        "receivedAt":"2026-07-28T00:00:01Z"
+    })";
+    return Json;
+}
+
+std::string ActionRequestWithExtensions(const std::size_t Count)
+{
+    std::string Json = R"({
+        "protocolVersion":"0.2",
+        "schemaVersion":"0.2",
+        "extensions":{)";
+    for (std::size_t Index = 0U; Index < Count; ++Index)
+    {
+        if (Index != 0U)
+        {
+            Json += ',';
+        }
+        Json += "\"extension_" + std::to_string(Index) + "\":true";
+    }
+    Json += R"(},
+        "operationId":"operation-extensions",
+        "runId":"run-extensions",
+        "turnId":"turn-extensions",
+        "toolCallId":"call-extensions",
+        "agentId":"agent-extensions",
+        "worldId":"world-extensions",
+        "actionName":"read_state",
+        "actionVersion":"1",
+        "arguments":{},
+        "requestedAt":"2026-07-28T00:00:00Z"
+    })";
+    return Json;
+}
 
 class FDuplicateCompletionHost final : public IGameAgentHostBoundary
 {
@@ -70,6 +226,59 @@ public:
     virtual void StopAndDrainActions() override
     {
     }
+};
+
+class FObservationCountCompletionHost final :
+    public IGameAgentHostBoundary
+{
+public:
+    explicit FObservationCountCompletionHost(
+        const std::size_t ObservationCount)
+        : ObservationCount_(ObservationCount)
+    {
+    }
+
+    virtual void ExecuteAction(
+        const game_agent::wire::ActionRequest& Request,
+        FGameAgentActionCompletion&& Completion) override
+    {
+        game_agent::wire::ActionReceipt Receipt;
+        Receipt.ProtocolVersion = "0.2";
+        Receipt.SchemaVersion = "0.2";
+        Receipt.OperationId = Request.OperationId;
+        Receipt.Status = game_agent::wire::ReceiptStatus::Succeeded;
+        Receipt.ReceivedAt = "2026-07-28T00:00:00Z";
+        Receipt.AuthoritativeObservations.reserve(ObservationCount_);
+        for (std::size_t Index = 0U;
+             Index < ObservationCount_;
+             ++Index)
+        {
+            game_agent::wire::ObservationEnvelope Observation;
+            Observation.ProtocolVersion = "0.2";
+            Observation.SchemaVersion = "0.2";
+            Observation.ObservationId = "observation-shared";
+            Observation.WorldId = "world-1";
+            Observation.Source = "game.world";
+            Observation.Kind = "event";
+            Observation.ContentType = "application/json";
+            Observation.Payload =
+                game_agent::wire::JsonValue(
+                    game_agent::wire::JsonValue::Object{});
+            Observation.ObservedAt = "2026-07-28T00:00:00Z";
+            Observation.Trust = "authoritative";
+            Observation.Visibility.Scope = "world";
+            Receipt.AuthoritativeObservations.emplace_back(
+                std::move(Observation));
+        }
+        Completion(MoveTemp(Receipt));
+    }
+
+    virtual void StopAndDrainActions() override
+    {
+    }
+
+private:
+    std::size_t ObservationCount_;
 };
 
 class FDeferredCompletionHost final : public IGameAgentHostBoundary
@@ -189,12 +398,247 @@ bool FGameAgentWireParserAutomationTest::RunTest(const FString&)
 {
     const auto Parsed = game_agent::wire::ParseActionRequest(ValidActionJson);
     TestTrue(TEXT("A valid action request parses"), Parsed.Ok);
+    const auto ExtensionsAtLimit =
+        game_agent::wire::ParseActionRequest(
+            ActionRequestWithExtensions(
+                game_agent::wire::MaxProtocolExtensions));
+    TestTrue(
+        TEXT("64 protocol extensions are accepted"),
+        ExtensionsAtLimit.Ok &&
+            ExtensionsAtLimit.Value.Extensions.size() ==
+                game_agent::wire::MaxProtocolExtensions);
+    const auto ExtensionsOverLimit =
+        game_agent::wire::ParseActionRequest(
+            ActionRequestWithExtensions(
+                game_agent::wire::MaxProtocolExtensions + 1U));
+    TestFalse(
+        TEXT("65 protocol extensions are rejected before copying"),
+        ExtensionsOverLimit.Ok);
     if (Parsed)
     {
         TestTrue(
             TEXT("Action name is preserved"),
             Parsed.Value.ActionName == "read_state");
+        TestTrue(
+            TEXT("Decision key is preserved"),
+            Parsed.Value.DecisionKey.has_value() &&
+                *Parsed.Value.DecisionKey == "npc read decision");
+        TestTrue(
+            TEXT("Batch id is preserved"),
+            Parsed.Value.BatchId.has_value() &&
+                *Parsed.Value.BatchId == "world-tick-1");
     }
+    const auto EmptySchemaReference =
+        game_agent::wire::ParseObservationEnvelope(
+            ValidResourceObservationJson);
+    TestTrue(
+        TEXT("An empty optional schema URI reference parses"),
+        EmptySchemaReference.Ok);
+    if (EmptySchemaReference)
+    {
+        TestTrue(
+            TEXT("Empty schema reference is preserved"),
+            EmptySchemaReference.Value.SchemaRef.has_value() &&
+                EmptySchemaReference.Value.SchemaRef->empty());
+        TestTrue(
+            TEXT("A non-empty resource digest is preserved"),
+            EmptySchemaReference.Value.ResourceRef.has_value() &&
+                EmptySchemaReference.Value.ResourceRef->Digest.has_value() &&
+                *EmptySchemaReference.Value.ResourceRef->Digest ==
+                    "sha256:actor-1");
+    }
+    TestTrue(
+        TEXT("A valid nested resource observation parses"),
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservation(
+                ValidResourceObservationJson))
+            .Ok);
+
+    constexpr std::string_view OriginalResourceUri =
+        "game://state/actor-1";
+    std::string AtResourceUriLimit(ValidResourceObservationJson);
+    const auto ResourceUriOffset =
+        AtResourceUriLimit.find(OriginalResourceUri);
+    TestTrue(
+        TEXT("The resource fixture contains its URI"),
+        ResourceUriOffset != std::string::npos);
+    if (ResourceUriOffset != std::string::npos)
+    {
+        const std::string BoundaryUri =
+            "game:" + std::string(2043U, 'a');
+        AtResourceUriLimit.replace(
+            ResourceUriOffset,
+            OriginalResourceUri.size(),
+            BoundaryUri);
+        TestTrue(
+            TEXT("A 2048 Unicode scalar resource URI parses"),
+            game_agent::wire::ParseObservationEnvelope(
+                AtResourceUriLimit)
+                .Ok);
+        AtResourceUriLimit.replace(
+            ResourceUriOffset,
+            BoundaryUri.size(),
+            BoundaryUri + "a");
+        TestFalse(
+            TEXT("A 2049 Unicode scalar resource URI is rejected"),
+            game_agent::wire::ParseObservationEnvelope(
+                AtResourceUriLimit)
+                .Ok);
+    }
+
+    std::string MalformedResourceUri(ValidResourceObservationJson);
+    const auto MalformedUriOffset =
+        MalformedResourceUri.find(OriginalResourceUri);
+    if (MalformedUriOffset != std::string::npos)
+    {
+        MalformedResourceUri.replace(
+            MalformedUriOffset,
+            OriginalResourceUri.size(),
+            "game://state/actor with space");
+    }
+    TestFalse(
+        TEXT("Malformed standalone resource URI references are rejected"),
+        game_agent::wire::ParseObservationEnvelope(
+            MalformedResourceUri)
+            .Ok);
+    TestFalse(
+        TEXT("Malformed nested resource URI references are rejected"),
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservation(MalformedResourceUri))
+            .Ok);
+
+    std::string EmptyDigest(ValidResourceObservationJson);
+    const auto DigestOffset = EmptyDigest.find("sha256:actor-1");
+    if (DigestOffset != std::string::npos)
+    {
+        EmptyDigest.replace(
+            DigestOffset,
+            std::string_view("sha256:actor-1").size(),
+            "");
+    }
+    TestFalse(
+        TEXT("Empty standalone resource digests are rejected"),
+        game_agent::wire::ParseObservationEnvelope(EmptyDigest).Ok);
+    TestFalse(
+        TEXT("Empty nested resource digests are rejected"),
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservation(EmptyDigest))
+            .Ok);
+
+    TestFalse(
+        TEXT("Standalone patches require stateVersion"),
+        game_agent::wire::ParseObservationEnvelope(
+            PatchWithoutStateVersionJson)
+            .Ok);
+    TestFalse(
+        TEXT("Nested patches require stateVersion"),
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservation(
+                PatchWithoutStateVersionJson))
+            .Ok);
+    std::string PatchWithStateVersion(PatchWithoutStateVersionJson);
+    const auto PatchTrustOffset =
+        PatchWithStateVersion.find("\"trust\":\"authoritative\"");
+    if (PatchTrustOffset != std::string::npos)
+    {
+        PatchWithStateVersion.insert(
+            PatchTrustOffset,
+            "\"stateVersion\":\"world-rev-2\",");
+    }
+    TestTrue(
+        TEXT("Patches with stateVersion parse"),
+        game_agent::wire::ParseObservationEnvelope(
+            PatchWithStateVersion)
+            .Ok);
+    TestTrue(
+        TEXT("Nested patches with stateVersion parse"),
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservation(PatchWithStateVersion))
+            .Ok);
+
+    const auto ProviderLifecycle =
+        game_agent::wire::ParseRuntimeEvent(
+            ValidProviderLifecycleEventJson);
+    TestTrue(
+        TEXT("A provider lifecycle runtime event parses"),
+        ProviderLifecycle.Ok);
+    if (ProviderLifecycle)
+    {
+        TestTrue(
+            TEXT("Provider lifecycle metadata is preserved"),
+            ProviderLifecycle.Value.ProviderId.has_value() &&
+                *ProviderLifecycle.Value.ProviderId ==
+                    "provider-primary" &&
+                ProviderLifecycle.Value.ModelId.has_value() &&
+                *ProviderLifecycle.Value.ModelId ==
+                    "model-gameplay-v1" &&
+                ProviderLifecycle.Value.TransportDialect.has_value() &&
+                *ProviderLifecycle.Value.TransportDialect ==
+                    "chat-completions" &&
+                ProviderLifecycle.Value.ProviderCapabilityDigest
+                    .has_value() &&
+                *ProviderLifecycle.Value.ProviderCapabilityDigest ==
+                    "capability-digest-v1" &&
+                ProviderLifecycle.Value.ProviderRouteDigest.has_value() &&
+                *ProviderLifecycle.Value.ProviderRouteDigest ==
+                    "route-digest-v1" &&
+                ProviderLifecycle.Value.ReasonCode.has_value() &&
+                *ProviderLifecycle.Value.ReasonCode ==
+                    "provider_dispatch");
+    }
+
+    const std::array<
+        std::pair<std::string_view, std::size_t>,
+        6U> ProviderFieldLimits{{
+        {"provider-primary", 128U},
+        {"model-gameplay-v1", 256U},
+        {"chat-completions", 128U},
+        {"capability-digest-v1", 256U},
+        {"route-digest-v1", 256U},
+        {"provider_dispatch", 96U}
+    }};
+    for (const auto& Limit : ProviderFieldLimits)
+    {
+        const std::string Boundary = RepeatUnicodeScalar(Limit.second);
+        std::string AtLimit(ValidProviderLifecycleEventJson);
+        const auto Offset = AtLimit.find(Limit.first);
+        TestTrue(
+            TEXT("The provider fixture contains its bounded field"),
+            Offset != std::string::npos);
+        if (Offset == std::string::npos)
+        {
+            continue;
+        }
+
+        AtLimit.replace(Offset, Limit.first.size(), Boundary);
+        TestTrue(
+            TEXT("Provider metadata accepts its Unicode scalar boundary"),
+            game_agent::wire::ParseRuntimeEvent(AtLimit).Ok);
+        AtLimit.replace(
+            Offset,
+            Boundary.size(),
+            Boundary + "\xE7\x95\x8C");
+        TestFalse(
+            TEXT("Provider metadata rejects an extra Unicode scalar"),
+            game_agent::wire::ParseRuntimeEvent(AtLimit).Ok);
+    }
+
+    const auto AtObservationLimit =
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservations(64U));
+    TestTrue(
+        TEXT("A receipt accepts 64 authoritative observations"),
+        AtObservationLimit.Ok);
+    TestTrue(
+        TEXT("A receipt preserves 64 authoritative observations"),
+        AtObservationLimit.Ok &&
+            AtObservationLimit.Value.AuthoritativeObservations.size() ==
+                64U);
+    TestFalse(
+        TEXT("A receipt rejects 65 authoritative observations"),
+        game_agent::wire::ParseActionReceipt(
+            ActionReceiptWithObservations(65U))
+            .Ok);
     return true;
 }
 
@@ -266,6 +710,76 @@ bool FGameAgentHostRouterAutomationTest::RunTest(const FString&)
     TestEqual(TEXT("Duplicate completions are suppressed"), CompletionCount, 1);
     Router->UnbindHost();
     Dispatcher->Stop();
+
+    auto ReceiptLimitDispatcher =
+        MakeShared<FGameAgentMainThreadDispatcher, ESPMode::ThreadSafe>();
+    auto ReceiptLimitRouter =
+        MakeShared<FGameAgentHostRouter, ESPMode::ThreadSafe>(
+            ReceiptLimitDispatcher);
+    TestTrue(
+        TEXT("The receipt limit test host is bound"),
+        ReceiptLimitRouter->BindHost(
+            MakeShared<
+                FObservationCountCompletionHost,
+                ESPMode::ThreadSafe>(
+                game_agent::wire::MaxAuthoritativeObservationsPerReceipt)));
+    game_agent::wire::ActionReceipt ReceiptAtLimit;
+    const auto ReceiptLimitResult =
+        ReceiptLimitRouter->DispatchActionJson(
+            ActionJson,
+            [&ReceiptAtLimit](
+                game_agent::wire::ActionReceipt&& Receipt)
+            {
+                ReceiptAtLimit = MoveTemp(Receipt);
+            });
+    TestTrue(
+        TEXT("A host receipt at the observation limit is accepted"),
+        ReceiptLimitResult.WasAccepted());
+    ReceiptLimitDispatcher->Drain(1);
+    TestTrue(
+        TEXT("A host receipt preserves 64 observations"),
+        ReceiptAtLimit.Status ==
+                game_agent::wire::ReceiptStatus::Succeeded &&
+            ReceiptAtLimit.AuthoritativeObservations.size() ==
+                game_agent::wire::MaxAuthoritativeObservationsPerReceipt);
+    ReceiptLimitRouter->UnbindHost();
+    ReceiptLimitDispatcher->Stop();
+
+    auto ReceiptOverflowDispatcher =
+        MakeShared<FGameAgentMainThreadDispatcher, ESPMode::ThreadSafe>();
+    auto ReceiptOverflowRouter =
+        MakeShared<FGameAgentHostRouter, ESPMode::ThreadSafe>(
+            ReceiptOverflowDispatcher);
+    TestTrue(
+        TEXT("The receipt overflow test host is bound"),
+        ReceiptOverflowRouter->BindHost(
+            MakeShared<
+                FObservationCountCompletionHost,
+                ESPMode::ThreadSafe>(
+                game_agent::wire::MaxAuthoritativeObservationsPerReceipt +
+                1U)));
+    game_agent::wire::ActionReceipt ReceiptOverLimit;
+    const auto ReceiptOverflowResult =
+        ReceiptOverflowRouter->DispatchActionJson(
+            ActionJson,
+            [&ReceiptOverLimit](
+                game_agent::wire::ActionReceipt&& Receipt)
+            {
+                ReceiptOverLimit = MoveTemp(Receipt);
+            });
+    TestTrue(
+        TEXT("A host receipt over the observation limit reaches validation"),
+        ReceiptOverflowResult.WasAccepted());
+    ReceiptOverflowDispatcher->Drain(1);
+    TestTrue(
+        TEXT("A host receipt over the limit fails before serialization"),
+        ReceiptOverLimit.Status ==
+                game_agent::wire::ReceiptStatus::Unknown &&
+            ReceiptOverLimit.ErrorCode.has_value() &&
+            *ReceiptOverLimit.ErrorCode == "receipt_invalid" &&
+            ReceiptOverLimit.AuthoritativeObservations.empty());
+    ReceiptOverflowRouter->UnbindHost();
+    ReceiptOverflowDispatcher->Stop();
 
     auto MismatchDispatcher =
         MakeShared<FGameAgentMainThreadDispatcher, ESPMode::ThreadSafe>();

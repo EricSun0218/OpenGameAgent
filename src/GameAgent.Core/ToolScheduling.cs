@@ -12,7 +12,7 @@ public sealed class ToolSchedulerLimits
         int maxParallelism = 8,
         int maxQueuedCalls = 512,
         int maxActiveConflictKeys = 4_096,
-        int maxConflictKeysPerCall = 64,
+        int maxConflictKeysPerCall = ProtocolLimits.MaxActionExpectedEffects,
         int maxConflictKeyUtf8Bytes = 256,
         JsonValueLimits? argumentJsonLimits = null,
         JsonValueLimits? resultJsonLimits = null,
@@ -39,12 +39,16 @@ public sealed class ToolSchedulerLimits
             throw new ArgumentOutOfRangeException(nameof(maxActiveConflictKeys));
         }
 
-        if (maxConflictKeysPerCall < 0 || maxConflictKeysPerCall > 256)
+        if (maxConflictKeysPerCall < 0
+            || maxConflictKeysPerCall
+            > ProtocolLimits.MaxActionExpectedEffects)
         {
             throw new ArgumentOutOfRangeException(nameof(maxConflictKeysPerCall));
         }
 
-        if (maxConflictKeyUtf8Bytes < 1 || maxConflictKeyUtf8Bytes > 1_024)
+        if (maxConflictKeyUtf8Bytes < 1
+            || maxConflictKeyUtf8Bytes
+            > ProtocolLimits.MaxActionExpectedEffectUnicodeScalars)
         {
             throw new ArgumentOutOfRangeException(nameof(maxConflictKeyUtf8Bytes));
         }
@@ -108,6 +112,8 @@ public sealed class ToolExecutionRequest
             throw new ArgumentNullException(nameof(invocation));
         }
 
+        ProtocolValidator.EnsureValid(invocation);
+
         if (!string.Equals(
                 invocation.ProtocolVersion,
                 ProtocolConstants.ProtocolVersion,
@@ -157,8 +163,8 @@ public sealed class ToolExecutionRequest
         Arguments = invocation.Arguments.Clone();
         ResolvedConflictKeys = RuntimeGuard.CopyStrings(
             invocation.ResolvedConflictKeys,
-            256,
-            1_024,
+            ProtocolLimits.MaxToolResolvedConflictKeys,
+            ProtocolLimits.MaxToolResolvedConflictKeyUnicodeScalars,
             nameof(invocation.ResolvedConflictKeys),
             sort: true,
             requireUnique: true);
@@ -705,8 +711,60 @@ public sealed class ToolBatchScheduler
             throw new ArgumentNullException(nameof(clock));
         }
 
+        using var reservation = ReserveExecution(plan);
+        var results = await ExecuteReservedAsync(
+                plan,
+                executor,
+                clock,
+                reservation,
+                cancellationToken)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return results;
+    }
+
+    internal ToolBatchReservation ReserveExecution(ToolBatchPlan plan)
+    {
+        if (plan is null)
+        {
+            throw new ArgumentNullException(nameof(plan));
+        }
+
         ValidatePlan(plan);
         ReserveQueue(plan.Calls.Count);
+        return new ToolBatchReservation(this, plan, plan.Calls.Count);
+    }
+
+    internal async ValueTask<IReadOnlyList<ToolExecutionResult>>
+        ExecuteReservedAsync(
+            ToolBatchPlan plan,
+            IToolCallExecutor executor,
+            IRuntimeClock clock,
+            ToolBatchReservation reservation,
+            CancellationToken cancellationToken = default,
+            Func<bool>? tryAcquireDispatchPermit = null)
+    {
+        if (plan is null)
+        {
+            throw new ArgumentNullException(nameof(plan));
+        }
+
+        if (executor is null)
+        {
+            throw new ArgumentNullException(nameof(executor));
+        }
+
+        if (clock is null)
+        {
+            throw new ArgumentNullException(nameof(clock));
+        }
+
+        if (reservation is null)
+        {
+            throw new ArgumentNullException(nameof(reservation));
+        }
+
+        reservation.Begin(this, plan);
         try
         {
             var resultByCallId = new Dictionary<string, ToolExecutionResult>(
@@ -714,12 +772,34 @@ public sealed class ToolBatchScheduler
                 StringComparer.Ordinal);
             foreach (var segment in plan.Segments)
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    foreach (var call in plan.Calls)
+                    {
+                        if (resultByCallId.ContainsKey(call.ToolCallId))
+                        {
+                            continue;
+                        }
+
+                        resultByCallId.Add(
+                            call.ToolCallId,
+                            ToolExecutionResult.Failed(
+                                call,
+                                "tool_execution_cancelled",
+                                "The tool execution was cancelled before "
+                                + "host dispatch.",
+                                mayHaveExecuted: false));
+                    }
+
+                    break;
+                }
+
                 var segmentResults = await ExecuteSegmentAsync(
                         segment,
                         executor,
                         clock,
-                        cancellationToken)
+                        cancellationToken,
+                        tryAcquireDispatchPermit)
                     .ConfigureAwait(false);
                 foreach (var result in segmentResults)
                 {
@@ -763,7 +843,7 @@ public sealed class ToolBatchScheduler
         }
         finally
         {
-            Interlocked.Add(ref _queuedCalls, -plan.Calls.Count);
+            reservation.Dispose();
         }
     }
 
@@ -771,7 +851,8 @@ public sealed class ToolBatchScheduler
         ToolExecutionSegment segment,
         IToolCallExecutor executor,
         IRuntimeClock clock,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<bool>? tryAcquireDispatchPermit)
     {
         if (!segment.CanRunConcurrently)
         {
@@ -779,7 +860,8 @@ public sealed class ToolBatchScheduler
                     segment.Calls[0],
                     executor,
                     clock,
-                    cancellationToken)
+                    cancellationToken,
+                    tryAcquireDispatchPermit)
             .ConfigureAwait(false);
             return new[] { only };
         }
@@ -810,7 +892,8 @@ public sealed class ToolBatchScheduler
                         segment.Calls[index],
                         executor,
                         clock,
-                        cancellationToken)
+                        cancellationToken,
+                        tryAcquireDispatchPermit)
                     .ConfigureAwait(false);
             }
         }
@@ -820,7 +903,8 @@ public sealed class ToolBatchScheduler
         ToolExecutionRequest request,
         IToolCallExecutor executor,
         IRuntimeClock clock,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<bool>? tryAcquireDispatchPermit)
     {
         var quarantineFailure = GetDetachedQuarantineFailure(request);
         if (quarantineFailure is not null)
@@ -994,6 +1078,27 @@ public sealed class ToolBatchScheduler
                 try
                 {
                     dispatchCancellation.Token.ThrowIfCancellationRequested();
+                    if (tryAcquireDispatchPermit is not null
+                        && !tryAcquireDispatchPermit())
+                    {
+                        var blockedDispatchCleanup =
+                            CancelObserveAndDisposeAsync(
+                                deadline,
+                                waitCancellation,
+                                timeoutCancellationReservation!);
+                        timeoutCancellationReservation = null;
+                        _ = await Task.WhenAny(
+                                blockedDispatchCleanup,
+                                Task.Delay(CancellationCleanupGrace))
+                            .ConfigureAwait(false);
+                        return ToolExecutionResult.Failed(
+                            request,
+                            "tool_control_before_dispatch",
+                            "A run-control command was accepted before "
+                            + "host dispatch.",
+                            mayHaveExecuted: false);
+                    }
+
                     executionStarted = true;
                     execution = executor
                         .ExecuteAsync(request, executionCancellation.Token)
@@ -1137,6 +1242,25 @@ public sealed class ToolBatchScheduler
             && deadlineCancellation.IsCancellationRequested)
         {
             return DeadlineExpiredBeforeDispatch(request);
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            if (execution is not null)
+            {
+                TransferExecutionOwnership(
+                    execution,
+                    "caller_cancelled");
+            }
+
+            return ToolExecutionResult.Failed(
+                request,
+                "tool_execution_cancelled",
+                executionStarted
+                    ? "The dispatched tool execution was cancelled."
+                    : "The tool execution was cancelled before host dispatch.",
+                mayHaveExecuted:
+                    executionStarted && HasSideEffects(request));
         }
         finally
         {
@@ -1546,6 +1670,53 @@ public sealed class ToolBatchScheduler
             StringComparison.Ordinal);
     }
 
+    internal sealed class ToolBatchReservation : IDisposable
+    {
+        private ToolBatchScheduler? _owner;
+        private readonly ToolBatchPlan _plan;
+        private readonly int _callCount;
+        private int _state;
+
+        internal ToolBatchReservation(
+            ToolBatchScheduler owner,
+            ToolBatchPlan plan,
+            int callCount)
+        {
+            _owner = owner;
+            _plan = plan;
+            _callCount = callCount;
+        }
+
+        internal void Begin(
+            ToolBatchScheduler owner,
+            ToolBatchPlan plan)
+        {
+            if (!ReferenceEquals(_owner, owner)
+                || !ReferenceEquals(_plan, plan))
+            {
+                throw new ArgumentException(
+                    "The tool queue reservation belongs to a different plan.");
+            }
+
+            if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
+            {
+                throw new InvalidOperationException(
+                    "The tool queue reservation is no longer available.");
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _state, 2) == 2)
+            {
+                return;
+            }
+
+            var owner = Interlocked.Exchange(ref _owner, null);
+            owner?.ReleaseQueue(_callCount);
+        }
+    }
+
     private sealed class DetachedExecution
     {
         public DetachedExecution(
@@ -1688,6 +1859,11 @@ public sealed class ToolBatchScheduler
                 return;
             }
         }
+    }
+
+    private void ReleaseQueue(int callCount)
+    {
+        Interlocked.Add(ref _queuedCalls, -callCount);
     }
 
     private static bool IsBarrier(ToolExecutionRequest request)

@@ -46,6 +46,7 @@ public sealed class JournalCoordinator : IDisposable
             initialTranscript,
             Array.Empty<ContextCandidate>(),
             Array.Empty<SkillReference>(),
+            ProviderWorkloadClasses.Interactive,
             cancellationToken);
     }
 
@@ -54,6 +55,24 @@ public sealed class JournalCoordinator : IDisposable
         IReadOnlyList<NormalizedMessage> initialTranscript,
         IReadOnlyList<ContextCandidate> initialContext,
         IReadOnlyList<SkillReference> activeSkills,
+        CancellationToken cancellationToken)
+    {
+        await CommitRunStartAsync(
+                run,
+                initialTranscript,
+                initialContext,
+                activeSkills,
+                ProviderWorkloadClasses.Interactive,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask CommitRunStartAsync(
+        AgentRun run,
+        IReadOnlyList<NormalizedMessage> initialTranscript,
+        IReadOnlyList<ContextCandidate> initialContext,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
         CancellationToken cancellationToken)
     {
         if (run is null)
@@ -76,23 +95,32 @@ public sealed class JournalCoordinator : IDisposable
             throw new ArgumentNullException(nameof(activeSkills));
         }
 
+        workloadClass = ProviderWorkloadClasses.Normalize(
+            workloadClass,
+            nameof(workloadClass));
+        var preparingTimestamp = MonotonicNow(run);
         var preparingTransition = RunStateMachine.Plan(
             run,
             RunStates.Preparing,
-            _clock.UtcNow);
+            preparingTimestamp);
         var preparing = CloneRun(run);
         preparing.State = preparingTransition.ToState;
         preparing.TerminalReason = preparingTransition.TerminalReason;
         preparing.CompletionIntent = preparingTransition.CompletionIntent;
         preparing.Revision = checked(run.Revision + 1);
-        preparing.UpdatedAt = _clock.UtcNow;
+        preparing.UpdatedAt = preparingTimestamp;
         EnsureRunInvariant(preparing);
 
         var runtimeEvents = new List<RuntimeEvent>(
             checked(
                 initialTranscript.Count
                 + 2
-                + (initialContext.Count > 0 || activeSkills.Count > 0
+                + (initialContext.Count > 0
+                   || activeSkills.Count > 0
+                   || !string.Equals(
+                       workloadClass,
+                       ProviderWorkloadClasses.Interactive,
+                       StringComparison.Ordinal)
                     ? 1
                     : 0)))
         {
@@ -106,7 +134,12 @@ public sealed class JournalCoordinator : IDisposable
                 streamAttemptId: null,
                 eventId: "run-started:" + run.RunId)
         };
-        if (initialContext.Count > 0 || activeSkills.Count > 0)
+        if (initialContext.Count > 0
+            || activeSkills.Count > 0
+            || !string.Equals(
+                workloadClass,
+                ProviderWorkloadClasses.Interactive,
+                StringComparison.Ordinal))
         {
             runtimeEvents.Add(
                 CreateEvent(
@@ -115,7 +148,8 @@ public sealed class JournalCoordinator : IDisposable
                     EventDurabilities.Durable,
                     DurableRunInputJournalCodec.Encode(
                         initialContext,
-                        activeSkills),
+                        activeSkills,
+                        workloadClass),
                     turnId: null,
                     attemptId: null,
                     streamAttemptId: null,
@@ -151,17 +185,18 @@ public sealed class JournalCoordinator : IDisposable
                     eventId: "transcript:" + message.MessageId));
         }
 
+        var runningTimestamp = MonotonicNow(preparing);
         var runningTransition = RunStateMachine.Plan(
             preparing,
             RunStates.Running,
-            _clock.UtcNow);
+            runningTimestamp);
         var running = CloneRun(preparing);
         running.State = runningTransition.ToState;
         running.TerminalReason = runningTransition.TerminalReason;
         running.CompletionIntent = runningTransition.CompletionIntent;
         running.Revision = checked(
             run.Revision + runtimeEvents.Count + 1);
-        running.UpdatedAt = _clock.UtcNow;
+        running.UpdatedAt = runningTimestamp;
         EnsureRunInvariant(running);
         runtimeEvents.Add(
             CreateEvent(
@@ -174,18 +209,22 @@ public sealed class JournalCoordinator : IDisposable
                 streamAttemptId: null,
                 eventId: "run-ready:" + run.RunId));
 
-        var appends = await _store.AppendAtomicBatchAsync(
+        var rawAppends = await _store.AppendAtomicBatchAsync(
                 runtimeEvents,
                 run.Revision,
                 cancellationToken)
             .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            runtimeEvents.Count,
+            "run-start");
         ValidateFreshBatchResults(
             appends,
             runtimeEvents.Count,
             run.Revision,
             "run-start");
 
-        for (var index = 0; index < appends.Count; index++)
+        for (var index = 0; index < appends.Length; index++)
         {
             runtimeEvents[index].Sequence = appends[index].Sequence;
         }
@@ -205,7 +244,8 @@ public sealed class JournalCoordinator : IDisposable
         string? completionIntent = null,
         string? turnId = null,
         string? attemptId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, JsonElement>? eventExtensions = null)
     {
         return CommitTransitionAndMutationAsync(
             run,
@@ -216,7 +256,8 @@ public sealed class JournalCoordinator : IDisposable
             completionIntent,
             turnId,
             attemptId,
-            cancellationToken);
+            cancellationToken,
+            eventExtensions);
     }
 
     internal ValueTask CommitTransitionAndMutationAsync(
@@ -228,12 +269,15 @@ public sealed class JournalCoordinator : IDisposable
         string? completionIntent = null,
         string? turnId = null,
         string? attemptId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, JsonElement>? eventExtensions = null)
     {
+        ValidateTransitionEventKind(targetState, eventKind);
+        var transitionTimestamp = MonotonicNow(run);
         var transition = RunStateMachine.Plan(
             run,
             targetState,
-            _clock.UtcNow,
+            transitionTimestamp,
             terminalReason,
             completionIntent);
         return CommitRunMutationAsync(
@@ -248,7 +292,8 @@ public sealed class JournalCoordinator : IDisposable
             },
             turnId,
             attemptId,
-            cancellationToken);
+            cancellationToken,
+            eventExtensions: eventExtensions);
     }
 
     internal async ValueTask CommitRunMutationAsync(
@@ -265,12 +310,13 @@ public sealed class JournalCoordinator : IDisposable
         string? modelId = null,
         string? transportDialect = null,
         string? providerCapabilityDigest = null,
-        string? providerRouteDigest = null)
+        string? providerRouteDigest = null,
+        IReadOnlyDictionary<string, JsonElement>? eventExtensions = null)
     {
         var next = CloneRun(run);
         mutation(next);
         next.Revision = checked(run.Revision + 1);
-        next.UpdatedAt = _clock.UtcNow;
+        next.UpdatedAt = MonotonicNow(run);
         EnsureRunInvariant(next);
 
         var runtimeEvent = CreateEvent(
@@ -288,6 +334,14 @@ public sealed class JournalCoordinator : IDisposable
             transportDialect,
             providerCapabilityDigest,
             providerRouteDigest);
+        if (eventExtensions is not null)
+        {
+            runtimeEvent.Extensions = eventExtensions.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.Clone(),
+                StringComparer.Ordinal);
+        }
+
         var append = await _store.AppendAtomicAsync(
                 runtimeEvent,
                 run.Revision,
@@ -301,6 +355,49 @@ public sealed class JournalCoordinator : IDisposable
         runtimeEvent.Sequence = append.Sequence;
         CopyRun(next, run);
         Publish(runtimeEvent);
+    }
+
+    internal ValueTask CommitGameContextAdvancementAsync(
+        AgentRun run,
+        string turnId,
+        string? attemptId,
+        GameContextAdvancementPlan plan,
+        CancellationToken cancellationToken)
+    {
+        if (plan is null)
+        {
+            throw new ArgumentNullException(nameof(plan));
+        }
+
+        var current = GameContextEnvelope.ValidateForRun(
+            run,
+            nameof(run))
+            ?? throw new GameContextAdvancementException(
+                GameContextAdvancementReasonCodes.TransitionConflict,
+                "A game-context advancement requires an active "
+                + "coordinate.");
+        if (!GameContextAdvancementPlanner.Equivalent(
+                current,
+                plan.Previous))
+        {
+            throw new GameContextAdvancementException(
+                GameContextAdvancementReasonCodes.TransitionConflict,
+                "The run coordinate changed before its advancement could "
+                + "be committed.");
+        }
+
+        return CommitRunMutationAsync(
+            run,
+            RuntimeEventKinds.GameContextAdvanced,
+            next => GameContextEnvelope.Attach(next, plan.Resulting),
+            turnId,
+            attemptId,
+            cancellationToken,
+            eventId: GameContextAdvancementJournalCodec.EventIdSuffix(
+                turnId,
+                plan),
+            eventExtensions:
+                GameContextAdvancementJournalCodec.EncodeExtensions(plan));
     }
 
     public async ValueTask AppendTranscriptAsync(
@@ -329,12 +426,40 @@ public sealed class JournalCoordinator : IDisposable
             checked(run.Revision + 1),
             "transcript append");
         run.Revision = append.Revision;
-        run.UpdatedAt = _clock.UtcNow;
+        run.UpdatedAt = MonotonicNow(run);
         runtimeEvent.Sequence = append.Sequence;
         Publish(runtimeEvent);
     }
 
-    public async ValueTask AppendDurableAsync(
+    public ValueTask AppendDurableAsync(
+        AgentRun run,
+        string kind,
+        JsonElement payload,
+        string? turnId,
+        string? attemptId,
+        string? streamAttemptId = null,
+        string? eventId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (IsReservedRuntimeEventKind(kind))
+        {
+            throw new ArgumentException(
+                "Built-in runtime event kinds require a typed journal API.",
+                nameof(kind));
+        }
+
+        return AppendBuiltInDurableAsync(
+            run,
+            kind,
+            payload,
+            turnId,
+            attemptId,
+            streamAttemptId,
+            eventId,
+            cancellationToken);
+    }
+
+    internal async ValueTask AppendBuiltInDurableAsync(
         AgentRun run,
         string kind,
         JsonElement payload,
@@ -363,7 +488,7 @@ public sealed class JournalCoordinator : IDisposable
             checked(run.Revision + 1),
             "durable append");
         run.Revision = append.Revision;
-        run.UpdatedAt = _clock.UtcNow;
+        run.UpdatedAt = MonotonicNow(run);
         runtimeEvent.Sequence = append.Sequence;
         Publish(runtimeEvent);
     }
@@ -374,6 +499,28 @@ public sealed class JournalCoordinator : IDisposable
         string attemptId,
         CancellationToken cancellationToken)
     {
+        if (run is null)
+        {
+            throw new ArgumentNullException(nameof(run));
+        }
+
+        if (snapshot is null)
+        {
+            throw new ArgumentNullException(nameof(snapshot));
+        }
+
+        ProtocolValidator.EnsureValid(snapshot);
+        if (!string.Equals(
+                snapshot.RunId,
+                run.RunId,
+                StringComparison.Ordinal)
+            || snapshot.RuntimeGeneration != run.RuntimeGeneration)
+        {
+            throw new ArgumentException(
+                "The turn snapshot does not match the run identity.",
+                nameof(snapshot));
+        }
+
         var runtimeEvent = CreateEvent(
             run,
             RuntimeEventKinds.TurnSnapshot,
@@ -393,7 +540,7 @@ public sealed class JournalCoordinator : IDisposable
             checked(run.Revision + 1),
             "turn snapshot append");
         run.Revision = append.Revision;
-        run.UpdatedAt = _clock.UtcNow;
+        run.UpdatedAt = MonotonicNow(run);
         runtimeEvent.Sequence = append.Sequence;
         Publish(runtimeEvent);
     }
@@ -406,7 +553,8 @@ public sealed class JournalCoordinator : IDisposable
         TurnSnapshot snapshot,
         DateTimeOffset startedAt,
         CancellationToken cancellationToken,
-        ToolDisclosureJournalRecord? toolDisclosure = null)
+        ToolDisclosureJournalRecord? toolDisclosure = null,
+        string? checkpointReasonCode = null)
     {
         if (run is null)
         {
@@ -424,22 +572,26 @@ public sealed class JournalCoordinator : IDisposable
         }
 
         if (!string.Equals(snapshot.RunId, run.RunId, StringComparison.Ordinal)
-            || !string.Equals(snapshot.TurnId, turnId, StringComparison.Ordinal))
+            || !string.Equals(snapshot.TurnId, turnId, StringComparison.Ordinal)
+            || snapshot.RuntimeGeneration != run.RuntimeGeneration)
         {
             throw new ArgumentException(
                 "The turn snapshot does not match the prepared run and turn.",
                 nameof(snapshot));
         }
 
+        ProtocolValidator.EnsureValid(snapshot);
+
+        var checkpointTimestamp = MonotonicNow(run);
         var turnCheckpoint = CloneRun(run);
         turnCheckpoint.CurrentTurnId = turnId;
         turnCheckpoint.Usage.Turns =
             checked(turnCheckpoint.Usage.Turns + 1);
         turnCheckpoint.Usage.DurationMs = Math.Max(
             turnCheckpoint.Usage.DurationMs,
-            (long)(_clock.UtcNow - startedAt).TotalMilliseconds);
+            ElapsedMilliseconds(checkpointTimestamp, startedAt));
         turnCheckpoint.Revision = checked(run.Revision + 1);
-        turnCheckpoint.UpdatedAt = _clock.UtcNow;
+        turnCheckpoint.UpdatedAt = checkpointTimestamp;
         EnsureRunInvariant(turnCheckpoint);
 
         var runtimeEvents = new List<RuntimeEvent>(
@@ -454,7 +606,8 @@ public sealed class JournalCoordinator : IDisposable
                 turnId,
                 attemptId,
                 streamAttemptId: null,
-                eventId: "turn-started:" + turnId)
+                eventId: "turn-started:" + turnId,
+                reasonCode: checkpointReasonCode)
         };
         var messageIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var message in promptMessages)
@@ -514,19 +667,23 @@ public sealed class JournalCoordinator : IDisposable
 
         var finalRun = CloneRun(turnCheckpoint);
         finalRun.Revision = checked(run.Revision + runtimeEvents.Count);
-        finalRun.UpdatedAt = _clock.UtcNow;
+        finalRun.UpdatedAt = MonotonicNow(turnCheckpoint);
         EnsureRunInvariant(finalRun);
-        var appends = await _store.AppendAtomicBatchAsync(
+        var rawAppends = await _store.AppendAtomicBatchAsync(
                 runtimeEvents,
                 run.Revision,
                 cancellationToken)
             .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            runtimeEvents.Count,
+            "turn-preparation");
         ValidateFreshBatchResults(
             appends,
             runtimeEvents.Count,
             run.Revision,
             "turn-preparation");
-        for (var index = 0; index < appends.Count; index++)
+        for (var index = 0; index < appends.Length; index++)
         {
             runtimeEvents[index].Sequence = appends[index].Sequence;
         }
@@ -601,11 +758,15 @@ public sealed class JournalCoordinator : IDisposable
             streamAttemptId: null,
             eventId: "transcript:" + resultMessage.MessageId);
         var runtimeEvents = new[] { stateEvent, transcriptEvent };
-        var appends = await _store.AppendAtomicBatchAsync(
+        var rawAppends = await _store.AppendAtomicBatchAsync(
                 runtimeEvents,
                 run.Revision,
                 cancellationToken)
             .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            runtimeEvents.Length,
+            "tool-disclosure-result");
         ValidateFreshBatchResults(
             appends,
             runtimeEvents.Length,
@@ -617,7 +778,118 @@ public sealed class JournalCoordinator : IDisposable
         }
 
         run.Revision = appends[^1].Revision;
-        run.UpdatedAt = _clock.UtcNow;
+        run.UpdatedAt = MonotonicNow(run);
+        foreach (var runtimeEvent in runtimeEvents)
+        {
+            Publish(runtimeEvent);
+        }
+    }
+
+    internal async ValueTask CommitSkillActivationResultAsync(
+        AgentRun run,
+        string turnId,
+        string attemptId,
+        string toolCallId,
+        IReadOnlyList<SkillActivationStateRecord> skillActivations,
+        ToolDisclosureJournalRecord toolDisclosure,
+        NormalizedMessage resultMessage,
+        CancellationToken cancellationToken)
+    {
+        if (run is null)
+        {
+            throw new ArgumentNullException(nameof(run));
+        }
+
+        RuntimeGuard.RequiredId(turnId, nameof(turnId));
+        RuntimeGuard.RequiredId(attemptId, nameof(attemptId));
+        RuntimeGuard.RequiredId(toolCallId, nameof(toolCallId));
+        _ = skillActivations
+            ?? throw new ArgumentNullException(nameof(skillActivations));
+        _ = toolDisclosure
+            ?? throw new ArgumentNullException(nameof(toolDisclosure));
+        if (resultMessage is null
+            || !string.Equals(
+                resultMessage.Role,
+                NormalizedRoles.Tool,
+                StringComparison.Ordinal)
+            || !resultMessage.Parts.Any(
+                part => string.Equals(
+                            part.Type,
+                            NormalizedPartTypes.ToolResult,
+                            StringComparison.Ordinal)
+                        && string.Equals(
+                            part.ToolCallId,
+                            toolCallId,
+                            StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                "A skill activation result must contain the matching tool result.",
+                nameof(resultMessage));
+        }
+
+        var checkpoint = CloneRun(run);
+        SkillActivationStateCodec.Attach(checkpoint, skillActivations);
+        checkpoint.Revision = checked(run.Revision + 1);
+        checkpoint.UpdatedAt = MonotonicNow(run);
+        EnsureRunInvariant(checkpoint);
+
+        var checkpointEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.RunCheckpoint,
+            EventDurabilities.Durable,
+            ProtocolJson.ToElement(checkpoint),
+            turnId,
+            attemptId,
+            streamAttemptId: null,
+            eventId: "skill-activation-checkpoint:" + toolCallId,
+            reasonCode: SkillRuntimeReasonCodes.ActivatedByModel);
+        var toolStateEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.ToolDisclosureChanged,
+            EventDurabilities.Durable,
+            ToolDisclosureJournalCodec.Encode(toolDisclosure),
+            turnId,
+            attemptId,
+            streamAttemptId: null,
+            eventId: "skill-tool-disclosure:" + toolCallId,
+            reasonCode: toolDisclosure.ReasonCodes.FirstOrDefault());
+        var transcriptEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.TranscriptMessage,
+            EventDurabilities.Durable,
+            NormalizedMessageJournalCodec.Encode(resultMessage),
+            turnId,
+            attemptId,
+            streamAttemptId: null,
+            eventId: "transcript:" + resultMessage.MessageId);
+        var runtimeEvents = new[]
+        {
+            checkpointEvent,
+            toolStateEvent,
+            transcriptEvent
+        };
+        var rawAppends = await _store.AppendAtomicBatchAsync(
+                runtimeEvents,
+                run.Revision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            runtimeEvents.Length,
+            "skill-activation-result");
+        ValidateFreshBatchResults(
+            appends,
+            runtimeEvents.Length,
+            run.Revision,
+            "skill-activation-result");
+        for (var index = 0; index < runtimeEvents.Length; index++)
+        {
+            runtimeEvents[index].Sequence = appends[index].Sequence;
+        }
+
+        checkpoint.Revision = appends[^1].Revision;
+        checkpoint.UpdatedAt = MonotonicNow(checkpoint);
+        CopyRun(checkpoint, run);
         foreach (var runtimeEvent in runtimeEvents)
         {
             Publish(runtimeEvent);
@@ -699,6 +971,10 @@ public sealed class JournalCoordinator : IDisposable
                 .ConfigureAwait(false);
         }
 
+        appends = SnapshotBatchResults(
+            appends,
+            runtimeEvents.Count,
+            "action request");
         var duplicate = ValidateFreshOrIdempotentBatchResults(
             appends,
             runtimeEvents.Count,
@@ -744,7 +1020,7 @@ public sealed class JournalCoordinator : IDisposable
         if (!duplicate)
         {
             run.Revision = appends[^1].Revision;
-            run.UpdatedAt = _clock.UtcNow;
+            run.UpdatedAt = MonotonicNow(run);
             foreach (var runtimeEvent in runtimeEvents)
             {
                 Publish(runtimeEvent);
@@ -762,15 +1038,121 @@ public sealed class JournalCoordinator : IDisposable
         }
 
         ProtocolValidator.EnsureValid(request);
-        if (!string.Equals(run.RunId, request.RunId, StringComparison.Ordinal))
+        if (!string.Equals(run.RunId, request.RunId, StringComparison.Ordinal)
+            || !string.Equals(
+                run.AgentId,
+                request.AgentId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                run.WorldId,
+                request.WorldId,
+                StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                "The action request belongs to a different run.",
+                "The action request belongs to a different run identity.",
                 nameof(request));
         }
     }
 
-    public async ValueTask AppendActionReceiptAsync(
+    public async ValueTask<string> AppendActionUncertaintyAsync(
+        AgentRun run,
+        string turnId,
+        string attemptId,
+        ActionReceipt uncertainty,
+        CancellationToken cancellationToken)
+    {
+        if (run is null)
+        {
+            throw new ArgumentNullException(nameof(run));
+        }
+
+        ProtocolValidator.EnsureValid(uncertainty);
+        if (!string.Equals(
+                uncertainty.Status,
+                ReceiptStatuses.Unknown,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "A dispatch-uncertainty event requires unknown status.",
+                nameof(uncertainty));
+        }
+
+        var operation = await _operations.GetOperationAsync(
+                uncertainty.OperationId,
+                cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidDataException(
+                "The uncertain action has no operation-ledger entry.");
+        ValidateActionUncertaintyOperation(
+            run,
+            turnId,
+            uncertainty,
+            operation);
+
+        var runtimeEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.ActionOutcomeUncertain,
+            EventDurabilities.Durable,
+            ProtocolJson.ToElement(uncertainty),
+            turnId,
+            attemptId,
+            streamAttemptId: null,
+            eventId:
+                "action-uncertainty:"
+                + uncertainty.OperationId
+                + ":"
+                + uncertainty.Revision.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture));
+        var append = await _store.AppendAtomicAsync(
+                runtimeEvent,
+                run.Revision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (append.WasDuplicate)
+        {
+            ValidateIdempotentAppendResult(
+                append,
+                run.Revision,
+                "action uncertainty");
+        }
+        else
+        {
+            ValidateFreshAppendResult(
+                append,
+                checked(run.Revision + 1),
+                "action uncertainty");
+            run.Revision = append.Revision;
+            run.UpdatedAt = MonotonicNow(run);
+        }
+
+        operation = await _operations.GetOperationAsync(
+                uncertainty.OperationId,
+                cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidDataException(
+                "The uncertain action lost its operation-ledger entry.");
+        ValidateActionUncertaintyOperation(
+            run,
+            turnId,
+            uncertainty,
+            operation);
+        if (!run.PendingOperationIds.Contains(
+                uncertainty.OperationId,
+                StringComparer.Ordinal))
+        {
+            run.PendingOperationIds.Add(uncertainty.OperationId);
+        }
+
+        runtimeEvent.Sequence = append.Sequence;
+        if (!append.WasDuplicate)
+        {
+            Publish(runtimeEvent);
+        }
+
+        return runtimeEvent.EventId;
+    }
+
+    public async ValueTask<string> AppendActionReceiptAsync(
         AgentRun run,
         string turnId,
         string attemptId,
@@ -860,11 +1242,15 @@ public sealed class JournalCoordinator : IDisposable
                     + ":"
                     + receipt.Revision.ToString(
                         System.Globalization.CultureInfo.InvariantCulture));
-            var appends = await _store.AppendAtomicBatchAsync(
+            var rawAppends = await _store.AppendAtomicBatchAsync(
                     new[] { runtimeEvent, completionEvent },
                     run.Revision,
                     cancellationToken)
                 .ConfigureAwait(false);
+            var appends = SnapshotBatchResults(
+                rawAppends,
+                expectedCount: 2,
+                "action receipt");
             duplicate = ValidateFreshOrIdempotentBatchResults(
                 appends,
                 expectedCount: 2,
@@ -891,7 +1277,7 @@ public sealed class JournalCoordinator : IDisposable
             run.Revision = completionEvent is null
                 ? result.Append.Revision
                 : checked(result.Append.Revision + 1);
-            run.UpdatedAt = _clock.UtcNow;
+            run.UpdatedAt = MonotonicNow(run);
         }
 
         if (!result.Operation.IsPending)
@@ -918,6 +1304,8 @@ public sealed class JournalCoordinator : IDisposable
                 Publish(completionEvent);
             }
         }
+
+        return runtimeEvent.EventId;
     }
 
     public async ValueTask CommitFinalCompletionAsync(
@@ -929,7 +1317,9 @@ public sealed class JournalCoordinator : IDisposable
         string providerAttemptId,
         string streamAttemptId,
         DateTimeOffset startedAt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ProviderRouteIdentity? routeIdentity = null,
+        JsonElement? finalOutputAdmissionEvidence = null)
     {
         if (assistantMessage is null)
         {
@@ -946,10 +1336,12 @@ public sealed class JournalCoordinator : IDisposable
                 nameof(assistantMessage));
         }
 
+        var checkpointTimestamp = MonotonicNow(run);
+
         var transition = RunStateMachine.Plan(
             run,
             RunStates.Completed,
-            _clock.UtcNow);
+            checkpointTimestamp);
         var next = CloneRun(run);
         next.State = transition.ToState;
         next.TerminalReason = transition.TerminalReason;
@@ -957,13 +1349,13 @@ public sealed class JournalCoordinator : IDisposable
         next.CurrentTurnId = null;
         next.Usage.DurationMs = Math.Max(
             next.Usage.DurationMs,
-            (long)(_clock.UtcNow - startedAt).TotalMilliseconds);
+            ElapsedMilliseconds(checkpointTimestamp, startedAt));
         next.Revision = checked(run.Revision + 4);
-        next.UpdatedAt = _clock.UtcNow;
+        next.UpdatedAt = checkpointTimestamp;
         EnsureRunInvariant(next);
         var resultNext = CloneRun(run);
         resultNext.Revision = checked(run.Revision + 2);
-        resultNext.UpdatedAt = _clock.UtcNow;
+        resultNext.UpdatedAt = checkpointTimestamp;
         EnsureRunInvariant(resultNext);
 
         var transcriptEvent = CreateEvent(
@@ -974,7 +1366,8 @@ public sealed class JournalCoordinator : IDisposable
             turnId,
             providerAttemptId,
             streamAttemptId: null,
-            eventId: "transcript:" + assistantMessage.MessageId);
+            eventId: "transcript:" + assistantMessage.MessageId,
+            providerId: providerId);
         var resultEvent = CreateEvent(
             run,
             RuntimeEventKinds.ProviderResultCommitted,
@@ -984,7 +1377,16 @@ public sealed class JournalCoordinator : IDisposable
             providerAttemptId,
             streamAttemptId,
             eventId: "provider-result-committed:" + streamAttemptId,
-            providerId: providerId);
+            providerId: providerId,
+            modelId: routeIdentity?.ModelId,
+            transportDialect: routeIdentity?.TransportDialect,
+            providerCapabilityDigest: routeIdentity?.CapabilityDigest,
+            providerRouteDigest: routeIdentity?.RouteDigest);
+        AttachProviderResultEvidence(
+            resultEvent,
+            providerId,
+            routeIdentity,
+            opaqueContinuationState: null);
         var assistantEvent = CreateEvent(
             run,
             RuntimeEventKinds.AssistantCompleted,
@@ -993,7 +1395,31 @@ public sealed class JournalCoordinator : IDisposable
             turnId,
             providerAttemptId,
             streamAttemptId,
-            eventId: "assistant-completed:" + turnId);
+            eventId: "assistant-completed:" + turnId,
+            providerId: providerId);
+        if (finalOutputAdmissionEvidence.HasValue)
+        {
+            var presentation =
+                FinalOutputAdmissionCodec.CreatePresentation(
+                    FinalOutputAdmissionCodec
+                        .AdmittedPresentationState,
+                    ReadAdmissionReasonCode(
+                        finalOutputAdmissionEvidence.Value),
+                    finalOutputAdmissionEvidence.Value);
+            resultEvent.Extensions[
+                    FinalOutputAdmissionControl
+                        .PresentationExtensionName] =
+                presentation;
+            assistantEvent.Extensions[
+                    FinalOutputAdmissionCodec.EvidenceExtensionName] =
+                finalOutputAdmissionEvidence.Value.Clone();
+            assistantEvent.Extensions[
+                    FinalOutputAdmissionControl
+                        .PresentationExtensionName] =
+                presentation;
+            ProtocolValidator.EnsureValid(resultEvent);
+            ProtocolValidator.EnsureValid(assistantEvent);
+        }
         var completionEvent = CreateEvent(
             run,
             RuntimeEventKinds.RunCompleted,
@@ -1003,7 +1429,7 @@ public sealed class JournalCoordinator : IDisposable
             providerAttemptId,
             streamAttemptId: null,
             eventId: "run-completed:" + run.RunId);
-        var appends = await _store.AppendAtomicBatchAsync(
+        var rawAppends = await _store.AppendAtomicBatchAsync(
                 new[]
                 {
                     transcriptEvent,
@@ -1014,6 +1440,10 @@ public sealed class JournalCoordinator : IDisposable
                 run.Revision,
                 cancellationToken)
             .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            expectedCount: 4,
+            "final completion");
         ValidateFreshBatchResults(
             appends,
             expectedCount: 4,
@@ -1031,18 +1461,102 @@ public sealed class JournalCoordinator : IDisposable
         Publish(completionEvent);
     }
 
-    public async ValueTask CommitProviderResultAsync(
+    public ValueTask CommitProviderResultAsync(
         AgentRun run,
         NormalizedMessage assistantMessage,
         string turnId,
         string providerId,
         string providerAttemptId,
         string streamAttemptId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ProviderRouteIdentity? routeIdentity = null,
+        ProviderOpaqueContinuationState? opaqueContinuationState = null,
+        JsonElement? finalOutputPresentation = null)
     {
+        return CommitProviderResultCoreAsync(
+            run,
+            assistantMessage,
+            turnId,
+            providerId,
+            providerAttemptId,
+            streamAttemptId,
+            cancellationToken,
+            routeIdentity,
+            opaqueContinuationState,
+            finalOutputPresentation,
+            Array.Empty<NormalizedMessage>());
+    }
+
+    internal ValueTask CommitProviderResultWithFeedbackAsync(
+        AgentRun run,
+        NormalizedMessage assistantMessage,
+        IReadOnlyList<NormalizedMessage> feedbackMessages,
+        string turnId,
+        string providerId,
+        string providerAttemptId,
+        string streamAttemptId,
+        CancellationToken cancellationToken,
+        ProviderRouteIdentity? routeIdentity = null,
+        ProviderOpaqueContinuationState? opaqueContinuationState = null,
+        JsonElement? finalOutputPresentation = null)
+    {
+        if (feedbackMessages is null)
+        {
+            throw new ArgumentNullException(nameof(feedbackMessages));
+        }
+
+        if (feedbackMessages.Count > ProviderRequestContentGuard.MaxTools)
+        {
+            throw new RuntimeContentLimitException(
+                nameof(feedbackMessages),
+                "provider_feedback_count_exceeded",
+                "The provider feedback batch exceeds the runtime limit.");
+        }
+
+        var snapshot = new NormalizedMessage[feedbackMessages.Count];
+        for (var index = 0; index < snapshot.Length; index++)
+        {
+            snapshot[index] = feedbackMessages[index]
+                              ?? throw new ArgumentException(
+                                  "A feedback message cannot be null.",
+                                  nameof(feedbackMessages));
+        }
+
+        return CommitProviderResultCoreAsync(
+            run,
+            assistantMessage,
+            turnId,
+            providerId,
+            providerAttemptId,
+            streamAttemptId,
+            cancellationToken,
+            routeIdentity,
+            opaqueContinuationState,
+            finalOutputPresentation,
+            snapshot);
+    }
+
+    private async ValueTask CommitProviderResultCoreAsync(
+        AgentRun run,
+        NormalizedMessage assistantMessage,
+        string turnId,
+        string providerId,
+        string providerAttemptId,
+        string streamAttemptId,
+        CancellationToken cancellationToken,
+        ProviderRouteIdentity? routeIdentity,
+        ProviderOpaqueContinuationState? opaqueContinuationState,
+        JsonElement? finalOutputPresentation,
+        IReadOnlyList<NormalizedMessage> additionalMessages)
+    {
+        var resultNext = CloneRun(run);
+        resultNext.Revision = checked(run.Revision + 2);
+        resultNext.UpdatedAt = MonotonicNow(run);
+        EnsureRunInvariant(resultNext);
         var next = CloneRun(run);
-        next.Revision = checked(run.Revision + 2);
-        next.UpdatedAt = _clock.UtcNow;
+        next.Revision = checked(
+            run.Revision + 2 + additionalMessages.Count);
+        next.UpdatedAt = resultNext.UpdatedAt;
         EnsureRunInvariant(next);
         var transcriptEvent = CreateEvent(
             run,
@@ -1052,33 +1566,217 @@ public sealed class JournalCoordinator : IDisposable
             turnId,
             providerAttemptId,
             streamAttemptId: null,
-            eventId: "transcript:" + assistantMessage.MessageId);
+            eventId: "transcript:" + assistantMessage.MessageId,
+            providerId: providerId);
         var resultEvent = CreateEvent(
             run,
             RuntimeEventKinds.ProviderResultCommitted,
             EventDurabilities.Durable,
-            ProtocolJson.ToElement(next),
+            ProtocolJson.ToElement(resultNext),
             turnId,
             providerAttemptId,
             streamAttemptId,
             eventId: "provider-result-committed:" + streamAttemptId,
-            providerId: providerId);
-        var appends = await _store.AppendAtomicBatchAsync(
-                new[] { transcriptEvent, resultEvent },
+            providerId: providerId,
+            modelId: routeIdentity?.ModelId,
+            transportDialect: routeIdentity?.TransportDialect,
+            providerCapabilityDigest: routeIdentity?.CapabilityDigest,
+            providerRouteDigest: routeIdentity?.RouteDigest);
+        AttachProviderResultEvidence(
+            resultEvent,
+            providerId,
+            routeIdentity,
+            opaqueContinuationState);
+        if (finalOutputPresentation.HasValue)
+        {
+            _ = FinalOutputAdmissionCodec.ValidatePresentation(
+                finalOutputPresentation.Value,
+                admissionEvidence: null);
+            resultEvent.Extensions[
+                    FinalOutputAdmissionControl
+                        .PresentationExtensionName] =
+                finalOutputPresentation.Value.Clone();
+            ProtocolValidator.EnsureValid(resultEvent);
+        }
+        var additionalTranscriptEvents =
+            new RuntimeEvent[additionalMessages.Count];
+        for (var index = 0; index < additionalMessages.Count; index++)
+        {
+            var additionalMessage = additionalMessages[index]
+                                    ?? throw new ArgumentException(
+                                        "An additional transcript message "
+                                        + "cannot be null.",
+                                        nameof(
+                                            additionalMessages));
+            additionalTranscriptEvents[index] = CreateEvent(
+                run,
+                RuntimeEventKinds.TranscriptMessage,
+                EventDurabilities.Durable,
+                NormalizedMessageJournalCodec.Encode(
+                    additionalMessage),
+                turnId,
+                providerAttemptId,
+                streamAttemptId: null,
+                eventId:
+                    "transcript:"
+                    + additionalMessage.MessageId);
+        }
+        var batch = new[]
+            {
+                transcriptEvent,
+                resultEvent
+            }
+            .Concat(additionalTranscriptEvents)
+            .ToArray();
+        var rawAppends = await _store.AppendAtomicBatchAsync(
+                batch,
                 run.Revision,
                 cancellationToken)
             .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            expectedCount: batch.Length,
+            "provider result");
         ValidateFreshBatchResults(
             appends,
-            expectedCount: 2,
+            expectedCount: batch.Length,
             run.Revision,
             "provider result");
 
         transcriptEvent.Sequence = appends[0].Sequence;
         resultEvent.Sequence = appends[1].Sequence;
+        for (var index = 0;
+             index < additionalTranscriptEvents.Length;
+             index++)
+        {
+            additionalTranscriptEvents[index].Sequence =
+                appends[index + 2].Sequence;
+        }
         CopyRun(next, run);
         Publish(transcriptEvent);
         Publish(resultEvent);
+        foreach (var additionalTranscriptEvent in
+                 additionalTranscriptEvents)
+        {
+            Publish(additionalTranscriptEvent);
+        }
+    }
+
+    public async ValueTask CommitProviderResultAndOutputAsync(
+        AgentRun run,
+        NormalizedMessage assistantMessage,
+        JsonElement finalOutput,
+        string turnId,
+        string providerId,
+        string providerAttemptId,
+        string streamAttemptId,
+        CancellationToken cancellationToken,
+        ProviderRouteIdentity? routeIdentity = null,
+        JsonElement? finalOutputAdmissionEvidence = null)
+    {
+        if (assistantMessage is null
+            || !string.Equals(
+                assistantMessage.Role,
+                NormalizedRoles.Assistant,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "A provider output requires an assistant transcript message.",
+                nameof(assistantMessage));
+        }
+
+        var timestamp = MonotonicNow(run);
+        var resultNext = CloneRun(run);
+        resultNext.Revision = checked(run.Revision + 2);
+        resultNext.UpdatedAt = timestamp;
+        EnsureRunInvariant(resultNext);
+        var cursorNext = CloneRun(resultNext);
+        cursorNext.Revision = checked(run.Revision + 3);
+        EnsureRunInvariant(cursorNext);
+        var transcriptEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.TranscriptMessage,
+            EventDurabilities.Durable,
+            NormalizedMessageJournalCodec.Encode(assistantMessage),
+            turnId,
+            providerAttemptId,
+            streamAttemptId: null,
+            eventId: "transcript:" + assistantMessage.MessageId,
+            providerId: providerId);
+        var resultEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.ProviderResultCommitted,
+            EventDurabilities.Durable,
+            ProtocolJson.ToElement(resultNext),
+            turnId,
+            providerAttemptId,
+            streamAttemptId,
+            eventId: "provider-result-committed:" + streamAttemptId,
+            providerId: providerId,
+            modelId: routeIdentity?.ModelId,
+            transportDialect: routeIdentity?.TransportDialect,
+            providerCapabilityDigest: routeIdentity?.CapabilityDigest,
+            providerRouteDigest: routeIdentity?.RouteDigest);
+        AttachProviderResultEvidence(
+            resultEvent,
+            providerId,
+            routeIdentity,
+            opaqueContinuationState: null);
+        var outputEvent = CreateEvent(
+            run,
+            RuntimeEventKinds.AssistantCompleted,
+            EventDurabilities.Durable,
+            finalOutput,
+            turnId,
+            providerAttemptId,
+            streamAttemptId,
+            eventId: "assistant-completed:" + turnId,
+            providerId: providerId);
+        if (finalOutputAdmissionEvidence.HasValue)
+        {
+            var presentation =
+                FinalOutputAdmissionCodec.CreatePresentation(
+                    FinalOutputAdmissionCodec
+                        .AdmittedPresentationState,
+                    ReadAdmissionReasonCode(
+                        finalOutputAdmissionEvidence.Value),
+                    finalOutputAdmissionEvidence.Value);
+            resultEvent.Extensions[
+                    FinalOutputAdmissionControl
+                        .PresentationExtensionName] =
+                presentation;
+            outputEvent.Extensions[
+                    FinalOutputAdmissionCodec.EvidenceExtensionName] =
+                finalOutputAdmissionEvidence.Value.Clone();
+            outputEvent.Extensions[
+                    FinalOutputAdmissionControl
+                        .PresentationExtensionName] =
+                presentation;
+            ProtocolValidator.EnsureValid(resultEvent);
+            ProtocolValidator.EnsureValid(outputEvent);
+        }
+        var rawAppends = await _store.AppendAtomicBatchAsync(
+                new[] { transcriptEvent, resultEvent, outputEvent },
+                run.Revision,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            expectedCount: 3,
+            "provider output");
+        ValidateFreshBatchResults(
+            appends,
+            expectedCount: 3,
+            run.Revision,
+            "provider output");
+
+        transcriptEvent.Sequence = appends[0].Sequence;
+        resultEvent.Sequence = appends[1].Sequence;
+        outputEvent.Sequence = appends[2].Sequence;
+        CopyRun(cursorNext, run);
+        Publish(transcriptEvent);
+        Publish(resultEvent);
+        Publish(outputEvent);
     }
 
     public async ValueTask CommitCompletionAsync(
@@ -1090,10 +1788,11 @@ public sealed class JournalCoordinator : IDisposable
         DateTimeOffset startedAt,
         CancellationToken cancellationToken)
     {
+        var checkpointTimestamp = MonotonicNow(run);
         var transition = RunStateMachine.Plan(
             run,
             RunStates.Completed,
-            _clock.UtcNow);
+            checkpointTimestamp);
         var next = CloneRun(run);
         next.State = transition.ToState;
         next.TerminalReason = transition.TerminalReason;
@@ -1101,9 +1800,9 @@ public sealed class JournalCoordinator : IDisposable
         next.CurrentTurnId = null;
         next.Usage.DurationMs = Math.Max(
             next.Usage.DurationMs,
-            (long)(_clock.UtcNow - startedAt).TotalMilliseconds);
+            ElapsedMilliseconds(checkpointTimestamp, startedAt));
         next.Revision = checked(run.Revision + 2);
-        next.UpdatedAt = _clock.UtcNow;
+        next.UpdatedAt = checkpointTimestamp;
         EnsureRunInvariant(next);
 
         var assistantEvent = CreateEvent(
@@ -1115,6 +1814,13 @@ public sealed class JournalCoordinator : IDisposable
             attemptId,
             streamAttemptId,
             eventId: "assistant-completed:" + turnId);
+        assistantEvent.Extensions[RuntimeCompletionEvidence.ExtensionName] =
+            RuntimeCompletionEvidence.Create(
+                run,
+                turnId,
+                attemptId,
+                streamAttemptId,
+                finalOutput);
         var completionEvent = CreateEvent(
             run,
             RuntimeEventKinds.RunCompleted,
@@ -1124,11 +1830,15 @@ public sealed class JournalCoordinator : IDisposable
             attemptId,
             streamAttemptId: null,
             eventId: "run-completed:" + run.RunId);
-        var appends = await _store.AppendAtomicBatchAsync(
+        var rawAppends = await _store.AppendAtomicBatchAsync(
                 new[] { assistantEvent, completionEvent },
                 run.Revision,
                 cancellationToken)
             .ConfigureAwait(false);
+        var appends = SnapshotBatchResults(
+            rawAppends,
+            expectedCount: 2,
+            "completion");
         ValidateFreshBatchResults(
             appends,
             expectedCount: 2,
@@ -1149,10 +1859,11 @@ public sealed class JournalCoordinator : IDisposable
         DateTimeOffset startedAt,
         CancellationToken cancellationToken)
     {
+        var checkpointTimestamp = MonotonicNow(run);
         var transition = RunStateMachine.Plan(
             run,
             RunStates.Completed,
-            _clock.UtcNow);
+            checkpointTimestamp);
         var next = CloneRun(run);
         next.State = transition.ToState;
         next.TerminalReason = transition.TerminalReason;
@@ -1160,9 +1871,9 @@ public sealed class JournalCoordinator : IDisposable
         next.CurrentTurnId = null;
         next.Usage.DurationMs = Math.Max(
             next.Usage.DurationMs,
-            (long)(_clock.UtcNow - startedAt).TotalMilliseconds);
+            ElapsedMilliseconds(checkpointTimestamp, startedAt));
         next.Revision = checked(run.Revision + 1);
-        next.UpdatedAt = _clock.UtcNow;
+        next.UpdatedAt = checkpointTimestamp;
         EnsureRunInvariant(next);
         var completionEvent = CreateEvent(
             run,
@@ -1221,8 +1932,9 @@ public sealed class JournalCoordinator : IDisposable
     {
         if (append is null
             || append.WasDuplicate
+            || expectedRevision <= 0
             || append.Revision != expectedRevision
-            || append.Sequence < 0)
+            || append.Sequence != expectedRevision - 1)
         {
             throw new InvalidDataException(
                 $"The journal returned an invalid {operation} result.");
@@ -1245,7 +1957,8 @@ public sealed class JournalCoordinator : IDisposable
 
         var first = appends[0];
         if (first is null
-            || first.Sequence < 0
+            || baseRevision < 0
+            || first.Sequence != baseRevision
             || first.Sequence > long.MaxValue - (expectedCount - 1))
         {
             throw new InvalidDataException(
@@ -1281,8 +1994,15 @@ public sealed class JournalCoordinator : IDisposable
                 $"The journal returned an invalid {operation} batch result.");
         }
 
-        var duplicateCount = appends.Count(
-            append => append is not null && append.WasDuplicate);
+        var duplicateCount = 0;
+        for (var index = 0; index < expectedCount; index++)
+        {
+            var append = appends[index];
+            if (append is not null && append.WasDuplicate)
+            {
+                duplicateCount++;
+            }
+        }
         if (duplicateCount == 0)
         {
             ValidateFreshBatchResults(
@@ -1329,6 +2049,70 @@ public sealed class JournalCoordinator : IDisposable
         return true;
     }
 
+    private static JournalAppendResult[] SnapshotBatchResults(
+        IReadOnlyList<JournalAppendResult>? appends,
+        int expectedCount,
+        string operation)
+    {
+        if (appends is null || expectedCount <= 0)
+        {
+            throw new InvalidDataException(
+                $"The journal returned an invalid {operation} batch result.");
+        }
+
+        int count;
+        try
+        {
+            count = appends.Count;
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException)
+        {
+            throw new InvalidDataException(
+                $"The journal returned an unreadable {operation} batch "
+                + "result.",
+                exception);
+        }
+
+        if (count != expectedCount)
+        {
+            throw new InvalidDataException(
+                $"The journal returned an invalid {operation} batch result.");
+        }
+
+        var snapshots = new JournalAppendResult[expectedCount];
+        for (var index = 0; index < expectedCount; index++)
+        {
+            JournalAppendResult? append;
+            try
+            {
+                append = appends[index];
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException)
+            {
+                throw new InvalidDataException(
+                    $"The journal returned an unreadable {operation} batch "
+                    + "result.",
+                    exception);
+            }
+
+            if (append is null)
+            {
+                throw new InvalidDataException(
+                    $"The journal returned an invalid {operation} batch "
+                    + "result.");
+            }
+
+            snapshots[index] = new JournalAppendResult(
+                append.Sequence,
+                append.Revision,
+                append.WasDuplicate);
+        }
+
+        return snapshots;
+    }
+
     private static void ValidateIdempotentAppendResult(
         JournalAppendResult? append,
         long baseRevision,
@@ -1338,6 +2122,7 @@ public sealed class JournalCoordinator : IDisposable
             || !append.WasDuplicate
             || append.Sequence < 0
             || append.Revision <= 0
+            || append.Sequence != append.Revision - 1
             || append.Revision > baseRevision)
         {
             throw new InvalidDataException(
@@ -1399,6 +2184,37 @@ public sealed class JournalCoordinator : IDisposable
         }
     }
 
+    private static void ValidateActionUncertaintyOperation(
+        AgentRun run,
+        string turnId,
+        ActionReceipt uncertainty,
+        OperationLedgerEntry operation)
+    {
+        if (!operation.IsPending
+            || operation.LatestReceipt is not null
+            || !string.Equals(
+                operation.OperationId,
+                uncertainty.OperationId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                operation.RunId,
+                run.RunId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                operation.Request.TurnId,
+                turnId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The operation ledger returned an invalid uncertain action.");
+        }
+
+        _ = ActionReceiptIngressValidator.ValidateAndClone(
+            operation.Request,
+            uncertainty,
+            run);
+    }
+
     private static bool ReceiptsAreEquivalent(
         ActionReceipt left,
         ActionReceipt right)
@@ -1410,6 +2226,165 @@ public sealed class JournalCoordinator : IDisposable
             ProtocolJson.Serialize(canonical),
             ProtocolJson.Serialize(right),
             StringComparison.Ordinal);
+    }
+
+    private static void ValidateTransitionEventKind(
+        string targetState,
+        string eventKind)
+    {
+        var valid = eventKind switch
+        {
+            RuntimeEventKinds.RunStarted =>
+                string.Equals(
+                    targetState,
+                    RunStates.Preparing,
+                    StringComparison.Ordinal)
+                || string.Equals(
+                    targetState,
+                    RunStates.Running,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.RunCheckpoint =>
+                !RunStateMachine.IsTerminal(targetState),
+            RuntimeEventKinds.TurnCompleted =>
+                string.Equals(
+                    targetState,
+                    RunStates.Running,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.ActionReconciling =>
+                string.Equals(
+                    targetState,
+                    RunStates.Reconciling,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.RunCompleted =>
+                string.Equals(
+                    targetState,
+                    RunStates.Completed,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.RunInterrupted =>
+                string.Equals(
+                    targetState,
+                    RunStates.Interrupted,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.RunFailed =>
+                string.Equals(
+                    targetState,
+                    RunStates.Failed,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.RunCancelled =>
+                string.Equals(
+                    targetState,
+                    RunStates.Cancelled,
+                    StringComparison.Ordinal),
+            RuntimeEventKinds.RunBudgetExhausted =>
+                string.Equals(
+                    targetState,
+                    RunStates.BudgetExhausted,
+                    StringComparison.Ordinal),
+            _ => false
+        };
+        if (!valid)
+        {
+            throw new ArgumentException(
+                "The transition state and runtime event kind do not match.",
+                nameof(eventKind));
+        }
+    }
+
+    private static bool IsReservedRuntimeEventKind(string kind)
+    {
+        return kind is RuntimeEventKinds.RunStarted
+            or RuntimeEventKinds.RunCompleted
+            or RuntimeEventKinds.RunInterrupted
+            or RuntimeEventKinds.RunFailed
+            or RuntimeEventKinds.RunCancelled
+            or RuntimeEventKinds.RunBudgetExhausted
+            or RuntimeEventKinds.RunCheckpoint
+            or RuntimeEventKinds.RunInputCaptured
+            or RuntimeEventKinds.TurnStarted
+            or RuntimeEventKinds.TurnCompleted
+            or RuntimeEventKinds.TurnSnapshot
+            or RuntimeEventKinds.TranscriptMessage
+            or RuntimeEventKinds.AssistantDelta
+            or RuntimeEventKinds.AssistantCompleted
+            or RuntimeEventKinds.ToolStarted
+            or RuntimeEventKinds.ToolCompleted
+            or RuntimeEventKinds.ToolFailed
+            or RuntimeEventKinds.ToolDisclosureChanged
+            or RuntimeEventKinds.ActionRequested
+            or RuntimeEventKinds.ActionReceived
+            or RuntimeEventKinds.ActionOutcomeUncertain
+            or RuntimeEventKinds.ActionReconciling
+            or RuntimeEventKinds.GameContextAdvanced
+            or RuntimeEventKinds.ProviderRetry
+            or RuntimeEventKinds.ProviderFallback
+            or RuntimeEventKinds.ProviderDispatchStarted
+            or RuntimeEventKinds.ProviderDispatchKnownZero
+            or RuntimeEventKinds.ProviderUsageUncertain
+            or RuntimeEventKinds.ProviderResultCommitted
+            or RuntimeEventKinds.ProviderResultDiscarded
+            or RuntimeEventKinds.MemoryCommitPrepared
+            or RuntimeEventKinds.MemoryCommitCompleted
+            or RuntimeEventKinds.MemoryCommitSettled
+            or RuntimeEventKinds.ControlReceived
+            or RuntimeEventKinds.BudgetUpdated;
+    }
+
+    private static void AttachProviderResultEvidence(
+        RuntimeEvent runtimeEvent,
+        string providerId,
+        ProviderRouteIdentity? routeIdentity,
+        ProviderOpaqueContinuationState? opaqueContinuationState)
+    {
+        if (routeIdentity is null)
+        {
+            if (opaqueContinuationState is not null)
+            {
+                throw new ArgumentException(
+                    "Durable provider continuation state requires a route identity.",
+                    nameof(opaqueContinuationState));
+            }
+
+            return;
+        }
+
+        if (!string.Equals(
+                providerId,
+                routeIdentity.ProviderId,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The provider result route does not match the provider id.",
+                nameof(routeIdentity));
+        }
+
+        runtimeEvent.Extensions[
+                ProviderRouteJournalExtensions.PolicyVersion] =
+            JsonArrayBuilder.String(routeIdentity.RoutePolicyVersion);
+        runtimeEvent.Extensions[
+                ProviderRouteJournalExtensions.PolicyDigest] =
+            JsonArrayBuilder.String(routeIdentity.RoutePolicyDigest);
+        runtimeEvent.Extensions[
+                ProviderWireRequestEvidence
+                    .DialectSemanticDigestJournalExtensionName] =
+            JsonArrayBuilder.String(routeIdentity.DialectSemanticDigest);
+
+        if (opaqueContinuationState is not null)
+        {
+            if (!opaqueContinuationState.Matches(routeIdentity)
+                || !opaqueContinuationState.TryCreateDurableEnvelope(
+                    out var envelope))
+            {
+                throw new ArgumentException(
+                    "Only matching provider-declared non-secret state can be journaled.",
+                    nameof(opaqueContinuationState));
+            }
+
+            runtimeEvent.Extensions[
+                    ProviderOpaqueContinuationState.JournalExtensionName] =
+                envelope;
+        }
+
+        ProtocolValidator.EnsureValid(runtimeEvent);
     }
 
     private RuntimeEvent CreateEvent(
@@ -1428,9 +2403,11 @@ public sealed class JournalCoordinator : IDisposable
         string? providerCapabilityDigest = null,
         string? providerRouteDigest = null)
     {
-        return new RuntimeEvent
+        var runtimeEvent = new RuntimeEvent
         {
-            EventId = eventId ?? _ids.NewId("event"),
+            EventId = RuntimeEventIdDerivation.Derive(
+                run.RunId,
+                eventId ?? _ids.NewId("event")),
             RunId = run.RunId,
             TurnId = turnId,
             Kind = kind,
@@ -1444,13 +2421,16 @@ public sealed class JournalCoordinator : IDisposable
             ProviderCapabilityDigest = providerCapabilityDigest,
             ProviderRouteDigest = providerRouteDigest,
             ReasonCode = reasonCode,
-            Timestamp = _clock.UtcNow,
+            Timestamp = MonotonicNow(run),
             Payload = payload.Clone()
         };
+        ProtocolValidator.EnsureValid(runtimeEvent);
+        return runtimeEvent;
     }
 
     private void Publish(RuntimeEvent runtimeEvent)
     {
+        ProtocolValidator.EnsureValid(runtimeEvent);
         try
         {
             _publisher.Publish(runtimeEvent);
@@ -1460,6 +2440,23 @@ public sealed class JournalCoordinator : IDisposable
             // Runtime events are notifications. The durable journal remains
             // authoritative if an observer violates the publisher contract.
         }
+    }
+
+    private DateTimeOffset MonotonicNow(AgentRun run)
+    {
+        var timestamp = _clock.UtcNow;
+        return timestamp < run.UpdatedAt
+            ? run.UpdatedAt
+            : timestamp;
+    }
+
+    private static long ElapsedMilliseconds(
+        DateTimeOffset timestamp,
+        DateTimeOffset startedAt)
+    {
+        return Math.Max(
+            0,
+            (long)(timestamp - startedAt).TotalMilliseconds);
     }
 
     private static void EnsureRunInvariant(AgentRun run)
@@ -1486,6 +2483,24 @@ public sealed class JournalCoordinator : IDisposable
     internal static AgentRun CloneRun(AgentRun run)
     {
         return ProtocolJson.DeserializeAgentRun(ProtocolJson.Serialize(run));
+    }
+
+    private static string ReadAdmissionReasonCode(JsonElement evidence)
+    {
+        if (evidence.ValueKind != JsonValueKind.Object
+            || !evidence.TryGetProperty(
+                "decisionReasonCode",
+                out var reason)
+            || reason.ValueKind != JsonValueKind.String)
+        {
+            throw new ArgumentException(
+                "Final-output admission evidence has no decision reason.",
+                nameof(evidence));
+        }
+
+        return RuntimeGuard.RequiredReasonCode(
+            reason.GetString(),
+            nameof(evidence));
     }
 
     internal static void CopyRun(AgentRun source, AgentRun target)

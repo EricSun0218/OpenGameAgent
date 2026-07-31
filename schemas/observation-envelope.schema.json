@@ -50,6 +50,7 @@
     },
     "subjectIds": {
       "type": "array",
+      "maxItems": 2048,
       "items": {
         "$ref": "common.schema.json#/$defs/id"
       },
@@ -112,6 +113,7 @@
         },
         "audienceIds": {
           "type": "array",
+          "maxItems": 2048,
           "items": {
             "$ref": "common.schema.json#/$defs/id"
           },

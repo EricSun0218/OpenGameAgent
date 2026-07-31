@@ -15,6 +15,9 @@
 
 namespace game_agent::wire
 {
+inline constexpr std::size_t MaxAuthoritativeObservationsPerReceipt = 64U;
+inline constexpr std::size_t MaxProtocolExtensions = 64U;
+
 struct JsonNumber final
 {
     std::string Lexeme;
@@ -129,6 +132,8 @@ struct ActionRequest final
     std::string ActionName;
     std::string ActionVersion;
     JsonValue Arguments;
+    std::optional<std::string> DecisionKey;
+    std::optional<std::string> BatchId;
     std::optional<std::string> BasedOnStateVersion;
     std::vector<std::string> ExpectedEffects;
     std::optional<std::string> ReasonCode;
@@ -181,6 +186,12 @@ struct RuntimeEvent final
     std::int64_t RuntimeGeneration = 1;
     std::optional<std::string> AttemptId;
     std::optional<std::string> StreamAttemptId;
+    std::optional<std::string> ProviderId;
+    std::optional<std::string> ModelId;
+    std::optional<std::string> TransportDialect;
+    std::optional<std::string> ProviderCapabilityDigest;
+    std::optional<std::string> ProviderRouteDigest;
+    std::optional<std::string> ReasonCode;
     std::string Timestamp;
     JsonValue Payload;
     JsonValue::Object Extensions;

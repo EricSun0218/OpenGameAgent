@@ -6,6 +6,36 @@ public static class ProtocolConstants
     public const string SchemaVersion = "0.2";
 }
 
+public static class ProtocolLimits
+{
+    public const int MaxAgentDefinitionReferences = 512;
+    public const int MaxSkillManifestListItems = 256;
+    public const int MaxCapabilityManifestListItems = 512;
+    public const int MaxContextBudgetReportItems = 512;
+    public const int MaxObservationSubjectIds = 2_048;
+    public const int MaxObservationAudienceIds = 2_048;
+    public const int MaxProtocolExtensions = 64;
+    public const int MaxProtocolExtensionKeyUnicodeScalars = 128;
+    public const int MaxProtocolJsonUtf8Bytes = 262_144;
+    public const int MaxProtocolJsonDepth = 32;
+    public const int MaxProtocolJsonNodes = 8_192;
+    public const int MaxProtocolJsonStringUtf8Bytes = 65_536;
+    public const int MaxProtocolJsonContainerItems = 2_048;
+    public const int MaxResourceUriUnicodeScalars = 2_048;
+    public const int MaxSkillPromptFragmentUnicodeScalars = 8_192;
+    public const int MaxToolConflictScopes = 32;
+    public const int MaxToolResolvedConflictKeys = 32;
+    public const int MaxToolResolvedConflictKeyUnicodeScalars = 256;
+    public const int MaxActionExpectedEffects = MaxToolResolvedConflictKeys;
+    public const int MaxActionExpectedEffectUnicodeScalars =
+        MaxToolResolvedConflictKeyUnicodeScalars;
+    public const int MaxProviderIdUnicodeScalars = 128;
+    public const int MaxModelIdUnicodeScalars = 256;
+    public const int MaxTurnPolicyVersionUnicodeScalars = 64;
+    public const int MaxRuntimeEventReasonCodeUnicodeScalars = 96;
+    public const int MaxAuthoritativeObservationsPerReceipt = 64;
+}
+
 public static class RunStates
 {
     public const string Queued = "queued";
@@ -27,6 +57,33 @@ public static class CompletionIntents
     public const string Cancelled = "cancelled";
     public const string Interrupted = "interrupted";
     public const string Failed = "failed";
+}
+
+public static class ObservationKinds
+{
+    public const string Event = "event";
+    public const string Snapshot = "snapshot";
+    public const string Patch = "patch";
+    public const string Document = "document";
+    public const string Metric = "metric";
+    public const string Relation = "relation";
+    public const string ResourceReference = "resource_ref";
+    public const string Custom = "custom";
+}
+
+public static class ObservationTrustLevels
+{
+    public const string Authoritative = "authoritative";
+    public const string Trusted = "trusted";
+    public const string Untrusted = "untrusted";
+}
+
+public static class ObservationVisibilityScopes
+{
+    public const string World = "world";
+    public const string Group = "group";
+    public const string Agent = "agent";
+    public const string Private = "private";
 }
 
 public static class ToolEffects
@@ -79,6 +136,12 @@ public static class EventDurabilities
     public const string Ephemeral = "ephemeral";
 }
 
+public static class UsageAvailabilityStates
+{
+    public const string CostAvailable = "cost_available";
+    public const string CostUnavailable = "cost_unavailable";
+}
+
 public static class RuntimeEventKinds
 {
     public const string RunStarted = "run.started";
@@ -101,7 +164,9 @@ public static class RuntimeEventKinds
     public const string ToolDisclosureChanged = "tool.disclosure_changed";
     public const string ActionRequested = "action.requested";
     public const string ActionReceived = "action.received";
+    public const string ActionOutcomeUncertain = "action.outcome_uncertain";
     public const string ActionReconciling = "action.reconciling";
+    public const string GameContextAdvanced = "game_context_advanced";
     public const string ProviderRetry = "provider.retry";
     public const string ProviderFallback = "provider.fallback";
     public const string ProviderDispatchStarted = "provider.dispatch_started";
@@ -110,6 +175,9 @@ public static class RuntimeEventKinds
     public const string ProviderUsageUncertain = "provider.usage_uncertain";
     public const string ProviderResultCommitted = "provider.result_committed";
     public const string ProviderResultDiscarded = "provider.result_discarded";
+    public const string MemoryCommitPrepared = "memory.commit_prepared";
+    public const string MemoryCommitCompleted = "memory.commit_completed";
+    public const string MemoryCommitSettled = "memory.commit_settled";
     public const string ControlReceived = "control.received";
     public const string BudgetUpdated = "budget.updated";
 }

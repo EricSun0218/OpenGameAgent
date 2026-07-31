@@ -241,6 +241,25 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     public delegate void RunFailedEventHandler(GodotDictionary error);
 
     [Signal]
+    public delegate void BatchCompletedEventHandler(GodotDictionary outcome);
+
+    [Signal]
+    public delegate void BatchParticipantCompletedEventHandler(
+        GodotDictionary result);
+
+    [Signal]
+    public delegate void BatchFailedEventHandler(GodotDictionary error);
+
+    [Signal]
+    public delegate void BatchStartedEventHandler(GodotDictionary manifest);
+
+    [Signal]
+    public delegate void ActorFinishedEventHandler(GodotDictionary result);
+
+    [Signal]
+    public delegate void BatchAbortedEventHandler(GodotDictionary error);
+
+    [Signal]
     public delegate void RuntimeStoppedEventHandler(GodotDictionary summary);
 
     [Signal]
@@ -252,9 +271,14 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     private CancellationTokenSource? _lifetimeCancellation;
     private GodotMainThreadDispatcher? _dispatcher;
     private GodotEventPump? _eventPump;
+    private RuntimeMetricsEmitter? _eventMetrics;
+    private IRuntimeMetricsSink? _metricsSink;
+    private RuntimeMetricsOptions? _metricsOptions;
     private GodotRuntimeEventPublisher? _runtimeEventPublisher;
     private IGodotRuntimeBackend? _backend;
     private IGodotDurableRuntimeBackend? _durableBackend;
+    private MultiActorDecisionCoordinator? _multiActorCoordinator;
+    private SemaphoreSlim? _actorBatchSlots;
     private GodotCancellationDispatcher.Reservation?
         _lifecycleCancellationReservation;
     private Task<Exception?>? _lifetimeCancellationTask;
@@ -266,12 +290,25 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     private int _lifecycleReservationReleaseScheduled;
     private int _stopRetryRequired;
     private int _shutdownIncomplete;
+    private int _guardedParticipantResumeSupported;
 
     [Export(PropertyHint.Range, "1,4096,1")]
     public int DispatcherCapacity { get; set; } = 256;
 
     [Export(PropertyHint.Range, "1,1024,1")]
     public int MaxActiveRuns { get; set; } = 64;
+
+    [Export(PropertyHint.Range, "1,1024,1")]
+    public int MaxActorBatchSize { get; set; } = 256;
+
+    [Export(PropertyHint.Range, "1,1024,1")]
+    public int MaxConcurrentActorRuns { get; set; } = 32;
+
+    [Export(PropertyHint.Range, "1,32,1")]
+    public int MaxConcurrentActorBatches { get; set; } = 4;
+
+    [Export(PropertyHint.Range, "1,1024,1")]
+    public int MaxConcurrentParticipantOperations { get; set; } = 32;
 
     [Export(PropertyHint.Range, "1,1024,1")]
     public int MaxCommandsPerFrame { get; set; } = 64;
@@ -295,6 +332,28 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     public bool IsShutdownIncomplete =>
         Volatile.Read(ref _shutdownIncomplete) != 0;
+
+    public RuntimeMetricsHealth? MetricsHealth => _eventMetrics?.Health;
+
+    public void ConfigureMetrics(
+        IRuntimeMetricsSink sink,
+        RuntimeMetricsOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        lock (_lifecycleGate)
+        {
+            if (_lifetimeCancellation is not null
+                || _stopTask is not null
+                || Volatile.Read(ref _exitStarted) != 0)
+            {
+                throw new InvalidOperationException(
+                    "Metrics must be configured before the node enters the scene tree.");
+            }
+
+            _metricsSink = sink;
+            _metricsOptions = options;
+        }
+    }
 
     public GodotMainThreadDispatcher Dispatcher =>
         _dispatcher
@@ -321,7 +380,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         {
             if (_lifetimeCancellation is not null
                 || _stopTask is not null
-                || Volatile.Read(ref _exitStarted) != 0) {
+                || Volatile.Read(ref _exitStarted) != 0)
+            {
                 throw new InvalidOperationException(
                     "A Godot runtime node instance can enter the scene tree only once.");
             }
@@ -341,7 +401,12 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                 _lifetimeCancellation = new CancellationTokenSource();
                 _dispatcher =
                     new GodotMainThreadDispatcher(DispatcherCapacity);
-                _eventPump = new GodotEventPump(EventCapacity);
+                _eventMetrics = new RuntimeMetricsEmitter(
+                    _metricsSink,
+                    _metricsOptions);
+                _eventPump = new GodotEventPump(
+                    EventCapacity,
+                    _eventMetrics);
                 _runtimeEventPublisher =
                     new GodotRuntimeEventPublisher(_eventPump);
                 Typed = new GodotRuntimeHost(this);
@@ -446,8 +511,11 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             Volatile.Write(ref _shutdownIncomplete, 1);
             var terminalPublish = EnsureStopEventPublishTask(
                 CreateStoppedMessage(graceful: false));
+            var publicationBudget = TimeSpan.FromMilliseconds(
+                Math.Min(250, timeout.TotalMilliseconds));
+            var publicationElapsed = Stopwatch.StartNew();
             while (!terminalPublish.IsCompleted
-                   && elapsed.Elapsed < timeout)
+                   && publicationElapsed.Elapsed < publicationBudget)
             {
                 EventPump.Drain(
                     MaxEventsPerFrame,
@@ -471,8 +539,11 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             }
         }
 
+        var finalDrainBudget = TimeSpan.FromMilliseconds(
+            Math.Min(250, timeout.TotalMilliseconds));
+        var finalDrainElapsed = Stopwatch.StartNew();
         while (EventPump.PendingCount > 0
-               && elapsed.Elapsed < timeout)
+               && finalDrainElapsed.Elapsed < finalDrainBudget)
         {
             var drained = EventPump.Drain(
                 MaxEventsPerFrame,
@@ -554,6 +625,36 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
     }
 
+    public string start_agent_run_with_options(
+        GodotDictionary run,
+        GodotArray observations,
+        GodotDictionary options)
+    {
+        DurableRunRequest request;
+        try
+        {
+            request = GodotProtocolVariantMapper.ToDurableRunRequest(
+                run,
+                observations,
+                options);
+        }
+        catch (Exception exception)
+        {
+            PublishFacadeError("invalid_run_request", exception.Message);
+            return string.Empty;
+        }
+
+        try
+        {
+            return StartTypedDurableRun(request);
+        }
+        catch (InvalidOperationException exception)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
     public string resume_agent_run(string runId)
     {
         try
@@ -561,6 +662,148 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             return ResumeTypedDurableRun(
                 runId,
                 continuation: null,
+                reconciler: null);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string resume_agent_run_with_options(
+        string runId,
+        GodotDictionary options)
+    {
+        GodotDurableResumeOptions resumeOptions;
+        try
+        {
+            resumeOptions =
+                GodotProtocolVariantMapper.ToDurableResumeOptions(options);
+        }
+        catch (Exception exception)
+        {
+            PublishFacadeError("invalid_resume_request", exception.Message);
+            return string.Empty;
+        }
+
+        try
+        {
+            return ResumeTypedDurableRun(
+                runId,
+                resumeOptions.Continuation,
+                resumeOptions.Reconciler,
+                resumeOptions.Guard);
+        }
+        catch (DurableRunResumeGuardException exception)
+        {
+            PublishFacadeError(exception.ReasonCode, exception.Message);
+            return string.Empty;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string start_agent_batch(GodotDictionary batch)
+    {
+        MultiActorDecisionBatch mapped;
+        try
+        {
+            mapped = GodotMultiActorVariantMapper.ToDecisionBatch(
+                batch,
+                MaxActorBatchSize);
+        }
+        catch (Exception exception)
+        {
+            PublishFacadeError("invalid_batch_request", exception.Message);
+            return string.Empty;
+        }
+
+        try
+        {
+            return StartTypedActorBatch(mapped);
+        }
+        catch (InvalidOperationException exception)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string resume_agent_batch_participant(
+        string batchId,
+        GodotDictionary participant,
+        GodotDictionary options)
+    {
+        MultiActorBatchParticipant mappedParticipant;
+        GodotParticipantResumeOptions resumeOptions;
+        try
+        {
+            mappedParticipant =
+                GodotMultiActorVariantMapper.ToParticipant(participant);
+            resumeOptions =
+                GodotProtocolVariantMapper.ToParticipantResumeOptions(options);
+        }
+        catch (Exception exception)
+        {
+            PublishFacadeError(
+                "invalid_batch_participant_request",
+                exception.Message);
+            return string.Empty;
+        }
+
+        try
+        {
+            return ResumeTypedActorBatchParticipant(
+                batchId,
+                mappedParticipant,
+                resumeOptions.Continuation,
+                resumeOptions.Reconciler,
+                resumeOptions.SemanticExpectation);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string abandon_agent_batch_participant(
+        string batchId,
+        GodotDictionary participant,
+        string reasonCode)
+    {
+        MultiActorBatchParticipant mappedParticipant;
+        try
+        {
+            mappedParticipant =
+                GodotMultiActorVariantMapper.ToParticipant(participant);
+            reasonCode =
+                GodotMultiActorVariantMapper.ValidateReasonCode(reasonCode);
+        }
+        catch (Exception exception)
+        {
+            PublishFacadeError(
+                "invalid_batch_participant_request",
+                exception.Message);
+            return string.Empty;
+        }
+
+        try
+        {
+            return AbandonTypedActorBatchParticipant(
+                batchId,
+                mappedParticipant,
+                reasonCode,
                 reconciler: null);
         }
         catch (Exception exception) when (
@@ -613,6 +856,14 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             ["accepting_runs"] = Volatile.Read(ref _acceptingRuns) != 0,
             ["active_runs"] = _activeRuns.Count,
             ["max_active_runs"] = MaxActiveRuns,
+            ["multi_actor_configured"] =
+                Volatile.Read(ref _multiActorCoordinator) is not null,
+            ["guarded_participant_resume"] =
+                Volatile.Read(ref _guardedParticipantResumeSupported) != 0,
+            ["max_actor_batch_size"] = MaxActorBatchSize,
+            ["max_concurrent_actor_runs"] = MaxConcurrentActorRuns,
+            ["max_concurrent_actor_batches"] =
+                MaxConcurrentActorBatches,
             ["dispatcher_pending"] = Dispatcher.PendingCount,
             ["dispatcher_running"] = Dispatcher.RunningCount,
             ["event_pending"] = EventPump.PendingCount,
@@ -647,6 +898,13 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     internal void ConfigureDurableBackend(IGodotDurableRuntimeBackend backend)
     {
+        ConfigureDurableBackend(backend, multiActorRuntime: null);
+    }
+
+    internal void ConfigureDurableBackend(
+        IGodotDurableRuntimeBackend backend,
+        IDurableAgentRuntime? multiActorRuntime)
+    {
         lock (_lifecycleGate)
         {
             if (_stopTask is not null)
@@ -662,7 +920,66 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             }
 
             _durableBackend = backend;
+            if (multiActorRuntime is not null)
+            {
+                ConfigureMultiActorRuntimeCore(multiActorRuntime);
+            }
         }
+    }
+
+    internal void ConfigureMultiActorRuntime(
+        IDurableAgentRuntime runtime)
+    {
+        if (runtime is null)
+        {
+            throw new ArgumentNullException(nameof(runtime));
+        }
+
+        lock (_lifecycleGate)
+        {
+            if (_stopTask is not null)
+            {
+                throw new InvalidOperationException(
+                    "The Godot runtime host is stopping.");
+            }
+
+            if (_durableBackend is null)
+            {
+                throw new InvalidOperationException(
+                    "Configure a durable backend before multi-actor coordination.");
+            }
+
+            ConfigureMultiActorRuntimeCore(runtime);
+        }
+    }
+
+    private void ConfigureMultiActorRuntimeCore(
+        IDurableAgentRuntime runtime)
+    {
+        if (_multiActorCoordinator is not null)
+        {
+            throw new InvalidOperationException(
+                "The multi-actor runtime is already configured.");
+        }
+
+        var lifecycleConcurrency = checked(
+            MaxConcurrentActorRuns * MaxConcurrentActorBatches
+            + MaxConcurrentParticipantOperations);
+        _multiActorCoordinator = new MultiActorDecisionCoordinator(
+            runtime,
+            new MultiActorCoordinatorOptions(
+                maxBatchSize: MaxActorBatchSize,
+                maxConcurrentRuns: MaxConcurrentActorRuns,
+                maxDetachedLifecycleNotifications: lifecycleConcurrency,
+                maxConcurrentParticipantResumes:
+                    MaxConcurrentParticipantOperations),
+            new GodotMultiActorLifecycle(this));
+        _actorBatchSlots = new SemaphoreSlim(
+            MaxConcurrentActorBatches,
+            MaxConcurrentActorBatches);
+        Volatile.Write(
+            ref _guardedParticipantResumeSupported,
+            runtime is IGuardedDurableAgentRuntime ? 1 : 0);
     }
 
     internal string StartTypedRun(HeadlessRunRequest request)
@@ -761,7 +1078,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     internal string ResumeTypedDurableRun(
         string runId,
         DurableRunContinuation? continuation,
-        IGameOperationReconciler? reconciler)
+        IGameOperationReconciler? reconciler,
+        DurableRunResumeGuard? guard = null)
     {
         if (string.IsNullOrWhiteSpace(runId))
         {
@@ -778,10 +1096,20 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             backend = Volatile.Read(ref _durableBackend)
                 ?? throw new InvalidOperationException(
                     "Configure a durable runtime backend before resuming a run.");
+            if (guard is not null
+                && (backend
+                        is not IGodotGuardedDurableRuntimeBackend guardedBackend
+                    || !guardedBackend.SupportsGuardedResume))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.NotSupported);
+            }
+
             cancellationToken = _lifetimeCancellation?.Token
                 ?? throw new InvalidOperationException(
                     "The Godot runtime node is not active.");
             var continuationSnapshot = SnapshotContinuation(continuation);
+            var guardSnapshot = SnapshotResumeGuard(guard);
             requestId = Guid.NewGuid().ToString("N");
             runTask = Task.Run(
                 () => ExecuteDurableResumeAsync(
@@ -790,6 +1118,7 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     runId,
                     continuationSnapshot,
                     reconciler,
+                    guardSnapshot,
                     cancellationToken),
                 CancellationToken.None);
 
@@ -804,9 +1133,158 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         return requestId;
     }
 
+    internal string StartTypedActorBatch(MultiActorDecisionBatch batch)
+    {
+        if (batch is null)
+        {
+            throw new ArgumentNullException(nameof(batch));
+        }
+
+        var snapshot = SnapshotActorBatch(batch);
+        return StartTrackedMultiActorOperation(
+            requireGuardedResume: false,
+            (coordinator, requestId, cancellationToken) =>
+                ExecuteActorBatchAsync(
+                    coordinator,
+                    requestId,
+                    snapshot,
+                    cancellationToken));
+    }
+
+    internal string ResumeTypedActorBatchParticipant(
+        string batchId,
+        MultiActorBatchParticipant participant,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        DurableRunSemanticExpectation? semanticExpectation = null)
+    {
+        if (string.IsNullOrWhiteSpace(batchId))
+        {
+            throw new ArgumentException(
+                "Batch id is required.",
+                nameof(batchId));
+        }
+
+        if (participant is null)
+        {
+            throw new ArgumentNullException(nameof(participant));
+        }
+
+        var participantSnapshot = new MultiActorBatchParticipant(
+            participant.InputIndex,
+            participant.AgentId,
+            participant.RunId,
+            participant.DecisionKey);
+        var continuationSnapshot = SnapshotContinuation(continuation);
+        return StartTrackedMultiActorOperation(
+            requireGuardedResume: true,
+            (coordinator, requestId, cancellationToken) =>
+                ExecuteActorParticipantResumeAsync(
+                    coordinator,
+                    requestId,
+                    batchId,
+                    participantSnapshot,
+                    continuationSnapshot,
+                    reconciler,
+                    semanticExpectation,
+                    cancellationToken));
+    }
+
+    internal string AbandonTypedActorBatchParticipant(
+        string batchId,
+        MultiActorBatchParticipant participant,
+        string reasonCode,
+        IGameOperationReconciler? reconciler)
+    {
+        if (string.IsNullOrWhiteSpace(batchId))
+        {
+            throw new ArgumentException(
+                "Batch id is required.",
+                nameof(batchId));
+        }
+
+        if (participant is null)
+        {
+            throw new ArgumentNullException(nameof(participant));
+        }
+
+        reasonCode =
+            GodotMultiActorVariantMapper.ValidateReasonCode(reasonCode);
+        var participantSnapshot = new MultiActorBatchParticipant(
+            participant.InputIndex,
+            participant.AgentId,
+            participant.RunId,
+            participant.DecisionKey);
+        return StartTrackedMultiActorOperation(
+            requireGuardedResume: true,
+            (coordinator, requestId, cancellationToken) =>
+                ExecuteActorParticipantAbandonAsync(
+                    coordinator,
+                    requestId,
+                    batchId,
+                    participantSnapshot,
+                    reasonCode,
+                    reconciler,
+                    cancellationToken));
+    }
+
+    private string StartTrackedMultiActorOperation(
+        bool requireGuardedResume,
+        Func<
+            MultiActorDecisionCoordinator,
+            string,
+            CancellationToken,
+            Task> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        Task task;
+        string requestId;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            var coordinator = Volatile.Read(ref _multiActorCoordinator)
+                ?? throw new InvalidOperationException(
+                    "Configure multi-actor coordination before starting a batch operation.");
+            if (requireGuardedResume
+                && Volatile.Read(
+                    ref _guardedParticipantResumeSupported) == 0)
+            {
+                throw new InvalidOperationException(
+                    "The configured durable runtime does not support guarded participant resume.");
+            }
+
+            var cancellationToken = _lifetimeCancellation?.Token
+                ?? throw new InvalidOperationException(
+                    "The Godot runtime node is not active.");
+            requestId = Guid.NewGuid().ToString("N");
+            task = Task.Run(
+                () => operation(
+                    coordinator,
+                    requestId,
+                    cancellationToken),
+                CancellationToken.None);
+            if (!_activeRuns.TryAdd(requestId, task))
+            {
+                throw new InvalidOperationException(
+                    "Unable to track the Godot batch request.");
+            }
+        }
+
+        AttachRunRemoval(task, requestId);
+        return requestId;
+    }
+
     internal bool TryPostTypedControl(
         string runId,
         RunControlCommand command)
+    {
+        return TryPostTypedControl(runId, command, out _);
+    }
+
+    internal bool TryPostTypedControl(
+        string runId,
+        RunControlCommand command,
+        out string? rejectionReason)
     {
         if (string.IsNullOrWhiteSpace(runId))
         {
@@ -820,12 +1298,22 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
         if (Volatile.Read(ref _acceptingRuns) == 0)
         {
+            rejectionReason = null;
             return false;
         }
 
         var backend = Volatile.Read(ref _durableBackend)
             ?? throw new InvalidOperationException(
                 "Configure a durable runtime backend before posting controls.");
+        if (backend is IGodotControlRejectionBackend detailedBackend)
+        {
+            return detailedBackend.TryPostControl(
+                runId,
+                command,
+                out rejectionReason);
+        }
+
+        rejectionReason = null;
         return backend.TryPostControl(runId, command);
     }
 
@@ -1022,6 +1510,10 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             && Volatile.Read(ref _stopRetryRequired) == 0)
         {
             EventPump.StopAccepting();
+            if (_eventMetrics is not null)
+            {
+                _ = await _eventMetrics.StopAsync().ConfigureAwait(false);
+            }
         }
 
         Volatile.Write(
@@ -1234,6 +1726,15 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     "The runtime request was cancelled.")
                 .ConfigureAwait(false);
         }
+        catch (ObservationAdmissionException exception)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    exception.ReasonCode,
+                    "validation",
+                    "An observation was rejected by the active run boundary.")
+                .ConfigureAwait(false);
+        }
         catch (Exception)
         {
             await PublishRunFailureAsync(
@@ -1268,6 +1769,15 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     "The durable runtime request was cancelled.")
                 .ConfigureAwait(false);
         }
+        catch (ObservationAdmissionException exception)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    exception.ReasonCode,
+                    "validation",
+                    "An observation was rejected by the active run boundary.")
+                .ConfigureAwait(false);
+        }
         catch (Exception)
         {
             await PublishRunFailureAsync(
@@ -1285,17 +1795,27 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         string runId,
         DurableRunContinuation? continuation,
         IGameOperationReconciler? reconciler,
+        DurableRunResumeGuard? guard,
         CancellationToken cancellationToken)
     {
         try
         {
-            var outcome = await backend
-                .ResumeAsync(
-                    runId,
-                    continuation,
-                    reconciler,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            var outcome = guard is null
+                ? await backend
+                    .ResumeAsync(
+                        runId,
+                        continuation,
+                        reconciler,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : await ((IGodotGuardedDurableRuntimeBackend)backend)
+                    .ResumeAsync(
+                        runId,
+                        continuation,
+                        reconciler,
+                        cancellationToken,
+                        guard)
+                    .ConfigureAwait(false);
             await PublishDurableOutcomeAsync(requestId, outcome)
                 .ConfigureAwait(false);
         }
@@ -1306,6 +1826,15 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     "resume_cancelled",
                     "cancelled",
                     "The durable resume request was cancelled.")
+                .ConfigureAwait(false);
+        }
+        catch (ObservationAdmissionException exception)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    exception.ReasonCode,
+                    "validation",
+                    "An observation was rejected by the active run boundary.")
                 .ConfigureAwait(false);
         }
         catch (KeyNotFoundException)
@@ -1326,6 +1855,291 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     "The durable runtime could not resume the run.")
                 .ConfigureAwait(false);
         }
+    }
+
+    private async Task ExecuteActorBatchAsync(
+        MultiActorDecisionCoordinator coordinator,
+        string requestId,
+        MultiActorDecisionBatch batch,
+        CancellationToken cancellationToken)
+    {
+        var batchSlots = Volatile.Read(ref _actorBatchSlots)
+            ?? throw new InvalidOperationException(
+                "The multi-actor batch admission is not configured.");
+        var slotHeld = false;
+        try
+        {
+            await batchSlots
+                .WaitAsync(cancellationToken)
+                .ConfigureAwait(false);
+            slotHeld = true;
+            var outcome = await coordinator
+                .RunAsync(batch, cancellationToken)
+                .ConfigureAwait(false);
+            await EventPump
+                .PublishCriticalAsync(
+                    new GodotEventMessage
+                    {
+                        Kind = GodotEventKinds.BatchCompleted,
+                        RequestId = requestId,
+                        Json =
+                            GodotMultiActorVariantMapper
+                                .SerializeBatchOutcome(outcome)
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "batch_cancelled",
+                    "cancelled",
+                    "The multi-actor batch was cancelled.",
+                    reconciliationRequired: slotHeld,
+                    phase: slotHeld ? "batch_execution" : "batch_admission",
+                    batchId: batch.BatchId,
+                    affectedRunIds: slotHeld
+                        ? batch.Runs.Select(item => item.Run.RunId).ToArray()
+                        : Array.Empty<string>())
+                .ConfigureAwait(false);
+        }
+        catch (MultiActorBatchAbortUncertainException exception)
+        {
+            await PublishBatchUncertaintyAsync(
+                    requestId,
+                    new MultiActorUncertainty(
+                        "batch_lifecycle_uncertain",
+                        exception.ReasonCode,
+                        exception.BatchId,
+                        Array.Empty<string>()))
+                .ConfigureAwait(false);
+        }
+        catch (MultiActorBatchExecutionUncertainException exception)
+        {
+            await PublishBatchUncertaintyAsync(
+                    requestId,
+                    new MultiActorUncertainty(
+                        "batch_execution_uncertain",
+                        "participant_execution",
+                        exception.BatchId,
+                        exception.RunIds))
+                .ConfigureAwait(false);
+        }
+        catch (AggregateException exception)
+            when (TryDescribeUncertainty(exception, out _))
+        {
+            _ = TryDescribeUncertainty(
+                exception,
+                out var uncertainty);
+            await PublishBatchUncertaintyAsync(
+                    requestId,
+                    uncertainty!)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "batch_execution_failed",
+                    "runtime",
+                    "The multi-actor batch could not be completed.")
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            if (slotHeld)
+            {
+                batchSlots.Release();
+            }
+        }
+    }
+
+    private async Task ExecuteActorParticipantResumeAsync(
+        MultiActorDecisionCoordinator coordinator,
+        string requestId,
+        string batchId,
+        MultiActorBatchParticipant participant,
+        DurableRunContinuation? continuation,
+        IGameOperationReconciler? reconciler,
+        DurableRunSemanticExpectation? semanticExpectation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = semanticExpectation is null
+                ? await coordinator
+                    .ResumeParticipantAsync(
+                        batchId,
+                        participant,
+                        continuation,
+                        reconciler,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : await coordinator
+                    .ResumeParticipantAsync(
+                        batchId,
+                        participant,
+                        semanticExpectation,
+                        continuation,
+                        reconciler,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            await PublishParticipantOutcomeAsync(
+                    requestId,
+                    "resume",
+                    result)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_resume_cancelled",
+                    "cancelled",
+                    "The participant resume was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "participant_resume",
+                    batchId: batchId,
+                    participant: participant)
+                .ConfigureAwait(false);
+        }
+        catch (MultiActorBatchAbortUncertainException exception)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_lifecycle_uncertain",
+                    "reconciliation",
+                    "The participant lifecycle outcome is uncertain.",
+                    reconciliationRequired: true,
+                    phase: exception.ReasonCode,
+                    batchId: exception.BatchId,
+                    participant: participant)
+                .ConfigureAwait(false);
+        }
+        catch (DurableRunResumeGuardException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_guard_failed",
+                    "identity",
+                    "The participant manifest does not match durable identity.")
+                .ConfigureAwait(false);
+        }
+        catch (KeyNotFoundException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "run_not_found",
+                    "persistence",
+                    "The participant run was not found.")
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_resume_failed",
+                    "runtime",
+                    "The participant could not be resumed.")
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task ExecuteActorParticipantAbandonAsync(
+        MultiActorDecisionCoordinator coordinator,
+        string requestId,
+        string batchId,
+        MultiActorBatchParticipant participant,
+        string reasonCode,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await coordinator
+                .ReconcileAbandonedParticipantAsync(
+                    batchId,
+                    participant,
+                    reasonCode,
+                    reconciler,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await PublishParticipantOutcomeAsync(
+                    requestId,
+                    "abandon",
+                    result)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_abandon_cancelled",
+                    "cancelled",
+                    "The participant abandonment was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "participant_abandon",
+                    batchId: batchId,
+                    participant: participant)
+                .ConfigureAwait(false);
+        }
+        catch (MultiActorBatchAbortUncertainException exception)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_lifecycle_uncertain",
+                    "reconciliation",
+                    "The participant lifecycle outcome is uncertain.",
+                    reconciliationRequired: true,
+                    phase: exception.ReasonCode,
+                    batchId: exception.BatchId,
+                    participant: participant)
+                .ConfigureAwait(false);
+        }
+        catch (DurableRunResumeGuardException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_guard_failed",
+                    "identity",
+                    "The participant manifest does not match durable identity.")
+                .ConfigureAwait(false);
+        }
+        catch (KeyNotFoundException)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "run_not_found",
+                    "persistence",
+                    "The participant run was not found.")
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            await PublishBatchFailureAsync(
+                    requestId,
+                    "participant_abandon_failed",
+                    "runtime",
+                    "The participant could not be durably abandoned.")
+                .ConfigureAwait(false);
+        }
+    }
+
+    private ValueTask PublishParticipantOutcomeAsync(
+        string requestId,
+        string operation,
+        MultiActorRunResult result)
+    {
+        return EventPump.PublishCriticalAsync(
+            new GodotEventMessage
+            {
+                Kind = GodotEventKinds.BatchParticipantCompleted,
+                RequestId = requestId,
+                Code = operation,
+                Json = GodotMultiActorVariantMapper.SerializeResult(result)
+            },
+            CancellationToken.None);
     }
 
     private ValueTask PublishDurableOutcomeAsync(
@@ -1383,12 +2197,15 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     Kind = kind,
                     Observation = observation,
                     CreatedAt = DateTimeOffset.UtcNow
-                });
+                },
+                out var rejectionReason);
             if (!delivered)
             {
                 PublishFacadeError(
-                    "run_not_active",
-                    "The run is not active or no longer accepts controls.");
+                    rejectionReason ?? "run_not_active",
+                    rejectionReason is null
+                        ? "The run is not active or no longer accepts controls."
+                        : "The control observation was rejected by the active run boundary.");
             }
 
             return delivered;
@@ -1429,6 +2246,64 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
     }
 
+    private async ValueTask PublishBatchFailureAsync(
+        string requestId,
+        string code,
+        string category,
+        string message,
+        bool reconciliationRequired = false,
+        string? phase = null,
+        string? batchId = null,
+        MultiActorBatchParticipant? participant = null,
+        IReadOnlyList<string>? affectedRunIds = null)
+    {
+        try
+        {
+            await EventPump
+                .PublishCriticalAsync(
+                    new GodotEventMessage
+                    {
+                        Kind = GodotEventKinds.BatchFailed,
+                        RequestId = requestId,
+                        Code = code,
+                        Category = category,
+                        Message = message,
+                        ReconciliationRequired = reconciliationRequired,
+                        Phase = phase,
+                        BatchId = batchId,
+                        ParticipantRunId = participant?.RunId,
+                        ParticipantAgentId = participant?.AgentId,
+                        ParticipantDecisionKey = participant?.DecisionKey,
+                        ParticipantInputIndex =
+                            participant?.InputIndex ?? -1,
+                        AffectedRunIds =
+                            affectedRunIds?.ToArray()
+                            ?? Array.Empty<string>()
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Shutdown may close the bounded pump before a stale batch returns.
+        }
+    }
+
+    private ValueTask PublishBatchUncertaintyAsync(
+        string requestId,
+        MultiActorUncertainty uncertainty)
+    {
+        return PublishBatchFailureAsync(
+            requestId,
+            uncertainty.Code,
+            "reconciliation",
+            "The multi-actor lifecycle outcome is uncertain.",
+            reconciliationRequired: true,
+            phase: uncertainty.Phase,
+            batchId: uncertainty.BatchId,
+            affectedRunIds: uncertainty.RunIds);
+    }
+
     private void EnsureCanStartRun()
     {
         if (Volatile.Read(ref _acceptingRuns) == 0)
@@ -1457,6 +2332,70 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    internal async ValueTask PublishBatchStartedLifecycleAsync(
+        MultiActorBatchManifest manifest,
+        CancellationToken cancellationToken)
+    {
+        var json =
+            GodotMultiActorVariantMapper.SerializeManifest(manifest);
+        _ = await Dispatcher
+            .InvokeAsync(
+                () =>
+                {
+                    EmitSignal(
+                        SignalName.BatchStarted,
+                        GodotProtocolVariantMapper.ParseDictionary(json));
+                    return true;
+                },
+                $"batch-started:{manifest.BatchId}",
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask PublishActorFinishedLifecycleAsync(
+        string batchId,
+        MultiActorRunResult result,
+        CancellationToken cancellationToken)
+    {
+        var json = GodotMultiActorVariantMapper.SerializeResult(result);
+        _ = await Dispatcher
+            .InvokeAsync(
+                () =>
+                {
+                    var mapped =
+                        GodotProtocolVariantMapper.ParseDictionary(json);
+                    mapped["batch_id"] = batchId;
+                    EmitSignal(SignalName.ActorFinished, mapped);
+                    return true;
+                },
+                $"actor-finished:{batchId}:{result.InputIndex}",
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask PublishBatchAbortedLifecycleAsync(
+        string batchId,
+        string reasonCode,
+        CancellationToken cancellationToken)
+    {
+        _ = await Dispatcher
+            .InvokeAsync(
+                () =>
+                {
+                    EmitSignal(
+                        SignalName.BatchAborted,
+                        new GodotDictionary
+                        {
+                            ["batch_id"] = batchId,
+                            ["reason_code"] = reasonCode
+                        });
+                    return true;
+                },
+                $"batch-aborted:{batchId}",
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private void PublishOnMainThread(GodotEventMessage message)
@@ -1489,6 +2428,34 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                 break;
             case GodotEventKinds.RunFailed:
                 EmitSignal(SignalName.RunFailed, ToErrorDictionary(message));
+                break;
+            case GodotEventKinds.BatchCompleted:
+                {
+                    var outcome =
+                        GodotProtocolVariantMapper.ParseDictionary(
+                            message.Json!);
+                    outcome["request_id"] =
+                        message.RequestId ?? string.Empty;
+                    EmitSignal(SignalName.BatchCompleted, outcome);
+                    break;
+                }
+            case GodotEventKinds.BatchParticipantCompleted:
+                {
+                    var result =
+                        GodotProtocolVariantMapper.ParseDictionary(
+                            message.Json!);
+                    result["request_id"] =
+                        message.RequestId ?? string.Empty;
+                    result["operation"] = message.Code ?? string.Empty;
+                    EmitSignal(
+                        SignalName.BatchParticipantCompleted,
+                        result);
+                    break;
+                }
+            case GodotEventKinds.BatchFailed:
+                EmitSignal(
+                    SignalName.BatchFailed,
+                    ToErrorDictionary(message));
                 break;
             case GodotEventKinds.RuntimeStopped:
                 EmitSignal(
@@ -1621,25 +2588,54 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
         EventPump.StopAccepting();
         Dispatcher.StopAccepting();
+        Interlocked.Exchange(ref _actorBatchSlots, null)?.Dispose();
         DisposeLifetimeCancellation();
     }
 
-    private static GodotDictionary ToErrorDictionary(GodotEventMessage message)
+    internal static GodotDictionary ToErrorDictionary(GodotEventMessage message)
     {
+        var affectedRunIds = new GodotArray();
+        foreach (var runId in message.AffectedRunIds)
+        {
+            affectedRunIds.Add(runId);
+        }
+
         return new GodotDictionary
         {
             ["request_id"] = message.RequestId ?? string.Empty,
             ["code"] = message.Code ?? "runtime_error",
             ["category"] = message.Category ?? "runtime",
             ["message"] = message.Message ?? "The runtime operation failed.",
-            ["count"] = message.Count
+            ["count"] = message.Count,
+            ["reconciliation_required"] =
+                message.ReconciliationRequired,
+            ["phase"] = message.Phase ?? string.Empty,
+            ["batch_id"] = message.BatchId ?? string.Empty,
+            ["participant_run_id"] =
+                message.ParticipantRunId ?? string.Empty,
+            ["participant_agent_id"] =
+                message.ParticipantAgentId ?? string.Empty,
+            ["participant_decision_key"] =
+                message.ParticipantDecisionKey ?? string.Empty,
+            ["participant_input_index"] =
+                message.ParticipantInputIndex,
+            ["affected_run_ids"] = affectedRunIds
         };
     }
 
     private void ValidateConfiguration()
     {
+        var lifecycleConcurrency =
+            (long)MaxConcurrentActorRuns * MaxConcurrentActorBatches
+            + MaxConcurrentParticipantOperations;
         if (DispatcherCapacity < 1
             || MaxActiveRuns < 1
+            || MaxActorBatchSize is < 1 or > 1_024
+            || MaxConcurrentActorRuns is < 1 or > 1_024
+            || MaxConcurrentActorBatches is < 1 or > 32
+            || MaxConcurrentParticipantOperations is < 1 or > 1_024
+            || lifecycleConcurrency > DispatcherCapacity
+            || lifecycleConcurrency > 1_024
             || MaxCommandsPerFrame < 1
             || CommandBudgetMilliseconds <= 0
             || EventCapacity < 2
@@ -1684,8 +2680,19 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                 .Select(item => NormalizedMessageJournalCodec.Decode(
                     NormalizedMessageJournalCodec.Encode(item)))
                 .ToArray(),
-            LaneId = request.LaneId
+            LaneId = request.LaneId,
+            WorkloadClass = request.WorkloadClass
         };
+    }
+
+    private static MultiActorDecisionBatch SnapshotActorBatch(
+        MultiActorDecisionBatch batch)
+    {
+        return new MultiActorDecisionBatch(
+            batch.BatchId,
+            batch.Coordinate,
+            batch.Runs.Select(SnapshotDurableRequest).ToArray(),
+            batch.AggregateBudget);
     }
 
     private static DurableRunContinuation? SnapshotContinuation(
@@ -1705,48 +2712,97 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                 .Select(item => new SkillReference(item.SkillId, item.Version))
                 .ToArray(),
             ReplaceActiveSkills = continuation.ReplaceActiveSkills,
-            LaneId = continuation.LaneId
+            LaneId = continuation.LaneId,
+            WorkloadClass = continuation.WorkloadClass,
+            RequestCancellation = continuation.RequestCancellation
+        };
+    }
+
+    private static DurableRunResumeGuard? SnapshotResumeGuard(
+        DurableRunResumeGuard? guard)
+    {
+        if (guard is null)
+        {
+            return null;
+        }
+
+        return new DurableRunResumeGuard
+        {
+            ExpectedBatchId = guard.ExpectedBatchId,
+            ExpectedAgentId = guard.ExpectedAgentId,
+            ExpectedDecisionKey = guard.ExpectedDecisionKey,
+            RequiredInt32ExtensionName =
+                guard.RequiredInt32ExtensionName,
+            MinimumInt32ExtensionValue =
+                guard.MinimumInt32ExtensionValue,
+            MaximumInt32ExtensionValue =
+                guard.MaximumInt32ExtensionValue,
+            ExpectedInt32ExtensionValue =
+                guard.ExpectedInt32ExtensionValue,
+            SemanticExtensionName = guard.SemanticExtensionName,
+            ExpectedSemanticExtensionSha256 =
+                guard.ExpectedSemanticExtensionSha256
         };
     }
 
     private static ContextCandidate CloneContextCandidate(
         ContextCandidate candidate)
     {
-        if (candidate.Content.HasValue)
-        {
-            return new ContextCandidate(
-                candidate.Id,
-                candidate.Category,
-                candidate.Content.Value,
-                candidate.Priority,
-                candidate.Required,
-                candidate.CanDefer,
-                candidate.EstimatedTokens,
-                candidate.ExpiresAt,
-                candidate.Provenance);
-        }
-
-        var resource = candidate.Resource
-            ?? throw new InvalidOperationException(
-                "A context candidate must contain content or a resource reference.");
-        return new ContextCandidate(
-            candidate.Id,
-            candidate.Category,
-            new ContextResourceReference(
-                resource.Uri,
-                resource.MediaType,
-                resource.Digest,
-                resource.SizeBytes),
-            candidate.Priority,
-            candidate.Required,
-            candidate.CanDefer,
-            candidate.EstimatedTokens,
-            candidate.ExpiresAt,
-            candidate.Provenance);
+        return candidate.Clone();
     }
 
     private static Exception Combine(Exception? first, Exception next) =>
         first is null ? next : new AggregateException(first, next);
+
+    private static bool TryDescribeUncertainty(
+        Exception exception,
+        out MultiActorUncertainty? uncertainty)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        IReadOnlyList<Exception> candidates =
+            exception is AggregateException aggregate
+            ? aggregate.Flatten().InnerExceptions
+            : new[] { exception };
+        var execution = candidates
+            .OfType<MultiActorBatchExecutionUncertainException>()
+            .ToArray();
+        if (execution.Length > 0)
+        {
+            var first = execution[0];
+            uncertainty = new MultiActorUncertainty(
+                "batch_execution_uncertain",
+                "participant_execution",
+                first.BatchId,
+                execution
+                    .SelectMany(item => item.RunIds)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray());
+            return true;
+        }
+
+        var abort = candidates
+            .OfType<MultiActorBatchAbortUncertainException>()
+            .FirstOrDefault();
+        if (abort is not null)
+        {
+            uncertainty = new MultiActorUncertainty(
+                "batch_lifecycle_uncertain",
+                abort.ReasonCode,
+                abort.BatchId,
+                Array.Empty<string>());
+            return true;
+        }
+
+        uncertainty = null;
+        return false;
+    }
+
+    private sealed record MultiActorUncertainty(
+        string Code,
+        string Phase,
+        string BatchId,
+        IReadOnlyList<string> RunIds);
 
     private sealed class RunRemoval
     {

@@ -35,6 +35,29 @@ $artifact = Join-Path $unityRoot `
 & (Join-Path $PSScriptRoot 'Test-UnityPackageArtifact.ps1') `
     -ArtifactPath $artifact
 
+& (Join-Path $PSScriptRoot "Build-UpmPackage.ps1") `
+    -Configuration Release -IncludeSymbols -Force
+if ($LASTEXITCODE -ne 0) {
+    throw "UPM symbol artifact assembly failed."
+}
+& (Join-Path $PSScriptRoot 'Test-UnityPackageArtifact.ps1') `
+    -ArtifactPath $artifact `
+    -ExpectSymbols
+& (Join-Path $PSScriptRoot 'Test-UnityPackageArtifactSelfTest.ps1') `
+    -ArtifactPath $artifact `
+    -ExpectSymbols
+
+& (Join-Path $PSScriptRoot "Build-UpmPackage.ps1") `
+    -Configuration Release -Force
+if ($LASTEXITCODE -ne 0) {
+    throw "Final UPM artifact assembly failed."
+}
+& (Join-Path $PSScriptRoot 'Test-UnityPackageArtifact.ps1') `
+    -ArtifactPath $artifact
+
+& (Join-Path $PSScriptRoot 'Test-UnityPackageArtifactSelfTest.ps1') `
+    -ArtifactPath $artifact
+
 if ([string]::IsNullOrWhiteSpace($UnityEditorPath) `
     -xor [string]::IsNullOrWhiteSpace($UnityProjectPath)) {
     throw "Pass both -UnityEditorPath and -UnityProjectPath, or neither."

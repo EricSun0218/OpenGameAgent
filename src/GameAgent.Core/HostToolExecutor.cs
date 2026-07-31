@@ -8,18 +8,24 @@ internal sealed class HostToolExecutor : IToolCallExecutor
 {
     private readonly IGameHost _host;
     private readonly IReadOnlyDictionary<string, ActionRequest> _requests;
+    private readonly AgentRun _run;
     private readonly ToolArgumentValidator _resultValidator;
+    private readonly bool _requireAudienceIncarnation;
     private readonly ConcurrentDictionary<string, ActionReceipt> _receipts =
         new(StringComparer.Ordinal);
 
     public HostToolExecutor(
         IGameHost host,
         IReadOnlyDictionary<string, ActionRequest> requests,
+        AgentRun run,
+        bool requireAudienceIncarnation = false,
         ToolArgumentValidator? resultValidator = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _requests = requests
                     ?? throw new ArgumentNullException(nameof(requests));
+        _run = run ?? throw new ArgumentNullException(nameof(run));
+        _requireAudienceIncarnation = requireAudienceIncarnation;
         _resultValidator = resultValidator ?? new ToolArgumentValidator();
     }
 
@@ -47,7 +53,9 @@ internal sealed class HostToolExecutor : IToolCallExecutor
             .ConfigureAwait(false);
         var receipt = ActionReceiptIngressValidator.ValidateAndClone(
             action,
-            hostReceipt);
+            hostReceipt,
+            _run,
+            _requireAudienceIncarnation);
         if (string.Equals(
                 receipt.Status,
                 ReceiptStatuses.Succeeded,

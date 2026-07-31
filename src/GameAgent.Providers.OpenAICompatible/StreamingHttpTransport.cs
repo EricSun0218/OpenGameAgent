@@ -10,6 +10,9 @@ public sealed class StreamingHttpRequest
     public string BearerToken { get; set; } = string.Empty;
 
     public byte[] Body { get; set; } = Array.Empty<byte>();
+
+    public string ContentType { get; set; } =
+        "application/json; charset=utf-8";
 }
 
 public interface IStreamingHttpResponse : IDisposable
@@ -23,6 +26,11 @@ public interface IStreamingHttpResponse : IDisposable
 
 public interface IStreamingHttpTransport
 {
+    /// <summary>
+    /// The implementation must finish consuming request.Body before this
+    /// operation completes. The provider clears the owned buffer immediately
+    /// afterward.
+    /// </summary>
     ValueTask<IStreamingHttpResponse> SendAsync(
         StreamingHttpRequest request,
         CancellationToken cancellationToken);
@@ -144,17 +152,26 @@ public sealed class HttpClientStreamingTransport :
                 nameof(request));
         }
 
+        MediaTypeHeaderValue contentType;
+        try
+        {
+            contentType = MediaTypeHeaderValue.Parse(request.ContentType);
+        }
+        catch (FormatException exception)
+        {
+            throw new ArgumentException(
+                "The transport content type is invalid.",
+                nameof(request),
+                exception);
+        }
+
         using var message = new HttpRequestMessage(HttpMethod.Post, request.Uri);
         message.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue("text/event-stream"));
         message.Headers.Authorization =
             new AuthenticationHeaderValue("Bearer", bearerToken);
         message.Content = new ByteArrayContent(request.Body);
-        message.Content.Headers.ContentType =
-            new MediaTypeHeaderValue("application/json")
-            {
-                CharSet = "utf-8"
-            };
+        message.Content.Headers.ContentType = contentType;
 
         var response = await _client.SendAsync(
                 message,

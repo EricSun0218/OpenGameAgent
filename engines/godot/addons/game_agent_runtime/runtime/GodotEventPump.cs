@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Threading.Channels;
+using GameAgent.Core;
 
 namespace GameAgent.Godot;
 
@@ -9,6 +10,10 @@ internal static class GodotEventKinds
     public const string RuntimeEvent = "runtime_event";
     public const string RunCompleted = "run_completed";
     public const string RunFailed = "run_failed";
+    public const string BatchCompleted = "batch_completed";
+    public const string BatchParticipantCompleted =
+        "batch_participant_completed";
+    public const string BatchFailed = "batch_failed";
     public const string RuntimeStopped = "runtime_stopped";
     public const string RuntimeError = "runtime_error";
     public const string PumpOverflow = "pump_overflow";
@@ -16,6 +21,8 @@ internal static class GodotEventKinds
 
 internal sealed class GodotEventMessage
 {
+    internal long EnqueuedTimestamp { get; set; }
+
     public string Kind { get; init; } = string.Empty;
 
     public string? RequestId { get; init; }
@@ -33,16 +40,34 @@ internal sealed class GodotEventMessage
     public int Count { get; init; }
 
     public bool ReconciliationRequired { get; init; }
+
+    public string? Phase { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? ParticipantRunId { get; init; }
+
+    public string? ParticipantAgentId { get; init; }
+
+    public string? ParticipantDecisionKey { get; init; }
+
+    public int ParticipantInputIndex { get; init; } = -1;
+
+    public IReadOnlyList<string> AffectedRunIds { get; init; } =
+        Array.Empty<string>();
 }
 
 internal sealed class GodotEventPump
 {
     private readonly Channel<GodotEventMessage> _events;
+    private readonly RuntimeMetricsEmitter? _metrics;
     private int _accepting = 1;
     private int _droppedCount;
     private int _pendingCount;
 
-    public GodotEventPump(int capacity)
+    public GodotEventPump(
+        int capacity,
+        RuntimeMetricsEmitter? metrics = null)
     {
         if (capacity < 2)
         {
@@ -50,6 +75,7 @@ internal sealed class GodotEventPump
         }
 
         Capacity = capacity;
+        _metrics = metrics;
         _events = Channel.CreateBounded<GodotEventMessage>(
             new BoundedChannelOptions(capacity)
             {
@@ -73,6 +99,7 @@ internal sealed class GodotEventPump
             return false;
         }
 
+        message.EnqueuedTimestamp = Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _pendingCount);
         if (_events.Writer.TryWrite(message))
         {
@@ -95,6 +122,7 @@ internal sealed class GodotEventPump
                 cancellationToken);
         }
 
+        message.EnqueuedTimestamp = Stopwatch.GetTimestamp();
         Interlocked.Increment(ref _pendingCount);
         try
         {
@@ -130,6 +158,12 @@ internal sealed class GodotEventPump
         var dropped = Interlocked.Exchange(ref _droppedCount, 0);
         if (dropped > 0 && processed < maxEvents)
         {
+            _metrics?.Record(
+                RuntimeMetricNames.EventPumpDropped,
+                RuntimeMetricKind.Counter,
+                dropped,
+                outcome: RuntimeMetricOutcomes.Dropped,
+                engine: "godot");
             publish(new GodotEventMessage
             {
                 Kind = GodotEventKinds.PumpOverflow,
@@ -146,6 +180,13 @@ internal sealed class GodotEventPump
                && _events.Reader.TryRead(out var message))
         {
             Interlocked.Decrement(ref _pendingCount);
+            _metrics?.Record(
+                RuntimeMetricNames.EventPumpDispatchLatencyMilliseconds,
+                RuntimeMetricKind.Histogram,
+                RuntimeMetricsEmitter.ElapsedMilliseconds(
+                    message.EnqueuedTimestamp),
+                outcome: RuntimeMetricOutcomes.Success,
+                engine: "godot");
             publish(message);
             processed++;
         }

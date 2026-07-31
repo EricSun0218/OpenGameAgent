@@ -71,7 +71,8 @@ public sealed class ContextCandidate
             canDefer,
             estimatedTokens,
             expiresAt,
-            provenance)
+            provenance,
+            observationAdmission: null)
     {
     }
 
@@ -95,11 +96,12 @@ public sealed class ContextCandidate
             canDefer,
             estimatedTokens,
             expiresAt,
-            provenance)
+            provenance,
+            observationAdmission: null)
     {
     }
 
-    private ContextCandidate(
+    internal ContextCandidate(
         string id,
         string category,
         JsonElement? content,
@@ -109,7 +111,8 @@ public sealed class ContextCandidate
         bool canDefer,
         int? estimatedTokens,
         DateTimeOffset? expiresAt,
-        string? provenance)
+        string? provenance,
+        ObservationAdmissionSnapshot? observationAdmission)
     {
         Id = RuntimeGuard.RequiredUtf8(id, 128, nameof(id));
         Category = RuntimeGuard.RequiredUtf8(category, 64, nameof(category));
@@ -131,6 +134,7 @@ public sealed class ContextCandidate
         EstimatedTokens = estimatedTokens;
         ExpiresAt = expiresAt;
         Provenance = provenance;
+        ObservationAdmissionMetadata = observationAdmission;
     }
 
     public string Id { get; }
@@ -153,8 +157,14 @@ public sealed class ContextCandidate
 
     public string? Provenance { get; }
 
+    internal ObservationAdmissionSnapshot? ObservationAdmissionMetadata
+    {
+        get;
+    }
+
     public static ContextCandidate FromObservation(
         ObservationEnvelope observation,
+        AgentRun run,
         bool required = false,
         bool canDefer = true,
         int? estimatedTokens = null)
@@ -164,11 +174,17 @@ public sealed class ContextCandidate
             throw new ArgumentNullException(nameof(observation));
         }
 
-        ProtocolValidator.EnsureValid(observation);
+        ObservationAdmission.EnsureVisibleToRun(observation, run);
+        var admission =
+            GameAgent.Core.ObservationAdmission.Snapshot(
+                observation,
+                run.AgentId);
         DateTimeOffset? expiresAt = null;
         if (observation.TtlMs.HasValue)
         {
-            expiresAt = observation.ObservedAt.AddMilliseconds(observation.TtlMs.Value);
+            expiresAt = SaturatingExpiration(
+                observation.ObservedAt,
+                observation.TtlMs.Value);
         }
 
         var provenance = $"{observation.Source}:{observation.Trust}";
@@ -178,12 +194,14 @@ public sealed class ContextCandidate
                 observation.ObservationId,
                 observation.Kind,
                 observation.Payload.Value,
+                null,
                 observation.Priority,
                 required,
                 canDefer,
                 estimatedTokens,
                 expiresAt,
-                provenance);
+                provenance,
+                admission);
         }
 
         var resource = observation.ResourceRef
@@ -193,6 +211,7 @@ public sealed class ContextCandidate
         return new ContextCandidate(
             observation.ObservationId,
             observation.Kind,
+            null,
             new ContextResourceReference(
                 resource.Uri,
                 resource.MediaType,
@@ -203,7 +222,54 @@ public sealed class ContextCandidate
             canDefer,
             estimatedTokens,
             expiresAt,
-            provenance);
+            provenance,
+            admission);
+    }
+
+    /// <summary>
+    /// Creates a detached candidate snapshot while retaining any observation
+    /// admission metadata needed by a strict durable runtime.
+    /// </summary>
+    public ContextCandidate Clone()
+    {
+        return new ContextCandidate(
+            Id,
+            Category,
+            Content?.Clone(),
+            Resource is null
+                ? null
+                : new ContextResourceReference(
+                    Resource.Uri,
+                    Resource.MediaType,
+                    Resource.Digest,
+                    Resource.SizeBytes),
+            Priority,
+            Required,
+            CanDefer,
+            EstimatedTokens,
+            ExpiresAt,
+            Provenance,
+            ObservationAdmissionMetadata);
+    }
+
+    private static DateTimeOffset SaturatingExpiration(
+        DateTimeOffset observedAt,
+        long ttlMs)
+    {
+        if (ttlMs > long.MaxValue / TimeSpan.TicksPerMillisecond)
+        {
+            return DateTimeOffset.MaxValue;
+        }
+
+        try
+        {
+            return observedAt.AddTicks(
+                ttlMs * TimeSpan.TicksPerMillisecond);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return DateTimeOffset.MaxValue;
+        }
     }
 }
 
@@ -353,10 +419,16 @@ public sealed class ContextBudgetExceededException : InvalidOperationException
 public sealed class ContextCompiler
 {
     private readonly ContextCompilerOptions _options;
+    private readonly IRuntimeTokenEstimator _tokenEstimator;
 
-    public ContextCompiler(ContextCompilerOptions? options = null)
+    public ContextCompiler(
+        ContextCompilerOptions? options = null,
+        IRuntimeTokenEstimator? tokenEstimator = null)
     {
         _options = options ?? new ContextCompilerOptions();
+        _tokenEstimator = tokenEstimator
+                          ?? new Utf8RatioTokenEstimator(
+                              _options.EstimatedBytesPerToken);
     }
 
     internal int MaxCandidates => _options.MaxCandidates;
@@ -388,7 +460,8 @@ public sealed class ContextCompiler
         var externalized = new List<ResourceReference>();
         var reasonCodes = new HashSet<string>(StringComparer.Ordinal);
         var usedBytes = request.Skills?.EstimatedUtf8Bytes ?? 0;
-        var usedTokens = EstimateTokens(usedBytes);
+        var usedTokens = _tokenEstimator.EstimateOpaqueUtf8Bytes(
+            usedBytes);
 
         EnsureSkillBudget(usedBytes, usedTokens);
 
@@ -445,7 +518,18 @@ public sealed class ContextCompiler
             Externalized = externalized,
             EstimatedTokens = usedTokens,
             BudgetLimit = _options.MaxEstimatedTokens,
-            ReasonCodes = reasonCodes.OrderBy(item => item, StringComparer.Ordinal).ToList()
+            ReasonCodes = reasonCodes
+                .OrderBy(item => item, StringComparer.Ordinal)
+                .ToList(),
+            Extensions = new Dictionary<string, JsonElement>(
+                StringComparer.Ordinal)
+            {
+                ["tokenEstimator"] = JsonArrayBuilder.Object(
+                    ("id", JsonArrayBuilder.String(
+                        _tokenEstimator.EstimatorId)),
+                    ("version", JsonArrayBuilder.String(
+                        _tokenEstimator.Version)))
+            }
         };
 
         return new CompiledContext(
@@ -476,7 +560,7 @@ public sealed class ContextCompiler
             }
 
             var bytes = Measure(candidate);
-            var measuredTokens = EstimateTokens(bytes);
+            var measuredTokens = EstimateTokens(candidate, bytes);
             var tokens = candidate.EstimatedTokens.HasValue
                 ? Math.Max(candidate.EstimatedTokens.Value, measuredTokens)
                 : measuredTokens;
@@ -597,15 +681,33 @@ public sealed class ContextCompiler
         reasonCodes.Add(reasonCode);
     }
 
-    private int EstimateTokens(int bytes)
+    private int EstimateTokens(ContextCandidate candidate, int bytes)
     {
         if (bytes <= 0)
         {
             return 0;
         }
 
-        return Math.Max(1, checked((bytes + _options.EstimatedBytesPerToken - 1)
-                                   / _options.EstimatedBytesPerToken));
+        if (candidate.Content.HasValue)
+        {
+            return _tokenEstimator.EstimateTokens(
+                candidate.Content.Value.GetRawText());
+        }
+
+        var resource = candidate.Resource
+                       ?? throw new ArgumentException(
+                           "A context candidate must contain content or a "
+                           + "resource reference.",
+                           nameof(candidate));
+        var known = string.Concat(
+            resource.Uri,
+            "\n",
+            resource.MediaType,
+            "\n",
+            resource.Digest ?? string.Empty);
+        return checked(
+            _tokenEstimator.EstimateTokens(known)
+            + _tokenEstimator.EstimateOpaqueUtf8Bytes(24));
     }
 
     private sealed class PreparedCandidate

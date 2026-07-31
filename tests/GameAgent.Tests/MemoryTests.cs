@@ -47,6 +47,38 @@ public sealed class MemoryTests
     }
 
     [Fact]
+    public async Task CjkSubstringQueryRecallsLongerChineseMemory()
+    {
+        var store = new DeterministicMemoryStore(capacity: 2);
+        await store.UpsertAsync(
+            Record(
+                "north-bridge",
+                "world:w-1/agent:a-1",
+                """{"description":"北桥已经关闭，禁止通行。"}""",
+                Array.Empty<string>(),
+                importance: 50),
+            default);
+        await store.UpsertAsync(
+            Record(
+                "south-gate",
+                "world:w-1/agent:a-1",
+                """{"description":"南门仍然开放。"}""",
+                Array.Empty<string>(),
+                importance: 50),
+            default);
+
+        var results = await store.SearchAsync(
+            new MemoryQuery(
+                "world:w-1/agent:a-1",
+                Json("""{"search":"北桥"}""")),
+            default);
+
+        Assert.Equal(
+            new[] { "north-bridge" },
+            results.Select(item => item.Record.MemoryId));
+    }
+
+    [Fact]
     public async Task SearchIsBoundedStableAndFiltersExpiredRecords()
     {
         var store = new DeterministicMemoryStore(capacity: 3);
@@ -88,6 +120,116 @@ public sealed class MemoryTests
 
         var result = Assert.Single(results);
         Assert.Equal("a", result.Record.MemoryId);
+    }
+
+    [Fact]
+    public async Task PerspectivalMemoryRequiresObserverOrPrivilegedQuery()
+    {
+        var store = new DeterministicMemoryStore();
+        var observer = new GameEntityIdentity("npc", 1);
+        await store.UpsertAsync(
+            Record(
+                "general",
+                "scope",
+                """{"event":"meeting"}""",
+                Array.Empty<string>(),
+                importance: 50),
+            default);
+        await store.UpsertAsync(
+            Record(
+                "private",
+                "scope",
+                """{"event":"meeting"}""",
+                Array.Empty<string>(),
+                importance: 50,
+                provenance: new MemoryProvenance(
+                    "world",
+                    "session",
+                    1,
+                    "run",
+                    "event",
+                    committed: true,
+                    perspective: new GameKnowledgePerspective(
+                        observer,
+                        "witnessed"))),
+            default);
+
+        var defaultResults = await store.SearchAsync(
+            new MemoryQuery(
+                "scope",
+                Json("""{"event":"meeting"}""")),
+            default);
+        var observerResults = await store.SearchAsync(
+            new MemoryQuery(
+                "scope",
+                Json("""{"event":"meeting"}"""),
+                observer: observer),
+            default);
+        var otherObserverResults = await store.SearchAsync(
+            new MemoryQuery(
+                "scope",
+                Json("""{"event":"meeting"}"""),
+                observer: new GameEntityIdentity("npc", 2)),
+            default);
+        var privilegedResults = await store.SearchAsync(
+            new MemoryQuery(
+                "scope",
+                Json("""{"event":"meeting"}"""),
+                includeAllPerspectives: true),
+            default);
+
+        Assert.Equal(
+            new[] { "general" },
+            defaultResults.Select(item => item.Record.MemoryId));
+        Assert.Equal(
+            new[] { "general", "private" },
+            observerResults.Select(item => item.Record.MemoryId));
+        Assert.Equal(
+            new[] { "general" },
+            otherObserverResults.Select(item => item.Record.MemoryId));
+        Assert.Equal(
+            new[] { "general", "private" },
+            privilegedResults.Select(item => item.Record.MemoryId));
+    }
+
+    [Fact]
+    public async Task GameTimeImplicitlyScopesTimelessMemoryToItsTimeline()
+    {
+        var store = new DeterministicMemoryStore();
+        foreach (var timeline in new[] { "branch-a", "branch-b" })
+        {
+            await store.UpsertAsync(
+                Record(
+                    timeline,
+                    "scope",
+                    """{"event":"meeting"}""",
+                    Array.Empty<string>(),
+                    importance: 50,
+                    provenance: new MemoryProvenance(
+                        "world",
+                        "session",
+                        1,
+                        "run",
+                        "event",
+                        committed: true,
+                        timelineId: timeline)),
+                default);
+        }
+
+        var results = await store.SearchAsync(
+            new MemoryQuery(
+                "scope",
+                Json("""{"event":"meeting"}"""),
+                gameTime: new GameTimePoint(
+                    "simulation",
+                    "branch-a",
+                    epoch: 0,
+                    tick: 10)),
+            default);
+
+        Assert.Equal(
+            new[] { "branch-a" },
+            results.Select(item => item.Record.MemoryId));
     }
 
     [Fact]
@@ -152,7 +294,8 @@ public sealed class MemoryTests
         string scope,
         string json,
         IReadOnlyList<string> tags,
-        int importance)
+        int importance,
+        MemoryProvenance? provenance = null)
     {
         return new MemoryRecord(
             id,
@@ -161,7 +304,8 @@ public sealed class MemoryTests
             tags,
             importance,
             DateTimeOffset.UnixEpoch,
-            DateTimeOffset.UnixEpoch);
+            DateTimeOffset.UnixEpoch,
+            provenance: provenance);
     }
 
     private static JsonElement Json(string json)

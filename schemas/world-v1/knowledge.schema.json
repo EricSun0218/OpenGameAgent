@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/world-v1/knowledge.schema.json",
+  "title": "Native World Knowledge Content v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "knowledge"
+  ],
+  "properties": {
+    "contract": {
+      "const": "game-agent.world-knowledge.v1"
+    },
+    "knowledge": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "data"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "version": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "data": {
+            "$ref": "native-world-common.schema.json#/$defs/jsonValue"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "extensions": {
+      "$ref": "native-world-common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

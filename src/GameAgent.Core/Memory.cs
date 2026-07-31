@@ -4,8 +4,88 @@ using System.Text.Json;
 
 namespace GameAgent.Core;
 
+public sealed class MemoryProvenance
+{
+    public MemoryProvenance(
+        string worldId,
+        string? sessionId,
+        long saveRevision,
+        string sourceRunId,
+        string sourceEventId,
+        bool committed,
+        string? timelineId = null,
+        GameKnowledgePerspective? perspective = null,
+        long? timelineEpoch = null)
+    {
+        WorldId = RuntimeGuard.RequiredUtf8(
+            worldId,
+            128,
+            nameof(worldId));
+        SessionId = sessionId is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(
+                sessionId,
+                128,
+                nameof(sessionId));
+        if (saveRevision < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(saveRevision));
+        }
+
+        SaveRevision = saveRevision;
+        SourceRunId = RuntimeGuard.RequiredUtf8(
+            sourceRunId,
+            128,
+            nameof(sourceRunId));
+        SourceEventId = RuntimeGuard.RequiredUtf8(
+            sourceEventId,
+            128,
+            nameof(sourceEventId));
+        Committed = committed;
+        TimelineId = timelineId is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(
+                timelineId,
+                128,
+                nameof(timelineId));
+        if (timelineEpoch < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timelineEpoch));
+        }
+
+        TimelineEpoch = timelineEpoch;
+        Perspective = perspective;
+    }
+
+    public string WorldId { get; }
+
+    public string? SessionId { get; }
+
+    public long SaveRevision { get; }
+
+    public string SourceRunId { get; }
+
+    public string SourceEventId { get; }
+
+    public bool Committed { get; }
+
+    public string? TimelineId { get; }
+
+    public long? TimelineEpoch { get; }
+
+    public GameKnowledgePerspective? Perspective { get; }
+}
+
 public sealed class MemoryRecord
 {
+    /// <summary>
+    /// Creates a memory record without game-specific provenance.
+    /// </summary>
+    /// <remarks>
+    /// This overload preserves the original binary constructor contract.
+    /// New code that needs provenance or game time can use the extended
+    /// overload.
+    /// </remarks>
     public MemoryRecord(
         string memoryId,
         string scope,
@@ -14,7 +94,32 @@ public sealed class MemoryRecord
         int importance,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        DateTimeOffset? expiresAt = null)
+        DateTimeOffset? expiresAt)
+        : this(
+            memoryId,
+            scope,
+            content,
+            tags,
+            importance,
+            createdAt,
+            updatedAt,
+            expiresAt,
+            provenance: null,
+            gameTimeWindow: null)
+    {
+    }
+
+    public MemoryRecord(
+        string memoryId,
+        string scope,
+        JsonElement content,
+        IEnumerable<string>? tags,
+        int importance,
+        DateTimeOffset createdAt,
+        DateTimeOffset updatedAt,
+        DateTimeOffset? expiresAt = null,
+        MemoryProvenance? provenance = null,
+        GameTimeWindow? gameTimeWindow = null)
     {
         MemoryId = RuntimeGuard.RequiredUtf8(memoryId, 128, nameof(memoryId));
         Scope = RuntimeGuard.RequiredUtf8(scope, 256, nameof(scope));
@@ -46,6 +151,23 @@ public sealed class MemoryRecord
         CreatedAt = createdAt;
         UpdatedAt = updatedAt;
         ExpiresAt = expiresAt;
+        Provenance = provenance;
+        GameTimeWindow = gameTimeWindow;
+        if (provenance?.TimelineId is not null
+            && gameTimeWindow is not null)
+        {
+            var coordinate = gameTimeWindow.ValidFrom
+                             ?? gameTimeWindow.ValidUntil!;
+            if (!string.Equals(
+                    provenance.TimelineId,
+                    coordinate.TimelineId,
+                    StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "Memory provenance and game-time timelines must match.",
+                    nameof(gameTimeWindow));
+            }
+        }
     }
 
     public string MemoryId { get; }
@@ -63,17 +185,64 @@ public sealed class MemoryRecord
     public DateTimeOffset UpdatedAt { get; }
 
     public DateTimeOffset? ExpiresAt { get; }
+
+    public MemoryProvenance? Provenance { get; }
+
+    public GameTimeWindow? GameTimeWindow { get; }
 }
 
 public sealed class MemoryQuery
 {
+    /// <summary>
+    /// Creates a memory query without game-specific provenance filters.
+    /// </summary>
+    /// <remarks>
+    /// This overload preserves the original binary constructor contract.
+    /// New code that needs world, timeline, or perspective filtering can use
+    /// the extended overload.
+    /// </remarks>
+    public MemoryQuery(
+        string scope,
+        JsonElement query,
+        IEnumerable<string>? requiredTags,
+        int maxResults,
+        int maxUtf8Bytes,
+        DateTimeOffset? now)
+        : this(
+            scope,
+            query,
+            requiredTags,
+            maxResults,
+            maxUtf8Bytes,
+            now,
+            worldId: null,
+            sessionId: null,
+            maximumSaveRevision: null,
+            requireCommittedProvenance: false,
+            timelineId: null,
+            observer: null,
+            gameTime: null,
+            includeAllPerspectives: false,
+            timelineEpoch: null)
+    {
+    }
+
     public MemoryQuery(
         string scope,
         JsonElement query,
         IEnumerable<string>? requiredTags = null,
         int maxResults = 8,
         int maxUtf8Bytes = 32_768,
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null,
+        string? worldId = null,
+        string? sessionId = null,
+        long? maximumSaveRevision = null,
+        bool requireCommittedProvenance = false,
+        string? timelineId = null,
+        GameEntityIdentity? observer = null,
+        GameTimePoint? gameTime = null,
+        bool includeAllPerspectives = false,
+        long? timelineEpoch = null)
     {
         Scope = RuntimeGuard.RequiredUtf8(scope, 256, nameof(scope));
         JsonValueInspector.ValidateAndMeasure(
@@ -101,6 +270,58 @@ public sealed class MemoryQuery
         MaxResults = maxResults;
         MaxUtf8Bytes = maxUtf8Bytes;
         Now = now ?? DateTimeOffset.UtcNow;
+        WorldId = worldId is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(worldId, 128, nameof(worldId));
+        SessionId = sessionId is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(sessionId, 128, nameof(sessionId));
+        if (maximumSaveRevision < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumSaveRevision));
+        }
+
+        MaximumSaveRevision = maximumSaveRevision;
+        RequireCommittedProvenance = requireCommittedProvenance;
+        var explicitTimelineId = timelineId is null
+            ? null
+            : RuntimeGuard.RequiredUtf8(
+                timelineId,
+                128,
+                nameof(timelineId));
+        Observer = observer;
+        GameTime = gameTime;
+        IncludeAllPerspectives = includeAllPerspectives;
+        if (timelineEpoch < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timelineEpoch));
+        }
+
+        if (gameTime is not null
+            && explicitTimelineId is not null
+            && !string.Equals(
+                gameTime.TimelineId,
+                explicitTimelineId,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Memory query and game-time timelines must match.",
+                nameof(gameTime));
+        }
+
+        TimelineId = explicitTimelineId ?? gameTime?.TimelineId;
+        if (gameTime is not null
+            && timelineEpoch.HasValue
+            && timelineEpoch.Value != gameTime.Epoch)
+        {
+            throw new ArgumentException(
+                "Memory query and game-time epochs must match.",
+                nameof(timelineEpoch));
+        }
+
+        TimelineEpoch = timelineEpoch ?? gameTime?.Epoch;
+        EnforceTimelineEpoch = timelineEpoch.HasValue;
     }
 
     public string Scope { get; }
@@ -114,6 +335,34 @@ public sealed class MemoryQuery
     public int MaxUtf8Bytes { get; }
 
     public DateTimeOffset Now { get; }
+
+    public string? WorldId { get; }
+
+    public string? SessionId { get; }
+
+    public long? MaximumSaveRevision { get; }
+
+    public bool RequireCommittedProvenance { get; }
+
+    public string? TimelineId { get; }
+
+    public long? TimelineEpoch { get; }
+
+    internal bool EnforceTimelineEpoch { get; }
+
+    public GameEntityIdentity? Observer { get; }
+
+    public GameTimePoint? GameTime { get; }
+
+    /// <summary>
+    /// Gets whether this privileged query may read memories from every
+    /// knowledge perspective. The default is <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// Games should enable this only for trusted system-level operations, not
+    /// for an actor's ordinary recall.
+    /// </remarks>
+    public bool IncludeAllPerspectives { get; }
 }
 
 public sealed class MemorySearchResult
@@ -154,6 +403,116 @@ public interface IMemoryStore : IMemoryProvider
         CancellationToken cancellationToken);
 }
 
+internal static class MemoryQueryFilter
+{
+    public static bool Matches(MemoryRecord record, MemoryQuery query)
+    {
+        return string.Equals(
+                   record.Scope,
+                   query.Scope,
+                   StringComparison.Ordinal)
+               && (record.ExpiresAt is null
+                   || record.ExpiresAt > query.Now)
+               && MatchesProvenance(
+                   record.Provenance,
+                   record.GameTimeWindow,
+                   query)
+               && MatchesGameTime(
+                   record.GameTimeWindow,
+                   query.GameTime)
+               && query.RequiredTags.All(
+                   tag => record.Tags.Contains(
+                       tag,
+                       StringComparer.Ordinal));
+    }
+
+    private static bool MatchesProvenance(
+        MemoryProvenance? provenance,
+        GameTimeWindow? gameTimeWindow,
+        MemoryQuery query)
+    {
+        if (query.RequireCommittedProvenance
+            && (provenance is null || !provenance.Committed))
+        {
+            return false;
+        }
+
+        if (query.WorldId is not null
+            && (provenance is null
+                || !string.Equals(
+                    provenance.WorldId,
+                    query.WorldId,
+                    StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (query.SessionId is not null
+            && (provenance is null
+                || !string.Equals(
+                    provenance.SessionId,
+                    query.SessionId,
+                    StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (query.TimelineId is not null)
+        {
+            var recordTimeline = provenance?.TimelineId
+                                 ?? (gameTimeWindow?.ValidFrom
+                                     ?? gameTimeWindow?.ValidUntil)
+                                 ?.TimelineId;
+            if (!string.Equals(
+                    recordTimeline,
+                    query.TimelineId,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        var recordWindowEpoch = (gameTimeWindow?.ValidFrom
+                                 ?? gameTimeWindow?.ValidUntil)
+            ?.Epoch;
+        if (query.TimelineEpoch.HasValue
+            && (query.EnforceTimelineEpoch
+                || provenance?.TimelineEpoch.HasValue == true
+                || recordWindowEpoch.HasValue))
+        {
+            var recordEpoch = provenance?.TimelineEpoch
+                              ?? recordWindowEpoch;
+            if (recordEpoch != query.TimelineEpoch)
+            {
+                return false;
+            }
+        }
+
+        var perspective = provenance?.Perspective;
+        if (perspective is not null
+            && !query.IncludeAllPerspectives
+            && (query.Observer is null
+                || !query.Observer.IsSameIncarnation(
+                    perspective.Observer)))
+        {
+            return false;
+        }
+
+        return !query.MaximumSaveRevision.HasValue
+               || provenance is not null
+               && provenance.SaveRevision
+               <= query.MaximumSaveRevision.Value;
+    }
+
+    private static bool MatchesGameTime(
+        GameTimeWindow? window,
+        GameTimePoint? point)
+    {
+        return window is null
+               || point is not null && window.Contains(point);
+    }
+}
+
 /// <summary>
 /// A bounded, deterministic baseline memory implementation. It intentionally
 /// requires no embedding model: both natural-language and structured JSON
@@ -161,10 +520,12 @@ public interface IMemoryStore : IMemoryProvider
 /// it with a vector, graph, full-text, or service-backed provider through
 /// IMemoryProvider.
 /// </summary>
-public sealed class DeterministicMemoryStore : IMemoryStore
+public sealed partial class DeterministicMemoryStore :
+    IMemoryStore,
+    IIdempotentAtomicMemoryBatchStore
 {
     private readonly object _sync = new();
-    private readonly Dictionary<string, IndexedRecord> _records =
+    private Dictionary<string, IndexedRecord> _records =
         new(StringComparer.Ordinal);
     private readonly int _capacity;
 
@@ -252,10 +613,7 @@ public sealed class DeterministicMemoryStore : IMemoryStore
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = indexed.Record;
-            if (!string.Equals(record.Scope, query.Scope, StringComparison.Ordinal)
-                || record.ExpiresAt <= query.Now
-                || query.RequiredTags.Any(
-                    tag => !record.Tags.Contains(tag, StringComparer.Ordinal)))
+            if (!MemoryQueryFilter.Matches(record, query))
             {
                 continue;
             }
@@ -365,20 +723,62 @@ public sealed class DeterministicMemoryStore : IMemoryStore
 
     private static void AddText(string value, ISet<string> terms)
     {
-        var token = new StringBuilder();
+        var word = new StringBuilder();
+        var cjkRun = new StringBuilder();
         foreach (var character in value.Normalize(NormalizationForm.FormKC))
         {
-            if (char.IsLetterOrDigit(character)
-                || character >= '\u3400' && character <= '\u9fff')
+            if (IsCjk(character))
             {
-                token.Append(char.ToLowerInvariant(character));
+                FlushToken(word, terms);
+                cjkRun.Append(character);
                 continue;
             }
 
-            FlushToken(token, terms);
+            if (char.IsLetterOrDigit(character))
+            {
+                FlushCjkRun(cjkRun, terms);
+                word.Append(char.ToLowerInvariant(character));
+                continue;
+            }
+
+            FlushToken(word, terms);
+            FlushCjkRun(cjkRun, terms);
         }
 
-        FlushToken(token, terms);
+        FlushToken(word, terms);
+        FlushCjkRun(cjkRun, terms);
+    }
+
+    private static bool IsCjk(char character)
+    {
+        return character is >= '\u3400' and <= '\u9fff'
+            or >= '\uf900' and <= '\ufaff';
+    }
+
+    private static void FlushCjkRun(
+        StringBuilder run,
+        ISet<string> terms)
+    {
+        if (run.Length == 0)
+        {
+            return;
+        }
+
+        for (var index = 0; index < run.Length; index++)
+        {
+            terms.Add(run[index].ToString());
+            if (index + 1 < run.Length)
+            {
+                terms.Add(run.ToString(index, 2));
+            }
+        }
+
+        if (run.Length > 2)
+        {
+            terms.Add(run.ToString());
+        }
+
+        run.Clear();
     }
 
     private static void FlushToken(StringBuilder token, ISet<string> terms)

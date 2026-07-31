@@ -4,9 +4,10 @@ using GameAgent.Protocol;
 
 namespace GameAgent.Core;
 
-internal static class ActionReceiptIngressValidator
+public static class ActionReceiptIngressValidator
 {
-    internal const int MaxAuthoritativeObservations = 64;
+    internal const int MaxAuthoritativeObservations =
+        ProtocolLimits.MaxAuthoritativeObservationsPerReceipt;
     internal const int MaxReceiptUtf8Bytes = 262_144;
 
     private const int MaxCollectionItems = 256;
@@ -45,8 +46,16 @@ internal static class ActionReceiptIngressValidator
         }
 
         hostReceipt = SnapshotHostReceipt(hostReceipt);
+        if (hostReceipt.Extensions?.ContainsKey(
+                FinalOutputAdmissionControl
+                    .EvidenceSourceEventIdPropertyName) == true)
+        {
+            throw new InvalidDataException(
+                "The game host returned a receipt containing "
+                + "runtime-reserved final-output evidence metadata.");
+        }
+
         ProtocolValidator.EnsureValid(expectedRequest);
-        ProtocolValidator.EnsureValid(hostReceipt);
 
         long boundedBytes = 0;
         AddOptionalString(
@@ -127,6 +136,8 @@ internal static class ActionReceiptIngressValidator
             nameof(hostReceipt.SchemaVersion),
             ref boundedBytes);
 
+        ProtocolValidator.EnsureValid(hostReceipt);
+        _ = GameContextReceiptEnvelope.ValidateAndRead(hostReceipt);
         var serialized = ProtocolJson.Serialize(hostReceipt);
         if (Encoding.UTF8.GetByteCount(serialized) > MaxReceiptUtf8Bytes)
         {
@@ -138,6 +149,100 @@ internal static class ActionReceiptIngressValidator
         }
 
         return ProtocolJson.DeserializeActionReceipt(serialized);
+    }
+
+    public static ActionReceipt ValidateAndClone(
+        ActionRequest expectedRequest,
+        ActionReceipt hostReceipt,
+        AgentRun run)
+    {
+        return ValidateAndClone(
+            expectedRequest,
+            hostReceipt,
+            run,
+            requireAudienceIncarnation: false);
+    }
+
+    public static ActionReceipt ValidateAndClone(
+        ActionRequest expectedRequest,
+        ActionReceipt hostReceipt,
+        AgentRun run,
+        bool requireAudienceIncarnation)
+    {
+        var receipt = ValidateAndClone(expectedRequest, hostReceipt);
+        if (GameContextReceiptEnvelope.NormalizeForRun(receipt, run))
+        {
+            receipt = ValidateAndClone(expectedRequest, receipt);
+        }
+        EnsureVisibleToRun(
+            expectedRequest,
+            receipt,
+            run,
+            requireAudienceIncarnation);
+        return receipt;
+    }
+
+    public static void EnsureVisibleToRun(
+        ActionRequest expectedRequest,
+        ActionReceipt receipt,
+        AgentRun run)
+    {
+        EnsureVisibleToRun(
+            expectedRequest,
+            receipt,
+            run,
+            requireAudienceIncarnation: false);
+    }
+
+    public static void EnsureVisibleToRun(
+        ActionRequest expectedRequest,
+        ActionReceipt receipt,
+        AgentRun run,
+        bool requireAudienceIncarnation)
+    {
+        if (expectedRequest is null)
+        {
+            throw new ArgumentNullException(nameof(expectedRequest));
+        }
+
+        if (receipt is null)
+        {
+            throw new ArgumentNullException(nameof(receipt));
+        }
+
+        if (run is null)
+        {
+            throw new ArgumentNullException(nameof(run));
+        }
+
+        ProtocolValidator.EnsureValid(expectedRequest);
+        ProtocolValidator.EnsureValid(receipt);
+        ProtocolValidator.EnsureValid(run);
+        if (!string.Equals(
+                expectedRequest.RunId,
+                run.RunId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                expectedRequest.AgentId,
+                run.AgentId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                expectedRequest.WorldId,
+                run.WorldId,
+                StringComparison.Ordinal))
+        {
+            throw new OperationLedgerConflictException(
+                expectedRequest.OperationId,
+                "the action request does not belong to the active run.");
+        }
+
+        foreach (var observation in receipt.AuthoritativeObservations)
+        {
+            ObservationAdmission.EnsureVisibleToRun(
+                observation,
+                run,
+                requireAudienceIncarnation);
+        }
     }
 
     private static ActionReceipt SnapshotHostReceipt(

@@ -54,10 +54,12 @@
     },
     "resolvedConflictKeys": {
       "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 128
+        "maxLength": 256
       }
     },
     "sequence": {

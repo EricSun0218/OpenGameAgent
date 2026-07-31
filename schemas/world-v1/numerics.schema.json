@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/game-agent-runtime/main/schemas/world-v1/numerics.schema.json",
+  "title": "Native World Numeric Schemas v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "schemas"
+  ],
+  "properties": {
+    "contract": {
+      "const": "game-agent.world-numerics.v1"
+    },
+    "schemas": {
+      "type": "array",
+      "maxItems": 8192,
+      "items": {
+        "type": "object",
+        "required": [
+          "schemaId",
+          "scale",
+          "unitId",
+          "minimum",
+          "maximum",
+          "defaultValue"
+        ],
+        "properties": {
+          "schemaId": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "scale": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18
+          },
+          "unitId": {
+            "$ref": "native-world-common.schema.json#/$defs/nonBlankString"
+          },
+          "minimum": {
+            "$ref": "native-world-common.schema.json#/$defs/canonicalInt64"
+          },
+          "maximum": {
+            "$ref": "native-world-common.schema.json#/$defs/canonicalInt64"
+          },
+          "defaultValue": {
+            "$ref": "native-world-common.schema.json#/$defs/canonicalInt64"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "extensions": {
+      "$ref": "native-world-common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

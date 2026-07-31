@@ -398,6 +398,18 @@ public sealed class ToolInputSafetyTests
     }
 
     [Fact]
+    public void ConflictResolverLimitsCannotExceedActionWireCapacity()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ConflictScopeResolverOptions(
+                maxScopes: ProtocolLimits.MaxToolConflictScopes + 1));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ConflictScopeResolverOptions(
+                maxKeyUtf8Bytes:
+                    ProtocolLimits.MaxActionExpectedEffectUnicodeScalars + 1));
+    }
+
+    [Fact]
     public void CombinedGuardUsesCatalogSchemaAndCatalogConflictTemplates()
     {
         var registry = new ToolCatalogRegistry();

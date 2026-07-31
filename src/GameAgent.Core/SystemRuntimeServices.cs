@@ -89,6 +89,11 @@ internal sealed class BoundedCancellationDispatcher
     public static BoundedCancellationDispatcher LifecycleShared { get; } =
         new();
 
+    public static BoundedCancellationDispatcher SkillContentResolverShared
+    {
+        get;
+    } = new();
+
     internal int ActiveReservations =>
         Volatile.Read(ref _reservations);
 

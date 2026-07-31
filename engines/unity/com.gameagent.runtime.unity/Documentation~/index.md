@@ -19,6 +19,40 @@ shared assemblies. The facade depends on backend interfaces, so a game can
 inject the shared durable runtime or another compatible backend without
 changing the Unity lifecycle layer.
 
+The assembled artifact also carries the optional durable Workflow module and
+both built-in streaming-provider adapters. They remain engine-neutral
+libraries; installing the Unity host does not select a provider or create a
+workflow automatically.
+
+The interactive-world adapter follows the same rule:
+
+```text
+UnityInteractiveWorldHost (MonoBehaviour)
+  -> UnityInteractiveWorldFacade
+     -> InteractiveWorldEngineSession
+        -> GameAgent.World package/save/interaction/event contracts
+```
+
+The host pumps only completed notifications. Portable planning and validation
+run off-thread; game-owned execution must provide its own atomic state and
+history transaction boundary.
+
+The built-in declarative path uses a higher-level owner:
+
+```text
+UnityNativeWorldSessionHost (MonoBehaviour)
+  -> UnityNativeWorldSessionFacade
+     -> NativeWorldEngineSession
+        -> activated package + authoritative runtime + settled save bridge
+```
+
+`LoadPackageAsync` and `LoadSaveAsync` fully admit a candidate before they
+pause admissions, drain the old generation, and publish one atomic
+replacement. `Typed` exposes structured interactions, named clock advancement,
+schedules, state reads, and package export. The UPM artifact carries world-v1
+schemas and an inert example; all business fields and rules remain authored by
+the game.
+
 ## Configure the host
 
 Add `UnityAgentRuntimeHost` to a bootstrap GameObject, or call
@@ -30,6 +64,29 @@ composition by default. Custom integrations may instead configure an
 `IDurableAgentRuntime` or `IUnityDurableAgentRuntimeBackend` together with its
 session store. The host exposes `RunAsync(DurableRunRequest)`, `ResumeAsync`,
 and `DurableControls`.
+
+The facade also exposes a guarded overload:
+
+```csharp
+var expectation = DurableRunSemanticExpectation.FromJson(
+    GameContextEnvelope.ExtensionName,
+    GameContextEnvelope.ToJson(currentCoordinate));
+var guard = new DurableRunResumeGuard
+{
+    SemanticExtensionName = expectation.ExtensionName,
+    ExpectedSemanticExtensionSha256 = expectation.ExpectedSha256
+};
+
+DurableRunOutcome outcome = await host.ResumeAsync(
+    runId,
+    guard,
+    continuation,
+    reconciler,
+    cancellationToken);
+```
+
+The call fails with `durable_resume_guard_not_supported` when a custom backend
+does not implement `IUnityGuardedDurableAgentRuntimeBackend` end to end.
 
 The provider/store/action-handler `Configure` overload remains available for
 the compact headless loop.
@@ -84,6 +141,33 @@ also provides reflection-free JSON parsing/serialization for
 `ObservationEnvelope`, `ActionRequest`, `ActionReceipt`, and `RuntimeEvent`.
 Natural language is not required: `payloadJson`, arguments, receipts, and final
 output can all be structured JSON.
+
+The bridge treats every DTO JSON string and full-object JSON entry point as an
+ingress boundary. DTO JSON values are checked before parsing or cloning at
+262,144 UTF-8 bytes, depth 32, 8,192 nodes, 65,536 UTF-8 bytes per string, and
+2,048 items per container. Nested receipt DTOs share a 32 MiB and 1,048,576-node
+aggregate budget. Full wire documents are capped at 32 MiB, depth 64, and
+1,048,576 nodes. Both DTO and full-document paths reject protocol extensions
+over 64 properties before materialization. Full documents also preflight the
+64-observation receipt limit and the 32-item expected-effects limit, while DTO
+array cardinality is checked before copying.
+
+Field DTO timestamps are deterministic inputs. Observations must provide
+`observedAtUnixMilliseconds`, and receipts must provide
+`receivedAtUnixMilliseconds`; set the matching `has...` field when the value is
+Unix epoch `0`. Optional `sequence` and `resourceSizeBytes` fields use `-1` only
+as their untouched absent default. Set `hasSequence` or
+`hasResourceSizeBytes` when supplying a value. Explicit negative values are
+rejected, and one receipt can contain at most 64 authoritative observations.
+
+`UnityObservationData.audienceIncarnations` provides a typed bridge for the
+Core `audienceIncarnations` extension. Each
+`UnityAudienceIncarnationData` links one `audienceId` to an `entityId` and
+non-negative `incarnation`; the array must exactly cover `audienceIds`. Enable
+`RequireAudienceIncarnationForRestrictedObservations` on the durable runtime to
+reject missing, stale, or malformed restricted observations before context
+compilation or a steer/follow-up interruption. Leaving the option disabled
+preserves the legacy ID-only audience behavior.
 
 The bridge calls `ProtocolValidator` for game-supplied observations, action
 requests, and action receipts. `RuntimeEvent` JSON uses the protocol's

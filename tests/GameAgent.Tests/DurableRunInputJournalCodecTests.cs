@@ -96,6 +96,65 @@ public sealed class DurableRunInputJournalCodecTests
         Assert.Equal("context_candidate_count_exceeded", error.LimitCode);
     }
 
+    [Fact]
+    public void BackgroundWorkloadClassRoundTripsDurably()
+    {
+        var encoded = DurableRunInputJournalCodec.Encode(
+            Array.Empty<ContextCandidate>(),
+            Array.Empty<SkillReference>(),
+            ProviderWorkloadClasses.Background);
+
+        var decoded = DurableRunInputJournalCodec.Decode(encoded);
+
+        Assert.Equal(
+            ProviderWorkloadClasses.Background,
+            decoded.WorkloadClass);
+    }
+
+    [Fact]
+    public void LegacyRunInputDefaultsToInteractiveWorkload()
+    {
+        var decoded = DurableRunInputJournalCodec.Decode(
+            ProtocolJson.ParseElement(
+                """{"context":[],"activeSkills":[]}"""));
+
+        Assert.Equal(
+            ProviderWorkloadClasses.Interactive,
+            decoded.WorkloadClass);
+    }
+
+    [Fact]
+    public void LatestTurnSnapshotOverridesInitialRecoveryWorkload()
+    {
+        var initial = DurableRunInputJournalCodec.Decode(
+            DurableRunInputJournalCodec.Encode(
+                Array.Empty<ContextCandidate>(),
+                Array.Empty<SkillReference>(),
+                ProviderWorkloadClasses.Interactive));
+        var latest = new TurnSnapshot();
+        latest.Extensions["providerWorkloadClass"] =
+            JsonArrayBuilder.String(ProviderWorkloadClasses.Background);
+
+        var recovered = RunRecovery.ResolveRecoveryWorkloadClass(
+            latest,
+            initial);
+
+        Assert.Equal(ProviderWorkloadClasses.Background, recovered);
+    }
+
+    [Fact]
+    public void InvalidLatestRecoveryWorkloadFailsClosed()
+    {
+        var latest = new TurnSnapshot();
+        latest.Extensions["providerWorkloadClass"] =
+            JsonArrayBuilder.String("unknown");
+
+        Assert.Throws<InvalidDataException>(
+            () => RunRecovery.ResolveRecoveryWorkloadClass(
+                latest,
+                initialInput: null));
+    }
+
     private sealed class MisreportedInfiniteReadOnlyList<T>
         : IReadOnlyList<T>
     {

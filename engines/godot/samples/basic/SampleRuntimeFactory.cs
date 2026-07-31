@@ -93,6 +93,10 @@ public static class SampleRuntimeFactory
             "sample-world",
             """{"hunger":70,"visibleResources":["berries"]}""",
             now);
+        var run = CreateRun(
+            "godot-sample-run",
+            "sample-world",
+            now);
         return new SampleRuntimeFixture
         {
             Store = store,
@@ -101,14 +105,12 @@ public static class SampleRuntimeFactory
             Observations = new[] { observation },
             Request = new DurableRunRequest
             {
-                Run = CreateRun(
-                    "godot-sample-run",
-                    "sample-world",
-                    now),
+                Run = run,
                 Context = new[]
                 {
                     ContextCandidate.FromObservation(
                         observation,
+                        run,
                         required: true,
                         canDefer: false)
                 }
