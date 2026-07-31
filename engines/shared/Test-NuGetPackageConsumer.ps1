@@ -192,7 +192,27 @@ $restoredPackages = @(
         -LiteralPath $packagesPath `
         -Directory `
         -Filter 'gameagent.*')
-if ($restoredPackages.Count -ne 10) {
+$expectedPackageIds = @(
+    'gameagent.core',
+    'gameagent.persistence',
+    'gameagent.protocol',
+    'gameagent.providers.anthropic',
+    'gameagent.providers.openaicompatible',
+    'gameagent.runtime',
+    'gameagent.testing',
+    'gameagent.workflow'
+)
+$restoredPackageIds = @(
+    $restoredPackages |
+        ForEach-Object { $_.Name.ToLowerInvariant() } |
+        Sort-Object
+)
+$packageSetDifference = @(
+    Compare-Object `
+        -ReferenceObject $expectedPackageIds `
+        -DifferenceObject $restoredPackageIds
+)
+if ($packageSetDifference.Count -ne 0) {
     throw 'The normalized NuGet consumer did not restore the complete package set.'
 }
 foreach ($restoredPackage in $restoredPackages) {
