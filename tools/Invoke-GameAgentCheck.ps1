@@ -12,6 +12,15 @@ $ErrorActionPreference = "Continue"
 Set-StrictMode -Version Latest
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$resolvedJsonPath = if ([string]::IsNullOrWhiteSpace($JsonPath)) {
+    $null
+}
+elseif ([IO.Path]::IsPathRooted($JsonPath)) {
+    [IO.Path]::GetFullPath($JsonPath)
+}
+else {
+    [IO.Path]::GetFullPath((Join-Path $repositoryRoot $JsonPath))
+}
 $results = [Collections.Generic.List[object]]::new()
 $failed = $false
 
@@ -121,8 +130,7 @@ $report = [ordered]@{
     checks = @($results)
 }
 
-if (-not [string]::IsNullOrWhiteSpace($JsonPath)) {
-    $resolvedJsonPath = [IO.Path]::GetFullPath($JsonPath)
+if ($null -ne $resolvedJsonPath) {
     $jsonParent = [IO.Path]::GetDirectoryName($resolvedJsonPath)
     if (-not [string]::IsNullOrWhiteSpace($jsonParent)) {
         New-Item -ItemType Directory -Path $jsonParent -Force | Out-Null
