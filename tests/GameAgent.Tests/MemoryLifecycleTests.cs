@@ -483,10 +483,14 @@ public sealed class MemoryLifecycleTests
             {
                 ShutdownTimeout = TimeSpan.FromMilliseconds(20)
             });
-        var prefetch = Task.Run(
+        var prefetch = Task.Factory.StartNew(
             () => lifecycle.Prefetch(
                 "blocking",
-                Query("harbor", worldId: "world")));
+                Query("harbor", worldId: "world")),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning
+            | TaskCreationOptions.DenyChildAttach,
+            TaskScheduler.Default);
         await provider.Entered.WaitAsync(TimeSpan.FromSeconds(1));
 
         try
