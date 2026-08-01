@@ -1,7 +1,7 @@
 param(
     [string]$Archive = (
         Join-Path (Split-Path -Parent $PSScriptRoot) (
-            "artifacts\game-agent-runtime-godot-0.1.0-test.zip")),
+            "artifacts\game-agent-runtime-godot-0.1.0-alpha.1.zip")),
     [string]$Godot = "godot",
     [string]$ExpectedVersion
 )
@@ -11,12 +11,14 @@ $godotRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $godotRoot "..\.."))
 $templateRoot = Join-Path $repositoryRoot "tests\godot\package-consumer-template"
-$artifactsRoot = [System.IO.Path]::GetFullPath(
-    (Join-Path $godotRoot "artifacts"))
-$consumerRoot = Join-Path $artifactsRoot (
-    "consumer-" + [System.Guid]::NewGuid().ToString("N"))
-$packageRoot = Join-Path $artifactsRoot (
-    "package-" + [System.Guid]::NewGuid().ToString("N"))
+$systemTemporaryRoot = [System.IO.Path]::GetFullPath(
+    [System.IO.Path]::GetTempPath()).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+$verificationRoot = Join-Path $systemTemporaryRoot (
+    "gar-godot-consumer-" + [System.Guid]::NewGuid().ToString("N"))
+$consumerRoot = Join-Path $verificationRoot "consumer"
+$packageRoot = Join-Path $verificationRoot "package"
 . (Join-Path $PSScriptRoot "GodotProcess.ps1")
 
 function Invoke-Godot {
@@ -273,14 +275,26 @@ try {
     Write-Output "PACKAGED_GODOT_ADDON_PASS"
 }
 finally {
-    foreach ($temporaryPath in @($consumerRoot, $packageRoot)) {
-        $resolvedTemporary = [System.IO.Path]::GetFullPath($temporaryPath)
-        $isUnderArtifacts = $resolvedTemporary.StartsWith(
-            $artifactsRoot + [System.IO.Path]::DirectorySeparatorChar,
-            [System.StringComparison]::OrdinalIgnoreCase)
-        if ($isUnderArtifacts -and
-            (Test-Path -LiteralPath $resolvedTemporary)) {
-            Remove-Item -LiteralPath $resolvedTemporary -Recurse -Force
-        }
+    $resolvedVerificationRoot = [System.IO.Path]::GetFullPath(
+        $verificationRoot).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar)
+    $verificationParent = [System.IO.Path]::GetDirectoryName(
+        $resolvedVerificationRoot)
+    $verificationName = [System.IO.Path]::GetFileName(
+        $resolvedVerificationRoot)
+    $hasExpectedParent = [string]::Equals(
+        $verificationParent,
+        $systemTemporaryRoot,
+        [System.StringComparison]::OrdinalIgnoreCase)
+    $hasExpectedName = $verificationName.StartsWith(
+        "gar-godot-consumer-",
+        [System.StringComparison]::Ordinal)
+    if ($hasExpectedParent -and $hasExpectedName -and
+        (Test-Path -LiteralPath $resolvedVerificationRoot)) {
+        Remove-Item `
+            -LiteralPath $resolvedVerificationRoot `
+            -Recurse `
+            -Force
     }
 }

@@ -193,7 +193,8 @@ public sealed class Bm25MemoryStoreOptions
 /// visibility constraints continue to use <see cref="MemoryQuery"/>.
 /// </summary>
 public sealed class Bm25MemoryStore :
-    IIdempotentAtomicMemoryBatchStore,
+    IRuntimeAuthoritativeMemoryBatchStore,
+    ILegacyRuntimeMemoryBatchReplayStore,
     IMemoryIndexDiagnosticsProvider,
     IPreflightMemoryIndex
 {
@@ -255,6 +256,9 @@ public sealed class Bm25MemoryStore :
 
     public string ProviderId { get; }
 
+    public int RuntimeMutationContractVersion =>
+        RuntimeMemoryMutationContract.CurrentVersion;
+
     public MemoryIndexDiagnostics IndexDiagnostics
     {
         get
@@ -287,6 +291,10 @@ public sealed class Bm25MemoryStore :
         lock (_sync)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            _records.TryGetValue(record.MemoryId, out var existing);
+            MemoryMutationAdmission.EnsureCanApplyUnconditionalUpsert(
+                MemoryMutation.Upsert(record),
+                existing?.Record);
             var staged = StageUpsert(
                 record.MemoryId,
                 indexed,
@@ -489,6 +497,7 @@ public sealed class Bm25MemoryStore :
             var staged = StageBatch(
                 snapshot,
                 prepared,
+                allowLegacyReplay: false,
                 cancellationToken);
             if (staged.Changed)
             {
@@ -507,6 +516,33 @@ public sealed class Bm25MemoryStore :
             string commitId,
             IReadOnlyList<MemoryMutation> mutations,
             CancellationToken cancellationToken = default)
+    {
+        return ApplyIdempotentAtomicBatchCoreAsync(
+            commitId,
+            mutations,
+            allowLegacyReplay: false,
+            cancellationToken);
+    }
+
+    public ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ApplyLegacyIdempotentAtomicBatchAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            CancellationToken cancellationToken = default)
+    {
+        return ApplyIdempotentAtomicBatchCoreAsync(
+            commitId,
+            mutations,
+            allowLegacyReplay: true,
+            cancellationToken);
+    }
+
+    private ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ApplyIdempotentAtomicBatchCoreAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            bool allowLegacyReplay,
+            CancellationToken cancellationToken)
     {
         commitId = RuntimeGuard.RequiredUtf8(
             commitId,
@@ -556,6 +592,7 @@ public sealed class Bm25MemoryStore :
             var staged = StageBatch(
                 snapshot,
                 prepared,
+                allowLegacyReplay,
                 cancellationToken);
             if (staged.Changed)
             {
@@ -606,7 +643,11 @@ public sealed class Bm25MemoryStore :
         lock (_sync)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            _ = StageBatch(snapshot, prepared, cancellationToken);
+            _ = StageBatch(
+                snapshot,
+                prepared,
+                allowLegacyReplay: false,
+                cancellationToken);
         }
     }
 
@@ -636,6 +677,7 @@ public sealed class Bm25MemoryStore :
     private StagedState StageBatch(
         IReadOnlyList<MemoryMutation> mutations,
         IReadOnlyDictionary<string, IndexedRecord> prepared,
+        bool allowLegacyReplay,
         CancellationToken cancellationToken)
     {
         var records = new Dictionary<string, IndexedRecord>(
@@ -653,6 +695,17 @@ public sealed class Bm25MemoryStore :
         {
             cancellationToken.ThrowIfCancellationRequested();
             var mutation = mutations[index];
+            records.TryGetValue(mutation.MemoryId, out var current);
+            if (allowLegacyReplay)
+            {
+                MemoryMutationAdmission.EnsureCanReplayLegacy(mutation);
+            }
+            else
+            {
+                MemoryMutationAdmission.EnsureCanApply(
+                    mutation,
+                    current?.Record);
+            }
             if (mutation.Kind == MemoryMutationKind.Upsert)
             {
                 var indexed = prepared[mutation.MemoryId];

@@ -189,6 +189,247 @@ public sealed class AnthropicMessagesStreamingProviderTests
     }
 
     [Fact]
+    public async Task EncodesPerOperationReasoningAndAutomaticCacheHint()
+    {
+        var transport = new FakeTransport(TextStream(cacheFields: true));
+        var provider = CreateProvider(
+            transport,
+            new AnthropicProviderOptions
+            {
+                Model = "claude-test",
+                MaxOutputTokens = 4_096,
+                ThinkingDialect = AnthropicThinkingDialects.ManualBudget
+            });
+        var request = Request();
+        request.MaxOutputTokens = 3_000;
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = true,
+            ReasoningTokenBudget = 1_024,
+            PromptCachingEnabled = true,
+            PromptCacheRetention = PromptCacheRetentions.OneHour
+        };
+
+        _ = await CollectAsync(provider.StreamAsync(request));
+
+        using var document = JsonDocument.Parse(
+            Assert.IsType<AnthropicStreamingHttpRequest>(
+                    transport.LastRequest)
+                .Body);
+        var root = document.RootElement;
+        Assert.Equal(
+            "enabled",
+            root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal(
+            1_024,
+            root.GetProperty("thinking")
+                .GetProperty("budget_tokens")
+                .GetInt32());
+        Assert.Equal(
+            "ephemeral",
+            root.GetProperty("cache_control")
+                .GetProperty("type")
+                .GetString());
+        Assert.Equal(
+            "1h",
+            root.GetProperty("cache_control")
+                .GetProperty("ttl")
+                .GetString());
+    }
+
+    [Fact]
+    public async Task RejectsDefaultReasoningBudgetAbovePerRequestOutputLimit()
+    {
+        var provider = CreateProvider(
+            new FakeTransport(TextStream(cacheFields: true)),
+            new AnthropicProviderOptions
+            {
+                Model = "claude-test",
+                MaxOutputTokens = 4_096,
+                ThinkingDialect = AnthropicThinkingDialects.ManualBudget,
+                DefaultReasoningTokenBudget = 2_048
+            });
+        var request = Request();
+        request.MaxOutputTokens = 1_024;
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(request)));
+
+        Assert.Equal("provider_reasoning_budget_invalid", error.Code);
+    }
+
+    [Fact]
+    public async Task RejectsReasoningWithToolsBeforeTransport()
+    {
+        var transport = new FakeTransport(TextStream(cacheFields: true));
+        var provider = CreateProvider(
+            transport,
+            new AnthropicProviderOptions
+            {
+                Model = "claude-test",
+                MaxOutputTokens = 4_096,
+                ThinkingDialect = AnthropicThinkingDialects.ManualBudget
+            });
+        var request = Request();
+        request.MaxOutputTokens = 3_000;
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = true,
+            ReasoningTokenBudget = 1_024
+        };
+        request.Tools = new[]
+        {
+            new ToolDescriptor
+            {
+                Name = "weather",
+                Version = "1",
+                ParametersSchema = Json(
+                    """{"type":"object","additionalProperties":false}""")
+            }
+        };
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(request)));
+
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            error.Code);
+        Assert.True(error.UsageKnownToBeZero);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task EncodesExplicitAdaptiveThinkingAndEffortDialect()
+    {
+        var transport = new FakeTransport(TextStream(cacheFields: true));
+        var provider = CreateProvider(
+            transport,
+            new AnthropicProviderOptions
+            {
+                Model = "claude-adaptive-test",
+                ThinkingDialect = AnthropicThinkingDialects.Adaptive,
+                SupportsThinkingDisable = true,
+                SupportedReasoningEfforts = new[]
+                {
+                    ModelReasoningEfforts.Low,
+                    ModelReasoningEfforts.High
+                }
+            });
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = true,
+            ReasoningEffort = ModelReasoningEfforts.Low
+        };
+
+        _ = await CollectAsync(provider.StreamAsync(request));
+
+        using var document = JsonDocument.Parse(
+            Assert.IsType<AnthropicStreamingHttpRequest>(
+                    transport.LastRequest)
+                .Body);
+        var root = document.RootElement;
+        Assert.Equal(
+            "adaptive",
+            root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal(
+            "low",
+            root.GetProperty("output_config")
+                .GetProperty("effort")
+                .GetString());
+    }
+
+    [Fact]
+    public async Task ReasoningControlWithoutDeclaredDialectFailsBeforeTransport()
+    {
+        var transport = new FakeTransport(TextStream(cacheFields: true));
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = true,
+            ReasoningTokenBudget = 1_024
+        };
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(request)));
+
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            error.Code);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task AdaptiveBudgetAndUnsupportedDisableFailBeforeTransport()
+    {
+        var transport = new FakeTransport(TextStream(cacheFields: true));
+        var provider = CreateProvider(
+            transport,
+            new AnthropicProviderOptions
+            {
+                Model = "claude-adaptive-test",
+                ThinkingDialect = AnthropicThinkingDialects.Adaptive
+            });
+        var budgetRequest = Request();
+        budgetRequest.Inference = new ModelInferenceOptions
+        {
+            ReasoningTokenBudget = 1_024
+        };
+        var budgetError = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(budgetRequest)));
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            budgetError.Code);
+
+        var disabledRequest = Request();
+        disabledRequest.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = false
+        };
+        var disabledError = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(disabledRequest)));
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            disabledError.Code);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public void AdaptiveDialectRejectsSamplingCapabilityClaim()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CreateProvider(
+                new FakeTransport(TextStream(cacheFields: true)),
+                new AnthropicProviderOptions
+                {
+                    Model = "claude-adaptive-test",
+                    ThinkingDialect = AnthropicThinkingDialects.Adaptive,
+                    SupportsSamplingControls = true
+                }));
+    }
+
+    [Fact]
+    public async Task PromptCacheBypassWithoutWireMappingFailsBeforeTransport()
+    {
+        var transport = new FakeTransport(TextStream(cacheFields: true));
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            PromptCachingEnabled = false
+        };
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(request)));
+
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            error.Code);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
     public async Task RejectsDuplicatePropertiesInRequestJson()
     {
         var transport = new FakeTransport(
@@ -328,10 +569,6 @@ public sealed class AnthropicMessagesStreamingProviderTests
         "event: message_start\n"
         + "data: {\"type\":\"ping\"}\n\n",
         "provider_protocol_invalid")]
-    [InlineData(
-        "event: content_block_start\n"
-        + "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"x\",\"signature\":\"y\"}}\n\n",
-        "provider_content_block_unsupported")]
     public async Task RejectsMaliciousEventShapes(
         string maliciousEvent,
         string expectedCode)
@@ -350,19 +587,96 @@ public sealed class AnthropicMessagesStreamingProviderTests
     }
 
     [Fact]
-    public async Task RejectsUnsupportedContentDialectExplicitly()
+    public async Task StreamsThinkingAsBoundedReasoningDeltas()
     {
         var stream = MessageStart(cacheFields: true)
                      + Event(
                          "content_block_start",
-                         """{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x","signature":"y"}}""");
+                         """{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}""")
+                     + Event(
+                         "content_block_delta",
+                         """{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"consider"}}""")
+                     + Event(
+                         "content_block_delta",
+                         """{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed"}}""")
+                     + Event(
+                         "content_block_stop",
+                         """{"type":"content_block_stop","index":0}""")
+                     + Event(
+                         "content_block_start",
+                         """{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}""")
+                     + Event(
+                         "content_block_delta",
+                         """{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}""")
+                     + Event(
+                         "content_block_stop",
+                         """{"type":"content_block_stop","index":1}""")
+                     + FinalDelta("end_turn", 6)
+                     + Event(
+                         "message_stop",
+                         """{"type":"message_stop"}""");
+        var provider = CreateProvider(new FakeTransport(stream));
+
+        var events = await CollectAsync(provider.StreamAsync(Request()));
+
+        Assert.Equal(
+            "consider",
+            Assert.Single(events, item =>
+                item.Kind == ModelStreamEventKinds.ReasoningDelta)
+                .ReasoningDelta);
+        Assert.Equal(
+            "answer",
+            Assert.Single(events, item =>
+                item.Kind == ModelStreamEventKinds.TextDelta)
+                .TextDelta);
+    }
+
+    [Fact]
+    public async Task AcceptsRedactedThinkingWithoutExposingIt()
+    {
+        var stream = MessageStart(cacheFields: true)
+                     + Event(
+                         "content_block_start",
+                         """{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}""")
+                     + Event(
+                         "content_block_stop",
+                         """{"type":"content_block_stop","index":0}""")
+                     + Event(
+                         "content_block_start",
+                         """{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"ok"}}""")
+                     + Event(
+                         "content_block_stop",
+                         """{"type":"content_block_stop","index":1}""")
+                     + FinalDelta("end_turn", 4)
+                     + Event(
+                         "message_stop",
+                         """{"type":"message_stop"}""");
+        var events = await CollectAsync(
+            CreateProvider(new FakeTransport(stream))
+                .StreamAsync(Request()));
+
+        Assert.DoesNotContain(
+            events,
+            item => item.Kind == ModelStreamEventKinds.ReasoningDelta);
+        Assert.Equal("ok", events[0].TextDelta);
+    }
+
+    [Fact]
+    public async Task RejectsThinkingBlockWithoutSignature()
+    {
+        var stream = MessageStart(cacheFields: true)
+                     + Event(
+                         "content_block_start",
+                         """{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x"}}""")
+                     + Event(
+                         "content_block_stop",
+                         """{"type":"content_block_stop","index":0}""");
         var provider = CreateProvider(new FakeTransport(stream));
 
         var error = await Assert.ThrowsAsync<ProviderException>(
             () => CollectAsync(provider.StreamAsync(Request())));
 
-        Assert.Equal("provider_content_block_unsupported", error.Code);
-        Assert.Equal(ProviderFailureDisposition.Failover, error.Disposition);
+        Assert.Equal("provider_protocol_invalid", error.Code);
     }
 
     [Fact]

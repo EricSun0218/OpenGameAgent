@@ -3,6 +3,217 @@ using System.Text.Json;
 
 namespace GameAgent.Workflow;
 
+internal static class WorkflowCancellationDispatcher
+{
+    private const int Capacity = 8;
+    private const int PendingCapacity = 128;
+    private static readonly object Sync = new();
+    private static readonly Queue<CancellationWorkItem> Pending = new();
+    private static int _active;
+    private static int _reservations;
+
+    internal const int ReservationCapacity = Capacity + PendingCapacity;
+
+    internal static int ActiveReservations
+    {
+        get
+        {
+            lock (Sync)
+            {
+                return _reservations;
+            }
+        }
+    }
+
+    internal static bool TryReserve(
+        out CancellationReservation? reservation)
+    {
+        lock (Sync)
+        {
+            if (_reservations >= ReservationCapacity)
+            {
+                reservation = null;
+                return false;
+            }
+
+            _reservations++;
+            reservation = new CancellationReservation();
+            return true;
+        }
+    }
+
+    private static Task DispatchReserved(Action cancellation)
+    {
+        if (cancellation is null)
+        {
+            throw new ArgumentNullException(nameof(cancellation));
+        }
+
+        var work = new CancellationWorkItem(cancellation);
+        var startWorker = false;
+        lock (Sync)
+        {
+            if (_active < Capacity)
+            {
+                _active++;
+                startWorker = true;
+            }
+            else
+            {
+                Pending.Enqueue(work);
+            }
+        }
+
+        if (startWorker)
+        {
+            StartWorker(work);
+        }
+
+        return work.Completion.Task;
+    }
+
+    private static void StartWorker(CancellationWorkItem work)
+    {
+        while (true)
+        {
+            try
+            {
+                _ = Task.Factory.StartNew(
+                    () => Execute(work),
+                    CancellationToken.None,
+                    TaskCreationOptions.DenyChildAttach
+                    | TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
+                return;
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                work.Completion.TrySetException(exception);
+                lock (Sync)
+                {
+                    if (Pending.Count == 0)
+                    {
+                        _active--;
+                        return;
+                    }
+
+                    work = Pending.Dequeue();
+                }
+            }
+        }
+    }
+
+    private static void Execute(CancellationWorkItem cancellation)
+    {
+        CancellationWorkItem? current = cancellation;
+        while (current is not null)
+        {
+            try
+            {
+                current.Cancellation();
+            }
+            catch
+            {
+            }
+            finally
+            {
+                current.Completion.TrySetResult(true);
+            }
+
+            lock (Sync)
+            {
+                if (Pending.Count == 0)
+                {
+                    _active--;
+                    current = null;
+                }
+                else
+                {
+                    current = Pending.Dequeue();
+                }
+            }
+        }
+    }
+
+    private static void ReleaseReservation()
+    {
+        lock (Sync)
+        {
+            if (_reservations <= 0)
+            {
+                throw new InvalidOperationException(
+                    "The workflow cancellation reservation count underflowed.");
+            }
+
+            _reservations--;
+        }
+    }
+
+    private sealed class CancellationWorkItem
+    {
+        internal CancellationWorkItem(Action cancellation)
+        {
+            Cancellation = cancellation;
+            Completion = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        internal Action Cancellation { get; }
+
+        internal TaskCompletionSource<bool> Completion { get; }
+    }
+
+    internal sealed class CancellationReservation : IDisposable
+    {
+        private int _state;
+
+        internal Task DispatchAsync(CancellationTokenSource cancellation)
+        {
+            if (cancellation is null)
+            {
+                throw new ArgumentNullException(nameof(cancellation));
+            }
+
+            if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
+            {
+                throw new InvalidOperationException(
+                    "A workflow cancellation reservation can be dispatched only once.");
+            }
+
+            return DispatchReserved(cancellation.Cancel);
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _state, 2) != 2)
+            {
+                ReleaseReservation();
+            }
+        }
+    }
+}
+
+internal interface IWorkflowDelayFactory
+{
+    Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken);
+}
+
+internal sealed class SystemWorkflowDelayFactory : IWorkflowDelayFactory
+{
+    internal static SystemWorkflowDelayFactory Instance { get; } = new();
+
+    private SystemWorkflowDelayFactory()
+    {
+    }
+
+    public Task DelayAsync(
+        TimeSpan delay,
+        CancellationToken cancellationToken) =>
+        Task.Delay(delay, cancellationToken);
+}
+
 public interface IWorkflowClock
 {
     DateTimeOffset UtcNow { get; }
@@ -259,18 +470,36 @@ public sealed class WorkflowRunner
     private readonly WorkflowStepExecutorRegistry _executors;
     private readonly IWorkflowClock _clock;
     private readonly WorkflowRunnerOptions _options;
+    private readonly IWorkflowDelayFactory _delayFactory;
 
     public WorkflowRunner(
         IWorkflowRunStore store,
         WorkflowStepExecutorRegistry executors,
         IWorkflowClock? clock = null,
         WorkflowRunnerOptions? options = null)
+        : this(
+            store,
+            executors,
+            clock,
+            options,
+            SystemWorkflowDelayFactory.Instance)
+    {
+    }
+
+    internal WorkflowRunner(
+        IWorkflowRunStore store,
+        WorkflowStepExecutorRegistry executors,
+        IWorkflowClock? clock,
+        WorkflowRunnerOptions? options,
+        IWorkflowDelayFactory delayFactory)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _executors = executors
             ?? throw new ArgumentNullException(nameof(executors));
         _clock = clock ?? new SystemWorkflowClock();
         _options = options ?? new WorkflowRunnerOptions();
+        _delayFactory = delayFactory
+            ?? throw new ArgumentNullException(nameof(delayFactory));
     }
 
     public async ValueTask<WorkflowRunSnapshot> ExecuteAsync(
@@ -609,18 +838,48 @@ public sealed class WorkflowRunner
                 continue;
             }
 
-            var invocationResults = await InvokeBatchWithHeartbeatAsync(
+            var invocationBatch = await InvokeBatchWithHeartbeatAsync(
                     workflow,
                     runId,
                     lease,
                     descriptors,
+                    prepared.CreatedAt,
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (invocationBatch.DeadlineExceeded)
+            {
+                var latest = await RequireRunAsync(runId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (latest.IsTerminal)
+                {
+                    return latest;
+                }
+
+                var expired = latest.Clone();
+                MarkRunFailed(
+                    expired,
+                    WorkflowReasonCodes.LimitExceeded,
+                    _clock.UtcNow);
+                var committed = await CommitMutationAsync(
+                        latest,
+                        expired,
+                        lease,
+                        _clock.UtcNow,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (committed is not null)
+                {
+                    return committed;
+                }
+
+                continue;
+            }
+
             await ApplyInvocationResultsAsync(
                     workflow,
                     runId,
                     lease,
-                    invocationResults,
+                    invocationBatch.Results,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -1161,65 +1420,238 @@ public sealed class WorkflowRunner
         return new ReadOnlyCollection<InvocationDescriptor>(descriptors);
     }
 
-    private async ValueTask<IReadOnlyList<InvocationResult>>
+    private async ValueTask<InvocationBatchOutcome>
         InvokeBatchWithHeartbeatAsync(
             CompiledWorkflow workflow,
             string runId,
             WorkflowLeaseToken lease,
             IReadOnlyList<InvocationDescriptor> descriptors,
+            DateTimeOffset createdAt,
             CancellationToken cancellationToken)
     {
-        using var executionSignal =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var invocationTask = Task.WhenAll(descriptors.Select(descriptor =>
-            InvokeOneAsync(
-                workflow,
-                runId,
-                lease,
-                descriptor,
-                executionSignal.Token)));
-        while (!invocationTask.IsCompleted)
+        var remaining = TimeSpan.FromMilliseconds(
+            workflow.Definition.Limits.MaxDurationMs)
+            - (_clock.UtcNow - createdAt);
+        if (remaining <= TimeSpan.Zero)
         {
-            var delay = Task.Delay(
-                _options.HeartbeatInterval,
-                cancellationToken);
-            var completed = await Task
-                .WhenAny(invocationTask, delay)
-                .ConfigureAwait(false);
-            if (completed == invocationTask)
-            {
-                break;
-            }
-
-            if (!await _store
-                    .RenewLeaseAsync(
-                        runId,
-                        lease,
-                        _options.LeaseDuration,
-                        _clock.UtcNow,
-                        cancellationToken)
-                    .ConfigureAwait(false))
-            {
-                executionSignal.Cancel();
-                throw LeaseLost();
-            }
-
-            var latest = await RequireRunAsync(runId, cancellationToken)
-                .ConfigureAwait(false);
-            if (latest.CancellationRequested)
-            {
-                executionSignal.Cancel();
-            }
+            return InvocationBatchOutcome.Deadline;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!WorkflowCancellationDispatcher.TryReserve(
+                out var cancellationReservation))
+        {
+            throw new WorkflowExecutorInterruptedException(
+                "Workflow cancellation capacity is exhausted before dispatch.");
+        }
+
+        CancellationTokenSource executionSignal;
         try
         {
-            return await invocationTask.ConfigureAwait(false);
+            executionSignal = new CancellationTokenSource();
         }
-        catch (OperationCanceledException)
-            when (!cancellationToken.IsCancellationRequested)
+        catch
         {
-            return Array.Empty<InvocationResult>();
+            cancellationReservation!.Dispose();
+            throw;
+        }
+
+        CancellationTokenSource timerSignal;
+        try
+        {
+            timerSignal = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+        }
+        catch
+        {
+            executionSignal.Dispose();
+            cancellationReservation!.Dispose();
+            throw;
+        }
+
+        Task<InvocationResult[]> invocationTask;
+        Task deadline;
+        try
+        {
+            deadline = _delayFactory.DelayAsync(
+                remaining,
+                timerSignal.Token);
+            invocationTask = Task.WhenAll(descriptors.Select(descriptor =>
+                InvokeOneAsync(
+                    workflow,
+                    runId,
+                    lease,
+                    descriptor,
+                    executionSignal.Token)));
+        }
+        catch
+        {
+            timerSignal.Dispose();
+            executionSignal.Dispose();
+            cancellationReservation!.Dispose();
+            throw;
+        }
+
+        var ownershipTransferred = false;
+        try
+        {
+            while (!invocationTask.IsCompleted)
+            {
+                var heartbeat = _delayFactory.DelayAsync(
+                    _options.HeartbeatInterval,
+                    timerSignal.Token);
+                var completed = await Task
+                    .WhenAny(invocationTask, heartbeat, deadline)
+                    .ConfigureAwait(false);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    ownershipTransferred = true;
+                    DetachAndCancel(
+                        invocationTask,
+                        executionSignal,
+                        cancellationReservation!);
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+
+                if (completed == invocationTask)
+                {
+                    break;
+                }
+
+                if (completed == deadline)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ownershipTransferred = true;
+                    DetachAndCancel(
+                        invocationTask,
+                        executionSignal,
+                        cancellationReservation!);
+                    return InvocationBatchOutcome.Deadline;
+                }
+
+                if (!await _store
+                        .RenewLeaseAsync(
+                            runId,
+                            lease,
+                            _options.LeaseDuration,
+                            _clock.UtcNow,
+                            cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    ownershipTransferred = true;
+                    DetachAndCancel(
+                        invocationTask,
+                        executionSignal,
+                        cancellationReservation!);
+                    throw LeaseLost();
+                }
+
+                var latest = await RequireRunAsync(runId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (latest.CancellationRequested)
+                {
+                    ownershipTransferred = true;
+                    DetachAndCancel(
+                        invocationTask,
+                        executionSignal,
+                        cancellationReservation!);
+                    return InvocationBatchOutcome.Completed(
+                        Array.Empty<InvocationResult>());
+                }
+            }
+
+            try
+            {
+                return InvocationBatchOutcome.Completed(
+                    await invocationTask.ConfigureAwait(false));
+            }
+            catch (OperationCanceledException)
+                when (!cancellationToken.IsCancellationRequested)
+            {
+                return InvocationBatchOutcome.Completed(
+                    Array.Empty<InvocationResult>());
+            }
+        }
+        finally
+        {
+            try
+            {
+                timerSignal.Cancel();
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+            }
+
+            timerSignal.Dispose();
+            if (!ownershipTransferred && !invocationTask.IsCompleted)
+            {
+                ownershipTransferred = true;
+                DetachAndCancel(
+                    invocationTask,
+                    executionSignal,
+                    cancellationReservation!);
+            }
+
+            if (!ownershipTransferred)
+            {
+                if (invocationTask.IsFaulted)
+                {
+                    _ = invocationTask.Exception;
+                }
+
+                executionSignal.Dispose();
+                cancellationReservation!.Dispose();
+            }
+        }
+    }
+
+    private static void DetachAndCancel(
+        Task invocationTask,
+        CancellationTokenSource executionSignal,
+        WorkflowCancellationDispatcher.CancellationReservation reservation)
+    {
+        Task cancellation;
+        try
+        {
+            cancellation = reservation.DispatchAsync(executionSignal);
+        }
+        catch
+        {
+            _ = ObserveDetachedInvocationAsync(
+                invocationTask,
+                Task.CompletedTask,
+                executionSignal,
+                reservation);
+            throw;
+        }
+
+        _ = ObserveDetachedInvocationAsync(
+            invocationTask,
+            cancellation,
+            executionSignal,
+            reservation);
+    }
+
+    private static async Task ObserveDetachedInvocationAsync(
+        Task invocationTask,
+        Task cancellation,
+        CancellationTokenSource executionSignal,
+        WorkflowCancellationDispatcher.CancellationReservation reservation)
+    {
+        try
+        {
+            await Task.WhenAll(invocationTask, cancellation)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+        }
+        finally
+        {
+            executionSignal.Dispose();
+            reservation.Dispose();
         }
     }
 
@@ -1813,6 +2245,28 @@ public sealed class WorkflowRunner
         public JsonElement OutputSchema { get; }
 
         public JsonElement? Checkpoint { get; }
+    }
+
+    private sealed class InvocationBatchOutcome
+    {
+        private InvocationBatchOutcome(
+            IReadOnlyList<InvocationResult> results,
+            bool deadlineExceeded)
+        {
+            Results = results;
+            DeadlineExceeded = deadlineExceeded;
+        }
+
+        public IReadOnlyList<InvocationResult> Results { get; }
+
+        public bool DeadlineExceeded { get; }
+
+        public static InvocationBatchOutcome Deadline { get; } =
+            new(Array.Empty<InvocationResult>(), true);
+
+        public static InvocationBatchOutcome Completed(
+            IReadOnlyList<InvocationResult> results) =>
+            new(results, false);
     }
 
     private sealed class InvocationResult

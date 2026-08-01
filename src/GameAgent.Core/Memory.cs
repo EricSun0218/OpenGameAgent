@@ -522,7 +522,8 @@ internal static class MemoryQueryFilter
 /// </summary>
 public sealed partial class DeterministicMemoryStore :
     IMemoryStore,
-    IIdempotentAtomicMemoryBatchStore
+    IRuntimeAuthoritativeMemoryBatchStore,
+    ILegacyRuntimeMemoryBatchReplayStore
 {
     private readonly object _sync = new();
     private Dictionary<string, IndexedRecord> _records =
@@ -547,6 +548,9 @@ public sealed partial class DeterministicMemoryStore :
 
     public string ProviderId { get; }
 
+    public int RuntimeMutationContractVersion =>
+        RuntimeMemoryMutationContract.CurrentVersion;
+
     public ValueTask UpsertAsync(
         MemoryRecord record,
         CancellationToken cancellationToken)
@@ -560,6 +564,10 @@ public sealed partial class DeterministicMemoryStore :
         var indexed = new IndexedRecord(record, Tokenize(record.Content));
         lock (_sync)
         {
+            _records.TryGetValue(record.MemoryId, out var existing);
+            MemoryMutationAdmission.EnsureCanApplyUnconditionalUpsert(
+                MemoryMutation.Upsert(record),
+                existing?.Record);
             if (!_records.ContainsKey(record.MemoryId)
                 && _records.Count >= _capacity)
             {

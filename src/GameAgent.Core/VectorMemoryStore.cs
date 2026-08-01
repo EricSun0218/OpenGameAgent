@@ -116,7 +116,9 @@ public sealed class VectorMemoryStoreOptions
 /// require the rest of the runtime to configure an embedding model. Combine it
 /// with a lexical provider through reciprocal-rank fusion for hybrid recall.
 /// </summary>
-public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
+public sealed class VectorMemoryStore :
+    IRuntimeAuthoritativeMemoryBatchStore,
+    ILegacyRuntimeMemoryBatchReplayStore
 {
     private readonly object _sync = new();
     private readonly IMemoryEmbeddingProvider _embeddingProvider;
@@ -188,6 +190,9 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
 
     public string ProviderId { get; }
 
+    public int RuntimeMutationContractVersion =>
+        RuntimeMemoryMutationContract.CurrentVersion;
+
     public string EmbeddingProviderId => _embeddingProviderId;
 
     public string EmbeddingModelId => _embeddingModelId;
@@ -214,6 +219,10 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
                 .ConfigureAwait(false);
             lock (_sync)
             {
+                _records.TryGetValue(record.MemoryId, out var existing);
+                MemoryMutationAdmission.EnsureCanApplyUnconditionalUpsert(
+                    MemoryMutation.Upsert(record),
+                    existing?.Record);
                 if (!_records.ContainsKey(record.MemoryId)
                     && _records.Count >= _capacity)
                 {
@@ -356,6 +365,7 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
         {
             return await ApplyPreparedBatchAsync(
                     snapshot,
+                    allowLegacyReplay: false,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -370,6 +380,35 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
             string commitId,
             IReadOnlyList<MemoryMutation> mutations,
             CancellationToken cancellationToken = default)
+    {
+        return await ApplyIdempotentAtomicBatchCoreAsync(
+                commitId,
+                mutations,
+                allowLegacyReplay: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ApplyLegacyIdempotentAtomicBatchAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            CancellationToken cancellationToken = default)
+    {
+        return await ApplyIdempotentAtomicBatchCoreAsync(
+                commitId,
+                mutations,
+                allowLegacyReplay: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ApplyIdempotentAtomicBatchCoreAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            bool allowLegacyReplay,
+            CancellationToken cancellationToken)
     {
         commitId = RuntimeGuard.RequiredUtf8(
             commitId,
@@ -420,6 +459,7 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
 
             var results = await ApplyPreparedBatchAsync(
                     snapshot,
+                    allowLegacyReplay,
                     cancellationToken)
                 .ConfigureAwait(false);
             lock (_sync)
@@ -438,6 +478,7 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
     private async ValueTask<IReadOnlyList<MemoryMutationResult>>
         ApplyPreparedBatchAsync(
             MemoryMutation[] mutations,
+            bool allowLegacyReplay,
             CancellationToken cancellationToken)
     {
         var prepared = new IndexedMemory?[mutations.Length];
@@ -472,6 +513,17 @@ public sealed class VectorMemoryStore : IIdempotentAtomicMemoryBatchStore
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var mutation = mutations[index];
+                staged.TryGetValue(mutation.MemoryId, out var existing);
+                if (allowLegacyReplay)
+                {
+                    MemoryMutationAdmission.EnsureCanReplayLegacy(mutation);
+                }
+                else
+                {
+                    MemoryMutationAdmission.EnsureCanApply(
+                        mutation,
+                        existing?.Record);
+                }
                 switch (mutation.Kind)
                 {
                     case MemoryMutationKind.Upsert:

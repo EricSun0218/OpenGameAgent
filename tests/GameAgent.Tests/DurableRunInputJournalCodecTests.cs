@@ -121,6 +121,84 @@ public sealed class DurableRunInputJournalCodecTests
         Assert.Equal(
             ProviderWorkloadClasses.Interactive,
             decoded.WorkloadClass);
+        Assert.Equal(
+            DurableExecutionModes.Agent,
+            decoded.ExecutionMode);
+    }
+
+    [Fact]
+    public void DirectExecutionModeRoundTripsDurably()
+    {
+        var encoded = DurableRunInputJournalCodec.Encode(
+            Array.Empty<ContextCandidate>(),
+            Array.Empty<SkillReference>(),
+            ProviderWorkloadClasses.Interactive,
+            DurableExecutionModes.Direct);
+
+        var decoded = DurableRunInputJournalCodec.Decode(encoded);
+
+        Assert.Equal(DurableExecutionModes.Direct, decoded.ExecutionMode);
+    }
+
+    [Fact]
+    public void InferenceAndModelRouteRoundTripDurably()
+    {
+        var encoded = DurableRunInputJournalCodec.Encode(
+            Array.Empty<ContextCandidate>(),
+            Array.Empty<SkillReference>(),
+            ProviderWorkloadClasses.Interactive,
+            DurableExecutionModes.Agent,
+            new ModelInferenceOptions
+            {
+                ReasoningEnabled = true,
+                ReasoningEffort = ModelReasoningEfforts.High,
+                PromptCachingEnabled = true,
+                PromptCacheRetention = PromptCacheRetentions.OneHour
+            },
+            new ProviderRoutePreference
+            {
+                ProviderIds = new[] { "quality", "fallback" }
+            });
+
+        var decoded = DurableRunInputJournalCodec.Decode(encoded);
+
+        Assert.True(decoded.Inference!.ReasoningEnabled);
+        Assert.Equal(
+            ModelReasoningEfforts.High,
+            decoded.Inference.ReasoningEffort);
+        Assert.Equal(
+            PromptCacheRetentions.OneHour,
+            decoded.Inference.PromptCacheRetention);
+        Assert.Equal(
+            new[] { "quality", "fallback" },
+            decoded.RoutePreference!.ProviderIds);
+        Assert.False(decoded.RoutePreference.AllowUnlistedFallback);
+    }
+
+    [Fact]
+    public void DirectExecutionModeRejectsActiveSkills()
+    {
+        Assert.Throws<ArgumentException>(
+            () => DurableRunInputJournalCodec.Encode(
+                Array.Empty<ContextCandidate>(),
+                new[] { new SkillReference("skill", "1") },
+                ProviderWorkloadClasses.Interactive,
+                DurableExecutionModes.Direct));
+    }
+
+    [Fact]
+    public void InvalidDurableExecutionModeFailsClosed()
+    {
+        Assert.Throws<InvalidDataException>(
+            () => DurableRunInputJournalCodec.Decode(
+                ProtocolJson.ParseElement(
+                    """
+                    {
+                      "context":[],
+                      "activeSkills":[],
+                      "executionMode":"unknown"
+                    }
+                    """)));
     }
 
     [Fact]

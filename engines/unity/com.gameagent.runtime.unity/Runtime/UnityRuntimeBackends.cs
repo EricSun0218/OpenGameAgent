@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using GameAgent.Core;
+using GameAgent.Protocol;
 using GameAgent.Runtime;
 
 namespace GameAgent.Unity
@@ -46,6 +47,35 @@ namespace GameAgent.Unity
             IGameOperationReconciler reconciler,
             CancellationToken cancellationToken,
             DurableRunResumeGuard guard);
+    }
+
+    public interface IUnityRoutedExecutionBackend
+    {
+        ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken);
+
+        ValueTask<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken);
+    }
+
+    public interface IUnityChildAgentBackend
+    {
+        ValueTask<ChildAgentRunResult> RunChildAsync(
+            string parentRunId,
+            DurableRunRequest request,
+            CancellationToken cancellationToken);
+
+        int CancelChildren(string parentRunId);
+    }
+
+    public interface IUnityPersistentChildAgentBackend
+    {
+        ValueTask<ChildAgentRunResult> RunChildAsync(
+            AgentRun parentRun,
+            DurableRunRequest request,
+            CancellationToken cancellationToken);
     }
 
     public sealed class HeadlessUnityAgentRuntimeBackend
@@ -169,7 +199,11 @@ namespace GameAgent.Unity
     }
 
     public sealed class BuiltUnityAgentRuntimeBackend
-        : IUnityGuardedDurableAgentRuntimeBackend, IAsyncDisposable
+        : IUnityGuardedDurableAgentRuntimeBackend,
+          IUnityRoutedExecutionBackend,
+          IUnityChildAgentBackend,
+          IUnityPersistentChildAgentBackend,
+          IAsyncDisposable
     {
         private readonly BuiltGameAgentRuntime _built;
         private readonly bool _ownsBuiltRuntime;
@@ -214,6 +248,49 @@ namespace GameAgent.Unity
                 continuation,
                 reconciler,
                 cancellationToken);
+        }
+
+        public ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken)
+        {
+            return _built.Execution.RunAsync(request, cancellationToken);
+        }
+
+        public ValueTask<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken)
+        {
+            return _built.Completion.CompleteAsync(
+                request,
+                cancellationToken);
+        }
+
+        public ValueTask<ChildAgentRunResult> RunChildAsync(
+            string parentRunId,
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            return _built.Children.RunChildAsync(
+                parentRunId,
+                request,
+                cancellationToken);
+        }
+
+        public ValueTask<ChildAgentRunResult> RunChildAsync(
+            AgentRun parentRun,
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            return _built.Children.RunChildAsync(
+                parentRun,
+                request,
+                cancellationToken);
+        }
+
+        public int CancelChildren(string parentRunId)
+        {
+            return _built.Children.CancelChildren(parentRunId);
         }
 
         public ValueTask<DurableRunOutcome> ResumeAsync(

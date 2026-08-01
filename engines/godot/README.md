@@ -32,7 +32,8 @@ To install the pinned editor into an explicit location:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File engines/godot/tools/Install-PinnedGodot.ps1 `
-  -InstallRoot E:\GameAgentTools\Godot
+  -Version 4.7.1 `
+  -InstallPath E:\GameAgentTools\Godot
 ```
 
 ## Build the distributable addon
@@ -61,11 +62,20 @@ powershell -NoProfile -ExecutionPolicy Bypass `
    runs.
 5. Register game action handlers on `GodotMainThreadGameHost` and return
    authoritative `ActionReceipt` values.
-6. Consume typed tasks from C#, or runtime signals and Variant dictionaries
-   from GDScript.
+6. Use `StartRoutedRun`, `StartCompletion`, or `StartChildRun` on the typed
+   host when those execution surfaces are needed.
+7. Correlate the returned request id with runtime signals from C#, or with
+   signals and Variant dictionaries from GDScript.
+
+Pass a persisted `AgentRun` to `StartChildRun` (or use
+`start_child_agent_run_with_parent` from GDScript) when delegation continues
+after restart or cache eviction. `CancelRequest`/`cancel_request` controls a
+routed or stateless-completion request; durable runs use normal run controls.
 
 See the [addon README](addons/game_agent_runtime/README.md) and
-[getting started](../../docs/getting-started.md).
+[getting started](../../docs/getting-started.md). Routing, per-operation model
+controls, and child supervision are covered by the
+[execution guide](../../docs/how-to-route-and-supervise-agents.md).
 
 ## Verified scope
 

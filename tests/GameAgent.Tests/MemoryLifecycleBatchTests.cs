@@ -159,6 +159,54 @@ public sealed class MemoryLifecycleBatchTests
                 .AsTask());
     }
 
+    [Fact]
+    public async Task RuntimeWritebackRejectsLegacyIdempotentStoreContract()
+    {
+        var store = new LegacyIdempotentMemoryStore();
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+
+        var error = await Assert.ThrowsAsync<
+            MemoryRuntimeMutationContractNotSupportedException>(
+            () => lifecycle.CommitIdempotentAtomicBatchAsync(
+                    "legacy-store-commit",
+                    new[]
+                    {
+                        MemoryMutation.Upsert(
+                            Record("new", committed: true))
+                    })
+                .AsTask());
+
+        Assert.Equal(
+            MemoryBatchReasonCodes.RuntimeMutationContractNotSupported,
+            error.ReasonCode);
+        Assert.Equal(0, store.ApplyCount);
+    }
+
+    [Fact]
+    public async Task RuntimeWritebackRejectsUnknownMutationContractVersion()
+    {
+        var store = new VersionedMemoryStore(version: 999);
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+
+        var error = await Assert.ThrowsAsync<
+            MemoryRuntimeMutationContractNotSupportedException>(
+            () => lifecycle.CommitIdempotentAtomicBatchAsync(
+                    "future-store-commit",
+                    new[]
+                    {
+                        MemoryMutation.Upsert(
+                            Record("new", committed: true))
+                    })
+                .AsTask());
+
+        Assert.Equal(999, error.AdvertisedVersion);
+        Assert.Equal(0, store.ApplyCount);
+    }
+
     private static MemoryRecord Record(string id, bool committed)
     {
         return new MemoryRecord(
@@ -267,6 +315,67 @@ public sealed class MemoryLifecycleBatchTests
             return new ValueTask<IReadOnlyList<MemoryMutationResult>>(
                 _results);
         }
+    }
+
+    private class LegacyIdempotentMemoryStore :
+        IIdempotentAtomicMemoryBatchStore
+    {
+        private readonly DeterministicMemoryStore _inner = new();
+
+        public string ProviderId => "legacy-idempotent";
+
+        public int ApplyCount { get; private set; }
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> SearchAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken) =>
+            _inner.SearchAsync(query, cancellationToken);
+
+        public ValueTask UpsertAsync(
+            MemoryRecord record,
+            CancellationToken cancellationToken) =>
+            _inner.UpsertAsync(record, cancellationToken);
+
+        public ValueTask<bool> DeleteAsync(
+            string memoryId,
+            CancellationToken cancellationToken) =>
+            _inner.DeleteAsync(memoryId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<MemoryMutationResult>>
+            ApplyAtomicBatchAsync(
+                IReadOnlyList<MemoryMutation> mutations,
+                CancellationToken cancellationToken = default)
+        {
+            ApplyCount++;
+            return _inner.ApplyAtomicBatchAsync(
+                mutations,
+                cancellationToken);
+        }
+
+        public ValueTask<IReadOnlyList<MemoryMutationResult>>
+            ApplyIdempotentAtomicBatchAsync(
+                string commitId,
+                IReadOnlyList<MemoryMutation> mutations,
+                CancellationToken cancellationToken = default)
+        {
+            ApplyCount++;
+            return _inner.ApplyIdempotentAtomicBatchAsync(
+                commitId,
+                mutations,
+                cancellationToken);
+        }
+    }
+
+    private sealed class VersionedMemoryStore :
+        LegacyIdempotentMemoryStore,
+        IRuntimeAuthoritativeMemoryBatchStore
+    {
+        public VersionedMemoryStore(int version)
+        {
+            RuntimeMutationContractVersion = version;
+        }
+
+        public int RuntimeMutationContractVersion { get; }
     }
 
     private sealed class IndexedOnlyList<T> : IReadOnlyList<T>

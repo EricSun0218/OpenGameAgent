@@ -22,13 +22,15 @@ internal sealed class AnthropicWireRequest
         int maxOutputTokens,
         string? system,
         IReadOnlyList<WireMessage> messages,
-        IReadOnlyList<WireTool> tools)
+        IReadOnlyList<WireTool> tools,
+        ModelInferenceOptions? inference)
     {
         StreamAttemptId = streamAttemptId;
         MaxOutputTokens = maxOutputTokens;
         System = system;
         Messages = messages;
         Tools = tools;
+        Inference = inference;
     }
 
     internal string StreamAttemptId { get; }
@@ -40,6 +42,8 @@ internal sealed class AnthropicWireRequest
     private IReadOnlyList<WireMessage> Messages { get; }
 
     private IReadOnlyList<WireTool> Tools { get; }
+
+    private ModelInferenceOptions? Inference { get; }
 
     internal static AnthropicWireRequest Create(
         StreamingModelRequest request,
@@ -288,11 +292,13 @@ internal sealed class AnthropicWireRequest
             maxOutputTokens,
             system,
             messages,
-            tools);
+            tools,
+            request.Inference?.CloneValidated());
     }
 
     internal byte[] Encode(AnthropicProviderOptions options)
     {
+        ValidateInference(options);
         using var buffer = new BoundedBufferWriter(
             MaxRequestBodyUtf8Bytes);
         using (var writer = new Utf8JsonWriter(
@@ -309,6 +315,83 @@ internal sealed class AnthropicWireRequest
                 "max_tokens",
                 MaxOutputTokens);
             writer.WriteBoolean("stream", true);
+            var reasoningDisabled = IsReasoningDisabled(Inference);
+            if (string.Equals(
+                    options.ThinkingDialect,
+                    AnthropicThinkingDialects.ManualBudget,
+                    StringComparison.Ordinal)
+                && !reasoningDisabled
+                && (Inference?.ReasoningEnabled == true
+                    || Inference?.ReasoningTokenBudget.HasValue == true
+                    || options.DefaultReasoningTokenBudget.HasValue))
+            {
+                var budget = Inference?.ReasoningTokenBudget
+                             ?? options.DefaultReasoningTokenBudget
+                             ?? throw Unsupported(
+                                 "reasoning without a token budget");
+                writer.WritePropertyName("thinking");
+                writer.WriteStartObject();
+                writer.WriteString("type", "enabled");
+                writer.WriteNumber("budget_tokens", budget);
+                writer.WriteEndObject();
+            }
+            else if (string.Equals(
+                         options.ThinkingDialect,
+                         AnthropicThinkingDialects.Adaptive,
+                         StringComparison.Ordinal)
+                     && reasoningDisabled)
+            {
+                writer.WritePropertyName("thinking");
+                writer.WriteStartObject();
+                writer.WriteString("type", "disabled");
+                writer.WriteEndObject();
+            }
+            else if (string.Equals(
+                         options.ThinkingDialect,
+                         AnthropicThinkingDialects.Adaptive,
+                         StringComparison.Ordinal)
+                     && Inference?.ReasoningEnabled == true)
+            {
+                writer.WritePropertyName("thinking");
+                writer.WriteStartObject();
+                writer.WriteString("type", "adaptive");
+                writer.WriteEndObject();
+            }
+
+            if (Inference?.ReasoningEffort is string effort
+                && !string.Equals(
+                    effort,
+                    ModelReasoningEfforts.None,
+                    StringComparison.Ordinal))
+            {
+                writer.WritePropertyName("output_config");
+                writer.WriteStartObject();
+                writer.WriteString("effort", effort);
+                writer.WriteEndObject();
+            }
+
+            if (Inference?.Temperature is double temperature)
+            {
+                writer.WriteNumber("temperature", temperature);
+            }
+
+            if (Inference?.TopP is double topP)
+            {
+                writer.WriteNumber("top_p", topP);
+            }
+
+            if (Inference?.PromptCachingEnabled == true)
+            {
+                writer.WritePropertyName("cache_control");
+                writer.WriteStartObject();
+                writer.WriteString("type", "ephemeral");
+                if (Inference.PromptCacheRetention is string retention)
+                {
+                    writer.WriteString("ttl", retention);
+                }
+
+                writer.WriteEndObject();
+            }
             if (System is not null)
             {
                 writer.WriteString("system", System);
@@ -360,6 +443,147 @@ internal sealed class AnthropicWireRequest
 
         return buffer.ToArray();
     }
+
+    private void ValidateInference(AnthropicProviderOptions options)
+    {
+        var manual = string.Equals(
+            options.ThinkingDialect,
+            AnthropicThinkingDialects.ManualBudget,
+            StringComparison.Ordinal);
+        var adaptive = string.Equals(
+            options.ThinkingDialect,
+            AnthropicThinkingDialects.Adaptive,
+            StringComparison.Ordinal);
+        var reasoningDisabled = IsReasoningDisabled(Inference);
+        var budget = manual && !reasoningDisabled
+            ? Inference?.ReasoningTokenBudget
+              ?? options.DefaultReasoningTokenBudget
+            : null;
+        var requestedReasoningControl =
+            Inference?.ReasoningEnabled.HasValue == true
+            || Inference?.ReasoningEffort is not null
+            || Inference?.ReasoningTokenBudget.HasValue == true;
+        if (!manual && !adaptive && requestedReasoningControl)
+        {
+            throw Unsupported(
+                "reasoning control because this route declares no thinking dialect");
+        }
+
+        if (manual
+            && Inference?.ReasoningEnabled == true
+            && !budget.HasValue)
+        {
+            throw Unsupported("manual reasoning without a token budget");
+        }
+
+        if (manual
+            && Inference?.ReasoningEffort is string manualEffort
+            && !string.Equals(
+                manualEffort,
+                ModelReasoningEfforts.None,
+                StringComparison.Ordinal))
+        {
+            throw Unsupported("reasoning effort on a manual-budget route");
+        }
+
+        if (adaptive && Inference?.ReasoningTokenBudget.HasValue == true)
+        {
+            throw Unsupported("a token budget on an adaptive-thinking route");
+        }
+
+        if (adaptive
+            && reasoningDisabled
+            && !options.SupportsThinkingDisable)
+        {
+            throw Unsupported("explicit thinking disable on this adaptive route");
+        }
+
+        if (adaptive
+            && Inference?.ReasoningEffort is string effort
+            && !string.Equals(
+                effort,
+                ModelReasoningEfforts.None,
+                StringComparison.Ordinal)
+            && !options.SupportedReasoningEfforts.Contains(
+                effort,
+                StringComparer.Ordinal))
+        {
+            throw Unsupported("the requested adaptive-thinking effort");
+        }
+
+        if (budget.HasValue
+            && (budget.Value < 1_024 || budget.Value >= MaxOutputTokens))
+        {
+            throw new ProviderException(
+                "provider_reasoning_budget_invalid",
+                "validation",
+                "The reasoning token budget must be at least 1024 and below the output-token limit.",
+                false,
+                usageKnownToBeZero: true);
+        }
+
+        var adaptiveMayThink = adaptive && !reasoningDisabled;
+        if ((budget.HasValue || adaptiveMayThink) && Tools.Count != 0)
+        {
+            throw Unsupported(
+                "reasoning with tool use because signed thinking-block continuation is not configured");
+        }
+
+        if (Inference is null)
+        {
+            return;
+        }
+
+        if ((Inference.Temperature.HasValue || Inference.TopP.HasValue)
+            && !options.SupportsSamplingControls)
+        {
+            throw Unsupported("sampling control");
+        }
+
+        if (Inference.Seed.HasValue)
+        {
+            throw Unsupported("seed");
+        }
+
+        if (Inference.PromptCachingEnabled == false)
+        {
+            throw Unsupported("prompt-cache bypass");
+        }
+
+        if (Inference.PromptCacheKey is not null)
+        {
+            throw Unsupported("prompt-cache key");
+        }
+
+        if (budget.HasValue && Inference.Temperature.HasValue)
+        {
+            throw Unsupported(
+                "temperature while manual extended thinking is enabled");
+        }
+
+        if (budget.HasValue
+            && Inference.TopP is double topP
+            && topP < 0.95)
+        {
+            throw Unsupported(
+                "top-p below 0.95 while manual extended thinking is enabled");
+        }
+    }
+
+    private static bool IsReasoningDisabled(ModelInferenceOptions? inference) =>
+        inference?.ReasoningEnabled == false
+        || string.Equals(
+            inference?.ReasoningEffort,
+            ModelReasoningEfforts.None,
+            StringComparison.Ordinal);
+
+    private static ProviderException Unsupported(string control) =>
+        new(
+            "provider_inference_control_unsupported",
+            "capability",
+            $"The selected provider route does not support {control}.",
+            ProviderFailureDisposition.Failover,
+            usageKnownToBeZero: true);
 
     private static void ReadSystemParts(
         IReadOnlyList<NormalizedContentPart> source,

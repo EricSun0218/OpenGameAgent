@@ -210,6 +210,65 @@ public sealed class WorkflowAgentStepExecutorTests
         Assert.Equal(reasonCode, failed.ReasonCode);
     }
 
+    [Theory]
+    [InlineData(RunStates.Failed)]
+    [InlineData(RunStates.BudgetExhausted)]
+    public async Task GamePolicyCanProjectSelectedTerminalOutcome(
+        string state)
+    {
+        var runtime = new ScriptedRuntime
+        {
+            RunHandler = (request, _) =>
+                Outcome(request.Run.RunId, state)
+        };
+        var adapter = new TestAdapter(
+            terminalFallback: WorkflowTestData.Json(
+                """{"value":"local-default"}"""));
+        var runner = CreateRunner(
+            new InMemoryWorkflowRunStore(),
+            new WorkflowAgentStepExecutor(runtime, adapter));
+
+        var completed = await runner.ExecuteAsync(
+            Compile(),
+            new WorkflowRunRequest(
+                "projected-" + state,
+                "owner",
+                WorkflowTestData.Json("""{"value":"input"}""")));
+
+        Assert.Equal(WorkflowRunStatus.Completed, completed.Status);
+        Assert.Equal(
+            "local-default",
+            completed.Output!.Value.GetProperty("value").GetString());
+        Assert.Equal(state, adapter.LastTerminalState);
+    }
+
+    [Fact]
+    public async Task UndefinedTerminalProjectionFailsClosed()
+    {
+        var runtime = new ScriptedRuntime
+        {
+            RunHandler = (request, _) =>
+                Outcome(request.Run.RunId, RunStates.Failed)
+        };
+        var adapter = new TestAdapter(
+            terminalFallback: default(JsonElement));
+        var runner = CreateRunner(
+            new InMemoryWorkflowRunStore(),
+            new WorkflowAgentStepExecutor(runtime, adapter));
+
+        var failed = await runner.ExecuteAsync(
+            Compile(),
+            new WorkflowRunRequest(
+                "undefined-projection",
+                "owner",
+                WorkflowTestData.Json("""{"value":"input"}""")));
+
+        Assert.Equal(WorkflowRunStatus.Failed, failed.Status);
+        Assert.Equal(
+            WorkflowAgentReasonCodes.InvalidOutcome,
+            failed.ReasonCode);
+    }
+
     [Fact]
     public async Task AdapterCannotChangeTheDerivedAgentRunId()
     {
@@ -239,6 +298,192 @@ public sealed class WorkflowAgentStepExecutorTests
             failed.ReasonCode);
         Assert.Equal(0, runtime.RunCalls);
     }
+
+    [Fact]
+    public async Task NonReturningCreateRequestIsBoundedAndTracked()
+    {
+        var adapter = new BlockingAdapter(blockCreateRequest: true);
+        var runtime = new ScriptedRuntime();
+        var executor = new WorkflowAgentStepExecutor(
+            runtime,
+            adapter,
+            reconciler: null,
+            options: ShortAdapterOptions());
+        try
+        {
+            var execution = CreateRunner(
+                    new InMemoryWorkflowRunStore(),
+                    executor)
+                .ExecuteAsync(
+                    Compile(),
+                    new WorkflowRunRequest(
+                        "blocked-create",
+                        "owner",
+                        WorkflowTestData.Json("""{"value":"input"}""")))
+                .AsTask();
+            await adapter.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var failed = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(WorkflowRunStatus.Failed, failed.Status);
+            Assert.Equal(WorkflowReasonCodes.ExecutorFailed, failed.ReasonCode);
+            Assert.Equal(0, runtime.RunCalls);
+            Assert.Equal(1, executor.DetachedAdapterCallCount);
+        }
+        finally
+        {
+            adapter.Release();
+            await executor.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task DetachedAdapterCallRetainsItsConcurrencySlot()
+    {
+        var adapter = new BlockingAdapter(blockCreateRequest: true);
+        var executor = new WorkflowAgentStepExecutor(
+            new ScriptedRuntime(),
+            adapter,
+            reconciler: null,
+            options: new WorkflowAgentStepExecutorOptions
+            {
+                MaxConcurrentAdapterCalls = 1,
+                AdapterCallTimeout = TimeSpan.FromMilliseconds(50),
+                ShutdownTimeout = TimeSpan.FromSeconds(2)
+            });
+        var runner = CreateRunner(new InMemoryWorkflowRunStore(), executor);
+        try
+        {
+            var first = runner.ExecuteAsync(
+                    Compile(),
+                    new WorkflowRunRequest(
+                        "slot-first",
+                        "owner",
+                        WorkflowTestData.Json("""{"value":"input"}""")))
+                .AsTask();
+            await adapter.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+            var second = runner.ExecuteAsync(
+                    Compile(),
+                    new WorkflowRunRequest(
+                        "slot-second",
+                        "owner",
+                        WorkflowTestData.Json("""{"value":"input"}""")))
+                .AsTask();
+
+            var outcomes = await Task.WhenAll(first, second)
+                .WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.All(
+                outcomes,
+                outcome => Assert.Equal(
+                    WorkflowRunStatus.Failed,
+                    outcome.Status));
+            Assert.Equal(1, adapter.CreateRequestCalls);
+            Assert.Equal(1, executor.DetachedAdapterCallCount);
+        }
+        finally
+        {
+            adapter.Release();
+            await executor.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task NonReturningTerminalProjectorIsBoundedAndTracked()
+    {
+        var adapter = new BlockingAdapter(blockTerminalProjector: true);
+        var runtime = new ScriptedRuntime
+        {
+            RunHandler = (request, _) =>
+                Outcome(request.Run.RunId, RunStates.Failed)
+        };
+        var executor = new WorkflowAgentStepExecutor(
+            runtime,
+            adapter,
+            reconciler: null,
+            options: ShortAdapterOptions());
+        try
+        {
+            var execution = CreateRunner(
+                    new InMemoryWorkflowRunStore(),
+                    executor)
+                .ExecuteAsync(
+                    Compile(),
+                    new WorkflowRunRequest(
+                        "blocked-projector",
+                        "owner",
+                        WorkflowTestData.Json("""{"value":"input"}""")))
+                .AsTask();
+            await adapter.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var failed = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(WorkflowRunStatus.Failed, failed.Status);
+            Assert.Equal(WorkflowReasonCodes.ExecutorFailed, failed.ReasonCode);
+            Assert.Equal(1, runtime.RunCalls);
+            Assert.Equal(1, executor.DetachedAdapterCallCount);
+        }
+        finally
+        {
+            adapter.Release();
+            await executor.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ShutdownIsBoundedButDisposeWaitsForDetachedAdapterCall()
+    {
+        var adapter = new BlockingAdapter(blockCreateRequest: true);
+        var executor = new WorkflowAgentStepExecutor(
+            new ScriptedRuntime(),
+            adapter,
+            reconciler: null,
+            options: new WorkflowAgentStepExecutorOptions
+            {
+                AdapterCallTimeout = TimeSpan.FromSeconds(5),
+                ShutdownTimeout = TimeSpan.FromMilliseconds(25)
+            });
+        var execution = CreateRunner(
+                new InMemoryWorkflowRunStore(),
+                executor)
+            .ExecuteAsync(
+                Compile(),
+                new WorkflowRunRequest(
+                    "shutdown-drain",
+                    "owner",
+                    WorkflowTestData.Json("""{"value":"input"}""")))
+            .AsTask();
+        await adapter.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            Assert.False(await executor.StopAsync());
+            var failed = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(WorkflowRunStatus.Failed, failed.Status);
+            Assert.Equal(1, executor.DetachedAdapterCallCount);
+
+            var dispose = executor.DisposeAsync().AsTask();
+            await Task.Delay(50);
+            Assert.False(dispose.IsCompleted);
+
+            adapter.Release();
+            await dispose.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(0, executor.DetachedAdapterCallCount);
+            Assert.True(await executor.StopAsync());
+        }
+        finally
+        {
+            adapter.Release();
+            await executor.DisposeAsync();
+        }
+    }
+
+    private static WorkflowAgentStepExecutorOptions ShortAdapterOptions() =>
+        new()
+        {
+            AdapterCallTimeout = TimeSpan.FromMilliseconds(25),
+            ShutdownTimeout = TimeSpan.FromSeconds(2)
+        };
 
     private static WorkflowRunner CreateRunner(
         IWorkflowRunStore store,
@@ -313,16 +558,28 @@ public sealed class WorkflowAgentStepExecutorTests
         };
     }
 
-    private sealed class TestAdapter : IWorkflowAgentRunAdapter
+    private sealed class TestAdapter :
+        IWorkflowAgentRunAdapter,
+        IWorkflowAgentTerminalOutcomeProjector
     {
         private readonly bool _useWrongRunId;
+        private readonly JsonElement? _terminalFallback;
 
-        public TestAdapter(bool useWrongRunId = false)
+        public TestAdapter(
+            bool useWrongRunId = false,
+            JsonElement? terminalFallback = null)
         {
             _useWrongRunId = useWrongRunId;
+            _terminalFallback = terminalFallback.HasValue
+                                && terminalFallback.Value.ValueKind
+                                != JsonValueKind.Undefined
+                ? terminalFallback.Value.Clone()
+                : terminalFallback;
         }
 
         public WorkflowAgentInvocation? LastInvocation { get; private set; }
+
+        public string? LastTerminalState { get; private set; }
 
         public DurableRunRequest CreateRequest(
             WorkflowAgentInvocation invocation,
@@ -372,6 +629,129 @@ public sealed class WorkflowAgentStepExecutorTests
         {
             LastInvocation = invocation;
             return outcome.FinalOutput!.Value.Clone();
+        }
+
+        public bool TryProjectTerminalOutcome(
+            WorkflowAgentInvocation invocation,
+            JsonElement input,
+            DurableRunOutcome outcome,
+            out JsonElement output)
+        {
+            LastInvocation = invocation;
+            LastTerminalState = outcome.Run.State;
+            if (!_terminalFallback.HasValue)
+            {
+                output = default;
+                return false;
+            }
+
+            output = _terminalFallback.Value.ValueKind
+                     == JsonValueKind.Undefined
+                ? default
+                : _terminalFallback.Value.Clone();
+            return true;
+        }
+    }
+
+    private sealed class BlockingAdapter :
+        IWorkflowAgentRunAdapter,
+        IWorkflowAgentTerminalOutcomeProjector
+    {
+        private readonly bool _blockCreateRequest;
+        private readonly bool _blockTerminalProjector;
+        private readonly TaskCompletionSource<bool> _entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _createRequestCalls;
+
+        public BlockingAdapter(
+            bool blockCreateRequest = false,
+            bool blockTerminalProjector = false)
+        {
+            _blockCreateRequest = blockCreateRequest;
+            _blockTerminalProjector = blockTerminalProjector;
+        }
+
+        public Task Entered => _entered.Task;
+
+        public int CreateRequestCalls =>
+            Volatile.Read(ref _createRequestCalls);
+
+        public DurableRunRequest CreateRequest(
+            WorkflowAgentInvocation invocation,
+            JsonElement input)
+        {
+            _ = input;
+            Interlocked.Increment(ref _createRequestCalls);
+            BlockIfRequested(_blockCreateRequest);
+            return new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = invocation.AgentRunId,
+                    AgentId = "npc",
+                    WorldId = "world"
+                }
+            };
+        }
+
+        public DurableRunContinuation? CreateContinuation(
+            WorkflowAgentInvocation invocation,
+            JsonElement input)
+        {
+            _ = invocation;
+            _ = input;
+            return new DurableRunContinuation();
+        }
+
+        public DurableRunResumeGuard? CreateResumeGuard(
+            WorkflowAgentInvocation invocation,
+            JsonElement input)
+        {
+            _ = invocation;
+            _ = input;
+            return new DurableRunResumeGuard
+            {
+                ExpectedAgentId = "npc"
+            };
+        }
+
+        public JsonElement ProjectOutcome(
+            WorkflowAgentInvocation invocation,
+            JsonElement input,
+            DurableRunOutcome outcome)
+        {
+            _ = invocation;
+            _ = input;
+            return outcome.FinalOutput!.Value.Clone();
+        }
+
+        public bool TryProjectTerminalOutcome(
+            WorkflowAgentInvocation invocation,
+            JsonElement input,
+            DurableRunOutcome outcome,
+            out JsonElement output)
+        {
+            _ = invocation;
+            _ = input;
+            _ = outcome;
+            BlockIfRequested(_blockTerminalProjector);
+            output = default;
+            return false;
+        }
+
+        public void Release() => _release.TrySetResult(true);
+
+        private void BlockIfRequested(bool block)
+        {
+            if (!block)
+            {
+                return;
+            }
+
+            _entered.TrySetResult(true);
+            _release.Task.GetAwaiter().GetResult();
         }
     }
 

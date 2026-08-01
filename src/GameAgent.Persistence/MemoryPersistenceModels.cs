@@ -32,6 +32,9 @@ internal sealed class MemoryFrameRecord
 
     [JsonPropertyName("payloadDigest")]
     public string? PayloadDigest { get; set; }
+
+    [JsonPropertyName("mutationContractVersion")]
+    public int? MutationContractVersion { get; set; }
 }
 
 internal sealed class MemoryFrameMutation
@@ -45,6 +48,140 @@ internal sealed class MemoryFrameMutation
 
     [JsonPropertyName("record")]
     public PersistedMemoryRecord? Record { get; set; }
+
+    [JsonPropertyName("expectedRecord")]
+    public PersistedMemoryExpectation? ExpectedRecord { get; set; }
+}
+
+internal sealed class PersistedMemoryExpectation
+{
+    [JsonRequired]
+    [JsonPropertyName("memoryId")]
+    public string MemoryId { get; set; } = string.Empty;
+
+    [JsonRequired]
+    [JsonPropertyName("scope")]
+    public string Scope { get; set; } = string.Empty;
+
+    [JsonRequired]
+    [JsonPropertyName("hasProvenance")]
+    public bool HasProvenance { get; set; }
+
+    [JsonPropertyName("worldId")]
+    public string? WorldId { get; set; }
+
+    [JsonPropertyName("sessionId")]
+    public string? SessionId { get; set; }
+
+    [JsonPropertyName("saveRevision")]
+    public long? SaveRevision { get; set; }
+
+    [JsonRequired]
+    [JsonPropertyName("committed")]
+    public bool Committed { get; set; }
+
+    [JsonPropertyName("timelineId")]
+    public string? TimelineId { get; set; }
+
+    [JsonPropertyName("timelineEpoch")]
+    public long? TimelineEpoch { get; set; }
+
+    [JsonRequired]
+    [JsonPropertyName("hasPerspective")]
+    public bool HasPerspective { get; set; }
+
+    [JsonPropertyName("observerEntityId")]
+    public string? ObserverEntityId { get; set; }
+
+    [JsonPropertyName("observerIncarnation")]
+    public long? ObserverIncarnation { get; set; }
+
+    [JsonPropertyName("perspectiveKind")]
+    public string? PerspectiveKind { get; set; }
+
+    [JsonRequired]
+    [JsonPropertyName("hasSource")]
+    public bool HasSource { get; set; }
+
+    [JsonPropertyName("sourceEntityId")]
+    public string? SourceEntityId { get; set; }
+
+    [JsonPropertyName("sourceIncarnation")]
+    public long? SourceIncarnation { get; set; }
+
+    [JsonRequired]
+    [JsonPropertyName("hasGameTimeWindow")]
+    public bool HasGameTimeWindow { get; set; }
+
+    [JsonPropertyName("gameTimeClockId")]
+    public string? GameTimeClockId { get; set; }
+
+    [JsonPropertyName("gameTimeTimelineId")]
+    public string? GameTimeTimelineId { get; set; }
+
+    [JsonPropertyName("gameTimeEpoch")]
+    public long? GameTimeEpoch { get; set; }
+
+    [JsonRequired]
+    [JsonPropertyName("recordDigest")]
+    public string RecordDigest { get; set; } = string.Empty;
+
+    public static PersistedMemoryExpectation FromExpectation(
+        MemoryRecordExpectation expectation)
+    {
+        var authority = expectation.Authority;
+        return new PersistedMemoryExpectation
+        {
+            MemoryId = expectation.MemoryId,
+            Scope = expectation.Scope,
+            HasProvenance = expectation.HasProvenance,
+            WorldId = expectation.WorldId,
+            SessionId = expectation.SessionId,
+            SaveRevision = authority.SaveRevision,
+            Committed = authority.Committed,
+            TimelineId = authority.TimelineId,
+            TimelineEpoch = authority.TimelineEpoch,
+            HasPerspective = authority.HasPerspective,
+            ObserverEntityId = authority.ObserverEntityId,
+            ObserverIncarnation = authority.ObserverIncarnation,
+            PerspectiveKind = authority.PerspectiveKind,
+            HasSource = authority.HasSource,
+            SourceEntityId = authority.SourceEntityId,
+            SourceIncarnation = authority.SourceIncarnation,
+            HasGameTimeWindow = authority.HasGameTimeWindow,
+            GameTimeClockId = authority.GameTimeClockId,
+            GameTimeTimelineId = authority.GameTimeTimelineId,
+            GameTimeEpoch = authority.GameTimeEpoch,
+            RecordDigest = expectation.RecordDigest
+        };
+    }
+
+    public MemoryRecordExpectation ToExpectation()
+    {
+        return MemoryRecordExpectation.Restore(
+            MemoryId,
+            Scope,
+            MemoryRecordAuthorityEnvelope.Restore(
+                HasProvenance,
+                WorldId,
+                SessionId,
+                SaveRevision,
+                Committed,
+                TimelineId,
+                TimelineEpoch,
+                HasPerspective,
+                ObserverEntityId,
+                ObserverIncarnation,
+                PerspectiveKind,
+                HasSource,
+                SourceEntityId,
+                SourceIncarnation,
+                HasGameTimeWindow,
+                GameTimeClockId,
+                GameTimeTimelineId,
+                GameTimeEpoch),
+            RecordDigest);
+    }
 }
 
 internal sealed class PersistedMemoryRecord

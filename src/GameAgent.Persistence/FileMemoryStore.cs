@@ -12,7 +12,8 @@ namespace GameAgent.Persistence;
 /// </summary>
 public sealed class FileMemoryStore :
     IMemoryStore,
-    IIdempotentAtomicMemoryBatchStore,
+    IRuntimeAuthoritativeMemoryBatchStore,
+    ILegacyRuntimeMemoryBatchReplayStore,
     IMemoryIndexDiagnosticsProvider,
     IDisposable,
     IAsyncDisposable
@@ -21,7 +22,8 @@ public sealed class FileMemoryStore :
     private const uint CommitMagic = 0x54494D43;
     private const int HeaderSize = 12;
     private const int FooterSize = 4;
-    private const int FormatVersion = 1;
+    private const int LegacyFormatVersion = 1;
+    private const int FormatVersion = 2;
     private const int IndexRebuildBatchSize = 32;
     private const string UpsertOperation = "upsert";
     private const string DeleteOperation = "delete";
@@ -51,6 +53,9 @@ public sealed class FileMemoryStore :
     private int _indexStatus = (int)MemoryIndexStatus.Rebuilding;
     private bool _faulted;
     private bool _disposed;
+
+    public int RuntimeMutationContractVersion =>
+        RuntimeMemoryMutationContract.CurrentVersion;
 
     public FileMemoryStore(
         string path,
@@ -214,6 +219,10 @@ public sealed class FileMemoryStore :
         {
             ThrowIfUnavailable();
             EnsureExpectedRevision(expectedRevision);
+            _records.TryGetValue(record.MemoryId, out var existing);
+            MemoryMutationAdmission.EnsureCanApplyUnconditionalUpsert(
+                MemoryMutation.Upsert(record),
+                existing);
             if (!_records.ContainsKey(record.MemoryId)
                 && _records.Count >= _capacity)
             {
@@ -357,6 +366,35 @@ public sealed class FileMemoryStore :
             IReadOnlyList<MemoryMutation> mutations,
             CancellationToken cancellationToken = default)
     {
+        return await ApplyIdempotentAtomicBatchCoreAsync(
+                commitId,
+                mutations,
+                allowLegacyReplay: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ApplyLegacyIdempotentAtomicBatchAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            CancellationToken cancellationToken = default)
+    {
+        return await ApplyIdempotentAtomicBatchCoreAsync(
+                commitId,
+                mutations,
+                allowLegacyReplay: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ApplyIdempotentAtomicBatchCoreAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            bool allowLegacyReplay,
+            CancellationToken cancellationToken)
+    {
         commitId = RuntimeGuard.RequiredUtf8(
             commitId,
             256,
@@ -402,6 +440,17 @@ public sealed class FileMemoryStore :
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var mutation = snapshot[index];
+                staged.TryGetValue(mutation.MemoryId, out var existing);
+                if (allowLegacyReplay)
+                {
+                    MemoryMutationAdmission.EnsureCanReplayLegacy(mutation);
+                }
+                else
+                {
+                    MemoryMutationAdmission.EnsureCanApply(
+                        mutation,
+                        existing);
+                }
                 switch (mutation.Kind)
                 {
                     case MemoryMutationKind.Upsert:
@@ -437,7 +486,15 @@ public sealed class FileMemoryStore :
                     $"Memory capacity exceeds {_capacity} records.");
             }
 
-            if (changed && _index is IPreflightMemoryIndex preflight)
+            if (allowLegacyReplay
+                && _index is not ILegacyRuntimeMemoryBatchReplayStore)
+            {
+                throw new MemoryLegacyReplayNotSupportedException();
+            }
+
+            if (changed
+                && !allowLegacyReplay
+                && _index is IPreflightMemoryIndex preflight)
             {
                 preflight.ValidateAtomicBatch(
                     snapshot,
@@ -450,17 +507,31 @@ public sealed class FileMemoryStore :
                     nextRevision,
                     cancellationToken,
                     commitId,
-                    payloadDigest)
+                    payloadDigest,
+                    allowLegacyReplay)
                 .ConfigureAwait(false);
 
             try
             {
                 if (changed)
                 {
-                    _ = await _index.ApplyAtomicBatchAsync(
-                            snapshot,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
+                    if (allowLegacyReplay)
+                    {
+                        _ = await ((ILegacyRuntimeMemoryBatchReplayStore)
+                                _index)
+                            .ApplyLegacyIdempotentAtomicBatchAsync(
+                                commitId,
+                                snapshot,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        _ = await _index.ApplyAtomicBatchAsync(
+                                snapshot,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
                     _records = staged;
                 }
 
@@ -511,6 +582,8 @@ public sealed class FileMemoryStore :
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var mutation = snapshot[index];
+                staged.TryGetValue(mutation.MemoryId, out var existing);
+                MemoryMutationAdmission.EnsureCanApply(mutation, existing);
                 switch (mutation.Kind)
                 {
                     case MemoryMutationKind.Upsert:
@@ -749,7 +822,8 @@ public sealed class FileMemoryStore :
         long revision,
         CancellationToken cancellationToken,
         string? commitId = null,
-        string? payloadDigest = null)
+        string? payloadDigest = null,
+        bool allowLegacyReplay = false)
     {
         using var payload = BoundedJsonPayload.Write(
             _maxFramePayloadBytes,
@@ -767,6 +841,11 @@ public sealed class FileMemoryStore :
                 {
                     writer.WriteString("commitId", commitId);
                     writer.WriteString("payloadDigest", payloadDigest);
+                }
+
+                if (allowLegacyReplay)
+                {
+                    writer.WriteNumber("mutationContractVersion", 0);
                 }
 
                 writer.WritePropertyName("mutations");
@@ -804,6 +883,17 @@ public sealed class FileMemoryStore :
                             throw new InvalidOperationException(
                                 $"Unknown memory mutation kind "
                                 + $"'{mutation.Kind}'.");
+                    }
+
+                    if (mutation.ExpectedRecord is not null)
+                    {
+                        writer.WritePropertyName("expectedRecord");
+                        JsonSerializer.Serialize(
+                            writer,
+                            PersistedMemoryExpectation.FromExpectation(
+                                mutation.ExpectedRecord),
+                            PersistenceJsonContext.Default
+                                .PersistedMemoryExpectation);
                     }
 
                     writer.WriteEndObject();
@@ -984,7 +1074,8 @@ public sealed class FileMemoryStore :
 
     private void ApplyRecoveredRecord(MemoryFrameRecord frame)
     {
-        if (frame.FormatVersion != FormatVersion)
+        if (frame.FormatVersion != LegacyFormatVersion
+            && frame.FormatVersion != FormatVersion)
         {
             throw new InvalidOperationException(
                 $"Unsupported memory format version "
@@ -1008,13 +1099,21 @@ public sealed class FileMemoryStore :
                 || frame.Record is null
                 || frame.Mutations is not null
                 || frame.CommitId is not null
-                || frame.PayloadDigest is not null)
+                || frame.PayloadDigest is not null
+                || frame.MutationContractVersion.HasValue)
             {
                 throw new InvalidOperationException(
                     "An upsert frame must contain exactly one memory record.");
             }
 
             var record = frame.Record.ToMemoryRecord();
+            if (frame.FormatVersion != LegacyFormatVersion)
+            {
+                _records.TryGetValue(record.MemoryId, out var existing);
+                MemoryMutationAdmission.EnsureCanApplyUnconditionalUpsert(
+                    MemoryMutation.Upsert(record),
+                    existing);
+            }
             if (!_records.ContainsKey(record.MemoryId)
                 && _records.Count >= _capacity)
             {
@@ -1035,7 +1134,8 @@ public sealed class FileMemoryStore :
                 || frame.MemoryId is null
                 || frame.Mutations is not null
                 || frame.CommitId is not null
-                || frame.PayloadDigest is not null)
+                || frame.PayloadDigest is not null
+                || frame.MutationContractVersion.HasValue)
             {
                 throw new InvalidOperationException(
                     "A delete frame must contain exactly one memory id.");
@@ -1058,16 +1158,33 @@ public sealed class FileMemoryStore :
                 || frame.MemoryId is not null
                 || frame.Mutations is null
                 || (frame.CommitId is null)
-                != (frame.PayloadDigest is null))
+                != (frame.PayloadDigest is null)
+                || frame.MutationContractVersion is not null and not 0)
             {
                 throw new InvalidOperationException(
                     "A batch frame must contain exactly one mutation array.");
             }
 
             var idempotent = frame.CommitId is not null;
+            if (frame.FormatVersion == LegacyFormatVersion
+                && frame.MutationContractVersion.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "A version 1 batch cannot declare a mutation contract version.");
+            }
+            if (frame.MutationContractVersion == 0 && !idempotent)
+            {
+                throw new InvalidOperationException(
+                    "A legacy replay marker requires an idempotent commit identity.");
+            }
+
+            var allowLegacyReplay =
+                frame.FormatVersion == LegacyFormatVersion
+                || frame.MutationContractVersion == 0;
             var snapshot = ApplyRecoveredBatch(
                 frame.Mutations,
-                allowNoChange: idempotent);
+                allowNoChange: idempotent,
+                allowLegacyReplay);
             if (idempotent)
             {
                 var commitId = RuntimeGuard.RequiredUtf8(
@@ -1102,7 +1219,8 @@ public sealed class FileMemoryStore :
 
     private MemoryMutation[] ApplyRecoveredBatch(
         IReadOnlyList<MemoryFrameMutation> mutations,
-        bool allowNoChange)
+        bool allowNoChange,
+        bool allowLegacyReplay)
     {
         var mutationCount = mutations.Count;
         if (mutationCount is < 1 or > MemoryBatchLimits.MaxMutations)
@@ -1116,8 +1234,9 @@ public sealed class FileMemoryStore :
         for (var index = 0; index < mutationCount; index++)
         {
             var mutation = mutations[index]
-                           ?? throw new InvalidOperationException(
-                               $"Memory mutation {index} is null.");
+                               ?? throw new InvalidOperationException(
+                                   $"Memory mutation {index} is null.");
+            var expected = mutation.ExpectedRecord?.ToExpectation();
             if (string.Equals(
                     mutation.Operation,
                     UpsertOperation,
@@ -1132,7 +1251,11 @@ public sealed class FileMemoryStore :
                 }
 
                 var record = mutation.Record.ToMemoryRecord();
-                parsed[index] = MemoryMutation.Upsert(record);
+                parsed[index] = MemoryMutation.Restore(
+                    MemoryMutationKind.Upsert,
+                    record.MemoryId,
+                    record,
+                    expected);
             }
             else if (string.Equals(
                          mutation.Operation,
@@ -1148,7 +1271,11 @@ public sealed class FileMemoryStore :
                 }
 
                 ValidateMemoryId(mutation.MemoryId);
-                parsed[index] = MemoryMutation.Delete(mutation.MemoryId);
+                parsed[index] = MemoryMutation.Restore(
+                    MemoryMutationKind.Delete,
+                    mutation.MemoryId,
+                    record: null,
+                    expectedRecord: expected);
             }
             else
             {
@@ -1167,6 +1294,15 @@ public sealed class FileMemoryStore :
         var changed = false;
         foreach (var mutation in snapshot)
         {
+            staged.TryGetValue(mutation.MemoryId, out var existing);
+            if (allowLegacyReplay)
+            {
+                MemoryMutationAdmission.EnsureCanReplayLegacy(mutation);
+            }
+            else
+            {
+                MemoryMutationAdmission.EnsureCanApply(mutation, existing);
+            }
             switch (mutation.Kind)
             {
                 case MemoryMutationKind.Upsert:

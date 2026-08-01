@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using GameAgent.Core;
@@ -1313,6 +1314,41 @@ public sealed class UnityHostConformanceTests
     }
 
     [Fact]
+    public async Task SynchronousBackendFailureCannotStrandShutdownSnapshot()
+    {
+        using var release = new ManualResetEventSlim(initialState: false);
+        var backend = new SynchronousBlockingThrowBackend(release);
+        var facade = new UnityAgentRuntimeFacade(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        Exception? startFailure = null;
+        var starting = Task.Run(
+            () =>
+            {
+                try
+                {
+                    _ = facade.RunAsync(
+                        new HeadlessRunRequest(),
+                        CancellationToken.None);
+                }
+                catch (Exception exception)
+                {
+                    startFailure = exception;
+                }
+            });
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var shutdown = facade.ShutdownAsync(CancellationToken.None).AsTask();
+        release.Set();
+        await starting.WaitAsync(TimeSpan.FromSeconds(2));
+        await shutdown.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.IsType<InvalidOperationException>(startFailure);
+        Assert.Equal(0, facade.ActiveRunCount);
+    }
+
+    [Fact]
     public async Task FacadeFlushesAfterThrowingCancellationCallback()
     {
         var store = new BlockingDurableStore();
@@ -1396,6 +1432,37 @@ public sealed class UnityHostConformanceTests
         }
 
         await caller.WaitAsync(TimeSpan.FromSeconds(2));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        await facade.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task FacadeCallerCancellationDoesNotRunBackendCallbacksInline()
+    {
+        using var release = new ManualResetEventSlim(initialState: false);
+        using var callerCancellation = new CancellationTokenSource();
+        var backend = new BlockingCancellationCallbackBackend(release);
+        var facade = new UnityAgentRuntimeFacade(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var run = facade.RunAsync(
+            new HeadlessRunRequest(),
+            callerCancellation.Token);
+        await backend.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var elapsed = Stopwatch.StartNew();
+        callerCancellation.Cancel();
+        elapsed.Stop();
+
+        Assert.True(
+            elapsed.Elapsed < TimeSpan.FromMilliseconds(250),
+            "Caller cancellation synchronously ran a backend callback.");
+        await backend.CancellationCallbackStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(2));
+        Assert.False(run.IsCompleted);
+
+        release.Set();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
         await facade.ShutdownAsync(CancellationToken.None);
     }
@@ -1498,6 +1565,8 @@ public sealed class UnityHostConformanceTests
             await shutdownBackend.Started.Task.WaitAsync(
                 TimeSpan.FromSeconds(2));
 
+            shutdownFacade.CancelActiveRuns();
+            Assert.Equal(1, UnityRunCancellationDispatcher.PendingCount);
             shutdownFacade.RequestShutdown();
             await shutdownBackend.CancellationCallbackStarted.Task.WaitAsync(
                 TimeSpan.FromSeconds(2));
@@ -1506,6 +1575,9 @@ public sealed class UnityHostConformanceTests
                 UnityRunCancellationDispatcher.ActiveCount);
             Assert.Equal(
                 1,
+                UnityShutdownRunCancellationDispatcher.ActiveCount);
+            Assert.Equal(
+                0,
                 UnityLifecycleCancellationDispatcher.ActiveCount);
         }
         finally
@@ -1548,6 +1620,7 @@ public sealed class UnityHostConformanceTests
         Assert.True(
             SpinWait.SpinUntil(
                 () => UnityRunCancellationDispatcher.ActiveCount == 0
+                    && UnityShutdownRunCancellationDispatcher.ActiveCount == 0
                     && UnityLifecycleCancellationDispatcher.ActiveCount == 0,
                 TimeSpan.FromSeconds(3)));
     }
@@ -1567,7 +1640,7 @@ public sealed class UnityHostConformanceTests
         try
         {
             for (var index = 0;
-                 index < UnityLifecycleCancellationDispatcher.Capacity;
+                 index < UnityShutdownRunCancellationDispatcher.Capacity;
                  index++)
             {
                 var release =
@@ -1592,8 +1665,8 @@ public sealed class UnityHostConformanceTests
             }
 
             Assert.Equal(
-                UnityLifecycleCancellationDispatcher.Capacity,
-                UnityLifecycleCancellationDispatcher.ActiveCount);
+                UnityShutdownRunCancellationDispatcher.Capacity,
+                UnityShutdownRunCancellationDispatcher.ActiveCount);
 
             var overflowBackend =
                 new IndefinitelyBlockingCancellationCallbackBackend(
@@ -1612,11 +1685,11 @@ public sealed class UnityHostConformanceTests
             Assert.False(
                 overflowFacade.RequiresShutdownCancellationAdmission);
             Assert.Equal(
-                UnityLifecycleCancellationDispatcher.Capacity,
-                UnityLifecycleCancellationDispatcher.ActiveCount);
+                UnityShutdownRunCancellationDispatcher.Capacity,
+                UnityShutdownRunCancellationDispatcher.ActiveCount);
             Assert.Equal(
                 1,
-                UnityLifecycleCancellationDispatcher.PendingCount);
+                UnityShutdownRunCancellationDispatcher.PendingCount);
             Assert.False(
                 overflowBackend.CancellationCallbackStarted.Task.IsCompleted);
 
@@ -1923,13 +1996,157 @@ public sealed class UnityHostConformanceTests
             cancellationToken: CancellationToken.None);
 
         Assert.Same(backend.Controls, facade.DurableControls);
-        Assert.Same(request, backend.LastRequest);
+        Assert.NotSame(request, backend.LastRequest);
+        Assert.Equal("durable-run", backend.LastRequest!.Run.RunId);
         Assert.Equal("durable-run", started.Run.RunId);
         Assert.Equal("resumed-run", backend.LastResumeRunId);
         Assert.Equal("resumed-run", resumed.Run.RunId);
         Assert.Equal(0, facade.ActiveRunCount);
 
         await facade.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task FacadeAndHostExposeTrackedRoutingAndStatelessCompletion()
+    {
+        var backend = new RecordingRoutedBackend();
+        var facade = new UnityAgentRuntimeFacade(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var routedRequest = new RoutedExecutionRequest
+        {
+            Route = new ExecutionRouteRequest
+            {
+                OperationKind = "npc-bark"
+            },
+            Run = new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "unity-routed-run",
+                    State = RunStates.Queued
+                }
+            }
+        };
+        var completionRequest = new SimpleCompletionRequest
+        {
+            OperationId = "unity-completion",
+            Messages = new[]
+            {
+                new NormalizedMessage
+                {
+                    MessageId = "unity-completion-message",
+                    Role = NormalizedRoles.User,
+                    CreatedAt = DateTimeOffset.UnixEpoch,
+                    Parts = new List<NormalizedContentPart>
+                    {
+                        NormalizedContentPart.FromText("Classify event.")
+                    }
+                }
+            }
+        };
+
+        var routed = await facade.RunRoutedAsync(
+            routedRequest,
+            CancellationToken.None);
+        var completed = await facade.CompleteAsync(
+            completionRequest,
+            CancellationToken.None);
+        var childRequest = new DurableRunRequest
+        {
+            Run = new AgentRun
+            {
+                RunId = "unity-child-run",
+                State = RunStates.Queued
+            }
+        };
+        var child = await facade.RunChildAsync(
+            "unity-parent-run",
+            childRequest,
+            CancellationToken.None);
+        Assert.NotSame(childRequest, backend.LastChildRequest);
+        Assert.Equal("unity-child-run", backend.LastChildRequest!.Run.RunId);
+        Assert.Equal("unity-parent-run", backend.LastParentRunId);
+        var persistedParent = new AgentRun
+        {
+            RunId = "unity-persisted-parent",
+            State = RunStates.Completed,
+            Extensions = new Dictionary<string, JsonElement>
+            {
+                [ChildAgentLineage.ExtensionName] =
+                    ProtocolJson.ParseElement(
+                        """
+                        {"rootRunId":"unity-root","parentRunId":"unity-root","childRunId":"unity-persisted-parent","depth":1}
+                        """)
+            }
+        };
+        var grandchild = await facade.RunChildAsync(
+            persistedParent,
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "unity-grandchild",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+
+        Assert.NotSame(routedRequest, backend.LastRoutedRequest);
+        Assert.Equal(
+            "npc-bark",
+            backend.LastRoutedRequest!.Route.OperationKind);
+        Assert.NotSame(completionRequest, backend.LastCompletionRequest);
+        Assert.Equal(
+            "unity-completion",
+            backend.LastCompletionRequest!.OperationId);
+        Assert.Equal(1, child.Lineage.Depth);
+        Assert.NotSame(persistedParent, backend.LastParentRun);
+        Assert.Equal(
+            "unity-persisted-parent",
+            backend.LastParentRun!.RunId);
+        Assert.Equal("unity-root", grandchild.Lineage.RootRunId);
+        Assert.Equal(2, grandchild.Lineage.Depth);
+        Assert.Equal(ExecutionPath.Direct, routed.Decision.Path);
+        Assert.Equal("unity-completed", completed.Text);
+        Assert.Equal(0, facade.ActiveRunCount);
+        await facade.DisposeAsync();
+
+        var host = new GameObject("GameAgentRuntimeRoutedTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        RoutedExecutionOutcome? observedRoute = null;
+        SimpleCompletionOutcome? observedCompletion = null;
+        host.RoutedRunCompleted += outcome => observedRoute = outcome;
+        host.CompletionCompleted += outcome => observedCompletion = outcome;
+        host.Configure(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+
+        var hostRoute = await host.RunRoutedAsync(
+            routedRequest,
+            CancellationToken.None);
+        var hostCompletion = await host.CompleteAsync(
+            completionRequest,
+            CancellationToken.None);
+        var hostChild = await host.RunChildAsync(
+            "unity-host-parent",
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "unity-host-child",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+        PumpHost(host);
+
+        Assert.Same(hostRoute, observedRoute);
+        Assert.Same(hostCompletion, observedCompletion);
+        Assert.Equal("unity-host-parent", hostChild.Lineage.ParentRunId);
+        await host.ShutdownAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -1955,7 +2172,10 @@ public sealed class UnityHostConformanceTests
             cancellationToken: CancellationToken.None);
 
         Assert.Equal("guarded-run", outcome.Run.RunId);
-        Assert.Same(guard, backend.LastGuard);
+        Assert.NotSame(guard, backend.LastGuard);
+        Assert.Equal(
+            guard.ExpectedSemanticExtensionSha256,
+            backend.LastGuard!.ExpectedSemanticExtensionSha256);
         Assert.Equal(0, facade.ActiveRunCount);
         await facade.DisposeAsync();
 
@@ -1971,7 +2191,10 @@ public sealed class UnityHostConformanceTests
             guard,
             cancellationToken: CancellationToken.None);
         Assert.Equal("host-guarded-run", hostOutcome.Run.RunId);
-        Assert.Same(guard, hostBackend.LastGuard);
+        Assert.NotSame(guard, hostBackend.LastGuard);
+        Assert.Equal(
+            guard.ExpectedSemanticExtensionSha256,
+            hostBackend.LastGuard!.ExpectedSemanticExtensionSha256);
         await host.ShutdownAsync(CancellationToken.None);
 
         var unsupportedFacade = new UnityAgentRuntimeFacade(
@@ -1987,6 +2210,128 @@ public sealed class UnityHostConformanceTests
             DurableRunResumeGuardReasonCodes.NotSupported,
             unsupported.ReasonCode);
         await unsupportedFacade.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task FacadeSnapshotsMutableRequestsBeforeReturning()
+    {
+        var durableBackend = new RecordingDurableBackend();
+        var durableFacade = new UnityAgentRuntimeFacade(
+            durableBackend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var durableRequest = new DurableRunRequest
+        {
+            Run = new AgentRun
+            {
+                RunId = "snapshot-durable",
+                State = RunStates.Queued
+            }
+        };
+
+        var durableTask = durableFacade.RunAsync(
+            durableRequest,
+            CancellationToken.None);
+        durableRequest.Run.RunId = "caller-mutated-durable";
+        await durableTask;
+
+        Assert.Equal(
+            "snapshot-durable",
+            durableBackend.LastRequest!.Run.RunId);
+        await durableFacade.DisposeAsync();
+
+        var routedBackend = new RecordingRoutedBackend();
+        var routedFacade = new UnityAgentRuntimeFacade(
+            routedBackend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var routedRequest = new RoutedExecutionRequest
+        {
+            Route = new ExecutionRouteRequest
+            {
+                OperationKind = "snapshot-route"
+            },
+            Run = new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "snapshot-routed-run",
+                    State = RunStates.Queued
+                }
+            }
+        };
+        var completionRequest = new SimpleCompletionRequest
+        {
+            OperationId = "snapshot-completion",
+            Messages = new[]
+            {
+                new NormalizedMessage
+                {
+                    MessageId = "snapshot-message",
+                    Role = NormalizedRoles.User,
+                    CreatedAt = DateTimeOffset.UnixEpoch,
+                    Parts = new List<NormalizedContentPart>
+                    {
+                        NormalizedContentPart.FromText("Classify.")
+                    }
+                }
+            }
+        };
+
+        var routedTask = routedFacade.RunRoutedAsync(
+            routedRequest,
+            CancellationToken.None);
+        routedRequest.Route.OperationKind = "caller-mutated-route";
+        routedRequest.Run.Run.RunId = "caller-mutated-run";
+        var completionTask = routedFacade.CompleteAsync(
+            completionRequest,
+            CancellationToken.None);
+        completionRequest.OperationId = "caller-mutated-completion";
+        await Task.WhenAll(routedTask, completionTask);
+
+        Assert.Equal(
+            "snapshot-route",
+            routedBackend.LastRoutedRequest!.Route.OperationKind);
+        Assert.Equal(
+            "snapshot-routed-run",
+            routedBackend.LastRoutedRequest.Run!.Run.RunId);
+        Assert.Equal(
+            "snapshot-completion",
+            routedBackend.LastCompletionRequest!.OperationId);
+        Assert.Equal(0, routedFacade.ActiveRunCount);
+        await routedFacade.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task FacadeSnapshotFailureReleasesRunAdmission()
+    {
+        var backend = new RecordingRoutedBackend();
+        var facade = new UnityAgentRuntimeFacade(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var runLeaseBaseline = UnityRunCancellationDispatcher.LeaseCount;
+        var shutdownLeaseBaseline =
+            UnityShutdownRunCancellationDispatcher.LeaseCount;
+        var request = new SimpleCompletionRequest
+        {
+            OperationId = "snapshot-failure",
+            Messages = new ThrowingReadOnlyList<NormalizedMessage>()
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => facade.CompleteAsync(request, CancellationToken.None));
+
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => facade.ActiveRunCount == 0
+                    && UnityRunCancellationDispatcher.LeaseCount
+                        == runLeaseBaseline
+                    && UnityShutdownRunCancellationDispatcher.LeaseCount
+                        == shutdownLeaseBaseline,
+                TimeSpan.FromSeconds(2)));
+        Assert.Null(backend.LastCompletionRequest);
+        await facade.DisposeAsync();
     }
 
     [Fact]
@@ -2225,13 +2570,421 @@ public sealed class UnityHostConformanceTests
         var outcome = await host.RunAsync(
             request,
             CancellationToken.None);
-        host.Dispatcher.Pump(maxItems: 8, maxMilliseconds: 10);
+        PumpHost(host);
 
         Assert.Same(backend.Controls, host.DurableControls);
         Assert.Same(outcome, observed);
 
         await host.ShutdownAsync(CancellationToken.None);
         Assert.True(host.Dispatcher.IsShutdown);
+    }
+
+    [Fact]
+    public async Task TerminalCompletionIsIndependentFromAFullActionQueue()
+    {
+        var host = new GameObject("UnityTerminalIsolationTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            new RecordingDurableBackend(),
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        DurableRunOutcome? observed = null;
+        host.DurableRunCompleted += outcome => observed = outcome;
+        for (var index = 0; index < host.Dispatcher.Capacity; index++)
+        {
+            Assert.True(host.Dispatcher.TryPost(() => { }));
+        }
+
+        var outcome = await host.RunAsync(
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "terminal-isolation-run",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+
+        Assert.Equal(1, host.PendingTerminalObserverCount);
+        PumpHost(host);
+        Assert.Same(outcome, observed);
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ConcurrentFaultEventsRetainRunIdentity()
+    {
+        var backend = new ControlledFailingDurableBackend();
+        var host = new GameObject("UnityFaultIdentityTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var faults = new List<UnityRunFault>();
+        host.RunFaultedDetailed += faults.Add;
+
+        var first = host.RunAsync(
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "fault-run-a",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+        var second = host.RunAsync(
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "fault-run-b",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+        backend.Fail("fault-run-b");
+        Assert.Throws<InvalidOperationException>(
+            () => second.GetAwaiter().GetResult());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => host.PendingTerminalObserverCount == 1,
+                TimeSpan.FromSeconds(2)));
+        backend.Fail("fault-run-a");
+        Assert.Throws<InvalidOperationException>(
+            () => first.GetAwaiter().GetResult());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => host.PendingTerminalObserverCount == 2,
+                TimeSpan.FromSeconds(2)));
+
+        PumpHost(host);
+
+        Assert.Equal(
+            new[] { "fault-run-b", "fault-run-a" },
+            faults.Select(item => item.RunId));
+        Assert.All(
+            faults,
+            item =>
+            {
+                Assert.Equal("durable_run", item.OperationKind);
+                Assert.True(item.ReconciliationRequired);
+                Assert.IsType<InvalidOperationException>(item.Exception);
+            });
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ShutdownPreservesPublishedTerminalObserverForLaterPump()
+    {
+        var host = new GameObject("UnityTerminalShutdownDrainTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            new RecordingDurableBackend(),
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        DurableRunOutcome? observed = null;
+        host.DurableRunCompleted += outcome => observed = outcome;
+        var outcome = await host.RunAsync(
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "shutdown-terminal-run",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => host.PendingTerminalObserverCount == 1,
+                TimeSpan.FromSeconds(2)));
+
+        await host.ShutdownAsync(CancellationToken.None);
+
+        Assert.Null(observed);
+        Assert.Equal(1, host.PendingTerminalObserverCount);
+        Assert.Equal(1, host.TerminalObserverReservationCount);
+        Assert.Throws<InvalidOperationException>(
+            () =>
+            {
+                _ = host.RunAsync(
+                    new DurableRunRequest
+                    {
+                        Run = new AgentRun
+                        {
+                            RunId = "shutdown-rejected-run",
+                            State = RunStates.Queued
+                        }
+                    },
+                    CancellationToken.None);
+            });
+
+        PumpHost(host);
+
+        Assert.Same(outcome, observed);
+        Assert.Equal(0, host.PendingTerminalObserverCount);
+        Assert.Equal(0, host.TerminalObserverReservationCount);
+    }
+
+    [Fact]
+    public async Task
+        TerminalQueueStopsNewReservationsButDrainsIssuedPublishers()
+    {
+        using var queue = new UnityTerminalObserverQueue(capacity: 1);
+        Assert.True(queue.TryReserve(out var issued));
+
+        var publisherDrain = queue.StopAccepting();
+
+        Assert.False(publisherDrain.IsCompleted);
+        Assert.False(queue.TryReserve(out _));
+        var observed = 0;
+        Assert.True(issued.Publish(() => observed++));
+        await publisherDrain.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, queue.PendingCount);
+        Assert.Equal(1, queue.ReservedCount);
+        Assert.Equal(
+            1,
+            queue.Pump(
+                maxItems: 1,
+                maxMilliseconds: 10,
+                report: null));
+        Assert.Equal(1, observed);
+        Assert.Equal(0, queue.PendingCount);
+        Assert.Equal(0, queue.ReservedCount);
+    }
+
+    [Fact]
+    public async Task HostShutdownWaitsForIssuedTerminalPublisher()
+    {
+        var host = new GameObject("UnityTerminalPublisherDrainTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        _ = host.Dispatcher;
+        var queue = Assert.IsType<UnityTerminalObserverQueue>(
+            typeof(UnityAgentRuntimeHost)
+                .GetField(
+                    "_terminalObservers",
+                    System.Reflection.BindingFlags.Instance
+                    | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(host));
+        Assert.True(queue.TryReserve(out var issued));
+        var observed = 0;
+
+        var shutdown = host.ShutdownAsync(CancellationToken.None);
+
+        Assert.False(shutdown.IsCompleted);
+        Assert.False(queue.TryReserve(out _));
+        Assert.True(issued.Publish(() => observed++));
+        await shutdown.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(host.Dispatcher.IsShutdown);
+        Assert.Equal(1, host.PendingTerminalObserverCount);
+        Assert.Equal(1, host.TerminalObserverReservationCount);
+        PumpHost(host);
+        Assert.Equal(1, observed);
+        Assert.Equal(0, host.PendingTerminalObserverCount);
+        Assert.Equal(0, host.TerminalObserverReservationCount);
+    }
+
+    [Fact]
+    public async Task AbandonedTerminalReservationCompletesPublisherDrain()
+    {
+        using var queue = new UnityTerminalObserverQueue(capacity: 1);
+        Assert.True(queue.TryReserve(out var issued));
+        var publisherDrain = queue.StopAccepting();
+
+        issued.Dispose();
+        await publisherDrain.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, queue.PendingCount);
+        Assert.Equal(0, queue.ReservedCount);
+    }
+
+    [Fact]
+    public async Task SuccessObserversAreIsolatedPerSubscriberAndApiShape()
+    {
+        var headlessHost = new GameObject("UnityHeadlessObserverIsolationTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        var headlessClock = new FakeRuntimeClock();
+        headlessHost.Configure(
+            new CompletingProvider(),
+            new InMemorySessionStore(),
+            (_, _) => throw new InvalidOperationException(
+                "No action should be dispatched."),
+            headlessClock,
+            new SequentialIdGenerator(),
+            ownsSessionStore: false);
+        var headlessObserved = 0;
+        headlessHost.RunCompleted += _ =>
+            throw new InvalidOperationException("malicious headless observer");
+        headlessHost.RunCompleted += _ => headlessObserved++;
+
+        _ = await headlessHost.RunAsync(
+            CreateRunRequest(headlessClock),
+            CancellationToken.None);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => headlessHost.PendingTerminalObserverCount == 1,
+                TimeSpan.FromSeconds(2)));
+        PumpHost(headlessHost);
+        Assert.Equal(1, headlessObserved);
+        await headlessHost.ShutdownAsync(CancellationToken.None);
+
+        var backend = new RecordingRoutedBackend();
+        var host = new GameObject("UnitySuccessObserverIsolationTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var durableObserved = 0;
+        var routedObserved = 0;
+        var completionObserved = 0;
+        host.DurableRunCompleted += _ =>
+            throw new InvalidOperationException("malicious durable observer");
+        host.DurableRunCompleted += _ => durableObserved++;
+        host.RoutedRunCompleted += _ =>
+            throw new InvalidOperationException("malicious routed observer");
+        host.RoutedRunCompleted += _ => routedObserved++;
+        host.CompletionCompleted += _ =>
+            throw new InvalidOperationException("malicious completion observer");
+        host.CompletionCompleted += _ => completionObserved++;
+
+        _ = await host.RunAsync(
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "isolated-success-run",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+        _ = await host.RunChildAsync(
+            "isolated-success-parent",
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "isolated-success-child",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+        _ = await host.RunRoutedAsync(
+            new RoutedExecutionRequest(),
+            CancellationToken.None);
+        _ = await host.CompleteAsync(
+            new SimpleCompletionRequest
+            {
+                OperationId = "isolated-success-completion"
+            },
+            CancellationToken.None);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => host.PendingTerminalObserverCount == 4,
+                TimeSpan.FromSeconds(2)));
+
+        PumpHost(host);
+
+        Assert.Equal(2, durableObserved);
+        Assert.Equal(1, routedObserved);
+        Assert.Equal(1, completionObserved);
+        Assert.Equal(0, host.TerminalObserverReservationCount);
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task FaultObserversAreIsolatedPerSubscriberAndApiShape()
+    {
+        var backend = new ControlledFailingDurableBackend();
+        var host = new GameObject("UnityFaultObserverIsolationTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            backend,
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var detailedObserved = 0;
+        var legacyObserved = 0;
+        host.RunFaultedDetailed += _ =>
+            throw new InvalidOperationException("malicious detailed observer");
+        host.RunFaultedDetailed += _ => detailedObserved++;
+        host.RunFaulted += _ =>
+            throw new InvalidOperationException("malicious legacy observer");
+        host.RunFaulted += _ => legacyObserved++;
+        var run = host.RunAsync(
+            new DurableRunRequest
+            {
+                Run = new AgentRun
+                {
+                    RunId = "isolated-fault-run",
+                    State = RunStates.Queued
+                }
+            },
+            CancellationToken.None);
+
+        backend.Fail("isolated-fault-run");
+        Assert.Throws<InvalidOperationException>(
+            () => run.GetAwaiter().GetResult());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => host.PendingTerminalObserverCount == 1,
+                TimeSpan.FromSeconds(2)));
+        PumpHost(host);
+
+        Assert.Equal(1, detailedObserved);
+        Assert.Equal(1, legacyObserved);
+        Assert.Equal(0, host.TerminalObserverReservationCount);
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TerminalObserverPumpChecksBudgetBetweenCallbacks()
+    {
+        var host = new GameObject("UnityTerminalBudgetTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        host.Configure(
+            new RecordingDurableBackend(),
+            new InMemorySessionStore(),
+            ownsSessionStore: false);
+        var observed = 0;
+        host.DurableRunCompleted += _ =>
+        {
+            Thread.Sleep(20);
+            observed++;
+        };
+        var runs = Enumerable.Range(0, 3)
+            .Select(index => host.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = new AgentRun
+                    {
+                        RunId = "terminal-budget-" + index,
+                        State = RunStates.Queued
+                    }
+                },
+                CancellationToken.None))
+            .ToArray();
+        await Task.WhenAll(runs);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => host.PendingTerminalObserverCount == 3,
+                TimeSpan.FromSeconds(2)));
+
+        PumpHost(host);
+
+        Assert.Equal(1, observed);
+        Assert.Equal(2, host.PendingTerminalObserverCount);
+        PumpHost(host);
+        Assert.Equal(2, observed);
+        Assert.Equal(1, host.PendingTerminalObserverCount);
+        PumpHost(host);
+        Assert.Equal(3, observed);
+        Assert.Equal(0, host.PendingTerminalObserverCount);
+        await host.ShutdownAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -2272,6 +3025,61 @@ public sealed class UnityHostConformanceTests
         Assert.Equal(RuntimeEventKinds.RunStarted, observed!.Kind);
         Assert.Equal(mainThread, callbackThread);
 
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task HostIsolatesRuntimeEventSubscribers()
+    {
+        var host = new GameObject("GameAgentRuntimeEventObserverIsolationTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        var observed = 0;
+        host.RuntimeEventPublished += _ =>
+            throw new InvalidOperationException("malicious runtime observer");
+        host.RuntimeEventPublished += _ => observed++;
+
+        host.EventPublisher.Publish(
+            new RuntimeEvent
+            {
+                EventId = "isolated-event",
+                RunId = "isolated-run",
+                Sequence = 1,
+                Kind = RuntimeEventKinds.RunStarted,
+                Durability = EventDurabilities.Durable,
+                RuntimeGeneration = 1,
+                Timestamp = DateTimeOffset.UnixEpoch,
+                Payload = ProtocolJson.ParseElement("{}")
+            });
+        PumpHost(host);
+
+        Assert.Equal(1, observed);
+        await host.ShutdownAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task HostIsolatesApplicationPauseSubscribers()
+    {
+        var host = new GameObject("GameAgentPauseObserverIsolationTest")
+            .AddComponent<UnityAgentRuntimeHost>();
+        var observed = 0;
+        host.ApplicationPauseChanged += _ =>
+            throw new InvalidOperationException("malicious pause observer");
+        host.ApplicationPauseChanged += paused =>
+        {
+            if (paused)
+            {
+                observed++;
+            }
+        };
+
+        typeof(UnityAgentRuntimeHost)
+            .GetMethod(
+                "OnApplicationPause",
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(host, new object[] { true });
+
+        Assert.Equal(1, observed);
         await host.ShutdownAsync(CancellationToken.None);
     }
 
@@ -2960,6 +3768,16 @@ public sealed class UnityHostConformanceTests
         return running;
     }
 
+    private static void PumpHost(UnityAgentRuntimeHost host)
+    {
+        typeof(UnityAgentRuntimeHost)
+            .GetMethod(
+                "Update",
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(host, null);
+    }
+
     private static HeadlessRunRequest CreateRunRequest(
         FakeRuntimeClock clock)
     {
@@ -3195,6 +4013,21 @@ public sealed class UnityHostConformanceTests
         }
     }
 
+    private sealed class CompletingProvider : IModelProvider
+    {
+        public ValueTask<ModelResponse> CompleteAsync(
+            ModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<ModelResponse>(
+                ModelResponse.Final(
+                    ProtocolJson.ParseElement(
+                        """{"result":"completed"}""")));
+        }
+    }
+
     private sealed class DurableLoopProvider : IStreamingModelProvider
     {
         private int _callCount;
@@ -3298,6 +4131,32 @@ public sealed class UnityHostConformanceTests
             _started.TrySetResult(true);
             await cancellation;
             throw new InvalidOperationException("Unreachable.");
+        }
+    }
+
+    private sealed class SynchronousBlockingThrowBackend
+        : IUnityAgentRuntimeBackend<HeadlessRunRequest, HeadlessRunOutcome>
+    {
+        private readonly ManualResetEventSlim _release;
+
+        public SynchronousBlockingThrowBackend(ManualResetEventSlim release)
+        {
+            _release = release;
+        }
+
+        public TaskCompletionSource<bool> Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<HeadlessRunOutcome> RunAsync(
+            HeadlessRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            Started.TrySetResult(true);
+            _release.Wait();
+            throw new InvalidOperationException(
+                "Synchronous backend start failed.");
         }
     }
 
@@ -3441,6 +4300,21 @@ public sealed class UnityHostConformanceTests
         }
     }
 
+    private sealed class ThrowingReadOnlyList<T> : IReadOnlyList<T>
+    {
+        public int Count =>
+            throw new InvalidOperationException("snapshot enumeration failed");
+
+        public T this[int index] =>
+            throw new InvalidOperationException("snapshot enumeration failed");
+
+        public IEnumerator<T> GetEnumerator() =>
+            throw new InvalidOperationException("snapshot enumeration failed");
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
     private sealed class IndefinitelyBlockingCancellationCallbackBackend
         : IUnityAgentRuntimeBackend<HeadlessRunRequest, HeadlessRunOutcome>
     {
@@ -3582,6 +4456,167 @@ public sealed class UnityHostConformanceTests
                         State = RunStates.Completed
                     }
                 });
+        }
+    }
+
+    private sealed class ControlledFailingDurableBackend
+        : IUnityDurableAgentRuntimeBackend
+    {
+        private readonly ConcurrentDictionary<
+            string,
+            TaskCompletionSource<DurableRunOutcome>> _runs =
+            new(StringComparer.Ordinal);
+
+        public RuntimeControlPlane Controls { get; } = new();
+
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var completion = _runs.GetOrAdd(
+                request.Run.RunId,
+                static _ => new TaskCompletionSource<DurableRunOutcome>(
+                    TaskCreationOptions.RunContinuationsAsynchronously));
+            return new ValueTask<DurableRunOutcome>(completion.Task);
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public void Fail(string runId)
+        {
+            Assert.True(
+                _runs.TryGetValue(runId, out var completion),
+                "The requested controlled run was not started.");
+            completion.TrySetException(
+                new InvalidOperationException("controlled failure"));
+        }
+    }
+
+    private sealed class RecordingRoutedBackend
+        : IUnityDurableAgentRuntimeBackend,
+          IUnityRoutedExecutionBackend,
+          IUnityChildAgentBackend,
+          IUnityPersistentChildAgentBackend
+    {
+        public RuntimeControlPlane Controls { get; } = new();
+
+        public RoutedExecutionRequest? LastRoutedRequest { get; private set; }
+
+        public SimpleCompletionRequest? LastCompletionRequest
+        {
+            get;
+            private set;
+        }
+
+        public DurableRunRequest? LastChildRequest { get; private set; }
+
+        public string? LastParentRunId { get; private set; }
+
+        public AgentRun? LastParentRun { get; private set; }
+
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken) =>
+            new(new DurableRunOutcome { Run = request.Run });
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastRoutedRequest = request;
+            return new ValueTask<RoutedExecutionOutcome>(
+                new RoutedExecutionOutcome
+                {
+                    Decision = new ExecutionRouteDecision(
+                        ExecutionPath.Direct,
+                        ExecutionRouteReasonCodes.DirectSufficient,
+                        "unity-test-router",
+                        "1")
+                });
+        }
+
+        public ValueTask<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastCompletionRequest = request;
+            return new ValueTask<SimpleCompletionOutcome>(
+                new SimpleCompletionOutcome
+                {
+                    OperationId = request.OperationId ?? "generated",
+                    ProviderId = "unity-test-provider",
+                    Text = "unity-completed",
+                    Usage = new ProviderUsage
+                    {
+                        InputTokens = 1,
+                        OutputTokens = 1,
+                        CostUsd = "0"
+                    },
+                    FinishReason = "stop"
+                });
+        }
+
+        public ValueTask<ChildAgentRunResult> RunChildAsync(
+            string parentRunId,
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastParentRunId = parentRunId;
+            LastChildRequest = request;
+            request.Run.State = RunStates.Completed;
+            var lineage = new ChildAgentLineage(
+                parentRunId,
+                parentRunId,
+                request.Run.RunId,
+                depth: 1);
+            return new ValueTask<ChildAgentRunResult>(
+                new ChildAgentRunResult(
+                    lineage,
+                    new DurableRunOutcome { Run = request.Run }));
+        }
+
+        public ValueTask<ChildAgentRunResult> RunChildAsync(
+            AgentRun parentRun,
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastParentRun = parentRun;
+            LastParentRunId = parentRun.RunId;
+            LastChildRequest = request;
+            request.Run.State = RunStates.Completed;
+            var parentLineage = ChildAgentLineage.Read(parentRun);
+            var lineage = new ChildAgentLineage(
+                parentLineage?.RootRunId ?? parentRun.RunId,
+                parentRun.RunId,
+                request.Run.RunId,
+                checked((parentLineage?.Depth ?? 0) + 1));
+            return new ValueTask<ChildAgentRunResult>(
+                new ChildAgentRunResult(
+                    lineage,
+                    new DurableRunOutcome { Run = request.Run }));
+        }
+
+        public int CancelChildren(string parentRunId)
+        {
+            LastParentRunId = parentRunId;
+            return 0;
         }
     }
 

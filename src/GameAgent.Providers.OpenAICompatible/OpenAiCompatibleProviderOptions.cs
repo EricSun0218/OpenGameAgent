@@ -20,6 +20,18 @@ public sealed class OpenAiCompatibleProviderOptions
 
     public bool ReasoningEffortRequiresThinkingMode { get; set; } = true;
 
+    public bool SupportsPerRequestReasoning { get; set; } = true;
+
+    public bool SupportsSamplingControls { get; set; } = true;
+
+    public bool SupportsSeed { get; set; }
+
+    public bool AutomaticPromptCaching { get; set; } = true;
+
+    public bool SupportsPromptCacheKey { get; set; }
+
+    public bool SupportsPromptCacheRetention { get; set; }
+
     public string? ToolChoice { get; set; }
 
     public bool? ParallelToolCalls { get; set; }
@@ -287,6 +299,12 @@ public sealed class OpenAiCompatibleProviderOptions
             ReasoningEffort = ReasoningEffort,
             ReasoningEffortRequiresThinkingMode =
                 ReasoningEffortRequiresThinkingMode,
+            SupportsPerRequestReasoning = SupportsPerRequestReasoning,
+            SupportsSamplingControls = SupportsSamplingControls,
+            SupportsSeed = SupportsSeed,
+            AutomaticPromptCaching = AutomaticPromptCaching,
+            SupportsPromptCacheKey = SupportsPromptCacheKey,
+            SupportsPromptCacheRetention = SupportsPromptCacheRetention,
             ToolChoice = ToolChoice,
             ParallelToolCalls = ParallelToolCalls,
             StrictToolSchemas = StrictToolSchemas,

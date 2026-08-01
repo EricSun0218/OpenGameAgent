@@ -47,6 +47,29 @@ function Get-StableUnityAssetGuid {
     return $hex.Substring(0, 32).ToLowerInvariant()
 }
 
+function Get-ArtifactRelativePath {
+    param(
+        [Parameter(Mandatory)][string]$RootPath,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    # Windows PowerShell 5.1 runs on .NET Framework, where
+    # IO.Path.GetRelativePath is unavailable. Artifact enumeration must remain
+    # inside the validated package root, so a checked prefix removal is both
+    # sufficient and less dependent on the host runtime.
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $root = [IO.Path]::GetFullPath($RootPath).TrimEnd(
+        [char[]]@('\', '/')) + $separator
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not $fullPath.StartsWith(
+            $root,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'An enumerated Unity package path escaped the artifact root.'
+    }
+
+    return $fullPath.Substring($root.Length).Replace('\', '/')
+}
+
 function Get-ExpectedPluginImporterMeta {
     param([Parameter(Mandatory)][string]$RelativePath)
 
@@ -211,9 +234,9 @@ $actualPluginPaths = @(
                 [StringComparison]::OrdinalIgnoreCase)
         } |
         ForEach-Object {
-            [IO.Path]::GetRelativePath(
-                $artifact.FullName,
-                $_.FullName).Replace('\', '/')
+            Get-ArtifactRelativePath `
+                -RootPath $artifact.FullName `
+                -Path $_.FullName
         } |
         Sort-Object)
 if ([string]::Join("`n", $actualPluginPaths) -cne
@@ -245,9 +268,9 @@ $actualSymbolPaths = @(
                 [StringComparison]::OrdinalIgnoreCase)
         } |
         ForEach-Object {
-            [IO.Path]::GetRelativePath(
-                $artifact.FullName,
-                $_.FullName).Replace('\', '/')
+            Get-ArtifactRelativePath `
+                -RootPath $artifact.FullName `
+                -Path $_.FullName
         } |
         Sort-Object)
 if ([string]::Join("`n", [string[]]$actualSymbolPaths) -cne
@@ -262,9 +285,9 @@ $expectedDllMetaPaths = @(
 $actualDllMetaPaths = @(
     $artifactFiles |
         ForEach-Object {
-            [IO.Path]::GetRelativePath(
-                $artifact.FullName,
-                $_.FullName).Replace('\', '/')
+            Get-ArtifactRelativePath `
+                -RootPath $artifact.FullName `
+                -Path $_.FullName
         } |
         Where-Object {
             $_.EndsWith(
@@ -284,9 +307,9 @@ $expectedPdbMetaPaths = @(
 $actualPdbMetaPaths = @(
     $artifactFiles |
         ForEach-Object {
-            [IO.Path]::GetRelativePath(
-                $artifact.FullName,
-                $_.FullName).Replace('\', '/')
+            Get-ArtifactRelativePath `
+                -RootPath $artifact.FullName `
+                -Path $_.FullName
         } |
         Where-Object {
             $_.EndsWith(

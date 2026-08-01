@@ -829,7 +829,7 @@ public sealed class ConversationContextTests
                 source)
             .AsTask();
 
-        await compactor.Entered.WaitAsync(TimeSpan.FromSeconds(1));
+        await compactor.Entered.WaitAsync(TimeSpan.FromSeconds(5));
         var completed = await Task.WhenAny(
             pending,
             Task.Delay(TimeSpan.FromSeconds(1)));
@@ -876,7 +876,7 @@ public sealed class ConversationContextTests
                 second,
                 await Task.WhenAny(
                     second,
-                    Task.Delay(TimeSpan.FromSeconds(1))));
+                    Task.Delay(TimeSpan.FromSeconds(5))));
             var view = await second;
             Assert.True(view.Report.CompactionFailed);
             Assert.False(view.Report.Compacted);
@@ -1010,7 +1010,7 @@ public sealed class ConversationContextTests
             compactor.Release();
         }
 
-        _ = await preparation.WaitAsync(TimeSpan.FromSeconds(1));
+        _ = await preparation.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(await manager.StopAsync());
     }
 

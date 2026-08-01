@@ -13,6 +13,7 @@ namespace GameAgent.Persistence;
 [JsonSerializable(typeof(JournalFrameRecord))]
 [JsonSerializable(typeof(MemoryFrameRecord))]
 [JsonSerializable(typeof(MemoryFrameMutation))]
+[JsonSerializable(typeof(PersistedMemoryExpectation))]
 [JsonSerializable(typeof(PersistedMemoryRecord))]
 [JsonSerializable(typeof(GroupInteractionFrameRecord))]
 internal sealed partial class PersistenceJsonContext : JsonSerializerContext

@@ -287,71 +287,133 @@ public sealed partial class ConversationContextManager
         var lineage = checkpoint.Lineage
                       ?? throw new InvalidDataException(
                           "A derived summary checkpoint is missing lineage.");
-        var compactionSource = SnapshotWithoutReasoning(
-            Enumerable.Range(0, transcript.Count)
-                .Where(index => !retainedIndexes.Contains(index))
-                .Select(index => transcript[index])
-                .ToArray());
-        if (lineage.SourceMessageCount != compactionSource.Count
+        var actualLineage = ConversationContextCheckpointCodec
+            .ReadSummaryLineage(summary);
+        if (lineage.SourceMessageCount != actualLineage.SourceMessageCount
             || !string.Equals(
                 lineage.SourceDigest,
-                Digest(compactionSource),
-                StringComparison.Ordinal))
+                actualLineage.SourceDigest,
+                StringComparison.Ordinal)
+            || !lineage.SourceMessageIds.SequenceEqual(
+                actualLineage.SourceMessageIds,
+                StringComparer.Ordinal))
         {
             throw new InvalidDataException(
                 "A derived summary checkpoint has invalid source lineage.");
         }
 
-        var sourceIds = compactionSource
-            .Select(message => message.MessageId)
-            .ToHashSet(StringComparer.Ordinal);
-        if (lineage.SourceMessageIds.Any(id => !sourceIds.Contains(id)))
-        {
-            throw new InvalidDataException(
-                "A derived summary checkpoint references a message outside "
-                + "its compaction source.");
-        }
-
-        var expectedCreatedAt = compactionSource.Count == 0
-            ? DateTimeOffset.UnixEpoch
-            : compactionSource.Max(message => message.CreatedAt);
-        if (summary.CreatedAt != expectedCreatedAt)
-        {
-            throw new InvalidDataException(
-                "A derived summary checkpoint changed its source time.");
-        }
-
-        var envelope = summary.Parts[0].Json!.Value;
-        var request = new ConversationCompactionRequest(
+        ValidateDerivedSummary(
             checkpoint.RunId,
             "checkpoint-restore",
-            compactionSource,
-            lineage.SourceDigest,
-            _options.MaxSummaryUtf8Bytes,
+            Enumerable.Range(0, transcript.Count)
+                .Where(index => !retainedIndexes.Contains(index))
+                .Select(index => transcript[index])
+                .ToArray(),
+            summary,
             _options,
-            messagesAreAdmittedSnapshots: true);
-        var result = new ConversationCompactionResult(
-            envelope.GetProperty("summary").GetString()!,
-            lineage.SourceMessageIds,
-            lineage.SourceDigest);
-        var analysis = ConversationSummaryQuality.Analyze(
-            request,
             CancellationToken.None);
-        if (!ConversationSummaryQuality.TryCreateAdmittedSummary(
+    }
+
+    internal static void ValidateDerivedSummary(
+        string runId,
+        string turnId,
+        IReadOnlyList<NormalizedMessage> source,
+        NormalizedMessage summary,
+        ConversationContextOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (source is null)
+        {
+            throw new ArgumentNullException(nameof(source));
+        }
+
+        if (summary is null)
+        {
+            throw new ArgumentNullException(nameof(summary));
+        }
+
+        if (options is null)
+        {
+            throw new ArgumentNullException(nameof(options));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var compactionSource = SnapshotWithoutReasoning(source);
+            var lineage = ConversationContextCheckpointCodec
+                .ReadSummaryLineage(summary);
+            var sourceDigest = Digest(compactionSource);
+            if (lineage.SourceMessageCount != compactionSource.Count
+                || !string.Equals(
+                    lineage.SourceDigest,
+                    sourceDigest,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "A derived summary has invalid source lineage.");
+            }
+
+            var sourceIds = compactionSource
+                .Select(message => message.MessageId)
+                .ToHashSet(StringComparer.Ordinal);
+            if (lineage.SourceMessageIds.Any(id => !sourceIds.Contains(id)))
+            {
+                throw new InvalidDataException(
+                    "A derived summary references a message outside its "
+                    + "compaction source.");
+            }
+
+            var expectedCreatedAt = compactionSource.Count == 0
+                ? DateTimeOffset.UnixEpoch
+                : compactionSource.Max(message => message.CreatedAt);
+            if (summary.CreatedAt != expectedCreatedAt)
+            {
+                throw new InvalidDataException(
+                    "A derived summary changed its source time.");
+            }
+
+            var envelope = summary.Parts[0].Json!.Value;
+            var request = new ConversationCompactionRequest(
+                runId,
+                turnId,
+                compactionSource,
+                sourceDigest,
+                options.MaxSummaryUtf8Bytes,
+                options,
+                messagesAreAdmittedSnapshots: true);
+            var result = new ConversationCompactionResult(
+                envelope.GetProperty("summary").GetString()!,
+                lineage.SourceMessageIds,
+                lineage.SourceDigest);
+            var analysis = ConversationSummaryQuality.Analyze(
                 request,
-                result,
-                analysis,
-                CancellationToken.None,
-                out var admitted,
-                out _)
-            || !string.Equals(
-                NormalizedMessageJournalCodec.EncodeText(admitted!),
-                NormalizedMessageJournalCodec.EncodeText(summary),
-                StringComparison.Ordinal))
+                cancellationToken);
+            if (!ConversationSummaryQuality.TryCreateAdmittedSummary(
+                    request,
+                    result,
+                    analysis,
+                    cancellationToken,
+                    out var admitted,
+                    out _)
+                || !string.Equals(
+                    NormalizedMessageJournalCodec.EncodeText(admitted!),
+                    NormalizedMessageJournalCodec.EncodeText(summary),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "A derived summary has invalid semantic quality evidence.");
+            }
+        }
+        catch (Exception exception)
+            when (exception is not OperationCanceledException
+                  and not OutOfMemoryException
+                  and not StackOverflowException
+                  and not InvalidDataException)
         {
             throw new InvalidDataException(
-                "A derived summary checkpoint has invalid semantic "
-                + "quality evidence.");
+                "A derived summary is not admitted by the runtime.",
+                exception);
         }
     }
 
@@ -763,7 +825,7 @@ internal static class ConversationContextCheckpointCodec
                    StringComparison.Ordinal);
     }
 
-    private static ConversationSummaryLineage ReadSummaryLineage(
+    internal static ConversationSummaryLineage ReadSummaryLineage(
         NormalizedMessage summary)
     {
         if (!LooksLikeDerivedSummary(summary))

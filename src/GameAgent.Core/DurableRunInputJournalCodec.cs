@@ -8,11 +8,17 @@ internal sealed class DurableRunInputSnapshot
     public DurableRunInputSnapshot(
         IReadOnlyList<ContextCandidate> context,
         IReadOnlyList<SkillReference> activeSkills,
-        string workloadClass)
+        string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
+        ProviderRoutePreference? routePreference)
     {
         Context = context;
         ActiveSkills = activeSkills;
         WorkloadClass = workloadClass;
+        ExecutionMode = executionMode;
+        Inference = inference;
+        RoutePreference = routePreference;
     }
 
     public IReadOnlyList<ContextCandidate> Context { get; }
@@ -20,6 +26,12 @@ internal sealed class DurableRunInputSnapshot
     public IReadOnlyList<SkillReference> ActiveSkills { get; }
 
     public string WorkloadClass { get; }
+
+    public string ExecutionMode { get; }
+
+    public ModelInferenceOptions? Inference { get; }
+
+    public ProviderRoutePreference? RoutePreference { get; }
 }
 
 internal static class DurableRunInputJournalCodec
@@ -37,13 +49,48 @@ internal static class DurableRunInputJournalCodec
         return Encode(
             context,
             activeSkills,
-            ProviderWorkloadClasses.Interactive);
+            ProviderWorkloadClasses.Interactive,
+            DurableExecutionModes.Agent,
+            inference: null,
+            routePreference: null);
     }
 
     public static JsonElement Encode(
         IReadOnlyList<ContextCandidate> context,
         IReadOnlyList<SkillReference> activeSkills,
         string workloadClass)
+    {
+        return Encode(
+            context,
+            activeSkills,
+            workloadClass,
+            DurableExecutionModes.Agent,
+            inference: null,
+            routePreference: null);
+    }
+
+    public static JsonElement Encode(
+        IReadOnlyList<ContextCandidate> context,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
+        string executionMode)
+    {
+        return Encode(
+            context,
+            activeSkills,
+            workloadClass,
+            executionMode,
+            inference: null,
+            routePreference: null);
+    }
+
+    public static JsonElement Encode(
+        IReadOnlyList<ContextCandidate> context,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
+        ProviderRoutePreference? routePreference)
     {
         if (context is null)
         {
@@ -58,6 +105,21 @@ internal static class DurableRunInputJournalCodec
         workloadClass = ProviderWorkloadClasses.Normalize(
             workloadClass,
             nameof(workloadClass));
+        executionMode = DurableExecutionModes.Normalize(
+            executionMode,
+            nameof(executionMode));
+        var inferenceSnapshot = inference?.CloneValidated();
+        var routePreferenceSnapshot = routePreference?.CloneValidated();
+        if (string.Equals(
+                executionMode,
+                DurableExecutionModes.Direct,
+                StringComparison.Ordinal)
+            && activeSkills.Count != 0)
+        {
+            throw new ArgumentException(
+                "Direct durable runs cannot activate skills.",
+                nameof(activeSkills));
+        }
         var contextSnapshot = RuntimeInputGuard.CopyBounded(
             context,
             MaxContextCandidates,
@@ -87,7 +149,10 @@ internal static class DurableRunInputJournalCodec
                 writer,
                 contextSnapshot,
                 activeSkillSnapshot,
-                workloadClass);
+                workloadClass,
+                executionMode,
+                inferenceSnapshot,
+                routePreferenceSnapshot);
         }
 
         using var document = JsonDocument.Parse(buffer.WrittenMemory);
@@ -114,6 +179,38 @@ internal static class DurableRunInputJournalCodec
         _ = Encode(context, activeSkills, workloadClass);
     }
 
+    internal static void ValidateEncodedSize(
+        IReadOnlyList<ContextCandidate> context,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
+        string executionMode)
+    {
+        _ = Encode(
+            context,
+            activeSkills,
+            workloadClass,
+            executionMode,
+            inference: null,
+            routePreference: null);
+    }
+
+    internal static void ValidateEncodedSize(
+        IReadOnlyList<ContextCandidate> context,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
+        ProviderRoutePreference? routePreference)
+    {
+        _ = Encode(
+            context,
+            activeSkills,
+            workloadClass,
+            executionMode,
+            inference,
+            routePreference);
+    }
+
     internal static void ValidateUniqueActiveSkills(
         IReadOnlyList<SkillReference> activeSkills)
     {
@@ -134,10 +231,16 @@ internal static class DurableRunInputJournalCodec
         Utf8JsonWriter writer,
         IReadOnlyList<ContextCandidate> context,
         IReadOnlyList<SkillReference> activeSkills,
-        string workloadClass)
+        string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
+        ProviderRoutePreference? routePreference)
     {
         writer.WriteStartObject();
         writer.WriteString("workloadClass", workloadClass);
+        writer.WriteString("executionMode", executionMode);
+        WriteInference(writer, inference);
+        WriteRoutePreference(writer, routePreference);
         writer.WritePropertyName("context");
         writer.WriteStartArray();
         foreach (var candidate in context)
@@ -228,11 +331,245 @@ internal static class DurableRunInputJournalCodec
                 out var workloadClassElement)
             ? ReadWorkloadClass(workloadClassElement)
             : ProviderWorkloadClasses.Interactive;
+        var executionMode = payload.TryGetProperty(
+                "executionMode",
+                out var executionModeElement)
+            ? ReadExecutionMode(executionModeElement)
+            : DurableExecutionModes.Agent;
+        var inference = payload.TryGetProperty("inference", out var inferenceJson)
+            ? ReadInference(inferenceJson)
+            : null;
+        var routePreference = payload.TryGetProperty(
+                "routePreference",
+                out var routePreferenceJson)
+            ? ReadRoutePreference(routePreferenceJson)
+            : null;
+        if (string.Equals(
+                executionMode,
+                DurableExecutionModes.Direct,
+                StringComparison.Ordinal)
+            && activeSkills.Count != 0)
+        {
+            throw new InvalidDataException(
+                "A direct durable run-input snapshot cannot activate skills.");
+        }
         return new DurableRunInputSnapshot(
             context,
             activeSkills,
-            workloadClass);
+            workloadClass,
+            executionMode,
+            inference,
+            routePreference);
     }
+
+    private static void WriteInference(
+        Utf8JsonWriter writer,
+        ModelInferenceOptions? inference)
+    {
+        if (inference is null)
+        {
+            return;
+        }
+
+        writer.WritePropertyName("inference");
+        writer.WriteStartObject();
+        if (inference.ReasoningEnabled.HasValue)
+        {
+            writer.WriteBoolean(
+                "reasoningEnabled",
+                inference.ReasoningEnabled.Value);
+        }
+
+        if (inference.ReasoningEffort is not null)
+        {
+            writer.WriteString("reasoningEffort", inference.ReasoningEffort);
+        }
+
+        if (inference.ReasoningTokenBudget.HasValue)
+        {
+            writer.WriteNumber(
+                "reasoningTokenBudget",
+                inference.ReasoningTokenBudget.Value);
+        }
+
+        if (inference.Temperature.HasValue)
+        {
+            writer.WriteNumber("temperature", inference.Temperature.Value);
+        }
+
+        if (inference.TopP.HasValue)
+        {
+            writer.WriteNumber("topP", inference.TopP.Value);
+        }
+
+        if (inference.Seed.HasValue)
+        {
+            writer.WriteNumber("seed", inference.Seed.Value);
+        }
+
+        if (inference.PromptCachingEnabled.HasValue)
+        {
+            writer.WriteBoolean(
+                "promptCachingEnabled",
+                inference.PromptCachingEnabled.Value);
+        }
+
+        if (inference.PromptCacheKey is not null)
+        {
+            writer.WriteString("promptCacheKey", inference.PromptCacheKey);
+        }
+
+        if (inference.PromptCacheRetention is not null)
+        {
+            writer.WriteString(
+                "promptCacheRetention",
+                inference.PromptCacheRetention);
+        }
+
+        writer.WriteEndObject();
+    }
+
+    private static ModelInferenceOptions ReadInference(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException(
+                "A durable inference configuration is malformed.");
+        }
+
+        try
+        {
+            return new ModelInferenceOptions
+            {
+                ReasoningEnabled = OptionalBoolean(
+                    value,
+                    "reasoningEnabled"),
+                ReasoningEffort = OptionalString(
+                    value,
+                    "reasoningEffort"),
+                ReasoningTokenBudget = OptionalInt32(
+                    value,
+                    "reasoningTokenBudget"),
+                Temperature = OptionalDouble(value, "temperature"),
+                TopP = OptionalDouble(value, "topP"),
+                Seed = OptionalInt32(value, "seed"),
+                PromptCachingEnabled = OptionalBoolean(
+                    value,
+                    "promptCachingEnabled"),
+                PromptCacheKey = OptionalString(value, "promptCacheKey"),
+                PromptCacheRetention = OptionalString(
+                    value,
+                    "promptCacheRetention")
+            }.CloneValidated();
+        }
+        catch (Exception exception)
+            when (exception is ArgumentException
+                  or InvalidOperationException
+                  or FormatException)
+        {
+            throw new InvalidDataException(
+                "A durable inference configuration is invalid.",
+                exception);
+        }
+    }
+
+    private static void WriteRoutePreference(
+        Utf8JsonWriter writer,
+        ProviderRoutePreference? preference)
+    {
+        if (preference is null)
+        {
+            return;
+        }
+
+        writer.WritePropertyName("routePreference");
+        writer.WriteStartObject();
+        writer.WriteBoolean(
+            "allowUnlistedFallback",
+            preference.AllowUnlistedFallback);
+        writer.WritePropertyName("providerIds");
+        writer.WriteStartArray();
+        foreach (var id in preference.ProviderIds)
+        {
+            writer.WriteStringValue(id);
+        }
+
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+    }
+
+    private static ProviderRoutePreference ReadRoutePreference(
+        JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("providerIds", out var providerIds)
+            || providerIds.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException(
+                "A durable provider route preference is malformed.");
+        }
+
+        try
+        {
+            return new ProviderRoutePreference
+            {
+                ProviderIds = providerIds
+                    .EnumerateArray()
+                    .Select(ReadStringValue)
+                    .ToArray(),
+                AllowUnlistedFallback = value.TryGetProperty(
+                    "allowUnlistedFallback",
+                    out var fallback)
+                    ? fallback.GetBoolean()
+                    : false
+            }.CloneValidated();
+        }
+        catch (Exception exception)
+            when (exception is ArgumentException
+                  or InvalidOperationException)
+        {
+            throw new InvalidDataException(
+                "A durable provider route preference is invalid.",
+                exception);
+        }
+    }
+
+    private static bool? OptionalBoolean(
+        JsonElement value,
+        string propertyName) =>
+        value.TryGetProperty(propertyName, out var property)
+            ? property.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => throw new InvalidDataException(
+                    "A durable Boolean option is malformed.")
+            }
+            : null;
+
+    private static string? OptionalString(
+        JsonElement value,
+        string propertyName) =>
+        value.TryGetProperty(propertyName, out var property)
+            ? property.ValueKind == JsonValueKind.String
+                ? property.GetString()
+                : throw new InvalidDataException(
+                    "A durable string option is malformed.")
+            : null;
+
+    private static int? OptionalInt32(
+        JsonElement value,
+        string propertyName) =>
+        value.TryGetProperty(propertyName, out var property)
+            ? property.GetInt32()
+            : null;
+
+    private static double? OptionalDouble(
+        JsonElement value,
+        string propertyName) =>
+        value.TryGetProperty(propertyName, out var property)
+            ? property.GetDouble()
+            : null;
 
     private static string ReadWorkloadClass(JsonElement value)
     {
@@ -252,6 +589,28 @@ internal static class DurableRunInputJournalCodec
         {
             throw new InvalidDataException(
                 "A durable provider workload class is not supported.",
+                exception);
+        }
+    }
+
+    private static string ReadExecutionMode(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException(
+                "A durable execution mode is malformed.");
+        }
+
+        try
+        {
+            return DurableExecutionModes.Normalize(
+                value.GetString(),
+                "executionMode");
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                "A durable execution mode is not supported.",
                 exception);
         }
     }

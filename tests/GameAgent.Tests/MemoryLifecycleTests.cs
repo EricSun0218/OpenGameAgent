@@ -824,6 +824,291 @@ public sealed class MemoryLifecycleTests
         Assert.Equal(3, reads);
     }
 
+    [Fact]
+    public async Task QueryTransformersMayRewriteMeaningButCannotBroadenIsolation()
+    {
+        var provider = new QueryRecordingProvider();
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { provider },
+            queryTransformers: new IMemoryQueryTransformer[]
+            {
+                new QueryRewriteTransformer("expanded"),
+                new WorldBroadeningTransformer("world-b")
+            });
+
+        await lifecycle.RecallAsync(
+            Query("original", worldId: "world-a"));
+
+        Assert.Equal("world-a", provider.Query!.WorldId);
+        Assert.Equal(
+            "expanded",
+            provider.Query.Query.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task GameAwareRerankerUsesGameTimeAndDiversifiesTies()
+    {
+        var now = DateTimeOffset.UnixEpoch.AddDays(10);
+        var results = new[]
+        {
+            TimedResult("recent-shared-a", 99, "shared", 11),
+            TimedResult("recent-shared-b", 99, "shared", 10),
+            TimedResult("recent-diverse", 99, "diverse", 10),
+            TimedResult("old-important", 0, "old", 100)
+        };
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { new UnfilteredProvider(results) },
+            resultRerankers: new[]
+            {
+                new GameAwareMemoryReranker(
+                    new GameAwareMemoryRerankerOptions
+                    {
+                        ImportanceWeight = 100,
+                        GameTimeRecencyWeight = 10_000,
+                        DiversityPenalty = 50_000
+                    })
+            });
+        var query = new MemoryQuery(
+            "agent",
+            ProtocolJson.ParseElement("{}"),
+            maxResults: 4,
+            now: now,
+            gameTime: new GameTimePoint(
+                "calendar",
+                "prime",
+                epoch: 1,
+                tick: 100));
+
+        var report = await lifecycle.RecallAsync(query);
+
+        Assert.Equal("recent-shared-a", report.Results[0].Record.MemoryId);
+        Assert.Equal("recent-diverse", report.Results[1].Record.MemoryId);
+        Assert.Equal("old-important", report.Results[^1].Record.MemoryId);
+    }
+
+    [Fact]
+    public async Task HostileRerankerCollectionFallsBackToOwnedSnapshot()
+    {
+        var original = new MemorySearchResult(
+            new MemoryRecord(
+                "original",
+                "agent",
+                ProtocolJson.ParseElement("{}"),
+                new[] { "safe" },
+                importance: 1,
+                createdAt: DateTimeOffset.UnixEpoch,
+                updatedAt: DateTimeOffset.UnixEpoch),
+            score: 50);
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { new UnfilteredProvider(new[] { original }) },
+            resultRerankers: new IMemoryResultReranker[]
+            {
+                new HostileCollectionReranker()
+            });
+
+        var report = await lifecycle.RecallAsync(Query("original"));
+
+        Assert.Single(report.Results);
+        Assert.Equal("original", report.Results[0].Record.MemoryId);
+    }
+
+    [Fact]
+    public async Task RerankerCannotSilentlyDropAdmittedCandidates()
+    {
+        var first = new MemorySearchResult(
+            new MemoryRecord(
+                "first",
+                "agent",
+                ProtocolJson.ParseElement("{}"),
+                new[] { "safe" },
+                importance: 1,
+                createdAt: DateTimeOffset.UnixEpoch,
+                updatedAt: DateTimeOffset.UnixEpoch),
+            score: 50);
+        var second = new MemorySearchResult(
+            new MemoryRecord(
+                "second",
+                "agent",
+                ProtocolJson.ParseElement("{}"),
+                new[] { "safe" },
+                importance: 1,
+                createdAt: DateTimeOffset.UnixEpoch,
+                updatedAt: DateTimeOffset.UnixEpoch),
+            score: 40);
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { new UnfilteredProvider(new[] { first, second }) },
+            resultRerankers: new IMemoryResultReranker[]
+            {
+                new DroppingReranker()
+            });
+
+        var report = await lifecycle.RecallAsync(Query("original"));
+
+        Assert.Equal(
+            new[] { "first", "second" },
+            report.Results.Select(item => item.Record.MemoryId));
+    }
+
+    [Fact]
+    public async Task NonCooperativeQueryTransformerIsBoundedAndDrained()
+    {
+        var transformer = new BlockingQueryTransformer();
+        var provider = new QueryRecordingProvider();
+        var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { provider },
+            options: new MemoryLifecycleOptions
+            {
+                ProcessingStageTimeout = TimeSpan.FromMilliseconds(25),
+                ShutdownTimeout = TimeSpan.FromSeconds(2)
+            },
+            queryTransformers: new[] { transformer });
+        try
+        {
+            var recall = lifecycle.RecallAsync(Query("original")).AsTask();
+            await transformer.Entered.WaitAsync(TimeSpan.FromSeconds(2));
+
+            await recall.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                "original",
+                provider.Query!.Query.GetProperty("text").GetString());
+
+            var dispose = lifecycle.DisposeAsync().AsTask();
+            Assert.False(dispose.IsCompleted);
+            transformer.Release();
+            await dispose.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(lifecycle.DetachedProviderCallsDrainedOnDispose);
+        }
+        finally
+        {
+            transformer.Release();
+            if (lifecycle.DetachedProviderCallsDrainedOnDispose is null)
+            {
+                await lifecycle.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DetachedQueryTransformerKeepsItsOriginalStageInput()
+    {
+        var scheduler = new DeferredFirstTaskScheduler();
+        var deferred = new RecordingQueryTransformer();
+        var provider = new QueryRecordingProvider();
+        var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { provider },
+            writeStore: null,
+            options: new MemoryLifecycleOptions
+            {
+                ProcessingStageTimeout = TimeSpan.FromMilliseconds(25),
+                ShutdownTimeout = TimeSpan.FromSeconds(2)
+            },
+            shutdownDispatcher: new BoundedCancellationDispatcher(),
+            queryTransformers: new IMemoryQueryTransformer[]
+            {
+                deferred,
+                new QueryRewriteTransformer("later-stage")
+            },
+            processingTaskScheduler: scheduler);
+        try
+        {
+            var recall = lifecycle.RecallAsync(Query("original")).AsTask();
+            await scheduler.FirstQueued.WaitAsync(TimeSpan.FromSeconds(2));
+            await recall.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                "later-stage",
+                provider.Query!.Query.GetProperty("text").GetString());
+
+            scheduler.ReleaseFirst();
+            var observed = await deferred.Observed
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                "original",
+                observed.Query.GetProperty("text").GetString());
+
+            await lifecycle.DisposeAsync().AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            scheduler.ReleaseFirst();
+            if (!lifecycle.ShutdownResourceCleanupCompleted)
+            {
+                await lifecycle.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DetachedRerankerKeepsItsOriginalStageInput()
+    {
+        var scheduler = new DeferredFirstTaskScheduler();
+        var deferred = new RecordingReranker();
+        var reversing = new RecordingReverseReranker();
+        var results = new[]
+        {
+            new MemorySearchResult(
+                new MemoryRecord(
+                    "first",
+                    "agent",
+                    ProtocolJson.ParseElement("{}"),
+                    Array.Empty<string>(),
+                    importance: 1,
+                    createdAt: DateTimeOffset.UnixEpoch,
+                    updatedAt: DateTimeOffset.UnixEpoch),
+                score: 20),
+            new MemorySearchResult(
+                new MemoryRecord(
+                    "second",
+                    "agent",
+                    ProtocolJson.ParseElement("{}"),
+                    Array.Empty<string>(),
+                    importance: 1,
+                    createdAt: DateTimeOffset.UnixEpoch,
+                    updatedAt: DateTimeOffset.UnixEpoch),
+                score: 10)
+        };
+        var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { new UnfilteredProvider(results) },
+            writeStore: null,
+            options: new MemoryLifecycleOptions
+            {
+                ProcessingStageTimeout = TimeSpan.FromMilliseconds(25),
+                ShutdownTimeout = TimeSpan.FromSeconds(2)
+            },
+            shutdownDispatcher: new BoundedCancellationDispatcher(),
+            resultRerankers: new IMemoryResultReranker[]
+            {
+                deferred,
+                reversing
+            },
+            processingTaskScheduler: scheduler);
+        try
+        {
+            var recall = lifecycle.RecallAsync(Query("original")).AsTask();
+            await scheduler.FirstQueued.WaitAsync(TimeSpan.FromSeconds(2));
+            var report = await recall.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(
+                reversing.InputIds!.Reverse(),
+                report.Results.Select(item => item.Record.MemoryId));
+
+            scheduler.ReleaseFirst();
+            var observed = await deferred.ObservedIds
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(reversing.InputIds, observed);
+
+            await lifecycle.DisposeAsync().AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            scheduler.ReleaseFirst();
+            if (!lifecycle.ShutdownResourceCleanupCompleted)
+            {
+                await lifecycle.DisposeAsync();
+            }
+        }
+    }
+
     private static async Task WaitUntilAsync(
         Func<bool> predicate,
         TimeSpan timeout)
@@ -857,6 +1142,31 @@ public sealed class MemoryLifecycleTests
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch,
             provenance: provenance);
+    }
+
+    private static MemorySearchResult TimedResult(
+        string id,
+        long tick,
+        string tag,
+        int importance)
+    {
+        return new MemorySearchResult(
+            new MemoryRecord(
+                id,
+                "agent",
+                ProtocolJson.ParseElement("{}"),
+                new[] { tag },
+                importance,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                gameTimeWindow: new GameTimeWindow(
+                    new GameTimePoint(
+                        "calendar",
+                        "prime",
+                        epoch: 1,
+                        tick: tick),
+                    validUntil: null)),
+            score: 0);
     }
 
     private static MemoryProvenance Provenance(
@@ -929,6 +1239,316 @@ public sealed class MemoryLifecycleTests
         {
             throw new InvalidOperationException("expected");
         }
+    }
+
+    private sealed class QueryRecordingProvider : IMemoryProvider
+    {
+        public string ProviderId => "query-recording";
+
+        public MemoryQuery? Query { get; private set; }
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> SearchAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Query = query;
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(
+                Array.Empty<MemorySearchResult>());
+        }
+    }
+
+    private sealed class QueryRewriteTransformer : IMemoryQueryTransformer
+    {
+        private readonly string _text;
+
+        public QueryRewriteTransformer(string text)
+        {
+            _text = text;
+        }
+
+        public string TransformerId => "query-rewrite";
+
+        public string Version => "1";
+
+        public ValueTask<MemoryQuery> TransformAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<MemoryQuery>(
+                CopyQuery(
+                    query,
+                    ProtocolJson.ParseElement(
+                        $$"""{"text":"{{_text}}"}"""),
+                    query.WorldId));
+        }
+    }
+
+    private sealed class WorldBroadeningTransformer :
+        IMemoryQueryTransformer
+    {
+        private readonly string _worldId;
+
+        public WorldBroadeningTransformer(string worldId)
+        {
+            _worldId = worldId;
+        }
+
+        public string TransformerId => "world-broadening";
+
+        public string Version => "1";
+
+        public ValueTask<MemoryQuery> TransformAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<MemoryQuery>(
+                CopyQuery(query, query.Query, _worldId));
+        }
+    }
+
+    private sealed class BlockingQueryTransformer :
+        IMemoryQueryTransformer
+    {
+        private readonly TaskCompletionSource<bool> _entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public string TransformerId => "blocking-query";
+
+        public string Version => "1";
+
+        public Task Entered => _entered.Task;
+
+        public async ValueTask<MemoryQuery> TransformAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            _entered.TrySetResult(true);
+            await _release.Task;
+            return query;
+        }
+
+        public void Release() => _release.TrySetResult(true);
+    }
+
+    private sealed class RecordingQueryTransformer : IMemoryQueryTransformer
+    {
+        private readonly TaskCompletionSource<MemoryQuery> _observed =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public string TransformerId => "recording-query";
+
+        public string Version => "1";
+
+        public Task<MemoryQuery> Observed => _observed.Task;
+
+        public ValueTask<MemoryQuery> TransformAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            _observed.TrySetResult(query);
+            return new ValueTask<MemoryQuery>(query);
+        }
+    }
+
+    private sealed class RecordingReranker : IMemoryResultReranker
+    {
+        private readonly TaskCompletionSource<IReadOnlyList<string>>
+            _observedIds = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public string RerankerId => "recording-reranker";
+
+        public string Version => "1";
+
+        public Task<IReadOnlyList<string>> ObservedIds => _observedIds.Task;
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> RerankAsync(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> candidates,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            _ = cancellationToken;
+            _observedIds.TrySetResult(
+                candidates.Select(item => item.Record.MemoryId).ToArray());
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(candidates);
+        }
+    }
+
+    private sealed class RecordingReverseReranker : IMemoryResultReranker
+    {
+        public string RerankerId => "recording-reverse";
+
+        public string Version => "1";
+
+        public IReadOnlyList<string>? InputIds { get; private set; }
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> RerankAsync(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> candidates,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            cancellationToken.ThrowIfCancellationRequested();
+            InputIds = candidates
+                .Select(item => item.Record.MemoryId)
+                .ToArray();
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(
+                candidates.Reverse().ToArray());
+        }
+    }
+
+    private sealed class DeferredFirstTaskScheduler : TaskScheduler
+    {
+        private readonly object _sync = new();
+        private readonly TaskCompletionSource<bool> _firstQueued =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Task? _first;
+        private bool _released;
+
+        public Task FirstQueued => _firstQueued.Task;
+
+        public void ReleaseFirst()
+        {
+            Task? first;
+            lock (_sync)
+            {
+                if (_released)
+                {
+                    return;
+                }
+
+                _released = true;
+                first = _first;
+            }
+
+            if (first is not null)
+            {
+                Queue(first);
+            }
+        }
+
+        protected override void QueueTask(Task task)
+        {
+            lock (_sync)
+            {
+                if (_first is null)
+                {
+                    _first = task;
+                    _firstQueued.TrySetResult(true);
+                    if (!_released)
+                    {
+                        return;
+                    }
+                }
+            }
+
+            Queue(task);
+        }
+
+        protected override bool TryExecuteTaskInline(
+            Task task,
+            bool taskWasPreviouslyQueued) => false;
+
+        protected override IEnumerable<Task>? GetScheduledTasks()
+        {
+            lock (_sync)
+            {
+                return _first is not null && !_released
+                    ? new[] { _first }
+                    : Array.Empty<Task>();
+            }
+        }
+
+        private void Queue(Task task)
+        {
+            ThreadPool.QueueUserWorkItem(
+                _ => TryExecuteTask(task),
+                state: null);
+        }
+    }
+
+    private sealed class HostileCollectionReranker : IMemoryResultReranker
+    {
+        public string RerankerId => "hostile-collection";
+
+        public string Version => "1";
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> RerankAsync(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> candidates,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            _ = candidates;
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(
+                new HostileResultList());
+        }
+    }
+
+    private sealed class DroppingReranker : IMemoryResultReranker
+    {
+        public string RerankerId => "dropping";
+
+        public string Version => "1";
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> RerankAsync(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> candidates,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(
+                new[] { candidates[0] });
+        }
+    }
+
+    private sealed class HostileResultList :
+        IReadOnlyList<MemorySearchResult>
+    {
+        public int Count => throw new InvalidOperationException("hostile");
+
+        public MemorySearchResult this[int index] =>
+            throw new InvalidOperationException("hostile");
+
+        public IEnumerator<MemorySearchResult> GetEnumerator() =>
+            throw new InvalidOperationException("hostile");
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+    }
+
+    private static MemoryQuery CopyQuery(
+        MemoryQuery source,
+        System.Text.Json.JsonElement query,
+        string? worldId)
+    {
+        return new MemoryQuery(
+            source.Scope,
+            query,
+            source.RequiredTags,
+            source.MaxResults,
+            source.MaxUtf8Bytes,
+            source.Now,
+            worldId,
+            source.SessionId,
+            source.MaximumSaveRevision,
+            source.RequireCommittedProvenance,
+            source.TimelineId,
+            source.Observer,
+            source.GameTime,
+            source.IncludeAllPerspectives,
+            source.GameTime is null ? source.TimelineEpoch : null);
     }
 
     private sealed class UnfilteredProvider : IMemoryProvider

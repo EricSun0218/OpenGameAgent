@@ -24,23 +24,33 @@ an assistant, or a group decision without forcing games into one data model.
 
 - Durable streaming model/tool loops with retries, route fallback, stale-stream
   fencing, crash recovery, and explicit reconciliation of uncertain writes.
+- Stateless completion plus durable `Direct`, full `Agent`, and fixed
+  `Workflow` execution paths with bounded deterministic routing.
 - Typed observations and structured tool results; natural language is optional.
 - Immutable tool and skill snapshots with bounded progressive disclosure.
 - Strict tool input validation, deterministic conflict scopes, parallel reads,
   serialized conflicting writes, and engine-main-thread dispatch.
 - Turn, token, duration, cost, action, queue, and provider-workload budgets.
 - Request preparation, context pruning, audited derived compaction, and durable
-  usage accounting without rewriting the authoritative transcript.
+  usage accounting without rewriting the authoritative transcript, with a
+  replaceable bounded conversation-context engine.
 - Pluggable memory with local BM25, an optional bounded vector store,
-  reciprocal-rank hybrid fusion, and crash-tolerant file storage.
+  reciprocal-rank hybrid fusion, bounded query transforms and reranking, and
+  crash-tolerant file storage.
 - Exact-call and argument-churn loop guards that stop repeated tool work while
   allowing deterministic recovery after real progress.
 - Cancel, interrupt, steering, and follow-up controls.
+- Per-operation reasoning, sampling, prompt-cache, and ordered provider-route
+  controls that are mapped explicitly or rejected before transport.
+- Typed required/optional lifecycle middleware around runs, model dispatch, and
+  tool batches, with bounded callback isolation.
 - Durable workflows for deterministic orchestration around Agent steps.
 - Game-specific coordinates for named clocks, timelines, perspectives, entity
   incarnations, state versions, spatial context, and causal provenance.
 - Bounded multi-actor batches and durable group interactions with isolated
   participant failures and deterministic result ordering.
+- Bounded child Agent supervision with durable lineage, depth and concurrency
+  limits, cancellation propagation, and failure-isolated batches.
 - OpenAI-compatible and native Anthropic streaming provider adapters.
 - A shared `netstandard2.1` core plus Godot and Unity integration boundaries.
 
@@ -77,6 +87,11 @@ Read [architecture](docs/architecture.md), [protocol](docs/protocol.md), and
 The engine SDK is only an adapter. Agent behavior, persistence semantics, and
 provider logic remain in the shared runtime.
 
+All reusable Agent behavior is designed to run in-process with the game. A
+remote model endpoint or credential gateway changes only model transport; it
+does not become the owner of workflows, memory, game rules, saves, or action
+settlement.
+
 ## Start here
 
 For a repository checkout:
@@ -92,6 +107,8 @@ Then follow:
 - [Godot integration](engines/godot/README.md)
 - [Unity integration](engines/unity/README.md)
 - [Tools, skills, and memory](docs/tools-skills-memory.md)
+- [Execution and extension reference](docs/execution-and-extension-reference.md)
+- [Route work and supervise child Agents](docs/how-to-route-and-supervise-agents.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
 - [Durable workflows](docs/durable-workflows.md)
 - [Group interactions](docs/group-interactions.md)

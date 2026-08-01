@@ -1,5 +1,9 @@
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using System.Threading.Channels;
+using System.Threading.Tasks;
 using GameAgent.Core;
 
 namespace GameAgent.Godot;
@@ -9,6 +13,8 @@ internal static class GodotEventKinds
     public const string RuntimeStarted = "runtime_started";
     public const string RuntimeEvent = "runtime_event";
     public const string RunCompleted = "run_completed";
+    public const string RoutedRunCompleted = "routed_run_completed";
+    public const string CompletionCompleted = "completion_completed";
     public const string RunFailed = "run_failed";
     public const string BatchCompleted = "batch_completed";
     public const string BatchParticipantCompleted =

@@ -45,10 +45,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
 
         await VerifyDispatcherBoundsAsync(runtime);
         await VerifyNodeWaitsForStartedActionHandlersAsync();
-        await VerifyFacadeErrorAsync(runtime);
         await VerifyEventPumpBoundsAsync();
         VerifyMultiActorUncertaintyErrorSurface();
         await VerifyDurableShutdownOrderAsync();
+        await VerifyTypedIngressSnapshotAdmissionAsync();
+        await VerifyTypedIngressSnapshotCoverageAsync();
+        await VerifyCustomBackendSemanticAuthorityAsync();
         await VerifyTypedContinuationSnapshotAsync();
         await VerifyVariantDurableOptionsAsync();
         await VerifyVariantMultiActorAsync();
@@ -61,21 +63,31 @@ public partial class HeadlessAddonTest : global::Godot.Node
         await VerifyExitTreePublishesTerminalEventBeforeBackgroundRetryAsync();
         await VerifyNodeContinuesShutdownAfterCancellationFailureAsync();
         await VerifyNodeDoesNotRunCancellationCallbacksInlineAsync();
+        await VerifyBlockingRunCancellationDoesNotStarveAnotherRunAsync();
         await VerifyNodeBoundsBlockedCancellationAsync();
         await VerifyNodeCancellationDispatcherRejectsProcessOverflowAsync();
         await VerifyNodeRetainsLifecycleReservationUntilOwnerDrainAsync();
+        await VerifyRequestCancellationCoalescingAsync();
         await VerifyNodeRejectsReentryAsync();
+        await VerifyUnknownBackendEffectRequiresReconciliationAsync();
 
         var fixture = SampleRuntimeFactory.Configure(runtime);
+        await VerifyFacadeErrorAsync(runtime);
         VerifyGodotJsonNumberCompatibility(fixture);
         VerifyFractionalPayloadRoundTrip();
+        VerifyGodotFloatIngressBoundary(fixture);
+        await VerifyJsonNumberOutputBoundaryAsync(runtime);
         VerifyHeadlessMapperCollectionBounds(fixture);
+        VerifyCompletionMapperCollectionBounds();
         VerifyVariantIngressBounds(fixture);
         runtime.RuntimeEventPublished += OnRuntimeEvent;
         runtime.RunCompleted += OnRunCompleted;
         runtime.RunFailed += OnRunFailed;
 
         await VerifyDurableToolLoopAsync(runtime, fixture);
+        await VerifyTypedRoutingAndCompletionAsync(runtime, fixture);
+        await VerifyTypedChildAgentAsync(runtime, fixture);
+        await VerifyRequestCancellationAsync(runtime, fixture);
         await VerifyTypedResumeAsync(runtime, fixture);
         await VerifyCancelAsync(runtime, fixture);
         await VerifyInterruptAsync(runtime, fixture);
@@ -173,6 +185,8 @@ public partial class HeadlessAddonTest : global::Godot.Node
             "start_run",
             "start_agent_run",
             "start_agent_run_with_options",
+            "start_routed_run",
+            "start_completion",
             "resume_agent_run",
             "resume_agent_run_with_options",
             "start_agent_batch",
@@ -193,6 +207,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             runtime.HasSignal(GameAgentRuntimeNode.SignalName.RunCompleted),
             "run_completed signal was not bound.");
+        Assert(
+            runtime.HasSignal(
+                GameAgentRuntimeNode.SignalName.RoutedRunCompleted)
+            && runtime.HasSignal(
+                GameAgentRuntimeNode.SignalName.CompletionCompleted),
+            "Routed execution or stateless completion signals were not bound.");
         Assert(
             runtime.HasSignal(GameAgentRuntimeNode.SignalName.BatchCompleted)
             && runtime.HasSignal(
@@ -291,6 +311,293 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             fixture.MainThreadProbe.ProviderRanOffMainThread,
             "The durable provider did not execute off the Godot main thread.");
+    }
+
+    private static async Task VerifyTypedRoutingAndCompletionAsync(
+        GameAgentRuntimeNode runtime,
+        SampleRuntimeFixture fixture)
+    {
+        var routedCompletion = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var simpleCompletion = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnRouted(GodotDictionary outcome) =>
+            routedCompletion.TrySetResult(outcome);
+        void OnCompleted(GodotDictionary outcome) =>
+            simpleCompletion.TrySetResult(outcome);
+        runtime.RoutedRunCompleted += OnRouted;
+        runtime.CompletionCompleted += OnCompleted;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var routedRequestId = runtime.Typed.StartRoutedRun(
+                new RoutedExecutionRequest
+                {
+                    Route = new ExecutionRouteRequest
+                    {
+                        OperationKind = "npc-bark"
+                    },
+                    Run = new DurableRunRequest
+                    {
+                        Run = SampleRuntimeFactory.CreateRun(
+                            "godot-routed-run",
+                            fixture.Request.Run.WorldId,
+                            now)
+                    }
+                });
+            var routed = await routedCompletion.Task.WaitAsync(
+                TimeSpan.FromSeconds(10));
+            Assert(
+                routed["request_id"].AsString() == routedRequestId
+                && routed["path"].AsString() == "direct",
+                "Typed Godot routing did not execute and publish the direct path.");
+            Assert(
+                fixture.Provider.RequestsFor("godot-routed-run")
+                    .Single()
+                    .Tools.Count == 0,
+                "The Godot direct path exposed agent tools.");
+
+            var completionRequestId = runtime.Typed.StartCompletion(
+                new SimpleCompletionRequest
+                {
+                    OperationId = "godot-simple-completion",
+                    Messages = new[]
+                    {
+                        new NormalizedMessage
+                        {
+                            MessageId = "godot-completion-message",
+                            Role = NormalizedRoles.User,
+                            CreatedAt = now,
+                            Parts = new List<NormalizedContentPart>
+                            {
+                                NormalizedContentPart.FromText(
+                                    "Return a short ambient line.")
+                            }
+                        }
+                    },
+                    MaxOutputTokens = 32
+                });
+            var completed = await simpleCompletion.Task.WaitAsync(
+                TimeSpan.FromSeconds(10));
+            Assert(
+                completed["request_id"].AsString() == completionRequestId
+                && completed["operationId"].AsString()
+                    == "godot-simple-completion"
+                && completed["text"].AsString() == "completed",
+                "Typed Godot stateless completion did not publish its result.");
+            var routeIdentity = completed["routeIdentity"]
+                .AsGodotDictionary();
+            var usage = completed["usage"].AsGodotDictionary();
+            Assert(
+                routeIdentity["providerId"].AsString()
+                    == "godot-sample-provider"
+                && !string.IsNullOrWhiteSpace(
+                    routeIdentity["modelId"].AsString())
+                && !string.IsNullOrWhiteSpace(
+                    routeIdentity["routeDigest"].AsString())
+                && usage.ContainsKey("samples")
+                && usage.ContainsKey("cacheMissTokens")
+                && usage.ContainsKey("providerTotalTokens")
+                && usage.ContainsKey("availability"),
+                "Godot completion dropped route or usage audit fields.");
+            Assert(
+                fixture.Provider.RequestsFor("godot-simple-completion")
+                    .Single()
+                    .Tools.Count == 0,
+                "The Godot stateless completion exposed agent tools.");
+
+            routedCompletion = new TaskCompletionSource<GodotDictionary>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var route = new GodotDictionary
+            {
+                ["operation_kind"] = "gdscript-npc-bark",
+                ["explicit_path"] = "direct",
+                ["requirements"] = new GodotArray(),
+                ["signal"] = new GodotDictionary
+                {
+                    ["trigger"] = "proximity"
+                }
+            };
+            var gdscriptRun = SampleRuntimeFactory.CreateRun(
+                "godot-gdscript-routed-run",
+                fixture.Request.Run.WorldId,
+                now);
+            var gdscriptRoutedRequestId = runtime.start_routed_run(
+                route,
+                GodotProtocolVariantMapper.ToDictionary(gdscriptRun),
+                new GodotArray(),
+                new GodotDictionary(),
+                new GodotDictionary());
+            var gdscriptRouted = await routedCompletion.Task.WaitAsync(
+                TimeSpan.FromSeconds(10));
+            Assert(
+                gdscriptRouted["request_id"].AsString()
+                    == gdscriptRoutedRequestId
+                && gdscriptRouted["path"].AsString() == "direct",
+                "The GDScript routed surface did not execute the direct path.");
+
+            simpleCompletion = new TaskCompletionSource<GodotDictionary>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var message = new NormalizedMessage
+            {
+                MessageId = "godot-gdscript-completion-message",
+                Role = NormalizedRoles.User,
+                CreatedAt = now,
+                Parts = new List<NormalizedContentPart>
+                {
+                    NormalizedContentPart.FromText(
+                        "Return another short ambient line.")
+                }
+            };
+            var messages = new GodotArray
+            {
+                global::Godot.Json
+                    .ParseString(
+                        ProtocolJson.Serialize(
+                            NormalizedMessageJournalCodec.Encode(message)))
+                    .AsGodotDictionary()
+            };
+            var completionOptions = new GodotDictionary
+            {
+                ["operation_id"] = "godot-gdscript-completion",
+                ["messages"] = messages,
+                ["max_output_tokens"] = 32
+            };
+            var gdscriptCompletionRequestId = runtime.start_completion(
+                completionOptions);
+            var gdscriptCompleted = await simpleCompletion.Task.WaitAsync(
+                TimeSpan.FromSeconds(10));
+            Assert(
+                gdscriptCompleted["request_id"].AsString()
+                    == gdscriptCompletionRequestId
+                && gdscriptCompleted["operationId"].AsString()
+                    == "godot-gdscript-completion"
+                && gdscriptCompleted["text"].AsString() == "completed",
+                "The GDScript stateless completion surface lost its result.");
+        }
+        finally
+        {
+            runtime.RoutedRunCompleted -= OnRouted;
+            runtime.CompletionCompleted -= OnCompleted;
+        }
+    }
+
+    private async Task VerifyTypedChildAgentAsync(
+        GameAgentRuntimeNode runtime,
+        SampleRuntimeFixture fixture)
+    {
+        var requestId = runtime.Typed.StartChildRun(
+            "godot-parent-run",
+            new DurableRunRequest
+            {
+                Run = SampleRuntimeFactory.CreateRun(
+                    "godot-child-run",
+                    fixture.Request.Run.WorldId,
+                    DateTimeOffset.UtcNow),
+                ExecutionMode = DurableExecutionModes.Direct
+            });
+        var outcome = await Completion(requestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        var run = outcome["run"].AsGodotDictionary();
+        var extensions = run["extensions"].AsGodotDictionary();
+        var lineage = extensions[ChildAgentLineage.ExtensionName]
+            .AsGodotDictionary();
+        Assert(
+            run["state"].AsString() == RunStates.Completed
+            && lineage["parentRunId"].AsString()
+                == "godot-parent-run"
+            && lineage["childRunId"].AsString()
+                == "godot-child-run"
+            && lineage["depth"].AsInt32() == 1,
+            "Typed Godot child-agent execution lost durable lineage.");
+
+        var grandchildRun = SampleRuntimeFactory.CreateRun(
+            "godot-grandchild-run",
+            fixture.Request.Run.WorldId,
+            DateTimeOffset.UtcNow);
+        var options = global::Godot.Json.ParseString(
+                """{"execution_mode":"direct"}""")
+            .AsGodotDictionary();
+        var grandchildRequestId = runtime
+            .start_child_agent_run_with_parent(
+                run,
+                GodotProtocolVariantMapper.ToDictionary(grandchildRun),
+                new GodotArray(),
+                options);
+        var grandchildOutcome = await Completion(grandchildRequestId)
+            .Task
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        var grandchild = grandchildOutcome["run"].AsGodotDictionary();
+        var grandchildLineage = grandchild["extensions"]
+            .AsGodotDictionary()[ChildAgentLineage.ExtensionName]
+            .AsGodotDictionary();
+        Assert(
+            grandchildLineage["rootRunId"].AsString()
+                == "godot-parent-run"
+            && grandchildLineage["parentRunId"].AsString()
+                == "godot-child-run"
+            && grandchildLineage["depth"].AsInt32() == 2,
+            "GDScript persistent-parent child execution lost lineage.");
+    }
+
+    private async Task VerifyRequestCancellationAsync(
+        GameAgentRuntimeNode runtime,
+        SampleRuntimeFixture fixture)
+    {
+        var failed = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnFailed(GodotDictionary error)
+        {
+            if (error["code"].AsString() == "completion_cancelled")
+            {
+                failed.TrySetResult(error);
+            }
+        }
+
+        runtime.RunFailed += OnFailed;
+        try
+        {
+            const string operationId = "control-cancel-completion";
+            var requestId = runtime.Typed.StartCompletion(
+                new SimpleCompletionRequest
+                {
+                    OperationId = operationId,
+                    Messages = new[]
+                    {
+                        new NormalizedMessage
+                        {
+                            MessageId = "cancel-completion-message",
+                            Role = NormalizedRoles.User,
+                            CreatedAt = DateTimeOffset.UtcNow,
+                            Parts = new List<NormalizedContentPart>
+                            {
+                                NormalizedContentPart.FromText("cancel")
+                            }
+                        }
+                    }
+                });
+            await fixture.Provider.WaitForAttemptAsync(
+                operationId,
+                1,
+                TimeSpan.FromSeconds(5));
+            Assert(
+                runtime.cancel_request(requestId),
+                "Godot request cancellation was not admitted.");
+            var error = await failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(
+                error["request_id"].AsString() == requestId,
+                "Godot request cancellation published the wrong identity.");
+            Assert(
+                SpinWait.SpinUntil(
+                    () => !runtime.cancel_request(requestId),
+                    TimeSpan.FromSeconds(2)),
+                "Godot request cancellation ownership was not cleaned up.");
+        }
+        finally
+        {
+            runtime.RunFailed -= OnFailed;
+        }
     }
 
     private async Task VerifyTypedResumeAsync(
@@ -505,6 +812,48 @@ public partial class HeadlessAddonTest : global::Godot.Node
         await legacy.Typed.StopAsync(TimeSpan.FromSeconds(2));
         legacy.QueueFree();
         await tree.Root.ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+    }
+
+    private async Task VerifyUnknownBackendEffectRequiresReconciliationAsync()
+    {
+        var tree = GetTree();
+        var backend = new EffectThenCancelBackend();
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "EffectThenCancelRuntime"
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.Configure(backend);
+
+        var failed = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        node.RunFailed += error => failed.TrySetResult(error);
+        var requestId = node.Typed.StartRun(
+            new HeadlessRunRequest
+            {
+                Run = SampleRuntimeFactory.CreateRun(
+                    "unknown-effect-run",
+                    "unknown-effect-world",
+                    DateTimeOffset.UtcNow)
+            });
+
+        var error = await failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert(
+            backend.EffectRecorded
+            && error["request_id"].AsString() == requestId
+            && error["code"].AsString() == "run_cancelled"
+            && error["reconciliation_required"].AsBool()
+            && error["phase"].AsString() == "headless_execution",
+            "An unknown backend effect was exposed as safe to retry.");
+
+        await node.Typed.StopAsync(TimeSpan.FromSeconds(2));
+        node.QueueFree();
+        await ToSignal(
             tree,
             global::Godot.SceneTree.SignalName.ProcessFrame);
     }
@@ -876,6 +1225,530 @@ public partial class HeadlessAddonTest : global::Godot.Node
                     "store_dispose"
                 }),
             "Retry did not finish lifecycle phases in dependency order.");
+    }
+
+    private async Task VerifyTypedIngressSnapshotAdmissionAsync()
+    {
+        var tree = GetTree();
+        var backend = new SnapshotAdmissionBackend();
+        var blockedInput = new GatedThrowingReadOnlyList<ObservationEnvelope>(
+            new[]
+            {
+                SampleRuntimeFactory.CreateObservation(
+                    "blocked-snapshot-observation",
+                    "snapshot-world",
+                    "{\"value\":1}",
+                    DateTimeOffset.UtcNow)
+            });
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "TypedSnapshotAdmissionRuntime",
+            MaxActiveRuns = 1
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.Configure(backend);
+
+        Task<Exception?>? firstAttempt = null;
+        Task<Exception?>? competingAttempt = null;
+        try
+        {
+            firstAttempt = Task.Run(
+                () => CaptureFailure(
+                    () => node.Typed.StartRun(
+                        new HeadlessRunRequest
+                        {
+                            Run = SampleRuntimeFactory.CreateRun(
+                                "blocked-snapshot-run",
+                                "snapshot-world",
+                                DateTimeOffset.UtcNow),
+                            Observations = blockedInput
+                        })));
+            await blockedInput.EnumerationStarted.WaitAsync(
+                TimeSpan.FromSeconds(2));
+
+            competingAttempt = Task.Run(
+                () => CaptureFailure(
+                    () => node.Typed.StartRun(
+                        new HeadlessRunRequest
+                        {
+                            Run = SampleRuntimeFactory.CreateRun(
+                                "competing-snapshot-run",
+                                "snapshot-world",
+                                DateTimeOffset.UtcNow)
+                        })));
+            var competingFailure = await competingAttempt.WaitAsync(
+                TimeSpan.FromSeconds(1));
+            Assert(
+                competingFailure is InvalidOperationException
+                && competingFailure.Message.Contains(
+                    "active-run limit",
+                    StringComparison.Ordinal),
+                "A blocked caller-owned snapshot either held the lifecycle lock "
+                + "or did not reserve active-run capacity before enumeration.");
+
+            blockedInput.Release();
+            var snapshotFailure = await firstAttempt.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert(
+                snapshotFailure is SnapshotProbeException,
+                "A caller-owned snapshot enumeration failure was not returned "
+                + "to the typed caller.");
+            Assert(
+                node.get_runtime_status()["active_runs"].AsInt32() == 0,
+                "A failed typed snapshot did not roll back its active-run reservation.");
+            Assert(
+                backend.CallCount == 0,
+                "A failed typed snapshot reached the Godot backend.");
+
+            var original = SampleRuntimeFactory.CreateObservation(
+                "owned-snapshot-observation",
+                "snapshot-world",
+                "{\"value\":2}",
+                DateTimeOffset.UtcNow);
+            var callerOwned = new List<ObservationEnvelope> { original };
+            var completed = new TaskCompletionSource<GodotDictionary>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            string? acceptedRequestId = null;
+            void OnCompleted(GodotDictionary outcome)
+            {
+                if (outcome["request_id"].AsString() == acceptedRequestId)
+                {
+                    completed.TrySetResult(outcome);
+                }
+            }
+
+            node.RunCompleted += OnCompleted;
+            try
+            {
+                acceptedRequestId = node.Typed.StartRun(
+                    new HeadlessRunRequest
+                    {
+                        Run = SampleRuntimeFactory.CreateRun(
+                            "owned-snapshot-run",
+                            "snapshot-world",
+                            DateTimeOffset.UtcNow),
+                        Observations = callerOwned
+                    });
+                callerOwned[0] = SampleRuntimeFactory.CreateObservation(
+                    "mutated-after-admission",
+                    "snapshot-world",
+                    "{\"value\":3}",
+                    DateTimeOffset.UtcNow);
+                var captured = await backend.RequestReceived.WaitAsync(
+                    TimeSpan.FromSeconds(2));
+                Assert(
+                    captured.Observations.Count == 1
+                    && captured.Observations[0].ObservationId
+                        == "owned-snapshot-observation"
+                    && !ReferenceEquals(
+                        original,
+                        captured.Observations[0]),
+                    "Typed headless ingress did not give the backend an owned snapshot.");
+                backend.Release();
+                await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+            finally
+            {
+                node.RunCompleted -= OnCompleted;
+            }
+        }
+        finally
+        {
+            blockedInput.Release();
+            backend.Release();
+            if (firstAttempt is not null)
+            {
+                try
+                {
+                    await firstAttempt.WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch
+                {
+                }
+            }
+
+            if (competingAttempt is not null)
+            {
+                try
+                {
+                    await competingAttempt.WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch
+                {
+                }
+            }
+
+            try
+            {
+                await node.Typed.StopAsync(
+                    TimeSpan.FromSeconds(2),
+                    CancellationToken.None);
+            }
+            finally
+            {
+                if (node.IsInsideTree())
+                {
+                    node.QueueFree();
+                    await ToSignal(
+                        tree,
+                        global::Godot.SceneTree.SignalName.ProcessFrame);
+                }
+            }
+        }
+    }
+
+    private async Task VerifyTypedIngressSnapshotCoverageAsync()
+    {
+        var tree = GetTree();
+        var backend = new SnapshotRejectingBackend();
+        var multiActorRuntime = new ContinuationCaptureRuntime();
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "TypedSnapshotCoverageRuntime",
+            MaxActiveRuns = 1,
+            MaxActorBatchSize = 2
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.ConfigureDurable(backend);
+        node.Typed.ConfigureMultiActor(multiActorRuntime);
+        var baselineCancellationReservations =
+            GodotRequestCancellationDispatcher.ReservationCount;
+
+        try
+        {
+            for (var attempt = 0; attempt < 16; attempt++)
+            {
+                AssertSnapshotRejected(
+                    () => node.Typed.StartRun(
+                        BadDurableRequest($"durable-{attempt}")),
+                    node,
+                    backend,
+                    "durable");
+                AssertSnapshotRejected(
+                    () => node.Typed.StartRoutedRun(
+                        new RoutedExecutionRequest
+                        {
+                            Route = new ExecutionRouteRequest
+                            {
+                                OperationKind = "snapshot-routing",
+                                ExplicitPath = ExecutionPath.Agent
+                            },
+                            Run = BadDurableRequest($"routed-{attempt}")
+                        }),
+                    node,
+                    backend,
+                    "routed");
+                AssertSnapshotRejected(
+                    () => node.Typed.StartCompletion(
+                        new SimpleCompletionRequest
+                        {
+                            OperationId =
+                                $"snapshot-completion-{attempt}",
+                            Messages =
+                                new ThrowingReadOnlyList<NormalizedMessage>()
+                        }),
+                    node,
+                    backend,
+                    "completion");
+            }
+
+            await WaitForConditionAsync(
+                () => GodotRequestCancellationDispatcher.ReservationCount
+                    == baselineCancellationReservations,
+                TimeSpan.FromSeconds(2),
+                "Rejected typed snapshots did not release cancellation "
+                + "reservations after owner drain.");
+            AssertSnapshotRejected(
+                () => node.Typed.ResumeRun(
+                    "snapshot-resume-run",
+                    new DurableRunContinuation
+                    {
+                        Context =
+                            new ThrowingReadOnlyList<ContextCandidate>()
+                    }),
+                node,
+                backend,
+                "resume");
+            AssertSnapshotRejected(
+                () => node.Typed.StartBatch(
+                    new MultiActorDecisionBatch(
+                        "snapshot-batch",
+                        new GameContextCoordinate(
+                            "snapshot-world",
+                            "snapshot-timeline",
+                            1),
+                        new[] { BadDurableRequest("actor-batch") })),
+                node,
+                backend,
+                "actor batch");
+            Assert(
+                multiActorRuntime.RunCallCount == 0,
+                "A failed actor-batch snapshot reached the multi-actor runtime.");
+        }
+        finally
+        {
+            await node.Typed.StopAsync(
+                TimeSpan.FromSeconds(2),
+                CancellationToken.None);
+            node.QueueFree();
+            await ToSignal(
+                tree,
+                global::Godot.SceneTree.SignalName.ProcessFrame);
+        }
+    }
+
+    private async Task VerifyCustomBackendSemanticAuthorityAsync()
+    {
+        var tree = GetTree();
+        var backend = new SemanticAuthorityBackend();
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "CustomBackendSemanticAuthorityRuntime",
+            MaxActiveRuns = 2
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.ConfigureDurable(backend);
+
+        try
+        {
+            using var run = GodotProtocolVariantMapper.ToDictionary(
+                new AgentRun
+                {
+                    RunId = "backend-defined-gdscript-run",
+                    Budget = null!
+                });
+            run["budget"] = new global::Godot.Variant();
+            using var observations = new GodotArray();
+            var requestId = node.start_agent_run(run, observations);
+            Assert(
+                !string.IsNullOrEmpty(requestId),
+                "The GDScript facade rejected a backend-defined run model.");
+            var receivedRun = await backend.DurableReceived.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert(
+                receivedRun.Run.RunId == "backend-defined-gdscript-run"
+                && receivedRun.Run.Budget is null,
+                "The Godot facade imposed built-runtime run semantics on a custom backend.");
+
+            var completionId = node.Typed.StartCompletion(
+                new SimpleCompletionRequest
+                {
+                    OperationId = "backend-defined-empty-completion",
+                    Messages = Array.Empty<NormalizedMessage>()
+                });
+            Assert(
+                !string.IsNullOrEmpty(completionId),
+                "The typed facade rejected a backend-defined empty completion.");
+            var receivedCompletion = await backend.CompletionReceived.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert(
+                receivedCompletion.Messages.Count == 0,
+                "The Godot facade imposed built-runtime completion semantics on a custom backend.");
+        }
+        finally
+        {
+            backend.Release();
+            await node.Typed.StopAsync(
+                TimeSpan.FromSeconds(2),
+                CancellationToken.None);
+            node.QueueFree();
+            await ToSignal(
+                tree,
+                global::Godot.SceneTree.SignalName.ProcessFrame);
+        }
+    }
+
+    private async Task VerifyRequestCancellationCoalescingAsync()
+    {
+        var tree = GetTree();
+        using var callbackRelease =
+            new ManualResetEventSlim(initialState: false);
+        var backend = new RequestCancellationProbeBackend(callbackRelease);
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "RequestCancellationCoalescingRuntime",
+            MaxActiveRuns = 1
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.ConfigureDurable(backend);
+        var baselineReservations =
+            GodotRequestCancellationDispatcher.ReservationCount;
+        var failed = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        string? requestId = null;
+        void OnFailed(GodotDictionary error)
+        {
+            if (error["request_id"].AsString() == requestId)
+            {
+                failed.TrySetResult(error);
+            }
+        }
+
+        node.RunFailed += OnFailed;
+        try
+        {
+            requestId = node.Typed.StartCompletion(
+                new SimpleCompletionRequest
+                {
+                    OperationId = "coalesced-cancellation",
+                    Messages = new[]
+                    {
+                        new NormalizedMessage
+                        {
+                            MessageId = "coalesced-cancellation-message",
+                            Role = NormalizedRoles.User,
+                            CreatedAt = DateTimeOffset.UtcNow,
+                            Parts = new List<NormalizedContentPart>
+                            {
+                                NormalizedContentPart.FromText("cancel")
+                            }
+                        }
+                    }
+                });
+            await backend.Started.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert(
+                GodotRequestCancellationDispatcher.ReservationCount
+                    == baselineReservations + 1,
+                "A cancellable request did not reserve bounded cancellation capacity.");
+
+            var accepted = 0;
+            await Task.Run(
+                () => Parallel.For(
+                    0,
+                    10_000,
+                    _ =>
+                    {
+                        if (node.Typed.CancelRequest(requestId))
+                        {
+                            Interlocked.Increment(ref accepted);
+                        }
+                    }));
+            await backend.CallbackStarted.WaitAsync(TimeSpan.FromSeconds(2));
+            await backend.BackendObservedCancellation.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert(
+                accepted == 1 && backend.CallbackCount == 1,
+                "Ten thousand duplicate request cancellations were not "
+                + "coalesced into one dispatcher operation.");
+            Assert(
+                !node.Typed.CancelRequest(requestId),
+                "A duplicate request cancellation was admitted after dispatch.");
+            Assert(
+                GodotRequestCancellationDispatcher.ReservationCount
+                    == baselineReservations + 1
+                && node.get_runtime_status()["active_runs"].AsInt32() == 1,
+                "Request cancellation ownership was released before its "
+                + "blocking callback drained.");
+
+            callbackRelease.Set();
+            var cancellationError = await failed.Task.WaitAsync(
+                TimeSpan.FromSeconds(3));
+            Assert(
+                cancellationError["code"].AsString()
+                    == "completion_cancelled",
+                "Coalesced cancellation did not publish the terminal request error.");
+            await WaitForConditionAsync(
+                () => GodotRequestCancellationDispatcher.ReservationCount
+                    == baselineReservations
+                    && node.get_runtime_status()["active_runs"].AsInt32()
+                        == 0,
+                TimeSpan.FromSeconds(3),
+                "Request cancellation capacity was not returned after owner drain.");
+        }
+        finally
+        {
+            node.RunFailed -= OnFailed;
+            callbackRelease.Set();
+            try
+            {
+                await node.Typed.StopAsync(
+                    TimeSpan.FromSeconds(3),
+                    CancellationToken.None);
+            }
+            finally
+            {
+                if (node.IsInsideTree())
+                {
+                    node.QueueFree();
+                    await ToSignal(
+                        tree,
+                        global::Godot.SceneTree.SignalName.ProcessFrame);
+                }
+            }
+        }
+    }
+
+    private static DurableRunRequest BadDurableRequest(string suffix)
+    {
+        return new DurableRunRequest
+        {
+            Run = SampleRuntimeFactory.CreateRun(
+                "snapshot-" + suffix + "-run",
+                "snapshot-world",
+                DateTimeOffset.UtcNow),
+            Context = new ThrowingReadOnlyList<ContextCandidate>()
+        };
+    }
+
+    private static void AssertSnapshotRejected(
+        Action start,
+        GameAgentRuntimeNode node,
+        SnapshotRejectingBackend backend,
+        string surface)
+    {
+        var failure = CaptureFailure(start);
+        Assert(
+            failure is SnapshotProbeException,
+            $"Typed {surface} ingress did not enumerate its caller-owned "
+            + "snapshot through the shared guard.");
+        Assert(
+            node.get_runtime_status()["active_runs"].AsInt32() == 0,
+            $"Typed {surface} ingress did not roll back failed admission.");
+        Assert(
+            backend.InvocationCount == 0,
+            $"Typed {surface} ingress reached the backend after snapshot failure.");
+    }
+
+    private static Exception? CaptureFailure(Action action)
+    {
+        try
+        {
+            action();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+    }
+
+    private static async Task WaitForConditionAsync(
+        Func<bool> condition,
+        TimeSpan timeout,
+        string message)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (!condition())
+        {
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new InvalidOperationException(message);
+            }
+
+            await Task.Delay(10);
+        }
     }
 
     private async Task VerifyTypedContinuationSnapshotAsync()
@@ -2203,6 +3076,73 @@ public partial class HeadlessAddonTest : global::Godot.Node
             global::Godot.SceneTree.SignalName.ProcessFrame);
     }
 
+    private async Task VerifyBlockingRunCancellationDoesNotStarveAnotherRunAsync()
+    {
+        var tree = GetTree();
+        using var release = new ManualResetEventSlim(initialState: false);
+        var runtime = new TwoRunCancellationRuntime(release);
+        var node = new GameAgentRuntimeNode
+        {
+            Name = "IndependentRunCancellationRuntime",
+            MaxActiveRuns = 2,
+            ShutdownTimeoutSeconds = 0.15
+        };
+        tree.Root.AddChild(node);
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+        node.Typed.ConfigureDurable(
+            runtime,
+            new LifecycleStore(new List<string>(), failFlush: false),
+            disposeRuntimeOnShutdown: true,
+            disposeStoreOnShutdown: true);
+
+        node.Typed.StartRun(
+            new DurableRunRequest
+            {
+                Run = SampleRuntimeFactory.CreateRun(
+                    "blocking-cancellation-run-a",
+                    "shutdown-test-world",
+                    DateTimeOffset.UtcNow)
+            });
+        node.Typed.StartRun(
+            new DurableRunRequest
+            {
+                Run = SampleRuntimeFactory.CreateRun(
+                    "independent-cancellation-run-b",
+                    "shutdown-test-world",
+                    DateTimeOffset.UtcNow)
+            });
+        await runtime.BothStarted.WaitAsync(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            var stop = node.Typed.StopAsync(
+                    TimeSpan.FromMilliseconds(150),
+                    CancellationToken.None)
+                .AsTask();
+            await runtime.BlockingCallbackStarted.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            await runtime.IndependentCancellationObserved.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            await AssertThrowsAsync<TimeoutException>(
+                stop,
+                "A blocked run unexpectedly completed bounded shutdown.");
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        await node.Typed.StopAsync(
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        node.QueueFree();
+        await ToSignal(
+            tree,
+            global::Godot.SceneTree.SignalName.ProcessFrame);
+    }
+
     private async Task VerifyNodeBoundsBlockedCancellationAsync()
     {
         var tree = GetTree();
@@ -2265,9 +3205,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
 
         Assert(
             SpinWait.SpinUntil(
-                () => GodotCancellationDispatcher.ActiveCount == 0,
+                () => GodotRequestCancellationDispatcher.ActiveCount == 0,
                 TimeSpan.FromSeconds(2)),
-            "The cancellation dispatcher retained released work.");
+            "The operation cancellation dispatcher retained released work.");
         node.QueueFree();
         await ToSignal(
             tree,
@@ -2285,13 +3225,15 @@ public partial class HeadlessAddonTest : global::Godot.Node
         var stops = new List<Task>();
         GameAgentRuntimeNode? overflow = null;
         BlockingCancellationRuntime? overflowRuntime = null;
-        var baselineReservations =
+        var baselineLifecycleReservations =
             GodotCancellationDispatcher.ReservationCount;
+        var baselineOperationReservations =
+            GodotRequestCancellationDispatcher.ReservationCount;
 
         try
         {
             for (var index = 0;
-                 index < GodotCancellationDispatcher.Capacity;
+                  index < GodotRequestCancellationDispatcher.Capacity;
                  index++)
             {
                 var runtime = new BlockingCancellationRuntime(release);
@@ -2332,9 +3274,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
             }
 
             Assert(
-                GodotCancellationDispatcher.ActiveCount
-                    == GodotCancellationDispatcher.Capacity,
-                "The process cancellation dispatcher did not reach its fixed capacity.");
+                GodotRequestCancellationDispatcher.ActiveCount
+                    == GodotRequestCancellationDispatcher.Capacity,
+                "The process operation-cancellation dispatcher did not reach its fixed capacity.");
 
             overflow = new GameAgentRuntimeNode
             {
@@ -2372,12 +3314,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
             await overflowExited;
             overflow = null;
             Assert(
-                GodotCancellationDispatcher.PendingCount == 1,
-                "Automatic lifecycle cancellation was not queued.");
+                GodotRequestCancellationDispatcher.PendingCount == 1,
+                "Automatic per-operation cancellation was not queued.");
             Assert(
-                GodotCancellationDispatcher.ActiveCount
-                    == GodotCancellationDispatcher.Capacity,
-                "Queued lifecycle cancellation exceeded the worker bound.");
+                GodotRequestCancellationDispatcher.ActiveCount
+                    == GodotRequestCancellationDispatcher.Capacity,
+                "Queued operation cancellation exceeded the worker bound.");
             Assert(
                 !overflowRuntime.CancellationCallbackStarted.IsCompleted,
                 "Queued lifecycle cancellation ran before capacity was released.");
@@ -2418,12 +3360,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
 
         Assert(
             SpinWait.SpinUntil(
-                () => GodotCancellationDispatcher.ActiveCount == 0
-                    && GodotCancellationDispatcher.PendingCount == 0
-                    && GodotCancellationDispatcher.ReservationCount
-                        == baselineReservations,
+                () => GodotRequestCancellationDispatcher.ActiveCount == 0
+                    && GodotRequestCancellationDispatcher.PendingCount == 0
+                    && GodotRequestCancellationDispatcher.ReservationCount
+                        == baselineOperationReservations,
                 TimeSpan.FromSeconds(15)),
-            "The lifecycle cancellation queue or reservation did not drain.");
+            "The operation cancellation queue or reservation did not drain.");
 
         var reservations =
             new List<GodotCancellationDispatcher.Reservation>();
@@ -2476,7 +3418,7 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             SpinWait.SpinUntil(
                 () => GodotCancellationDispatcher.ReservationCount
-                    == baselineReservations,
+                    == baselineLifecycleReservations,
                 TimeSpan.FromSeconds(2)),
             "Unused lifecycle reservations were not returned.");
     }
@@ -2637,6 +3579,23 @@ public partial class HeadlessAddonTest : global::Godot.Node
             Assert(
                 error["code"].AsString() == "invalid_run_request",
                 "Malformed Variant input was not normalized into a stable error.");
+
+            errorCompletion = new TaskCompletionSource<GodotDictionary>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            requestId = runtime.start_child_agent_run(
+                "facade-parent",
+                new GodotDictionary(),
+                malformedObservations,
+                new GodotDictionary());
+            Assert(
+                string.IsNullOrEmpty(requestId),
+                "Malformed child Variant input produced a runtime request.");
+
+            error = await errorCompletion.Task.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert(
+                error["code"].AsString() == "invalid_run_request",
+                "Malformed child Variant input escaped the facade boundary.");
         }
         finally
         {
@@ -2669,6 +3628,34 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             mapped.Context[0].Required && !mapped.Context[0].CanDefer,
             "Observation-to-context mapping lost its required boundary.");
+
+        var directOptions = global::Godot.Json.ParseString(
+            """
+            {
+              "execution_mode":"direct",
+              "inference": {
+                "reasoning_enabled": false,
+                "temperature": 0.4,
+                "prompt_caching_enabled": true
+              },
+              "provider_route": {
+                "provider_ids": ["fast-model"],
+                "allow_unlisted_fallback": false
+              }
+            }
+            """).AsGodotDictionary();
+        var direct = GodotProtocolVariantMapper.ToDurableRunRequest(
+            run,
+            observations,
+            directOptions);
+        Assert(
+            direct.ExecutionMode == DurableExecutionModes.Direct,
+            "The Godot options mapper lost the durable direct mode.");
+        Assert(
+            direct.Inference?.Temperature == 0.4
+            && direct.Inference.ReasoningEnabled == false
+            && direct.RoutePreference?.ProviderIds.Single() == "fast-model",
+            "The Godot options mapper lost inference or model routing controls.");
     }
 
     private static void VerifyFractionalPayloadRoundTrip()
@@ -2707,6 +3694,149 @@ public partial class HeadlessAddonTest : global::Godot.Node
             && payload.GetProperty("nested")
                 .GetProperty("weight").GetDouble() == 0.125,
             "Godot lost a finite fractional JSON value.");
+    }
+
+    private static void VerifyGodotFloatIngressBoundary(
+        SampleRuntimeFixture fixture)
+    {
+        using var observation = GodotProtocolVariantMapper.ToDictionary(
+            fixture.Observations[0]);
+        using var payload = new GodotDictionary
+        {
+            ["int64_exclusive_upper"] =
+                9_223_372_036_854_775_808d,
+            ["integral_float"] = 1.0d,
+            ["negative_zero"] = -0.0d
+        };
+        observation["payload"] = payload;
+
+        var mapped = GodotProtocolVariantMapper.ToObservation(observation);
+        var json = mapped.Payload!.Value;
+        Assert(
+            json.GetProperty("int64_exclusive_upper").GetDouble()
+            == 9_223_372_036_854_775_808d,
+            "Godot silently saturated a Float at the Int64 upper boundary.");
+        Assert(
+            BitConverter.DoubleToInt64Bits(
+                json.GetProperty("negative_zero").GetDouble())
+            == BitConverter.DoubleToInt64Bits(-0.0d),
+            "Godot silently erased the sign of negative zero.");
+
+        using var roundTrip = GodotProtocolVariantMapper.ToDictionary(mapped);
+        using var roundTripPayload = roundTrip["payload"].AsGodotDictionary();
+        using var integralFloat = roundTripPayload["integral_float"];
+        using var negativeZero = roundTripPayload["negative_zero"];
+        Assert(
+            integralFloat.VariantType == global::Godot.Variant.Type.Float
+            && integralFloat.AsDouble() == 1.0d,
+            "Godot changed an integral Float into an Int on round trip.");
+        Assert(
+            negativeZero.VariantType == global::Godot.Variant.Type.Float
+            && BitConverter.DoubleToInt64Bits(negativeZero.AsDouble())
+            == BitConverter.DoubleToInt64Bits(-0.0d),
+            "Godot changed negative-zero Float identity on round trip.");
+    }
+
+    private static async Task VerifyJsonNumberOutputBoundaryAsync(
+        GameAgentRuntimeNode runtime)
+    {
+        using (var fraction =
+               GodotProtocolVariantMapper.ParseVariant("0.1"))
+        {
+            Assert(
+                fraction.VariantType == global::Godot.Variant.Type.Float
+                && fraction.AsDouble() == 0.1,
+                "The Godot output mapper rejected an ordinary fraction.");
+        }
+
+        using (var scientific =
+               GodotProtocolVariantMapper.ParseVariant("1e100"))
+        {
+            Assert(
+                scientific.VariantType == global::Godot.Variant.Type.Float
+                && scientific.AsDouble() == 1e100,
+                "The Godot output mapper rejected a finite scientific value.");
+        }
+
+        using (var exactBeyondInt64 =
+               GodotProtocolVariantMapper.ParseVariant(
+                   "9223372036854775808"))
+        {
+            Assert(
+                exactBeyondInt64.VariantType
+                == global::Godot.Variant.Type.Float
+                && exactBeyondInt64.AsDouble()
+                == 9_223_372_036_854_775_808d,
+                "The Godot output mapper rejected an exactly representable float.");
+        }
+
+        AssertNumberMappingFailure(
+            "1e400",
+            "godot_json_number_out_of_range");
+        AssertNumberMappingFailure(
+            "9223372036854775809",
+            "godot_json_number_precision_loss");
+        AssertNumberMappingFailure(
+            "0.12345678901234567890123456789",
+            "godot_json_number_precision_loss");
+
+        var errorCompletion = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnRuntimeError(GodotDictionary error)
+        {
+            if (error["code"].AsString()
+                == "godot_json_number_out_of_range")
+            {
+                errorCompletion.TrySetResult(error);
+            }
+        }
+
+        runtime.RuntimeError += OnRuntimeError;
+        try
+        {
+            Assert(
+                runtime.EventPump.TryPublish(
+                    new GodotEventMessage
+                    {
+                        Kind = GodotEventKinds.CompletionCompleted,
+                        RequestId = "number-output-boundary",
+                        Json = "{\"content\":1e400}"
+                    }),
+                "The numeric boundary fixture could not queue an event.");
+            var error = await errorCompletion.Task.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert(
+                error["request_id"].AsString()
+                == "number-output-boundary"
+                && error["category"].AsString() == "mapping"
+                && error["phase"].AsString() == "godot_variant_output",
+                "An unrepresentable output number did not fail through the stable signal boundary.");
+        }
+        finally
+        {
+            runtime.RuntimeError -= OnRuntimeError;
+        }
+    }
+
+    private static void AssertNumberMappingFailure(
+        string json,
+        string expectedReasonCode)
+    {
+        try
+        {
+            using var ignored =
+                GodotProtocolVariantMapper.ParseVariant(json);
+        }
+        catch (GodotJsonNumberMappingException exception)
+        {
+            Assert(
+                exception.ReasonCode == expectedReasonCode,
+                "The Godot number mapper returned the wrong stable reason code.");
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "The Godot output mapper silently accepted a lossy JSON number.");
     }
 
     private static void VerifyHeadlessMapperCollectionBounds(
@@ -2760,6 +3890,61 @@ public partial class HeadlessAddonTest : global::Godot.Node
             "513 tools were allocated by the headless mapper.");
     }
 
+    private static void VerifyCompletionMapperCollectionBounds()
+    {
+        using var messages = new GodotArray();
+        for (var index = 0; index < 4_096; index++)
+        {
+            var message = new NormalizedMessage
+            {
+                MessageId = $"completion-boundary-{index}",
+                Role = NormalizedRoles.User,
+                CreatedAt = DateTimeOffset.UnixEpoch,
+                Parts = new List<NormalizedContentPart>
+                {
+                    NormalizedContentPart.FromText("x")
+                }
+            };
+            messages.Add(
+                global::Godot.Json
+                    .ParseString(
+                        ProtocolJson.Serialize(
+                            NormalizedMessageJournalCodec.Encode(message)))
+                    .AsGodotDictionary());
+        }
+
+        using var options = new GodotDictionary
+        {
+            ["messages"] = messages
+        };
+        var accepted = GodotProtocolVariantMapper
+            .ToSimpleCompletionRequest(options);
+        Assert(
+            accepted.Messages.Count == 4_096,
+            "The documented completion-message boundary was rejected.");
+
+        var overflow = new NormalizedMessage
+        {
+            MessageId = "completion-boundary-overflow",
+            Role = NormalizedRoles.User,
+            CreatedAt = DateTimeOffset.UnixEpoch,
+            Parts = new List<NormalizedContentPart>
+            {
+                NormalizedContentPart.FromText("x")
+            }
+        };
+        messages.Add(
+            global::Godot.Json
+                .ParseString(
+                    ProtocolJson.Serialize(
+                        NormalizedMessageJournalCodec.Encode(overflow)))
+                .AsGodotDictionary());
+        AssertJsonFailure(
+            () => GodotProtocolVariantMapper
+                .ToSimpleCompletionRequest(options),
+            "4,097 completion messages crossed the mapper boundary.");
+    }
+
     private static void VerifyVariantIngressBounds(
         SampleRuntimeFixture fixture)
     {
@@ -2792,7 +3977,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
                    fixture.Observations[0]))
         using (var widePayload = new GodotArray())
         {
-            for (var index = 0; index < 2_048; index++)
+            for (var index = 0;
+                 index < ProtocolLimits.MaxProtocolJsonContainerItems;
+                 index++)
             {
                 widePayload.Add(index);
             }
@@ -2801,9 +3988,10 @@ public partial class HeadlessAddonTest : global::Godot.Node
             var boundary =
                 GodotProtocolVariantMapper.ToObservation(observation);
             Assert(
-                boundary.Payload!.Value.GetArrayLength() == 2_048,
-                "The Variant container boundary was not preserved.");
-            widePayload.Add(2_048);
+                boundary.Payload!.Value.GetArrayLength()
+                == ProtocolLimits.MaxProtocolJsonContainerItems,
+                "The protocol JSON container boundary was not preserved.");
+            widePayload.Add(ProtocolLimits.MaxProtocolJsonContainerItems);
             AssertJsonFailure(
                 () => GodotProtocolVariantMapper.ToObservation(
                     observation),
@@ -2957,6 +4145,343 @@ public partial class HeadlessAddonTest : global::Godot.Node
         if (!condition)
         {
             throw new InvalidOperationException(message);
+        }
+    }
+
+    private sealed class SnapshotProbeException : Exception
+    {
+        internal SnapshotProbeException()
+            : base("Caller-owned snapshot enumeration failed.")
+        {
+        }
+    }
+
+    private sealed class ThrowingReadOnlyList<T> : IReadOnlyList<T>
+    {
+        public int Count => 1;
+
+        public T this[int index] => throw new SnapshotProbeException();
+
+        public IEnumerator<T> GetEnumerator() =>
+            throw new SnapshotProbeException();
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    private sealed class GatedThrowingReadOnlyList<T> : IReadOnlyList<T>
+    {
+        private readonly IReadOnlyList<T> _items;
+        private readonly ManualResetEventSlim _release = new(false);
+        private readonly TaskCompletionSource<bool> _enumerationStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal GatedThrowingReadOnlyList(IReadOnlyList<T> items)
+        {
+            _items = items;
+        }
+
+        internal Task EnumerationStarted => _enumerationStarted.Task;
+
+        public int Count => _items.Count;
+
+        public T this[int index] => _items[index];
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            _enumerationStarted.TrySetResult(true);
+            _release.Wait();
+            throw new SnapshotProbeException();
+        }
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        internal void Release()
+        {
+            _release.Set();
+        }
+    }
+
+    private sealed class SnapshotAdmissionBackend : IGodotRuntimeBackend
+    {
+        private readonly TaskCompletionSource<HeadlessRunRequest>
+            _requestReceived =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _callCount;
+
+        internal Task<HeadlessRunRequest> RequestReceived =>
+            _requestReceived.Task;
+
+        internal int CallCount => Volatile.Read(ref _callCount);
+
+        public async ValueTask<HeadlessRunOutcome> RunAsync(
+            HeadlessRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _callCount);
+            _requestReceived.TrySetResult(request);
+            await _release.Task.WaitAsync(cancellationToken);
+            return new HeadlessRunOutcome
+            {
+                Run = request.Run
+            };
+        }
+
+        public ValueTask StopAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _release.TrySetResult(true);
+            return default;
+        }
+
+        internal void Release()
+        {
+            _release.TrySetResult(true);
+        }
+    }
+
+    private sealed class SnapshotRejectingBackend :
+        IGodotDurableRuntimeBackend,
+        IGodotRoutedExecutionBackend
+    {
+        private int _invocationCount;
+
+        internal int InvocationCount => Volatile.Read(ref _invocationCount);
+
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            Interlocked.Increment(ref _invocationCount);
+            throw new InvalidOperationException(
+                "Snapshot-rejected durable work reached the backend.");
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken)
+        {
+            _ = runId;
+            _ = continuation;
+            _ = reconciler;
+            _ = cancellationToken;
+            Interlocked.Increment(ref _invocationCount);
+            throw new InvalidOperationException(
+                "Snapshot-rejected resume work reached the backend.");
+        }
+
+        public ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            Interlocked.Increment(ref _invocationCount);
+            throw new InvalidOperationException(
+                "Snapshot-rejected routed work reached the backend.");
+        }
+
+        public ValueTask<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            Interlocked.Increment(ref _invocationCount);
+            throw new InvalidOperationException(
+                "Snapshot-rejected completion work reached the backend.");
+        }
+
+        public bool TryPostControl(
+            string runId,
+            RunControlCommand command)
+        {
+            _ = runId;
+            _ = command;
+            return false;
+        }
+
+        public ValueTask StopAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return default;
+        }
+    }
+
+    private sealed class SemanticAuthorityBackend :
+        IGodotDurableRuntimeBackend,
+        IGodotRoutedExecutionBackend
+    {
+        private readonly TaskCompletionSource<DurableRunRequest>
+            _durableReceived = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<SimpleCompletionRequest>
+            _completionReceived = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal Task<DurableRunRequest> DurableReceived =>
+            _durableReceived.Task;
+
+        internal Task<SimpleCompletionRequest> CompletionReceived =>
+            _completionReceived.Task;
+
+        public async ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            _durableReceived.TrySetResult(request);
+            await _release.Task.WaitAsync(cancellationToken);
+            return new DurableRunOutcome { Run = CompletedRun(request.Run.RunId) };
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public async ValueTask<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _completionReceived.TrySetResult(request);
+            await _release.Task.WaitAsync(cancellationToken);
+            return new SimpleCompletionOutcome
+            {
+                OperationId = request.OperationId ?? "backend-completion",
+                Text = "completed"
+            };
+        }
+
+        public bool TryPostControl(
+            string runId,
+            RunControlCommand command) => false;
+
+        public ValueTask StopAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _release.TrySetResult(true);
+            return default;
+        }
+
+        internal void Release() => _release.TrySetResult(true);
+
+        private static AgentRun CompletedRun(string runId)
+        {
+            var now = DateTimeOffset.UtcNow;
+            return new AgentRun
+            {
+                RunId = runId,
+                AgentId = "backend-defined-agent",
+                WorldId = "backend-defined-world",
+                State = RunStates.Completed,
+                Budget = new AgentBudget
+                {
+                    MaxTurns = 1,
+                    MaxDurationMs = 1_000,
+                    MaxTokens = 1,
+                    MaxActions = 1,
+                    MaxCostUsd = "0"
+                },
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+        }
+    }
+
+    private sealed class RequestCancellationProbeBackend :
+        IGodotDurableRuntimeBackend,
+        IGodotRoutedExecutionBackend
+    {
+        private readonly ManualResetEventSlim _callbackRelease;
+        private readonly TaskCompletionSource<bool> _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _callbackStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool>
+            _backendObservedCancellation =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenRegistration _registration;
+        private int _callbackCount;
+
+        internal RequestCancellationProbeBackend(
+            ManualResetEventSlim callbackRelease)
+        {
+            _callbackRelease = callbackRelease;
+        }
+
+        internal Task Started => _started.Task;
+
+        internal Task CallbackStarted => _callbackStarted.Task;
+
+        internal Task BackendObservedCancellation =>
+            _backendObservedCancellation.Task;
+
+        internal int CallbackCount => Volatile.Read(ref _callbackCount);
+
+        public ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation,
+            IGameOperationReconciler? reconciler,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public async ValueTask<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _registration = cancellationToken.Register(
+                () =>
+                {
+                    Interlocked.Increment(ref _callbackCount);
+                    _callbackStarted.TrySetResult(true);
+                    _callbackRelease.Wait();
+                });
+            _started.TrySetResult(true);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(1).ConfigureAwait(false);
+            }
+
+            _backendObservedCancellation.TrySetResult(true);
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        public bool TryPostControl(
+            string runId,
+            RunControlCommand command) => false;
+
+        public ValueTask StopAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _registration.Dispose();
+            return default;
         }
     }
 
@@ -3434,6 +4959,30 @@ public partial class HeadlessAddonTest : global::Godot.Node
             CancellationToken cancellationToken) => default;
     }
 
+    private sealed class EffectThenCancelBackend : IGodotRuntimeBackend
+    {
+        public bool EffectRecorded { get; private set; }
+
+        public ValueTask<HeadlessRunOutcome> RunAsync(
+            HeadlessRunRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            EffectRecorded = true;
+            return new ValueTask<HeadlessRunOutcome>(
+                Task.FromException<HeadlessRunOutcome>(
+                    new OperationCanceledException(
+                        "The backend outcome is unknown.")));
+        }
+
+        public ValueTask StopAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return default;
+        }
+    }
+
     private sealed class LifecycleRuntime :
         IDurableAgentRuntime,
         IDisposable
@@ -3686,6 +5235,73 @@ public partial class HeadlessAddonTest : global::Godot.Node
             cancellationToken.ThrowIfCancellationRequested();
             throw new NotSupportedException();
         }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class TwoRunCancellationRuntime :
+        IDurableAgentRuntime,
+        IDisposable
+    {
+        private readonly ManualResetEventSlim _release;
+        private readonly TaskCompletionSource<bool> _bothStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _blockingCallbackStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool>
+            _independentCancellationObserved = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _started;
+
+        internal TwoRunCancellationRuntime(ManualResetEventSlim release)
+        {
+            _release = release;
+        }
+
+        public RuntimeControlPlane Controls { get; } = new();
+
+        internal Task BothStarted => _bothStarted.Task;
+
+        internal Task BlockingCallbackStarted =>
+            _blockingCallbackStarted.Task;
+
+        internal Task IndependentCancellationObserved =>
+            _independentCancellationObserved.Task;
+
+        public async ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            using var registration = cancellationToken.Register(
+                () =>
+                {
+                    if (request.Run.RunId == "blocking-cancellation-run-a")
+                    {
+                        _blockingCallbackStarted.TrySetResult(true);
+                        _release.Wait();
+                    }
+                    else
+                    {
+                        _independentCancellationObserved.TrySetResult(true);
+                    }
+                });
+            if (Interlocked.Increment(ref _started) == 2)
+            {
+                _bothStarted.TrySetResult(true);
+            }
+
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The run did not cancel.");
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation = null,
+            IGameOperationReconciler? reconciler = null,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
 
         public void Dispose()
         {

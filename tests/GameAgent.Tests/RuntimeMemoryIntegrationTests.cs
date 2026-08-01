@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using GameAgent.Core;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
@@ -465,6 +466,739 @@ public sealed class RuntimeMemoryIntegrationTests
     }
 
     [Theory]
+    [InlineData("bare")]
+    [InlineData("foreign")]
+    public async Task RuntimeManagedDeleteRequiresCurrentWorldExpectation(
+        string deleteKind)
+    {
+        var directory = TempDirectory();
+        var journalPath = Path.Combine(directory, "runtime.journal");
+        var store = new DeterministicMemoryStore();
+        var protectedRecord = BoundMemoryRecord(
+            "protected-memory",
+            deleteKind == "foreign" ? "world-2" : "world-1",
+            "session-1",
+            "protected value");
+        await store.UpsertAsync(protectedRecord, CancellationToken.None);
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        var mutation = deleteKind == "foreign"
+            ? MemoryMutation.Delete(protectedRecord)
+            : MemoryMutation.Delete(protectedRecord.MemoryId);
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(journalPath)
+                .AddProvider(new CapturingFinalProvider())
+                .WithRuntimeMemory(
+                    memory,
+                    new MutationPolicy(_ => new[] { mutation }))
+                .Build();
+
+            var outcome = await built.Runtime.RunAsync(
+                Request("memory-delete-guard-" + deleteKind));
+
+            Assert.Equal(RunStates.Failed, outcome.Run.State);
+            Assert.Equal(
+                RuntimeMemoryIntegrationReasonCodes.PolicyResultInvalid,
+                outcome.ErrorCode);
+            var retained = await store.SearchAsync(
+                new MemoryQuery(
+                    protectedRecord.Scope,
+                    ProtocolJson.ParseElement("{}"),
+                    worldId: protectedRecord.Provenance!.WorldId,
+                    sessionId: protectedRecord.Provenance.SessionId,
+                    requireCommittedProvenance: true),
+                CancellationToken.None);
+            Assert.Equal(
+                protectedRecord.MemoryId,
+                Assert.Single(retained).Record.MemoryId);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeManagedUpsertCannotReplaceAnotherWorldRecord()
+    {
+        var directory = TempDirectory();
+        var journalPath = Path.Combine(directory, "runtime.journal");
+        var store = new DeterministicMemoryStore();
+        var protectedRecord = BoundMemoryRecord(
+            "protected-memory",
+            "world-2",
+            "session-1",
+            "foreign value");
+        await store.UpsertAsync(protectedRecord, CancellationToken.None);
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(journalPath)
+                .AddProvider(new CapturingFinalProvider())
+                .WithRuntimeMemory(
+                    memory,
+                    new MutationPolicy(
+                        context =>
+                        {
+                            var now = DateTimeOffset.UtcNow;
+                            return new[]
+                            {
+                                MemoryMutation.Upsert(
+                                    new MemoryRecord(
+                                        protectedRecord.MemoryId,
+                                        protectedRecord.Scope,
+                                        ProtocolJson.ParseElement(
+                                            "{\"text\":\"replacement\"}"),
+                                        Array.Empty<string>(),
+                                        importance: 50,
+                                        createdAt: now,
+                                        updatedAt: now,
+                                        provenance: new MemoryProvenance(
+                                            context.WorldId,
+                                            context.SessionId,
+                                            saveRevision: 0,
+                                            sourceRunId: context.RunId,
+                                            sourceEventId:
+                                                context.CommittedSourceEventIds[0],
+                                            committed: true)))
+                            };
+                        }))
+                .Build();
+
+            var outcome = await built.Runtime.RunAsync(
+                Request("memory-upsert-world-collision"));
+
+            Assert.Equal(RunStates.Failed, outcome.Run.State);
+            Assert.Equal(
+                RuntimeMemoryIntegrationReasonCodes.CommitFailed,
+                outcome.ErrorCode);
+            var retained = await store.SearchAsync(
+                new MemoryQuery(
+                    protectedRecord.Scope,
+                    ProtocolJson.ParseElement("{}"),
+                    worldId: "world-2",
+                    sessionId: "session-1",
+                    requireCommittedProvenance: true),
+                CancellationToken.None);
+            Assert.Contains(
+                "foreign value",
+                Assert.Single(retained).Record.Content.GetRawText(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeManagedBareUpsertCannotReplaceCurrentCoordinateRecord()
+    {
+        var directory = TempDirectory();
+        var journalPath = Path.Combine(directory, "runtime.journal");
+        var store = new DeterministicMemoryStore();
+        var protectedRecord = BoundMemoryRecord(
+            "protected-current-memory",
+            "world-1",
+            "session-1",
+            "current value",
+            timelineEpoch: 2);
+        await store.UpsertAsync(protectedRecord, CancellationToken.None);
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(journalPath)
+                .AddProvider(new CapturingFinalProvider())
+                .WithRuntimeMemory(
+                    memory,
+                    new MutationPolicy(
+                        context =>
+                        {
+                            var now = DateTimeOffset.UtcNow;
+                            return new[]
+                            {
+                                MemoryMutation.Upsert(
+                                    new MemoryRecord(
+                                        protectedRecord.MemoryId,
+                                        protectedRecord.Scope,
+                                        ProtocolJson.ParseElement(
+                                            "{\"text\":\"replacement\"}"),
+                                        Array.Empty<string>(),
+                                        importance: 50,
+                                        createdAt: now,
+                                        updatedAt: now,
+                                        provenance: new MemoryProvenance(
+                                            context.WorldId,
+                                            context.SessionId,
+                                            saveRevision:
+                                                context.Coordinate!.SaveRevision,
+                                            sourceRunId: context.RunId,
+                                            sourceEventId:
+                                                context.CommittedSourceEventIds[0],
+                                            committed: true,
+                                            timelineId:
+                                                context.Coordinate.TimelineId,
+                                            timelineEpoch:
+                                                context.Coordinate.GameTime!.Epoch)))
+                            };
+                        }))
+                .Build();
+            var request = Request("memory-upsert-current-collision");
+            GameContextEnvelope.Attach(request.Run, Coordinate());
+
+            var outcome = await built.Runtime.RunAsync(request);
+
+            Assert.Equal(RunStates.Failed, outcome.Run.State);
+            Assert.Equal(
+                RuntimeMemoryIntegrationReasonCodes.CommitFailed,
+                outcome.ErrorCode);
+            var retained = await store.SearchAsync(
+                new MemoryQuery(
+                    protectedRecord.Scope,
+                    ProtocolJson.ParseElement("{}"),
+                    worldId: "world-1",
+                    sessionId: "session-1",
+                    requireCommittedProvenance: true,
+                    timelineId: "timeline-main",
+                    timelineEpoch: 2),
+                CancellationToken.None);
+            Assert.Contains(
+                "current value",
+                Assert.Single(retained).Record.Content.GetRawText(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("timeline")]
+    [InlineData("epoch")]
+    [InlineData("observer")]
+    [InlineData("observer_incarnation")]
+    [InlineData("game_clock")]
+    [InlineData("game_timeline")]
+    [InlineData("game_epoch")]
+    [InlineData("future_revision")]
+    public async Task RuntimeManagedMutationMustMatchCurrentCoordinate(
+        string boundary)
+    {
+        var store = new DeterministicMemoryStore();
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        var loop = new RuntimeMemoryAgentLoop(
+            memory,
+            new MutationPolicy(
+                context =>
+                {
+                    var coordinate = context.Coordinate!;
+                    var observer = boundary switch
+                    {
+                        "observer" => new GameEntityIdentity("npc-9", 2),
+                        "observer_incarnation" =>
+                            new GameEntityIdentity("npc-1", 3),
+                        _ => new GameEntityIdentity("npc-1", 2)
+                    };
+                    var coordinateTime = coordinate.GameTime!;
+                    var timelineId = boundary is "timeline" or "game_timeline"
+                        ? "timeline-fork"
+                        : coordinate.TimelineId;
+                    var epoch = boundary == "epoch"
+                        ? 3
+                        : coordinateTime.Epoch;
+                    var gameClock = boundary == "game_clock"
+                        ? "dream-clock"
+                        : coordinateTime.ClockId;
+                    var gameTimeline = boundary is "timeline" or "game_timeline"
+                        ? "timeline-fork"
+                        : coordinateTime.TimelineId;
+                    var gameEpoch = boundary == "game_epoch"
+                        ? 3
+                        : coordinateTime.Epoch;
+                    var now = DateTimeOffset.UtcNow;
+                    return new[]
+                    {
+                        MemoryMutation.Upsert(
+                            new MemoryRecord(
+                                "coordinate-memory-" + boundary,
+                                "agent:" + context.AgentId,
+                                ProtocolJson.ParseElement(
+                                    "{\"text\":\"coordinate\"}"),
+                                Array.Empty<string>(),
+                                50,
+                                now,
+                                now,
+                                provenance: new MemoryProvenance(
+                                    context.WorldId,
+                                    context.SessionId,
+                                    boundary == "future_revision"
+                                        ? coordinate.SaveRevision + 1
+                                        : coordinate.SaveRevision,
+                                    context.RunId,
+                                    context.CommittedSourceEventIds[0],
+                                    committed: true,
+                                    timelineId,
+                                    new GameKnowledgePerspective(
+                                        observer,
+                                        "observation",
+                                        new GameEntityIdentity("npc-2", 7)),
+                                    epoch),
+                                gameTimeWindow: new GameTimeWindow(
+                                    validFrom: new GameTimePoint(
+                                        gameClock,
+                                        gameTimeline,
+                                        gameEpoch,
+                                        tick: 90))))
+                    };
+                }),
+            options: null);
+        var request = Request("memory-coordinate-write-" + boundary);
+        GameContextEnvelope.Attach(request.Run, Coordinate());
+
+        var error = Assert.Throws<RuntimeMemoryIntegrationException>(
+            () => loop.PrepareCommit(
+                request.Run,
+                "turn-coordinate",
+                new[] { "committed-event" },
+                Array.Empty<ActionReceipt>(),
+                request.InitialTranscript));
+
+        Assert.Equal(
+            RuntimeMemoryIntegrationReasonCodes.PolicyResultInvalid,
+            error.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData("timeline")]
+    [InlineData("epoch")]
+    [InlineData("observer_incarnation")]
+    [InlineData("game_clock")]
+    [InlineData("future_revision")]
+    public async Task RecoveryRevalidatesPreparedAuthorityAgainstCoordinate(
+        string boundary)
+    {
+        var store = new DeterministicMemoryStore();
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        var loop = new RuntimeMemoryAgentLoop(
+            memory,
+            new MutationPolicy(
+                context =>
+                {
+                    var coordinate = context.Coordinate!;
+                    var now = DateTimeOffset.UtcNow;
+                    return new[]
+                    {
+                        MemoryMutation.Upsert(
+                            new MemoryRecord(
+                                "prepared-coordinate-memory",
+                                "agent:" + context.AgentId,
+                                ProtocolJson.ParseElement(
+                                    "{\"text\":\"prepared\"}"),
+                                Array.Empty<string>(),
+                                50,
+                                now,
+                                now,
+                                provenance: new MemoryProvenance(
+                                    context.WorldId,
+                                    context.SessionId,
+                                    coordinate.SaveRevision,
+                                    context.RunId,
+                                    context.CommittedSourceEventIds[0],
+                                    committed: true,
+                                    timelineId: coordinate.TimelineId,
+                                    perspective: new GameKnowledgePerspective(
+                                        coordinate.Observer!,
+                                        "observation",
+                                        new GameEntityIdentity("npc-2", 7)),
+                                    timelineEpoch:
+                                        coordinate.GameTime!.Epoch),
+                                gameTimeWindow: new GameTimeWindow(
+                                    validFrom: new GameTimePoint(
+                                        coordinate.GameTime.ClockId,
+                                        coordinate.GameTime.TimelineId,
+                                        coordinate.GameTime.Epoch,
+                                        tick: 90))))
+                    };
+                }),
+            options: null);
+        var request = Request("memory-recovery-coordinate-" + boundary);
+        GameContextEnvelope.Attach(request.Run, Coordinate());
+        var prepared = loop.PrepareCommit(
+            request.Run,
+            "turn-coordinate",
+            new[] { "committed-event" },
+            Array.Empty<ActionReceipt>(),
+            request.InitialTranscript);
+        var current = boundary switch
+        {
+            "timeline" => CoordinateFor(
+                timelineId: "timeline-fork",
+                gameTimeTimelineId: "timeline-fork"),
+            "epoch" => CoordinateFor(gameTimeEpoch: 3),
+            "observer_incarnation" => CoordinateFor(
+                observerIncarnation: 3),
+            "game_clock" => CoordinateFor(gameTimeClockId: "dream-clock"),
+            "future_revision" => CoordinateFor(saveRevision: 4),
+            _ => throw new ArgumentOutOfRangeException(nameof(boundary))
+        };
+        GameContextEnvelope.Attach(request.Run, current);
+
+        var error = Assert.Throws<RuntimeMemoryIntegrationException>(
+            () => loop.ValidatePreparedForRun(
+                prepared,
+                request.Run,
+                new[] { "committed-event" }));
+
+        Assert.Equal(
+            RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+            error.ReasonCode);
+    }
+
+    [Fact]
+    public void PreparedCommitRoundTripsCompleteAuthorityEnvelope()
+    {
+        var original = SemanticMemoryRecord(
+            "journal-authority-memory",
+            "original",
+            saveRevision: 5);
+        var replacement = SemanticMemoryRecord(
+            "journal-authority-memory",
+            "replacement",
+            saveRevision: 6);
+        var mutations = new[]
+        {
+            MemoryMutation.Upsert(replacement, original)
+        };
+        var prepared = new PreparedRuntimeMemoryCommit(
+            "memory-commit:test:0:turn-authority",
+            "turn-authority",
+            "policy",
+            "1",
+            RuntimeMemoryCommitJournalCodec.ComputeMutationDigest(mutations),
+            mutations);
+
+        var decoded = RuntimeMemoryCommitJournalCodec.DecodePrepared(
+            RuntimeMemoryCommitJournalCodec.EncodePrepared(prepared),
+            prepared.TurnId,
+            prepared.CommitId);
+
+        var expectation = Assert.Single(decoded.Mutations).ExpectedRecord!;
+        var authority = expectation.Authority;
+        Assert.Equal(5, authority.SaveRevision);
+        Assert.True(authority.Committed);
+        Assert.Equal("timeline-main", authority.TimelineId);
+        Assert.Equal(2, authority.TimelineEpoch);
+        Assert.True(authority.HasPerspective);
+        Assert.Equal("npc-1", authority.ObserverEntityId);
+        Assert.Equal(2, authority.ObserverIncarnation);
+        Assert.Equal("observation", authority.PerspectiveKind);
+        Assert.True(authority.HasSource);
+        Assert.Equal("npc-2", authority.SourceEntityId);
+        Assert.Equal(7, authority.SourceIncarnation);
+        Assert.True(authority.HasGameTimeWindow);
+        Assert.Equal("world-clock", authority.GameTimeClockId);
+        Assert.Equal("timeline-main", authority.GameTimeTimelineId);
+        Assert.Equal(2, authority.GameTimeEpoch);
+        Assert.Equal(
+            original.MemoryId,
+            expectation.MemoryId);
+        Assert.Equal(
+            MemoryRecordDigest.ComputeSha256(original),
+            expectation.RecordDigest);
+    }
+
+    [Theory]
+    [InlineData("upsert")]
+    [InlineData("delete")]
+    public async Task LegacyPreparedCommitReplaysHistoricalMutationSemantics(
+        string kind)
+    {
+        var store = new DeterministicMemoryStore();
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        var policy = new MutationPolicy(
+            _ => Array.Empty<MemoryMutation>());
+        var loop = new RuntimeMemoryAgentLoop(memory, policy, options: null);
+        var request = Request("legacy-memory-" + kind);
+        const string turnId = "turn-legacy";
+        const string memoryId = "legacy-memory-id";
+        var now = DateTimeOffset.UtcNow;
+        await store.UpsertAsync(
+            new MemoryRecord(
+                memoryId,
+                "old-scope",
+                ProtocolJson.ParseElement("{\"value\":\"old\"}"),
+                Array.Empty<string>(),
+                50,
+                now,
+                now),
+            CancellationToken.None);
+
+        var mutations = string.Equals(kind, "upsert", StringComparison.Ordinal)
+            ? new[]
+            {
+                MemoryMutation.Upsert(
+                    new MemoryRecord(
+                        memoryId,
+                        "agent:agent-1",
+                        ProtocolJson.ParseElement(
+                            "{\"value\":\"replacement\"}"),
+                        Array.Empty<string>(),
+                        50,
+                        now,
+                        now,
+                        provenance: new MemoryProvenance(
+                            request.Run.WorldId,
+                            request.Run.SessionId,
+                            0,
+                            request.Run.RunId,
+                            "committed-event",
+                            committed: true)))
+            }
+            : new[] { MemoryMutation.Delete(memoryId) };
+        var prepared = new PreparedRuntimeMemoryCommit(
+            RuntimeMemoryAgentLoop.CommitId(
+                request.Run.RunId,
+                request.Run.RuntimeGeneration,
+                turnId),
+            turnId,
+            loop.PolicyId,
+            loop.PolicyVersion,
+            RuntimeMemoryCommitJournalCodec.ComputeMutationDigest(mutations),
+            mutations,
+            PreparedRuntimeMemoryCommit.LegacyMutationContractVersion);
+        var encoded = RuntimeMemoryCommitJournalCodec
+            .EncodePrepared(prepared)
+            .GetRawText();
+        using var oldPayload = JsonDocument.Parse(
+            encoded.Replace(
+                "\"mutationContractVersion\":0,",
+                string.Empty,
+                StringComparison.Ordinal));
+        var decoded = RuntimeMemoryCommitJournalCodec.DecodePrepared(
+            oldPayload.RootElement,
+            turnId,
+            prepared.CommitId);
+
+        Assert.Equal(
+            PreparedRuntimeMemoryCommit.LegacyMutationContractVersion,
+            decoded.MutationContractVersion);
+        loop.ValidatePreparedForRun(
+            decoded,
+            request.Run,
+            new[] { "committed-event" });
+        await loop.ApplyPreparedAsync(decoded, CancellationToken.None);
+
+        var oldScope = await store.SearchAsync(
+            new MemoryQuery(
+                "old-scope",
+                ProtocolJson.ParseElement("{}")),
+            CancellationToken.None);
+        Assert.Empty(oldScope);
+        if (string.Equals(kind, "upsert", StringComparison.Ordinal))
+        {
+            var replacement = await store.SearchAsync(
+                new MemoryQuery(
+                    "agent:agent-1",
+                    ProtocolJson.ParseElement("{}")),
+                CancellationToken.None);
+            Assert.Equal(
+                "replacement",
+                Assert.Single(replacement).Record.Content
+                    .GetProperty("value")
+                    .GetString());
+        }
+    }
+
+    [Fact]
+    public async Task LegacyPreparedCommitPreservesUnsupportedReplaySignal()
+    {
+        var store = new ApplyThenThrowStore();
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { store },
+            store);
+        var loop = new RuntimeMemoryAgentLoop(
+            memory,
+            new MutationPolicy(_ => Array.Empty<MemoryMutation>()),
+            options: null);
+        var now = DateTimeOffset.UtcNow;
+        var mutations = new[]
+        {
+            MemoryMutation.Upsert(
+                new MemoryRecord(
+                    "legacy-unsupported-memory",
+                    "agent:agent-1",
+                    ProtocolJson.ParseElement("{\"value\":\"legacy\"}"),
+                    Array.Empty<string>(),
+                    50,
+                    now,
+                    now,
+                    provenance: new MemoryProvenance(
+                        "world-legacy",
+                        "session-legacy",
+                        0,
+                        "run-legacy",
+                        "event-legacy",
+                        committed: true)))
+        };
+        var prepared = new PreparedRuntimeMemoryCommit(
+            "memory-commit:legacy-unsupported:0:turn-legacy",
+            "turn-legacy",
+            loop.PolicyId,
+            loop.PolicyVersion,
+            RuntimeMemoryCommitJournalCodec.ComputeMutationDigest(mutations),
+            mutations,
+            PreparedRuntimeMemoryCommit.LegacyMutationContractVersion);
+
+        await Assert.ThrowsAsync<MemoryLegacyReplayNotSupportedException>(
+            () => loop.ApplyPreparedAsync(prepared, CancellationToken.None)
+                .AsTask());
+        Assert.Equal(0, store.ApplyCallCount);
+    }
+
+    [Fact]
+    public async Task ExplicitTimelineEpochSurvivesBindingWithoutGameTime()
+    {
+        var provider = new IgnoringQueryMemoryProvider(
+            Array.Empty<MemorySearchResult>());
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { provider });
+        var loop = new RuntimeMemoryAgentLoop(
+            memory,
+            new FixedRecallPolicy(
+                new MemoryQuery(
+                    "agent:agent-1",
+                    ProtocolJson.ParseElement("{}"),
+                    timelineId: "timeline-main",
+                    timelineEpoch: 2)),
+            options: null);
+        var request = Request("memory-explicit-epoch");
+
+        _ = await loop.RecallAsync(
+            request.Run,
+            "turn-explicit-epoch",
+            request.InitialTranscript,
+            Array.Empty<ContextCandidate>(),
+            maximumContextCandidates: 8,
+            CancellationToken.None);
+
+        Assert.NotNull(provider.LastQuery);
+        Assert.Equal(2, provider.LastQuery.TimelineEpoch);
+        Assert.True(provider.LastQuery.EnforceTimelineEpoch);
+        Assert.Null(provider.LastQuery.GameTime);
+    }
+
+    [Fact]
+    public async Task CoordinateTimelineEpochIsBoundWithoutBecomingExplicit()
+    {
+        var provider = new IgnoringQueryMemoryProvider(
+            Array.Empty<MemorySearchResult>());
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { provider });
+        var loop = new RuntimeMemoryAgentLoop(
+            memory,
+            new FixedRecallPolicy(
+                new MemoryQuery(
+                    "agent:agent-1",
+                    ProtocolJson.ParseElement("{}"))),
+            options: null);
+        var request = Request("memory-coordinate-epoch");
+        GameContextEnvelope.Attach(request.Run, Coordinate());
+
+        _ = await loop.RecallAsync(
+            request.Run,
+            "turn-coordinate-epoch",
+            request.InitialTranscript,
+            Array.Empty<ContextCandidate>(),
+            maximumContextCandidates: 8,
+            CancellationToken.None);
+
+        Assert.NotNull(provider.LastQuery);
+        Assert.Equal(2, provider.LastQuery.TimelineEpoch);
+        Assert.False(provider.LastQuery.EnforceTimelineEpoch);
+        Assert.Equal(2, provider.LastQuery.GameTime!.Epoch);
+    }
+
+    [Fact]
+    public async Task ExplicitTimelineEpochFiltersProvenanceOnlyRecords()
+    {
+        var provider = new IgnoringQueryMemoryProvider(
+            new[]
+            {
+                new MemorySearchResult(
+                    BoundMemoryRecord(
+                        "current-epoch",
+                        "world-1",
+                        "session-1",
+                        "current epoch memory",
+                        timelineEpoch: 2),
+                    score: 300),
+                new MemorySearchResult(
+                    BoundMemoryRecord(
+                        "stale-epoch",
+                        "world-1",
+                        "session-1",
+                        "stale epoch memory",
+                        timelineEpoch: 1),
+                    score: 200),
+                new MemorySearchResult(
+                    BoundMemoryRecord(
+                        "missing-epoch",
+                        "world-1",
+                        "session-1",
+                        "missing epoch memory"),
+                    score: 100)
+            });
+        await using var memory = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { provider });
+        var loop = new RuntimeMemoryAgentLoop(
+            memory,
+            new FixedRecallPolicy(
+                new MemoryQuery(
+                    "agent:agent-1",
+                    ProtocolJson.ParseElement("{}"),
+                    worldId: "world-1",
+                    sessionId: "session-1",
+                    requireCommittedProvenance: true,
+                    timelineId: "timeline-main",
+                    timelineEpoch: 2)),
+            options: null);
+        var request = Request("memory-provenance-only-epoch");
+
+        var selection = await loop.RecallAsync(
+            request.Run,
+            "turn-provenance-only-epoch",
+            request.InitialTranscript,
+            Array.Empty<ContextCandidate>(),
+            maximumContextCandidates: 8,
+            CancellationToken.None);
+
+        var candidate = Assert.Single(selection.Candidates);
+        Assert.Contains(
+            "current epoch memory",
+            candidate.Content!.Value.GetRawText(),
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("world")]
     [InlineData("session")]
     [InlineData("future_revision")]
@@ -676,15 +1410,28 @@ public sealed class RuntimeMemoryIntegrationTests
 
     private static GameContextCoordinate Coordinate()
     {
+        return CoordinateFor();
+    }
+
+    private static GameContextCoordinate CoordinateFor(
+        string timelineId = "timeline-main",
+        long saveRevision = 12,
+        long observerIncarnation = 2,
+        string gameTimeClockId = "world-clock",
+        string gameTimeTimelineId = "timeline-main",
+        long gameTimeEpoch = 2)
+    {
         return new GameContextCoordinate(
             "world-1",
-            "timeline-main",
-            saveRevision: 12,
-            observer: new GameEntityIdentity("npc-1", 2),
+            timelineId,
+            saveRevision,
+            observer: new GameEntityIdentity(
+                "npc-1",
+                observerIncarnation),
             gameTime: new GameTimePoint(
-                "world-clock",
-                "timeline-main",
-                epoch: 2,
+                gameTimeClockId,
+                gameTimeTimelineId,
+                gameTimeEpoch,
                 tick: 100));
     }
 
@@ -692,7 +1439,8 @@ public sealed class RuntimeMemoryIntegrationTests
         string memoryId,
         string worldId,
         string? sessionId,
-        string text)
+        string text,
+        long? timelineEpoch = null)
     {
         var now = DateTimeOffset.UtcNow;
         return new MemoryRecord(
@@ -711,7 +1459,44 @@ public sealed class RuntimeMemoryIntegrationTests
                 sourceRunId: "source-" + memoryId,
                 sourceEventId: "event-" + memoryId,
                 committed: true,
-                timelineId: "timeline-main"));
+                timelineId: "timeline-main",
+                timelineEpoch: timelineEpoch));
+    }
+
+    private static MemoryRecord SemanticMemoryRecord(
+        string memoryId,
+        string text,
+        long saveRevision)
+    {
+        var now = DateTimeOffset.UnixEpoch;
+        return new MemoryRecord(
+            memoryId,
+            "agent:agent-1",
+            ProtocolJson.ParseElement(
+                $$"""{"text":"{{text}}"}"""),
+            Array.Empty<string>(),
+            importance: 50,
+            now,
+            now,
+            provenance: new MemoryProvenance(
+                "world-1",
+                "session-1",
+                saveRevision,
+                sourceRunId: "source-" + text,
+                sourceEventId: "event-" + text,
+                committed: true,
+                timelineId: "timeline-main",
+                perspective: new GameKnowledgePerspective(
+                    new GameEntityIdentity("npc-1", 2),
+                    "observation",
+                    new GameEntityIdentity("npc-2", 7)),
+                timelineEpoch: 2),
+            gameTimeWindow: new GameTimeWindow(
+                validFrom: new GameTimePoint(
+                    "world-clock",
+                    "timeline-main",
+                    epoch: 2,
+                    tick: 90)));
     }
 
     private static ToolDescriptor RememberTool()
@@ -866,6 +1651,37 @@ public sealed class RuntimeMemoryIntegrationTests
             RuntimeMemoryCommitContext context)
         {
             return Array.Empty<MemoryMutation>();
+        }
+    }
+
+    private sealed class MutationPolicy : IRuntimeMemoryPolicy
+    {
+        private readonly Func<
+            RuntimeMemoryCommitContext,
+            IReadOnlyList<MemoryMutation>> _mutations;
+
+        public MutationPolicy(
+            Func<
+                RuntimeMemoryCommitContext,
+                IReadOnlyList<MemoryMutation>> mutations)
+        {
+            _mutations = mutations;
+        }
+
+        public string PolicyId => "mutation-policy";
+
+        public string Version => "1.0.0";
+
+        public RuntimeMemoryRecallPlan? PlanRecall(
+            RuntimeMemoryRecallContext context)
+        {
+            return null;
+        }
+
+        public IReadOnlyList<MemoryMutation> SelectCommittedMutations(
+            RuntimeMemoryCommitContext context)
+        {
+            return _mutations(context);
         }
     }
 
@@ -1129,7 +1945,7 @@ public sealed class RuntimeMemoryIntegrationTests
     }
 
     private sealed class ApplyThenThrowStore :
-        IIdempotentAtomicMemoryBatchStore
+        IRuntimeAuthoritativeMemoryBatchStore
     {
         private readonly DeterministicMemoryStore _inner = new();
         private int _applyCalls;
@@ -1137,6 +1953,9 @@ public sealed class RuntimeMemoryIntegrationTests
         public string ProviderId => "apply-then-throw";
 
         public int ApplyCallCount => Volatile.Read(ref _applyCalls);
+
+        public int RuntimeMutationContractVersion =>
+            RuntimeMemoryMutationContract.CurrentVersion;
 
         public ValueTask UpsertAsync(
             MemoryRecord record,

@@ -34,13 +34,17 @@ credentials or game-specific tools.
 
 Add `UnityAgentRuntimeHost` to a persistent GameObject. At application startup:
 
-1. Create a `UnityMainThreadDispatcher` and a game-owned `IGameHost`.
-2. Compose a `BuiltGameAgentRuntime` with `GameAgentRuntimeBuilder`.
-3. Call `UnityAgentRuntimeHost.Configure(...)` exactly once.
-4. Start `DurableRunRequest` instances through `RunAsync`.
-5. Pump and display runtime events without treating streamed text as an
+1. Get or create the persistent `UnityAgentRuntimeHost`.
+2. Construct the game-owned `IGameHost` with `host.Dispatcher`.
+3. Compose a `BuiltGameAgentRuntime` with `GameAgentRuntimeBuilder`.
+4. Call `host.Configure(...)` exactly once.
+5. Start `DurableRunRequest` instances through `RunAsync`.
+6. Pump and display runtime events without treating streamed text as an
    authoritative state mutation.
-6. Await `ShutdownAsync` during controlled shutdown when possible.
+7. Await `ShutdownAsync` during controlled shutdown when possible.
+
+Do not create a separate dispatcher for the game host. The runtime host pumps
+the bounded dispatcher exposed by its `Dispatcher` property.
 
 Import the **Structured Tool Loop** sample from Package Manager for an offline,
 deterministic example. It sends structured JSON context, receives a streamed
@@ -64,13 +68,41 @@ mutation in game code.
 ## Lifecycle and backpressure
 
 `UnityAgentRuntimeHost` bounds active runs, main-thread commands, and runtime
-events. `Update` drains each queue within count and time budgets. Shutdown stops
-admission, cancels active work, drains callbacks, stops the backend, and flushes
-owned durable stores. `IsShutdownIncomplete` reports a bounded shutdown that
-could not finish cleanly.
+events. Terminal completion and fault observers use a separately reserved queue,
+so a burst of game-thread actions cannot drop a run's terminal notification.
+`RunFaultedDetailed` includes the operation kind, known run/operation/parent
+identity, and a conservative reconciliation flag; `RunFaulted` remains for
+compatibility. Completion, fault, runtime-event, and application-pause
+subscribers are invoked independently, so one throwing subscriber does not
+suppress later observers.
+`Update` drains each queue within count and time budgets. The time budget is
+checked between callbacks; an individual main-thread subscriber cannot be
+preempted and therefore must be trusted, non-blocking, and constant-time.
+
+Shutdown stops new admission, cancels active work, stops the backend, and
+flushes owned durable stores. It stops issuing terminal reservations first,
+then waits for every reservation already issued to publish or be abandoned.
+If an ordinary cancellation is waiting behind saturated callbacks, shutdown
+also promotes that run onto its separately reserved shutdown lane; only one
+lane executes the actual token cancellation, and both dispatches drain before
+their per-run resources are released.
+Those published notifications remain queued, and subsequent main-thread
+`Update` calls continue to pump them even after the action dispatcher has
+stopped. During controlled teardown, await `ShutdownAsync`, then keep the host
+alive until `PendingTerminalObserverCount` reaches zero. The returned operation
+task and durable store remain authoritative if Unity destroys the host or exits
+before that drain. `IsShutdownIncomplete` reports a bounded shutdown that could
+not finish cleanly.
 
 Do not call Unity APIs from provider or persistence continuations. Route them
 through `UnityMainThreadDispatcher` or a registered main-thread game host.
+
+Every mutable request passed to an injected backend is copied into bounded
+runtime-owned data after active-run admission and before backend dispatch.
+Caller mutation after the facade returns cannot change the in-flight request,
+and a failed snapshot releases both cancellation leases. The snapshot does not
+apply core AgentRun completeness rules on behalf of a custom backend; that
+backend retains validation authority.
 
 ## Credentials
 
@@ -87,3 +119,11 @@ has not been executed for this alpha.
 
 See [Documentation~/index.md](Documentation~/index.md) for the architecture and
 integration checklist.
+
+The built runtime backend also exposes `RunRoutedAsync`, `CompleteAsync`,
+`RunChildAsync`, and `CancelChildren` through `UnityAgentRuntimeHost`. These use
+the shared durable routing, per-operation inference/provider selection, and
+bounded child-lineage contracts rather than Unity-specific Agent behavior.
+Use the `RunChildAsync(AgentRun, ...)` overload when the parent was restored
+from durable storage or delegation continues after supervisor cache eviction;
+the string overload is intended for roots or currently supervised parents.

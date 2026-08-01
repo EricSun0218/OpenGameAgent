@@ -77,3 +77,8 @@ identifier.
 workflow stage instance, so recovery resumes the same durable agent run.
 Game-specific request construction and outcome projection remain behind
 `IWorkflowAgentRunAdapter`.
+
+An adapter may additionally implement
+`IWorkflowAgentTerminalOutcomeProjector` for game-defined optional branches.
+The default remains fail-closed, and a projected fallback passes through the
+same stage output-schema validation before downstream work can consume it.

@@ -169,13 +169,31 @@ Calls on one instance are serialized and only one writer can open a file.
 committed revision plus ordered per-mutation results. Batch validation rejects
 duplicate IDs and invalid or oversized collections before writing. A batch of
 only missing-record deletes is a no-op and does not advance the revision.
-`ApplyIdempotentAtomicBatchAsync` implements
-`IIdempotentAtomicMemoryBatchStore` for runtime outboxes. The store computes the
-batch digest itself and persists the commit identity in the same frame. Retrying
-the same identity and payload, including after restart, writes no frame and does
-not advance the revision; reusing an identity for another payload throws
-`MemoryBatchIdempotencyConflictException`. An idempotent all-no-op batch still
-writes one settlement frame so its deduplication evidence survives restart.
+`ApplyIdempotentAtomicBatchAsync` implements the versioned
+`IRuntimeAuthoritativeMemoryBatchStore` contract for runtime outboxes. The
+store computes the batch digest itself, applies authority-aware compare-and-swap
+inside its serialized transaction, and persists the commit identity in the
+same frame. Retrying the same identity and payload, including after restart,
+writes no frame and does not advance the revision; reusing an identity for
+another payload throws `MemoryBatchIdempotencyConflictException`. An
+idempotent all-no-op batch still writes one settlement frame so its
+deduplication evidence survives restart.
+
+New memory frames use format version 2. Version 1 remains readable with its
+historical unconditional single- and batch-upsert replay semantics, so an
+existing local memory file can open without rewriting. Every newly appended
+frame uses the version 2 authority-aware semantics, including when it follows
+version 1 history in the same file. This is a one-way write boundary: opening a
+version 1 file is non-mutating, but after the first successful mutation appends
+a version 2 frame, a version-1-only runtime can no longer open that file. Back
+up the file or upgrade a copy under a new path before the first write when
+application rollback must remain possible. One deliberately narrow exception supports
+an already-prepared version 0 runtime outbox after upgrade: the explicit legacy
+replay API first checks that every mutation is safe under the historical
+contract, then writes a version 2 frame carrying
+`mutationContractVersion: 0`. Ordinary commits never select that bridge.
+Recovery therefore preserves the contract used to prepare the pending batch
+without weakening admission for new writes.
 If an I/O error occurs after writing begins, the instance fails closed because
 the caller cannot know whether the commit marker reached disk. Dispose and
 reopen it; recovery exposes either the complete mutation or the prior revision,

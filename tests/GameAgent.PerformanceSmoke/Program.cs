@@ -11,6 +11,8 @@ var results = new List<Measurement>
     await MeasureContextAsync(),
     await MeasureMemoryAsync(),
     await MeasureHybridMemoryAsync(),
+    await MeasureGameAwareRerankerAsync(4_096),
+    await MeasureGameAwareRerankerAsync(65_536),
     await MeasureMultiActorAsync(1, warm: false),
     await MeasureMultiActorAsync(1, warm: true),
     await MeasureMultiActorAsync(10, warm: false),
@@ -223,6 +225,54 @@ static async Task<Measurement> MeasureHybridMemoryAsync()
             {
                 throw new InvalidOperationException(
                     "Hybrid memory performance scenario violated its bounds.");
+            }
+        });
+}
+
+static async Task<Measurement> MeasureGameAwareRerankerAsync(
+    int candidateCount)
+{
+    var candidates = Enumerable.Range(0, candidateCount)
+        .Select(index => new MemorySearchResult(
+            new MemoryRecord(
+                "rerank-memory-" + index,
+                "world",
+                ProtocolJson.ParseElement(
+                    $$"""{"index":{{index}},"fact":"bounded recall"}"""),
+                new[] { "group-" + (index % 32) },
+                index % 100,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch),
+            candidateCount - index))
+        .ToArray();
+    var query = new MemoryQuery(
+        "world",
+        ProtocolJson.ParseElement("{}"),
+        maxResults: 128,
+        maxUtf8Bytes: 1_048_576);
+    var reranker = new GameAwareMemoryReranker();
+    _ = await reranker.RerankAsync(
+        query,
+        candidates.Take(128).ToArray(),
+        CancellationToken.None);
+    return await MeasureAsync(
+        "memory.game-aware-rerank." + candidateCount,
+        operations: 1,
+        budgetMilliseconds: candidateCount == 4_096 ? 2_000 : 8_000,
+        budgetAllocatedBytes: 256L * 1_048_576,
+        async _ =>
+        {
+            var ranked = await reranker.RerankAsync(
+                query,
+                candidates,
+                CancellationToken.None);
+            if (ranked.Count != candidateCount
+                || ranked.Select(item => item.Record.MemoryId)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count() != candidateCount)
+            {
+                throw new InvalidOperationException(
+                    "Game-aware reranking lost or duplicated candidates.");
             }
         });
 }

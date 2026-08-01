@@ -30,7 +30,8 @@ public sealed class DurableAgentRuntime :
     private readonly ToolBatchPlanner _toolPlanner;
     private readonly ToolBatchScheduler _toolScheduler;
     private readonly ToolInputSafetyGuard _toolSafety;
-    private readonly ConversationContextManager _conversationContext;
+    private readonly IConversationContextEngine _conversationContext;
+    private readonly AgentLifecyclePipeline _lifecycle;
     private readonly RuntimeMemoryAgentLoop? _memory;
     private readonly FinalOutputAdmissionEvaluator? _finalOutputAdmission;
     private readonly IRuntimeClock _clock;
@@ -92,7 +93,9 @@ public sealed class DurableAgentRuntime :
         IFinalOutputAdmissionPolicy? finalOutputAdmissionPolicy = null,
         IRuntimeTokenEstimator? tokenEstimator = null,
         IRuntimeMetricsSink? metricsSink = null,
-        RuntimeMetricsOptions? metricsOptions = null)
+        RuntimeMetricsOptions? metricsOptions = null,
+        IConversationContextEngine? conversationContextEngine = null,
+        AgentLifecyclePipeline? lifecyclePipeline = null)
         : this(
             provider,
             host,
@@ -121,7 +124,9 @@ public sealed class DurableAgentRuntime :
             finalOutputAdmissionPolicy,
             tokenEstimator,
             metricsSink,
-            metricsOptions)
+            metricsOptions,
+            conversationContextEngine,
+            lifecyclePipeline)
     {
     }
 
@@ -153,7 +158,9 @@ public sealed class DurableAgentRuntime :
         IFinalOutputAdmissionPolicy? finalOutputAdmissionPolicy = null,
         IRuntimeTokenEstimator? tokenEstimator = null,
         IRuntimeMetricsSink? metricsSink = null,
-        RuntimeMetricsOptions? metricsOptions = null)
+        RuntimeMetricsOptions? metricsOptions = null,
+        IConversationContextEngine? conversationContextEngine = null,
+        AgentLifecyclePipeline? lifecyclePipeline = null)
     {
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -219,15 +226,38 @@ public sealed class DurableAgentRuntime :
                 finalOutputAdmissionPolicy,
                 _options.FinalOutputAdmission);
         _metrics = new RuntimeMetricsEmitter(metricsSink, metricsOptions);
-        _conversationContext = new ConversationContextManager(
-            _options.ConversationContext,
-            conversationCompactor ?? new ExtractiveConversationCompactor(),
-            _clock,
-            shutdownCancellationDispatcher
-            ?? throw new ArgumentNullException(
-                nameof(shutdownCancellationDispatcher)),
-            detachedCompactionCleanupCheckpoint: null,
-            metrics: _metrics);
+        if (conversationContextEngine is not null
+            && conversationCompactor is not null)
+        {
+            throw new ArgumentException(
+                "A custom context engine cannot be combined with the built-in compactor.",
+                nameof(conversationContextEngine));
+        }
+
+        _conversationContext = conversationContextEngine is null
+            ? new ConversationContextManager(
+                _options.ConversationContext,
+                conversationCompactor
+                ?? new ExtractiveConversationCompactor(),
+                _clock,
+                shutdownCancellationDispatcher
+                ?? throw new ArgumentNullException(
+                    nameof(shutdownCancellationDispatcher)),
+                detachedCompactionCleanupCheckpoint: null,
+                metrics: _metrics)
+            : new BoundedConversationContextEngine(
+                conversationContextEngine,
+                _options.ConversationContext);
+        _ = RuntimeGuard.RequiredUtf8(
+            _conversationContext.EngineId,
+            128,
+            nameof(conversationContextEngine));
+        _lifecycle = lifecyclePipeline
+                     ?? new AgentLifecyclePipeline(registrations: null);
+        _ = RuntimeGuard.RequiredUtf8(
+            _conversationContext.Version,
+            64,
+            nameof(conversationContextEngine));
         Controls = controls ?? new RuntimeControlPlane();
         _ownership = ownership ?? new RunOwnershipRegistry();
         _cancellationDispatcher = cancellationDispatcher
@@ -244,6 +274,9 @@ public sealed class DurableAgentRuntime :
     }
 
     public RuntimeControlPlane Controls { get; }
+
+    internal ProviderWorkloadAdmission ProviderAdmission =>
+        _providerAdmission;
 
     public RuntimeMetricsHealth MetricsHealth => _metrics.Health;
 
@@ -438,7 +471,31 @@ public sealed class DurableAgentRuntime :
     public DurableExecutionPolicyIdentity CaptureExecutionPolicyIdentity(
         CancellationToken cancellationToken = default)
     {
-        return CaptureExecutionPolicy(cancellationToken).Identity;
+        return CaptureExecutionPolicy(
+            DurableExecutionModes.Agent,
+            routePreference: null,
+            cancellationToken).Identity;
+    }
+
+    public DurableExecutionPolicyIdentity CaptureExecutionPolicyIdentity(
+        string executionMode,
+        CancellationToken cancellationToken = default)
+    {
+        return CaptureExecutionPolicy(
+            executionMode,
+            routePreference: null,
+            cancellationToken).Identity;
+    }
+
+    public DurableExecutionPolicyIdentity CaptureExecutionPolicyIdentity(
+        string executionMode,
+        ProviderRoutePreference? routePreference,
+        CancellationToken cancellationToken = default)
+    {
+        return CaptureExecutionPolicy(
+            executionMode,
+            routePreference,
+            cancellationToken).Identity;
     }
 
     public async ValueTask<DurableRunOutcome> RunAsync(
@@ -453,16 +510,90 @@ public sealed class DurableAgentRuntime :
         using var activeRun = EnterRun(cancellationToken);
         cancellationToken = activeRun.Token;
         var requestSnapshot = Snapshot(request, cancellationToken);
+        var runId = requestSnapshot.Run.RunId;
+        var startingGameContext = GameContextEnvelope.ValidateForRun(
+            requestSnapshot.Run,
+            nameof(request));
+        if (_lifecycle.Count > 0)
+        {
+            await _lifecycle.InvokeAsync(
+                    new RunStartingLifecycleEvent(
+                        runId,
+                        requestSnapshot.Run.AgentId,
+                        requestSnapshot.Run.WorldId,
+                        requestSnapshot.Run.SessionId,
+                        isResume: false,
+                        startingGameContext),
+                    allowRejection: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        DurableRunOutcome? outcome = null;
+        Exception? failure = null;
+        try
+        {
+            outcome = await RunCoreAsync(requestSnapshot, cancellationToken)
+                .ConfigureAwait(false);
+            return outcome;
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+            throw;
+        }
+        finally
+        {
+            try
+            {
+                if (_lifecycle.Count > 0)
+                {
+                    await _lifecycle.InvokeAsync(
+                        new RunCompletedLifecycleEvent(
+                            runId,
+                            isResume: false,
+                            outcome,
+                            failure),
+                        allowRejection: false,
+                        CancellationToken.None,
+                        enforceRequired: false)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                _ = exception;
+            }
+        }
+    }
+
+    private async ValueTask<DurableRunOutcome> RunCoreAsync(
+        DurableRunRequest requestSnapshot,
+        CancellationToken cancellationToken)
+    {
         BindNewRunFinalOutputAdmission(
             requestSnapshot.Run,
             requestSnapshot.FinalOutputContract);
+        if (string.Equals(
+                requestSnapshot.ExecutionMode,
+                DurableExecutionModes.Direct,
+                StringComparison.Ordinal)
+            && requestSnapshot.FinalOutputContract is not null)
+        {
+            throw new ArgumentException(
+                "A direct run cannot use tool-mediated final-output admission.",
+                nameof(requestSnapshot));
+        }
         _ = GameContextEnvelope.ValidateForRun(
             requestSnapshot.Run,
-            nameof(request));
+            nameof(requestSnapshot));
         EnsureContextObservationsVisibleToRun(
             requestSnapshot.Context,
             requestSnapshot.Run);
-        RunAdmission.EnsureNewRun(requestSnapshot.Run, nameof(request));
+        RunAdmission.EnsureNewRun(
+            requestSnapshot.Run,
+            "request");
 
         var laneId = LaneId(
             requestSnapshot.Run,
@@ -484,29 +615,41 @@ public sealed class DurableAgentRuntime :
             requestSnapshot.Run.Usage.DurationMs,
             cancellationToken,
             _cancellationDispatcher);
+        var executionPolicy = CaptureExecutionPolicy(
+            requestSnapshot.ExecutionMode,
+            requestSnapshot.RoutePreference,
+            cancellationToken);
+        EnsureExecutionPolicyBinding(
+            requestSnapshot.Run,
+            executionPolicy);
+        var initialSkillActivationState = ReconcileActiveSkillState(
+            requestSnapshot.ActiveSkills,
+            Array.Empty<SkillActivationStateRecord>(),
+            executionPolicy.Skills);
+        SkillActivationStateCodec.Attach(
+            requestSnapshot.Run,
+            initialSkillActivationState);
+        var runStarted = false;
 
         try
         {
-            var executionPolicy = CaptureExecutionPolicy(cancellationToken);
-            EnsureExecutionPolicyBinding(
-                requestSnapshot.Run,
-                executionPolicy);
-            var initialSkillActivationState = ReconcileActiveSkillState(
-                requestSnapshot.ActiveSkills,
-                Array.Empty<SkillActivationStateRecord>(),
-                executionPolicy.Skills);
-            SkillActivationStateCodec.Attach(
-                requestSnapshot.Run,
-                initialSkillActivationState);
+            // Every validation and provider-policy capture that can fail
+            // before persistence is complete above. From this point a store
+            // exception can be an ambiguous acknowledgement of an atomically
+            // committed run-start batch, so failure recovery must treat the
+            // run as started.
+            runStarted = true;
             await _journal.CommitRunStartAsync(
                     requestSnapshot.Run,
                     transcript,
                     requestSnapshot.Context,
                     requestSnapshot.ActiveSkills,
                     requestSnapshot.WorkloadClass,
+                    requestSnapshot.ExecutionMode,
+                    requestSnapshot.Inference,
+                    requestSnapshot.RoutePreference,
                     cancellationToken)
                 .ConfigureAwait(false);
-
             return await ExecuteLoopAsync(
                     requestSnapshot.Run,
                     transcript,
@@ -514,6 +657,8 @@ public sealed class DurableAgentRuntime :
                     requestSnapshot.ActiveSkills,
                     Array.Empty<ToolActivationRecord>(),
                     requestSnapshot.WorkloadClass,
+                    requestSnapshot.ExecutionMode,
+                    requestSnapshot.Inference,
                     control,
                     startedAt,
                     deadline,
@@ -531,6 +676,8 @@ public sealed class DurableAgentRuntime :
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (
+            runStarted
+            &&
             exception is not DuplicateRunException
             and not DurableExecutionPolicyMismatchException)
         {
@@ -570,17 +717,70 @@ public sealed class DurableAgentRuntime :
         CancellationToken cancellationToken = default,
         DurableRunResumeGuard? guard = null)
     {
+        using var activeRun = EnterRun(cancellationToken);
+        cancellationToken = activeRun.Token;
         if (string.IsNullOrWhiteSpace(runId))
         {
             throw new ArgumentException("Run id is required.", nameof(runId));
         }
 
-        using var activeRun = EnterRun(cancellationToken);
-        cancellationToken = activeRun.Token;
+        runId = RuntimeGuard.RequiredId(runId, nameof(runId));
         var continuationSnapshot = Snapshot(
             continuation ?? new DurableRunContinuation(),
             cancellationToken);
         var guardSnapshot = guard is null ? null : Snapshot(guard);
+        DurableRunOutcome? outcome = null;
+        Exception? failure = null;
+        try
+        {
+            outcome = await ResumeCoreAsync(
+                    runId,
+                    continuationSnapshot,
+                    reconciler,
+                    cancellationToken,
+                    guardSnapshot)
+                .ConfigureAwait(false);
+            return outcome;
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+            throw;
+        }
+        finally
+        {
+            try
+            {
+                if (_lifecycle.Count > 0)
+                {
+                    await _lifecycle.InvokeAsync(
+                        new RunCompletedLifecycleEvent(
+                            runId,
+                            isResume: true,
+                            outcome,
+                            failure),
+                        allowRejection: false,
+                        CancellationToken.None,
+                        enforceRequired: false)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                _ = exception;
+            }
+        }
+    }
+
+    private async ValueTask<DurableRunOutcome> ResumeCoreAsync(
+        string runId,
+        DurableRunContinuation continuationSnapshot,
+        IGameOperationReconciler? reconciler,
+        CancellationToken cancellationToken,
+        DurableRunResumeGuard? guardSnapshot)
+    {
         var recovered = await _recovery.LoadAsync(runId, cancellationToken)
             .ConfigureAwait(false)
             ?? throw new DurableRunNotFoundException(runId);
@@ -600,9 +800,23 @@ public sealed class DurableAgentRuntime :
             EnsureResumeGuard(recovered.Run, runId, guardSnapshot);
         }
 
-        _ = GameContextEnvelope.ValidateForRun(
+        var recoveredGameContext = GameContextEnvelope.ValidateForRun(
             recovered.Run,
             nameof(runId));
+        if (_lifecycle.Count > 0)
+        {
+            await _lifecycle.InvokeAsync(
+                    new RunStartingLifecycleEvent(
+                        runId,
+                        recovered.Run.AgentId,
+                        recovered.Run.WorldId,
+                        recovered.Run.SessionId,
+                        isResume: true,
+                        recoveredGameContext),
+                    allowRejection: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
         var laneId = LaneId(recovered.Run, continuationSnapshot.LaneId);
         await using var ownership = await _ownership.AcquireAsync(
                 runId,
@@ -621,6 +835,18 @@ public sealed class DurableAgentRuntime :
             Array.Empty<SkillActivationStateRecord>();
         var workloadClass = continuationSnapshot.WorkloadClass
                             ?? recovered.RecoveryWorkloadClass;
+        var executionMode = recovered.RecoveryExecutionMode;
+        if (string.Equals(
+                executionMode,
+                DurableExecutionModes.Direct,
+                StringComparison.Ordinal)
+            && (activeSkills.Count != 0
+                || continuationSnapshot.ReplaceActiveSkills))
+        {
+            throw new ArgumentException(
+                "A direct durable run cannot activate or replace skills.",
+                nameof(continuationSnapshot));
+        }
         if (context.Count == 0)
         {
             context = recovered.RecoveryContext;
@@ -881,7 +1107,10 @@ public sealed class DurableAgentRuntime :
                 return Outcome(recovered.Run, transcript);
             }
 
-            var executionPolicy = CaptureExecutionPolicy(cancellationToken);
+            var executionPolicy = CaptureExecutionPolicy(
+                executionMode,
+                recovered.RecoveryRoutePreference,
+                cancellationToken);
             EnsureExecutionPolicyBinding(
                 recovered.Run,
                 executionPolicy);
@@ -900,6 +1129,8 @@ public sealed class DurableAgentRuntime :
                     activeSkills,
                     recovered.RecoveryToolActivations,
                     workloadClass,
+                    executionMode,
+                    recovered.RecoveryInference,
                     control,
                     startedAt,
                     deadline,
@@ -1049,6 +1280,33 @@ public sealed class DurableAgentRuntime :
                           "Runtime shutdown cleanup was not initialized.");
         await WaitForSharedTaskAsync(cleanup, cancellationToken)
             .ConfigureAwait(false);
+
+        if (!ShutdownResourceCleanupCompleted)
+        {
+            bool conversationContextDrained;
+            try
+            {
+                conversationContextDrained = await _conversationContext
+                    .StopAsync()
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                throw new InvalidOperationException(
+                    "The conversation context engine failed during shutdown cleanup.",
+                    exception);
+            }
+
+            if (!conversationContextDrained)
+            {
+                throw new InvalidOperationException(
+                    "The conversation context engine did not complete shutdown cleanup.");
+            }
+
+            Volatile.Write(ref _shutdownResourceCleanupCompleted, 1);
+        }
     }
 
     private ValueTask AbandonReplaySafeTurnAsync(
@@ -1089,12 +1347,33 @@ public sealed class DurableAgentRuntime :
     }
 
     private RuntimeExecutionPolicyLease CaptureExecutionPolicy(
+        string executionMode,
+        ProviderRoutePreference? routePreference,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var tools = _tools.Current;
-        var skills = _skills.Current;
-        var providerRoutes = _provider.CaptureRoutePlan(cancellationToken);
+        executionMode = DurableExecutionModes.Normalize(
+            executionMode,
+            nameof(executionMode));
+        var direct = string.Equals(
+            executionMode,
+            DurableExecutionModes.Direct,
+            StringComparison.Ordinal);
+        var currentTools = _tools.Current;
+        var currentSkills = _skills.Current;
+        var tools = direct
+            ? new ToolCatalogSnapshot(
+                currentTools.Generation,
+                Array.Empty<ToolCatalogEntry>())
+            : currentTools;
+        var skills = direct
+            ? new SkillCatalogSnapshot(
+                currentSkills.Generation,
+                Array.Empty<SkillCatalogEntry>())
+            : currentSkills;
+        var providerRoutes = _provider.CaptureRoutePlan(
+            routePreference,
+            cancellationToken);
         var providerPolicy = new CanonicalDigestBuilder();
         providerPolicy.Add("type", "durable-provider-policy.v1");
         var modelPolicy = new CanonicalDigestBuilder();
@@ -1165,6 +1444,8 @@ public sealed class DurableAgentRuntime :
         IReadOnlyList<SkillReference> activeSkills,
         IReadOnlyList<ToolActivationRecord> initialToolActivations,
         string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
         RuntimeControlPlane.Registration control,
         DateTimeOffset startedAt,
         RunDeadline deadline,
@@ -1175,6 +1456,10 @@ public sealed class DurableAgentRuntime :
         bool allowInitialSkillStateReplacement = false)
     {
         var cancellationToken = deadline.Token;
+        var directExecution = string.Equals(
+            executionMode,
+            DurableExecutionModes.Direct,
+            StringComparison.Ordinal);
         var toolSnapshot = executionPolicy.Tools;
         var skillSnapshot = executionPolicy.Skills;
         var routePlan = executionPolicy.ProviderRoutes;
@@ -1222,6 +1507,18 @@ public sealed class DurableAgentRuntime :
 
         while (true)
         {
+            if (directExecution && run.Usage.Turns >= 1)
+            {
+                return await FailOrCancelAsync(
+                        run,
+                        transcript,
+                        new InvalidOperationException(
+                            "A direct run cannot start a second model turn."),
+                        startedAt,
+                        deadline.ExternalCancellationRequested)
+                    .ConfigureAwait(false);
+            }
+
             if (toolLoopGuard.Decision?.HardStop == true)
             {
                 return await CompleteToolLoopFailureAsync(
@@ -1547,22 +1844,33 @@ public sealed class DurableAgentRuntime :
             var stablePrefix = providerPrompt
                 .TakeWhile(IsSkillDisclosureMessage)
                 .ToArray();
+            var contextInput = providerPrompt
+                .Select(
+                    message => NormalizedMessageJournalCodec
+                        .CloneValidated(message))
+                .ToArray();
+            var stablePrefixIds = stablePrefix
+                .Select(message => message.MessageId)
+                .Concat(
+                    promptMessages.Select(
+                        message => message.MessageId))
+                .Concat(
+                    currentUserMessageId is null
+                        ? Array.Empty<string>()
+                        : new[] { currentUserMessageId })
+                .ToArray();
             var contextView = await _conversationContext.PrepareAsync(
                     run.RunId,
                     turnId,
-                    providerPrompt,
-                    stablePrefix
-                        .Select(message => message.MessageId)
-                        .Concat(
-                            promptMessages.Select(
-                                message => message.MessageId))
-                        .Concat(
-                            currentUserMessageId is null
-                                ? Array.Empty<string>()
-                                : new[] { currentUserMessageId })
-                        .ToArray(),
+                    contextInput,
+                    stablePrefixIds,
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (contextView is null)
+            {
+                throw new InvalidDataException(
+                    "The conversation context engine returned no view.");
+            }
             providerPrompt = contextView.Messages.ToArray();
             stablePrefix = providerPrompt
                 .TakeWhile(IsSkillDisclosureMessage)
@@ -1758,6 +2066,27 @@ public sealed class DurableAgentRuntime :
                 ProviderWorkloadAdmission.Lease? providerLease = null;
                 try
                 {
+                    if (_lifecycle.Count > 0)
+                    {
+                        await _lifecycle.InvokeAsync(
+                                new ModelDispatchingLifecycleEvent(
+                                    run.RunId,
+                                    turnId,
+                                    promptDigest,
+                                    providerPrompt.Length,
+                                    routePlan.RouteIdentities
+                                        .Select(route => route.ProviderId)
+                                        .ToArray(),
+                                    directTools
+                                        .Select(tool => tool.Name)
+                                        .ToArray(),
+                                    inference),
+                                allowRejection: true,
+                                step.CancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    step.CancellationToken.ThrowIfCancellationRequested();
                     providerLease = await _providerAdmission.AcquireAsync(
                             workloadClass,
                             step.CancellationToken)
@@ -1850,8 +2179,21 @@ public sealed class DurableAgentRuntime :
                                         turnId),
                                 opaqueContinuationState:
                                     providerOpaqueContinuationState,
-                                routePlan: routePlan)
+                                routePlan: routePlan,
+                                inference: inference)
                             .ConfigureAwait(false);
+                        if (_lifecycle.Count > 0)
+                        {
+                            await _lifecycle.InvokeAsync(
+                                    new ModelCompletedLifecycleEvent(
+                                        run.RunId,
+                                        turnId,
+                                        response),
+                                    allowRejection: false,
+                                    CancellationToken.None,
+                                    enforceRequired: false)
+                                .ConfigureAwait(false);
+                        }
                         streamOutcome = RuntimeMetricOutcomes.Success;
                     }
                     catch (OperationCanceledException)
@@ -2408,6 +2750,25 @@ public sealed class DurableAgentRuntime :
                 actionRequests.Add(call.ToolCallId, request);
             }
 
+            if (_lifecycle.Count > 0)
+            {
+                await _lifecycle.InvokeAsync(
+                        new ToolBatchDispatchingLifecycleEvent(
+                            run.RunId,
+                            turnId,
+                            valid
+                                .Select(
+                                    call => new ToolLifecycleCall(
+                                        call.ToolCallId,
+                                        call.Tool.Name,
+                                        call.Tool.Effect,
+                                        call.Arguments))
+                                .ToArray()),
+                        allowRejection: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             foreach (var call in valid)
             {
                 await _journal.AppendBuiltInDurableAsync(
@@ -2545,6 +2906,8 @@ public sealed class DurableAgentRuntime :
                 }
             }
 
+            var lifecycleResults = new List<ToolLifecycleResult>(
+                valid.Length);
             foreach (var call in valid)
             {
                 ActionReceipt receipt;
@@ -2626,8 +2989,29 @@ public sealed class DurableAgentRuntime :
                                     .ForModelPresentation(
                                         receipt,
                                         receiptSourceEventId),
-                            receipt.ReceivedAt);
+                                    receipt.ReceivedAt);
                 }
+
+                lifecycleResults.Add(
+                    new ToolLifecycleResult(
+                        receipt.OperationId,
+                        call.ToolCallId,
+                        receipt.Status,
+                        receipt.ErrorCode));
+            }
+
+
+            if (_lifecycle.Count > 0)
+            {
+                await _lifecycle.InvokeAsync(
+                        new ToolBatchCompletedLifecycleEvent(
+                            run.RunId,
+                            turnId,
+                            lifecycleResults),
+                        allowRejection: false,
+                        CancellationToken.None,
+                        enforceRequired: false)
+                    .ConfigureAwait(false);
             }
 
             toolActivations = await AppendPreparedToolMessagesAsync(
@@ -6056,7 +6440,10 @@ public sealed class DurableAgentRuntime :
         DurableRunInputJournalCodec.ValidateEncodedSize(
             contextSnapshot,
             activeSkillSnapshot,
-            request.WorkloadClass);
+            request.WorkloadClass,
+            request.ExecutionMode,
+            request.Inference,
+            request.RoutePreference);
         var transcriptInput = RuntimeInputGuard.CopyBounded(
             transcript,
             _options.MaxTranscriptMessages,
@@ -6103,6 +6490,11 @@ public sealed class DurableAgentRuntime :
             WorkloadClass = ProviderWorkloadClasses.Normalize(
                 request.WorkloadClass,
                 nameof(request.WorkloadClass)),
+            ExecutionMode = DurableExecutionModes.Normalize(
+                request.ExecutionMode,
+                nameof(request.ExecutionMode)),
+            Inference = request.Inference?.CloneValidated(),
+            RoutePreference = request.RoutePreference?.CloneValidated(),
             FinalOutputContract =
                 request.FinalOutputContract?.Snapshot()
         };
@@ -6977,6 +7369,7 @@ public sealed class DurableAgentRuntime :
             var conversationContext = _conversationContext
                 .StopAsync()
                 .AsTask();
+            var lifecycle = _lifecycle.StopAsync().AsTask();
             var metrics = _metrics.StopAsync().AsTask();
             var detachedProviders = DrainDetachedProviderCleanupsAsync(
                 _options.ShutdownDrainTimeout);
@@ -6984,6 +7377,7 @@ public sealed class DurableAgentRuntime :
             await Task.WhenAll(
                     detachedTools,
                     conversationContext,
+                    lifecycle,
                     skillContent,
                     finalOutputAdmission,
                     metrics)
@@ -7041,7 +7435,10 @@ public sealed class DurableAgentRuntime :
             await Task.WhenAll(conversationCleanup, providerCleanup)
                 .ConfigureAwait(false);
             await shutdownCancellationCleanup.ConfigureAwait(false);
-            Volatile.Write(ref _shutdownResourceCleanupCompleted, 1);
+            if (_conversationContext.CleanupCompleted)
+            {
+                Volatile.Write(ref _shutdownResourceCleanupCompleted, 1);
+            }
         }
         catch (Exception exception)
         {
@@ -7053,7 +7450,8 @@ public sealed class DurableAgentRuntime :
     private async Task RetryConversationContextCleanupAsync()
     {
         var retryDelayMs = 10;
-        while (true)
+        const int maximumAttempts = 3;
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
         {
             try
             {
@@ -7070,8 +7468,11 @@ public sealed class DurableAgentRuntime :
                 _ = exception;
             }
 
-            await Task.Delay(retryDelayMs).ConfigureAwait(false);
-            retryDelayMs = Math.Min(250, retryDelayMs * 2);
+            if (attempt + 1 < maximumAttempts)
+            {
+                await Task.Delay(retryDelayMs).ConfigureAwait(false);
+                retryDelayMs = Math.Min(250, retryDelayMs * 2);
+            }
         }
     }
 

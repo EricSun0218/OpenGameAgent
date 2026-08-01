@@ -457,6 +457,8 @@ public sealed class StreamingModelRequest
 
     public int? MaxOutputTokens { get; set; }
 
+    public ModelInferenceOptions? Inference { get; set; }
+
     public ProviderOpaqueContinuationState? OpaqueContinuationState
     {
         get;
@@ -854,20 +856,26 @@ public sealed class ProviderAttemptNotice
 public sealed class ProviderRoutePlan
 {
     private readonly object _owner;
+    private readonly int[] _providerIndexes;
     private readonly ProviderCapabilities[] _capabilities;
     private readonly ProviderRouteIdentity[] _identities;
 
     internal ProviderRoutePlan(
         object owner,
+        int[] providerIndexes,
         ProviderCapabilities[] capabilities,
         ProviderRouteIdentity[] identities)
     {
         _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+        _providerIndexes = providerIndexes
+                           ?? throw new ArgumentNullException(
+                               nameof(providerIndexes));
         _capabilities =
             capabilities ?? throw new ArgumentNullException(nameof(capabilities));
         _identities =
             identities ?? throw new ArgumentNullException(nameof(identities));
         if (_capabilities.Length == 0
+            || _providerIndexes.Length != _capabilities.Length
             || _capabilities.Length != _identities.Length)
         {
             throw new ArgumentException("The provider route plan is invalid.");
@@ -876,6 +884,8 @@ public sealed class ProviderRoutePlan
 
     public ProviderRouteIdentity PrimaryRouteIdentity => _identities[0];
 
+    public int Count => _identities.Length;
+
     public IReadOnlyList<ProviderRouteIdentity> RouteIdentities =>
         Array.AsReadOnly(_identities);
 
@@ -883,6 +893,8 @@ public sealed class ProviderRoutePlan
 
     internal ProviderCapabilities CapabilitiesAt(int index) =>
         _capabilities[index];
+
+    internal int ProviderIndexAt(int index) => _providerIndexes[index];
 
     internal ProviderRouteIdentity IdentityAt(int index) =>
         _identities[index];
@@ -1052,21 +1064,30 @@ public sealed class ProviderAttemptRunner
     public ProviderRoutePlan CaptureRoutePlan(
         CancellationToken cancellationToken = default)
     {
+        return CaptureRoutePlan(preference: null, cancellationToken);
+    }
+
+    public ProviderRoutePlan CaptureRoutePlan(
+        ProviderRoutePreference? preference,
+        CancellationToken cancellationToken = default)
+    {
         cancellationToken.ThrowIfCancellationRequested();
+        var selectedIndexes = ResolveProviderIndexes(preference);
         var capabilities =
-            new ProviderCapabilities[_providers.Count];
+            new ProviderCapabilities[selectedIndexes.Length];
         var identities =
-            new ProviderRouteIdentity[_providers.Count];
-        for (var index = 0; index < _providers.Count; index++)
+            new ProviderRouteIdentity[selectedIndexes.Length];
+        for (var index = 0; index < selectedIndexes.Length; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var providerIndex = selectedIndexes[index];
             try
             {
                 capabilities[index] = SnapshotCapabilities(
-                    _providers[index].Capabilities);
+                    _providers[providerIndex].Capabilities);
                 identities[index] = new ProviderRouteIdentity(
-                    _providerIds[index],
-                    _routeMetadata[index],
+                    _providerIds[providerIndex],
+                    _routeMetadata[providerIndex],
                     capabilities[index]);
             }
             catch (ProviderException)
@@ -1088,8 +1109,60 @@ public sealed class ProviderAttemptRunner
 
         return new ProviderRoutePlan(
             _routePlanOwner,
+            selectedIndexes,
             capabilities,
             identities);
+    }
+
+    private int[] ResolveProviderIndexes(
+        ProviderRoutePreference? preference)
+    {
+        if (preference is null)
+        {
+            return Enumerable.Range(0, _providers.Count).ToArray();
+        }
+
+        var snapshot = preference.CloneValidated();
+        var indexes = new List<int>(_providers.Count);
+        foreach (var id in snapshot.ProviderIds)
+        {
+            var index = -1;
+            for (var candidate = 0;
+                 candidate < _providerIds.Count;
+                 candidate++)
+            {
+                if (string.Equals(
+                        _providerIds[candidate],
+                        id,
+                        StringComparison.Ordinal))
+                {
+                    index = candidate;
+                    break;
+                }
+            }
+
+            if (index < 0)
+            {
+                throw new ArgumentException(
+                    "A preferred provider route is not configured.",
+                    nameof(preference));
+            }
+
+            indexes.Add(index);
+        }
+
+        if (snapshot.AllowUnlistedFallback)
+        {
+            for (var index = 0; index < _providers.Count; index++)
+            {
+                if (!indexes.Contains(index))
+                {
+                    indexes.Add(index);
+                }
+            }
+        }
+
+        return indexes.ToArray();
     }
 
     /// <summary>
@@ -1123,7 +1196,8 @@ public sealed class ProviderAttemptRunner
         Func<ProviderResultDiscardedNotice, ValueTask>?
             onResultDiscarded = null,
         ProviderOpaqueContinuationState? opaqueContinuationState = null,
-        ProviderRoutePlan? routePlan = null)
+        ProviderRoutePlan? routePlan = null,
+        ModelInferenceOptions? inference = null)
     {
         if (messages is null)
         {
@@ -1157,6 +1231,7 @@ public sealed class ProviderAttemptRunner
 
         var continuationSnapshot =
             opaqueContinuationState?.Snapshot();
+        var inferenceSnapshot = inference?.CloneValidated();
         var messageReferences = SnapshotRequestReferences(
             messages,
             ProviderRequestContentGuard.MaxMessages,
@@ -1181,14 +1256,15 @@ public sealed class ProviderAttemptRunner
         ProviderException? lastError = null;
         var aggregateUsage = new ProviderUsage { Samples = 0 };
         var usageSettledStreams = new HashSet<string>(StringComparer.Ordinal);
-        for (var providerIndex = 0;
-             providerIndex < _providers.Count;
-             providerIndex++)
+        for (var routeIndex = 0;
+             routeIndex < capturedRoutePlan.Count;
+             routeIndex++)
         {
+            var providerIndex = capturedRoutePlan.ProviderIndexAt(routeIndex);
             var provider = _providers[providerIndex];
             var providerId = _providerIds[providerIndex];
             var routeIdentity =
-                capturedRoutePlan.IdentityAt(providerIndex);
+                capturedRoutePlan.IdentityAt(routeIndex);
             string? lastProviderAttemptId = null;
             string? lastStreamAttemptId = null;
             if (IsProviderQuarantined(providerId))
@@ -1200,7 +1276,8 @@ public sealed class ProviderAttemptRunner
                     false);
                 NotifyFallback(
                     onLifecycleNotice,
-                    providerIndex,
+                    capturedRoutePlan,
+                    routeIndex,
                     attemptNumber: 0,
                     lastError);
                 continue;
@@ -1224,7 +1301,8 @@ public sealed class ProviderAttemptRunner
                     usageKnownToBeZero: true);
                 NotifyFallback(
                     onLifecycleNotice,
-                    providerIndex,
+                    capturedRoutePlan,
+                    routeIndex,
                     attemptNumber: 0,
                     lastError);
                 continue;
@@ -1235,7 +1313,7 @@ public sealed class ProviderAttemptRunner
             try
             {
                 capabilities = SnapshotCapabilities(
-                    capturedRoutePlan.CapabilitiesAt(providerIndex));
+                    capturedRoutePlan.CapabilitiesAt(routeIndex));
                 EnsureCapabilities(
                     providerId,
                     capabilities,
@@ -1262,7 +1340,8 @@ public sealed class ProviderAttemptRunner
 
                 NotifyFallback(
                     onLifecycleNotice,
-                    providerIndex,
+                    capturedRoutePlan,
+                    routeIndex,
                     attemptNumber: 0,
                     exception);
                 continue;
@@ -1316,6 +1395,7 @@ public sealed class ProviderAttemptRunner
                         toolSnapshot,
                         cancellationToken),
                     MaxOutputTokens = providerMaxOutputTokens,
+                    Inference = inferenceSnapshot?.CloneValidated(),
                     OpaqueContinuationState =
                         continuationSnapshot is not null
                         && continuationSnapshot.Matches(routeIdentity)
@@ -1636,7 +1716,8 @@ public sealed class ProviderAttemptRunner
 
                 NotifyFallback(
                     onLifecycleNotice,
-                    providerIndex,
+                    capturedRoutePlan,
+                    routeIndex,
                     _policy.MaxAttemptsPerProvider,
                     routeError,
                     lastProviderAttemptId,
@@ -1688,24 +1769,28 @@ public sealed class ProviderAttemptRunner
 
     private void NotifyFallback(
         Action<ProviderAttemptNotice>? notify,
-        int providerIndex,
+        ProviderRoutePlan routePlan,
+        int routeIndex,
         int attemptNumber,
         ProviderException exception,
         string? providerAttemptId = null,
         string? streamAttemptId = null)
     {
-        if (providerIndex + 1 >= _providers.Count)
+        if (routeIndex + 1 >= routePlan.Count)
         {
             return;
         }
+
+        var current = routePlan.IdentityAt(routeIndex);
+        var next = routePlan.IdentityAt(routeIndex + 1);
 
         Notify(
             notify,
             new ProviderAttemptNotice
             {
                 Kind = ProviderAttemptNoticeKinds.Fallback,
-                ProviderId = _providerIds[providerIndex],
-                NextProviderId = _providerIds[providerIndex + 1],
+                ProviderId = current.ProviderId,
+                NextProviderId = next.ProviderId,
                 ProviderAttemptId = providerAttemptId,
                 StreamAttemptId = streamAttemptId,
                 AttemptNumber = attemptNumber,
@@ -3379,6 +3464,9 @@ public sealed class ProviderAttemptRunner
             || !OpaqueStateEquivalent(
                 original.OpaqueContinuationState,
                 request.OpaqueContinuationState)
+            || !InferenceEquivalent(
+                original.Inference,
+                request.Inference)
             || !string.Equals(
                 ToolSetDigest(request.Tools, cancellationToken),
                 ToolSetDigest(original.Tools, cancellationToken),
@@ -3534,6 +3622,7 @@ public sealed class ProviderAttemptRunner
         var messageSource = request.Messages;
         var toolSource = request.Tools;
         var maxOutputTokens = request.MaxOutputTokens;
+        var inference = request.Inference?.CloneValidated();
         var opaqueContinuationState =
             request.OpaqueContinuationState?.Snapshot();
         var messages = SnapshotPreparedList(
@@ -3557,6 +3646,7 @@ public sealed class ProviderAttemptRunner
             Messages = messages,
             Tools = tools,
             MaxOutputTokens = maxOutputTokens,
+            Inference = inference,
             OpaqueContinuationState = opaqueContinuationState
         };
         PreflightPreparedRequest(
@@ -3574,6 +3664,7 @@ public sealed class ProviderAttemptRunner
             Messages = SnapshotMessages(messages, cancellationToken),
             Tools = SnapshotTools(tools, cancellationToken),
             MaxOutputTokens = maxOutputTokens,
+            Inference = shallowSnapshot.Inference?.CloneValidated(),
             OpaqueContinuationState =
                 opaqueContinuationState?.Snapshot()
         };
@@ -3605,6 +3696,37 @@ public sealed class ProviderAttemptRunner
                    right.PayloadDigest,
                    StringComparison.Ordinal)
                && left.Persistence == right.Persistence;
+    }
+
+    private static bool InferenceEquivalent(
+        ModelInferenceOptions? left,
+        ModelInferenceOptions? right)
+    {
+        if (left is null || right is null)
+        {
+            return left is null && right is null;
+        }
+
+        var a = left.CloneValidated();
+        var b = right.CloneValidated();
+        return a.ReasoningEnabled == b.ReasoningEnabled
+               && string.Equals(
+                   a.ReasoningEffort,
+                   b.ReasoningEffort,
+                   StringComparison.Ordinal)
+               && a.ReasoningTokenBudget == b.ReasoningTokenBudget
+               && a.Temperature == b.Temperature
+               && a.TopP == b.TopP
+               && a.Seed == b.Seed
+               && a.PromptCachingEnabled == b.PromptCachingEnabled
+               && string.Equals(
+                   a.PromptCacheKey,
+                   b.PromptCacheKey,
+                   StringComparison.Ordinal)
+               && string.Equals(
+                   a.PromptCacheRetention,
+                   b.PromptCacheRetention,
+                   StringComparison.Ordinal);
     }
 
     private static T[] SnapshotPreparedList<T>(

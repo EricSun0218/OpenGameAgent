@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using GameAgent.Core;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
@@ -9,6 +10,681 @@ namespace GameAgent.Tests;
 
 public sealed class RuntimeBuilderTests
 {
+    [Fact]
+    public async Task DirectDurableRunHidesToolsAndSkillsAndCapturesMode()
+    {
+        var store = new ShutdownTrackingStore();
+        var provider = new DirectInspectionProvider();
+        var publisher = new RecordingRuntimeEventPublisher();
+        await using var built = new GameAgentRuntimeBuilder(
+                new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(provider)
+            .WithTools(new[] { SlowTool() })
+            .WithSkills(new[] { Skill("hidden-skill") })
+            .PublishEventsTo(publisher)
+            .Build();
+        var request = new DurableRunRequest
+        {
+            Run = NewRun("direct-durable"),
+            ExecutionMode = DurableExecutionModes.Direct
+        };
+        DurableExecutionPolicyBinding.Attach(
+            request.Run,
+            built.Runtime.CaptureExecutionPolicyIdentity(
+                DurableExecutionModes.Direct));
+
+        var outcome = await built.Runtime.RunAsync(request);
+
+        Assert.Equal(RunStates.Completed, outcome.Run.State);
+        Assert.Equal(1, provider.CallCount);
+        Assert.Empty(provider.ToolNames);
+        Assert.DoesNotContain(
+            "hidden-skill",
+            provider.Prompt,
+            StringComparison.Ordinal);
+        var captured = Assert.Single(
+            publisher.Events,
+            item => string.Equals(
+                item.Kind,
+                RuntimeEventKinds.RunInputCaptured,
+                StringComparison.Ordinal));
+        Assert.Equal(
+            DurableExecutionModes.Direct,
+            captured.Payload.GetProperty("executionMode").GetString());
+    }
+
+    [Fact]
+    public async Task DirectDurableRunRejectsSkillActivationBeforeDispatch()
+    {
+        var store = new ShutdownTrackingStore();
+        var provider = new DirectInspectionProvider();
+        await using var built = new GameAgentRuntimeBuilder(
+                new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(provider)
+            .WithSkills(new[] { Skill("forbidden-skill") })
+            .Build();
+        var request = new DurableRunRequest
+        {
+            Run = NewRun("direct-skill-rejected"),
+            ExecutionMode = DurableExecutionModes.Direct,
+            ActiveSkills = new[]
+            {
+                new SkillReference("forbidden-skill", "1.0.0")
+            }
+        };
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => built.Runtime.RunAsync(request).AsTask());
+
+        Assert.Equal(0, provider.CallCount);
+        Assert.Empty(await store.ReadRunAsync(request.Run.RunId, default));
+    }
+
+    [Fact]
+    public async Task DirectDurableRunNeverRepairsHallucinatedToolWithSecondTurn()
+    {
+        var directory = TempDirectory();
+        var provider = new ToolThenFinalProvider();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(provider)
+                .WithTools(new[] { SlowTool() })
+                .Build();
+
+            var outcome = await built.Runtime.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = NewRun("direct-hallucinated-tool"),
+                    ExecutionMode = DurableExecutionModes.Direct
+                });
+
+            Assert.Equal(RunStates.Failed, outcome.Run.State);
+            Assert.Equal(1, provider.CallCount);
+            Assert.Equal(0, outcome.Run.Usage.Actions);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DurableRunPinsInferenceAndConfiguredModelRoute()
+    {
+        var directory = TempDirectory();
+        var path = Path.Combine(directory, "runtime.journal");
+        var first = new DirectInspectionProvider("first-model");
+        var selected = new DirectInspectionProvider("quality-model");
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(path)
+                .AddProvider(first)
+                .AddProvider(selected)
+                .Build();
+            var route = new ProviderRoutePreference
+            {
+                ProviderIds = new[] { "quality-model" }
+            };
+            var request = new DurableRunRequest
+            {
+                Run = NewRun("durable-model-route"),
+                ExecutionMode = DurableExecutionModes.Direct,
+                Inference = new ModelInferenceOptions
+                {
+                    ReasoningEnabled = false,
+                    Temperature = 0.35,
+                    PromptCachingEnabled = true
+                },
+                RoutePreference = route
+            };
+            DurableExecutionPolicyBinding.Attach(
+                request.Run,
+                built.Runtime.CaptureExecutionPolicyIdentity(
+                    request.ExecutionMode,
+                    route));
+
+            var outcome = await built.Runtime.RunAsync(request);
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(0, first.CallCount);
+            Assert.Equal(1, selected.CallCount);
+            Assert.Equal(0.35, selected.Inference!.Temperature);
+            Assert.True(selected.Inference.PromptCachingEnabled == true);
+            var runInput = Assert.Single(
+                await built.SessionStore.ReadRunAsync(
+                    request.Run.RunId,
+                    default),
+                item => item.Kind == RuntimeEventKinds.RunInputCaptured);
+            Assert.Equal(
+                "quality-model",
+                runInput.Payload.GetProperty("routePreference")
+                    .GetProperty("providerIds")[0]
+                    .GetString());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UnknownProviderRouteFailsBeforeDurableRunStart()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(new FinalProvider())
+                .Build();
+            var request = new DurableRunRequest
+            {
+                Run = NewRun("unknown-provider-route"),
+                RoutePreference = new ProviderRoutePreference
+                {
+                    ProviderIds = new[] { "not-configured" }
+                }
+            };
+
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => built.Runtime.RunAsync(request).AsTask());
+
+            Assert.Equal(RunStates.Queued, request.Run.State);
+            Assert.Empty(
+                await built.SessionStore.ReadRunAsync(
+                    request.Run.RunId,
+                    default));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BuilderUsesAndStopsCustomConversationContextEngine()
+    {
+        var engine = new RecordingContextEngine();
+        var store = new ShutdownTrackingStore();
+        var built = new GameAgentRuntimeBuilder(new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(new FinalProvider())
+            .WithConversationContextEngine(engine)
+            .Build();
+
+        var outcome = await built.Runtime.RunAsync(
+            new DurableRunRequest
+            {
+                Run = NewRun("custom-context-engine"),
+                ExecutionMode = DurableExecutionModes.Direct
+            });
+        await built.StopAsync();
+
+        Assert.Equal(RunStates.Completed, outcome.Run.State);
+        Assert.True(engine.PrepareCount > 0);
+        Assert.True(engine.CleanupCompleted);
+    }
+
+    [Fact]
+    public async Task BuilderSurfacesIncompleteContextCleanupAndCanRetry()
+    {
+        var engine = new RetriableStopContextEngine(succeedOnAttempt: 6);
+        var store = new ShutdownTrackingStore();
+        var built = new GameAgentRuntimeBuilder(new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(new FinalProvider())
+            .WithConversationContextEngine(engine)
+            .Build();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => built.StopAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(built.Runtime.ShutdownResourceCleanupCompleted);
+        Assert.False(store.WasDisposed);
+
+        await built.StopAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(engine.CleanupCompleted);
+        Assert.True(built.Runtime.ShutdownResourceCleanupCompleted);
+        Assert.True(store.WasDisposed);
+    }
+
+    [Fact]
+    public void BuilderRejectsCompactorAndCustomContextEngineCombination()
+    {
+        var builder = new GameAgentRuntimeBuilder(new RejectingHost())
+            .WithConversationCompactor(
+                new ExtractiveConversationCompactor());
+
+        Assert.Throws<InvalidOperationException>(
+            () => builder.WithConversationContextEngine(
+                new RecordingContextEngine()));
+    }
+
+    [Fact]
+    public async Task LifecycleMiddlewareObservesRunModelAndToolBoundaries()
+    {
+        var directory = TempDirectory();
+        var middleware = new RecordingLifecycleMiddleware();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RecordingSucceededHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(new ToolThenFinalProvider())
+                .WithTools(new[] { SlowTool() })
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(middleware)
+                    })
+                .Build();
+
+            var outcome = await built.Runtime.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = NewRun("lifecycle-boundaries")
+                });
+
+            Assert.Equal(RunStates.Completed, outcome.Run.State);
+            Assert.Equal(
+                new[]
+                {
+                    AgentLifecycleEventKinds.RunStarting,
+                    AgentLifecycleEventKinds.ModelDispatching,
+                    AgentLifecycleEventKinds.ModelCompleted,
+                    AgentLifecycleEventKinds.ToolBatchDispatching,
+                    AgentLifecycleEventKinds.ToolBatchCompleted,
+                    AgentLifecycleEventKinds.ModelDispatching,
+                    AgentLifecycleEventKinds.ModelCompleted,
+                    AgentLifecycleEventKinds.RunCompleted
+                },
+                middleware.Kinds);
+            var tool = Assert.IsType<ToolBatchDispatchingLifecycleEvent>(
+                middleware.Events.Single(
+                    item => item.Kind
+                            == AgentLifecycleEventKinds
+                                .ToolBatchDispatching));
+            Assert.Equal("slow_tool", Assert.Single(tool.Calls).ToolName);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RequiredLifecycleMiddlewareCanRejectBeforeModelDispatch()
+    {
+        var directory = TempDirectory();
+        var provider = new FinalProvider();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(provider)
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(
+                            new RejectingLifecycleMiddleware())
+                    })
+                .Build();
+
+            var outcome = await built.Runtime.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = NewRun("lifecycle-rejection")
+                });
+
+            Assert.Equal(RunStates.Failed, outcome.Run.State);
+            Assert.Equal(0, provider.CallCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ModelDispatchMiddlewareDoesNotHoldProviderAdmissionLease()
+    {
+        var directory = TempDirectory();
+        var provider = new FinalProvider();
+        var middleware = new FirstModelDispatchGate();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(provider)
+                .WithRuntimeOptions(
+                    new DurableAgentRuntimeOptions
+                    {
+                        MaxConcurrentProviderCalls = 1
+                    })
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(middleware)
+                    })
+                .Build();
+            var first = built.Runtime.RunAsync(
+                    new DurableRunRequest
+                    {
+                        Run = NewRun("lifecycle-provider-lease-first"),
+                        LaneId = "provider-lease-first"
+                    })
+                .AsTask();
+            await middleware.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var second = built.Runtime.RunAsync(
+                    new DurableRunRequest
+                    {
+                        Run = NewRun("lifecycle-provider-lease-second"),
+                        LaneId = "provider-lease-second"
+                    })
+                .AsTask();
+
+            await WaitUntilAsync(
+                () => provider.CallCount == 1,
+                TimeSpan.FromSeconds(2));
+            middleware.Release.TrySetResult(true);
+            var outcomes = await Task.WhenAll(first, second)
+                .WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.All(
+                outcomes,
+                outcome => Assert.Equal(
+                    RunStates.Completed,
+                    outcome.Run.State));
+            Assert.Equal(2, provider.CallCount);
+        }
+        finally
+        {
+            middleware.Release.TrySetResult(true);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LifecyclePipelineSnapshotsMiddlewareIdentity()
+    {
+        var middleware = new MutableIdentityLifecycleMiddleware();
+        using var pipeline = new AgentLifecyclePipeline(
+            new[]
+            {
+                new AgentLifecycleMiddlewareRegistration(middleware)
+            });
+        middleware.MiddlewareId = "changed-after-registration";
+        middleware.ThrowOnIdentityRead = true;
+
+        var error = await Assert.ThrowsAsync<AgentLifecycleRejectedException>(
+            () => pipeline.InvokeAsync(
+                    new RunStartingLifecycleEvent(
+                        "identity-snapshot-run",
+                        agentId: null,
+                        worldId: null,
+                        sessionId: null,
+                        isResume: false),
+                    allowRejection: true,
+                    CancellationToken.None)
+                .AsTask());
+
+        Assert.Equal("original-lifecycle", error.MiddlewareId);
+        Assert.True(await pipeline.StopAsync());
+    }
+
+    [Fact]
+    public async Task LifecycleStopTracksMiddlewareAlreadyInFlight()
+    {
+        var middleware = new GatedLifecycleMiddleware();
+        using var pipeline = new AgentLifecyclePipeline(
+            new[]
+            {
+                new AgentLifecycleMiddlewareRegistration(middleware)
+            },
+            new AgentLifecyclePipelineOptions
+            {
+                MiddlewareTimeout = TimeSpan.FromSeconds(2),
+                ShutdownTimeout = TimeSpan.FromMilliseconds(25)
+            });
+        var invocation = pipeline.InvokeAsync(
+                new RunStartingLifecycleEvent(
+                    "lifecycle-stop-race",
+                    agentId: null,
+                    worldId: null,
+                    sessionId: null,
+                    isResume: false),
+                allowRejection: true,
+                CancellationToken.None)
+            .AsTask();
+        await middleware.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.False(await pipeline.StopAsync());
+        Assert.False(invocation.IsCompleted);
+        middleware.Release.TrySetResult();
+        await invocation.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task RunInputIsSnapshottedBeforeLifecycleMiddlewareAwaits()
+    {
+        var directory = TempDirectory();
+        var middleware = new GatedRunStartingMiddleware(gateResume: false);
+        var provider = new DirectInspectionProvider();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(provider)
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(middleware)
+                    })
+                .Build();
+            var request = new DurableRunRequest
+            {
+                Run = NewRun("input-snapshot-before-lifecycle"),
+                ExecutionMode = DurableExecutionModes.Direct,
+                Inference = new ModelInferenceOptions { Temperature = 0.1 }
+            };
+
+            var running = built.Runtime.RunAsync(request).AsTask();
+            await middleware.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            request.Run.RunId = "mutated-run-id";
+            request.Run.AgentId = "mutated-agent";
+            request.Inference.Temperature = 0.9;
+            middleware.Release.TrySetResult(true);
+            var outcome = await running;
+
+            Assert.Equal("input-snapshot-before-lifecycle", outcome.Run.RunId);
+            Assert.Equal("agent-1", outcome.Run.AgentId);
+            Assert.Equal(0.1, provider.Inference!.Temperature);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ResumeGuardIsSnapshottedBeforeLifecycleMiddlewareAwaits()
+    {
+        var directory = TempDirectory();
+        var middleware = new GatedRunStartingMiddleware(gateResume: true);
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(new FinalProvider())
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(middleware)
+                    })
+                .Build();
+            var initial = await built.Runtime.RunAsync(
+                new DurableRunRequest
+                {
+                    Run = NewRun("resume-input-snapshot")
+                });
+            Assert.Equal(RunStates.Completed, initial.Run.State);
+            var guard = new DurableRunResumeGuard
+            {
+                ExpectedAgentId = "agent-1"
+            };
+
+            var resuming = built.Runtime.ResumeAsync(
+                    initial.Run.RunId,
+                    guard: guard)
+                .AsTask();
+            await middleware.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            guard.ExpectedAgentId = "mutated-agent";
+            middleware.Release.TrySetResult(true);
+            var resumed = await resuming;
+
+            Assert.Equal(RunStates.Completed, resumed.Run.State);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ResumeLifecycleReceivesRecoveredRunIdentityAndGameContext()
+    {
+        var directory = TempDirectory();
+        var middleware = new RecordingLifecycleMiddleware();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(new FinalProvider())
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(middleware)
+                    })
+                .Build();
+            var run = NewRun("resume-lifecycle-identity");
+            run.SessionId = "session-resume";
+            GameContextEnvelope.Attach(
+                run,
+                new GameContextCoordinate(
+                    "world-1",
+                    "timeline-main",
+                    saveRevision: 7,
+                    observer: new GameEntityIdentity("agent-1", 3)));
+            var initial = await built.Runtime.RunAsync(
+                new DurableRunRequest { Run = run });
+
+            _ = await built.Runtime.ResumeAsync(initial.Run.RunId);
+
+            var resumed = Assert.Single(
+                middleware.Events
+                    .OfType<RunStartingLifecycleEvent>(),
+                item => item.IsResume);
+            Assert.Equal("agent-1", resumed.AgentId);
+            Assert.Equal("world-1", resumed.WorldId);
+            Assert.Equal("session-resume", resumed.SessionId);
+            Assert.NotNull(resumed.GameContext);
+            Assert.Equal("timeline-main", resumed.GameContext!.TimelineId);
+            Assert.Equal(7, resumed.GameContext.SaveRevision);
+            Assert.Equal("agent-1", resumed.GameContext.Observer!.EntityId);
+            Assert.Equal(3, resumed.GameContext.Observer.Incarnation);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RunLifecycleKeepsSameAgentWorldSessionsDistinct()
+    {
+        var directory = TempDirectory();
+        var middleware = new RecordingLifecycleMiddleware();
+        try
+        {
+            await using var built = new GameAgentRuntimeBuilder(
+                    new RejectingHost())
+                .UseFileJournal(Path.Combine(directory, "runtime.journal"))
+                .AddProvider(new FinalProvider())
+                .WithLifecycleMiddleware(
+                    new[]
+                    {
+                        new AgentLifecycleMiddlewareRegistration(middleware)
+                    })
+                .Build();
+            foreach (var sessionId in new[] { "save-a", "save-b" })
+            {
+                var run = NewRun("session-lifecycle-" + sessionId);
+                run.SessionId = sessionId;
+                _ = await built.Runtime.RunAsync(
+                    new DurableRunRequest { Run = run });
+            }
+
+            var starts = middleware.Events
+                .OfType<RunStartingLifecycleEvent>()
+                .Where(item => !item.IsResume)
+                .ToArray();
+            Assert.Equal(2, starts.Length);
+            Assert.All(starts, item => Assert.Equal("agent-1", item.AgentId));
+            Assert.All(starts, item => Assert.Equal("world-1", item.WorldId));
+            Assert.Equal(
+                new[] { "save-a", "save-b" },
+                starts.Select(item => item.SessionId));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ModelInferenceRejectsNonFiniteSamplingValues()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ModelInferenceOptions
+            {
+                Temperature = double.NaN
+            }.CloneValidated());
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ModelInferenceOptions
+            {
+                TopP = double.NaN
+            }.CloneValidated());
+    }
+
+    [Fact]
+    public void ModelInferenceRejectsContradictoryReasoningControls()
+    {
+        Assert.Throws<ArgumentException>(
+            () => new ModelInferenceOptions
+            {
+                ReasoningEnabled = true,
+                ReasoningEffort = ModelReasoningEfforts.None
+            }.CloneValidated());
+        Assert.Throws<ArgumentException>(
+            () => new ModelInferenceOptions
+            {
+                ReasoningEffort = ModelReasoningEfforts.None,
+                ReasoningTokenBudget = 2_048
+            }.CloneValidated());
+    }
+
     [Fact]
     public void BuilderRejectsNullRecoveryOptions()
     {
@@ -1054,6 +1730,109 @@ public sealed class RuntimeBuilderTests
     }
 
     [Fact]
+    public async Task ShutdownDrainsActiveCompletionBeforeDisposingStore()
+    {
+        var store = new ShutdownTrackingStore();
+        var provider = new CancellableProvider();
+        var built = new GameAgentRuntimeBuilder(new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(provider)
+            .Build();
+        var completion = built.Completion.CompleteAsync(
+                new SimpleCompletionRequest
+                {
+                    OperationId = "shutdown-completion",
+                    Messages = new[] { UserMessage("completion-message") }
+                })
+            .AsTask();
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var stop = built.StopAsync().AsTask();
+        await provider.CancellationObserved.Task.WaitAsync(
+            TimeSpan.FromSeconds(2));
+        await Task.Delay(80);
+        Assert.False(stop.IsCompleted);
+        Assert.False(store.WasDisposed);
+
+        provider.Release.TrySetResult();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => completion);
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(store.WasDisposed);
+    }
+
+    [Fact]
+    public async Task ShutdownDrainsActiveChildBeforeDisposingStore()
+    {
+        var store = new ShutdownTrackingStore();
+        var provider = new CancellableProvider();
+        var built = new GameAgentRuntimeBuilder(new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(provider)
+            .Build();
+        var child = built.Children.RunChildAsync(
+                "root-parent",
+                new DurableRunRequest
+                {
+                    Run = NewRun("shutdown-child")
+                })
+            .AsTask();
+        await provider.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var stop = built.StopAsync().AsTask();
+        await provider.CancellationObserved.Task.WaitAsync(
+            TimeSpan.FromSeconds(2));
+        Assert.False(store.WasDisposed);
+
+        provider.Release.TrySetResult();
+        _ = await child.WaitAsync(TimeSpan.FromSeconds(5));
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(store.RunCancellationCommitted);
+        Assert.False(store.DisposedBeforeRunCancellation);
+        Assert.True(store.WasDisposed);
+    }
+
+    [Fact]
+    public async Task ShutdownDefersOwnedCleanupForDetachedRoutePolicy()
+    {
+        var store = new ShutdownTrackingStore();
+        var policy = new IgnoringRoutePolicy();
+        var built = new GameAgentRuntimeBuilder(new RejectingHost())
+            .UseDurableStore(store, store, disposeOnShutdown: true)
+            .AddProvider(new FinalProvider())
+            .WithExecutionRoutePolicy(
+                policy,
+                new ExecutionRouterOptions
+                {
+                    PolicyTimeout = TimeSpan.FromMilliseconds(20),
+                    ShutdownTimeout = TimeSpan.FromMilliseconds(20),
+                    MaxConcurrentPolicyCalls = 1
+                })
+            .Build();
+
+        var routed = await built.Execution.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = new DurableRunRequest
+                {
+                    Run = NewRun("detached-route-policy")
+                }
+            });
+        Assert.Equal(
+            ExecutionRouteReasonCodes.PolicyTimeoutFallback,
+            routed.Decision.ReasonCode);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => built.StopAsync().AsTask());
+        Assert.False(store.WasDisposed);
+
+        policy.Release.TrySetResult();
+        await built.StopAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(store.WasDisposed);
+    }
+
+    [Fact]
     public async Task ShutdownTimeoutDefersOwnedCleanupUntilActiveLeaseDrains()
     {
         var store = new ShutdownTrackingStore();
@@ -1617,6 +2396,20 @@ public sealed class RuntimeBuilderTests
         };
     }
 
+    private static NormalizedMessage UserMessage(string messageId)
+    {
+        return new NormalizedMessage
+        {
+            MessageId = messageId,
+            Role = NormalizedRoles.User,
+            CreatedAt = DateTimeOffset.UtcNow,
+            Parts = new List<NormalizedContentPart>
+            {
+                NormalizedContentPart.FromText("Classify this game event.")
+            }
+        };
+    }
+
     private static ToolDescriptor SlowTool()
     {
         return Tool("slow_tool");
@@ -2079,6 +2872,363 @@ public sealed class RuntimeBuilderTests
         }
     }
 
+    private sealed class DirectInspectionProvider : IStreamingModelProvider
+    {
+        private int _callCount;
+
+        private readonly string _providerId;
+
+        public DirectInspectionProvider(
+            string providerId = "direct-inspection")
+        {
+            _providerId = providerId;
+        }
+
+        public string ProviderId => _providerId;
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public IReadOnlyList<string> ToolNames { get; private set; } =
+            Array.Empty<string>();
+
+        public string Prompt { get; private set; } = string.Empty;
+
+        public ModelInferenceOptions? Inference { get; private set; }
+
+        public ProviderCapabilities Capabilities { get; } = new()
+        {
+            Streaming = true,
+            ToolCalling = true,
+            JsonOutput = true
+        };
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _callCount);
+            Inference = request.Inference?.CloneValidated();
+            ToolNames = request.Tools.Select(item => item.Name).ToArray();
+            Prompt = string.Join(
+                "\n",
+                request.Messages.SelectMany(
+                    message => message.Parts.Select(
+                        part => part.Text
+                                ?? part.Json?.GetRawText()
+                                ?? string.Empty)));
+            yield return new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 0,
+                Kind = ModelStreamEventKinds.TextDelta,
+                TextDelta = "Direct reply"
+            };
+            await Task.Yield();
+            yield return new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 1,
+                Kind = ModelStreamEventKinds.Usage,
+                Usage = new ProviderUsage
+                {
+                    InputTokens = 1,
+                    OutputTokens = 1,
+                    CostUsd = "0"
+                }
+            };
+            yield return new ModelStreamEvent
+            {
+                StreamAttemptId = request.StreamAttemptId,
+                Ordinal = 2,
+                Kind = ModelStreamEventKinds.Completed,
+                FinishReason = "stop"
+            };
+        }
+    }
+
+    private sealed class RecordingRuntimeEventPublisher :
+        INonBlockingRuntimeEventPublisher
+    {
+        private readonly List<RuntimeEvent> _events = new();
+
+        public IReadOnlyList<RuntimeEvent> Events
+        {
+            get
+            {
+                lock (_events)
+                {
+                    return _events.ToArray();
+                }
+            }
+        }
+
+        public void Publish(RuntimeEvent runtimeEvent)
+        {
+            lock (_events)
+            {
+                _events.Add(runtimeEvent);
+            }
+        }
+    }
+
+    private sealed class RecordingContextEngine : IConversationContextEngine
+    {
+        private readonly ConversationContextManager _inner = new(
+            new ConversationContextOptions(),
+            new ExtractiveConversationCompactor(),
+            new SystemRuntimeClock());
+        private int _prepareCount;
+
+        public string EngineId => "recording-context";
+
+        public string Version => "1";
+
+        public int PrepareCount => Volatile.Read(ref _prepareCount);
+
+        public bool CleanupCompleted => _inner.CleanupCompleted;
+
+        public async ValueTask<ConversationContextView> PrepareAsync(
+            string runId,
+            string turnId,
+            IReadOnlyList<NormalizedMessage> transcript,
+            IReadOnlyCollection<string>? stablePrefixMessageIds = null,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _prepareCount);
+            return await _inner.PrepareAsync(
+                runId,
+                turnId,
+                transcript,
+                stablePrefixMessageIds,
+                cancellationToken);
+        }
+
+        public void RegisterCheckpoint(JsonElement checkpoint) =>
+            _inner.RegisterCheckpoint(checkpoint);
+
+        public ValueTask<bool> StopAsync() => _inner.StopAsync();
+    }
+
+    private sealed class RetriableStopContextEngine :
+        IConversationContextEngine
+    {
+        private readonly int _succeedOnAttempt;
+        private int _attempts;
+
+        internal RetriableStopContextEngine(int succeedOnAttempt)
+        {
+            _succeedOnAttempt = succeedOnAttempt;
+        }
+
+        public string EngineId => "retriable-stop-context";
+
+        public string Version => "1";
+
+        public bool CleanupCompleted { get; private set; }
+
+        public ValueTask<ConversationContextView> PrepareAsync(
+            string runId,
+            string turnId,
+            IReadOnlyList<NormalizedMessage> transcript,
+            IReadOnlyCollection<string>? stablePrefixMessageIds = null,
+            CancellationToken cancellationToken = default)
+        {
+            throw new InvalidOperationException("No run expected.");
+        }
+
+        public void RegisterCheckpoint(JsonElement checkpoint)
+        {
+            _ = checkpoint;
+        }
+
+        public ValueTask<bool> StopAsync()
+        {
+            CleanupCompleted = Interlocked.Increment(ref _attempts)
+                >= _succeedOnAttempt;
+            return new ValueTask<bool>(CleanupCompleted);
+        }
+    }
+
+    private sealed class RecordingLifecycleMiddleware :
+        IAgentLifecycleMiddleware
+    {
+        private readonly List<AgentLifecycleEvent> _events = new();
+
+        public string MiddlewareId => "recording-lifecycle";
+
+        public string Version => "1";
+
+        public IReadOnlyList<AgentLifecycleEvent> Events
+        {
+            get
+            {
+                lock (_events)
+                {
+                    return _events.ToArray();
+                }
+            }
+        }
+
+        public IReadOnlyList<string> Kinds =>
+            Events.Select(item => item.Kind).ToArray();
+
+        public ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_events)
+            {
+                _events.Add(lifecycleEvent);
+            }
+
+            return new ValueTask<AgentLifecycleDecision>(
+                AgentLifecycleDecision.Continue);
+        }
+    }
+
+    private sealed class RejectingLifecycleMiddleware :
+        IAgentLifecycleMiddleware
+    {
+        public string MiddlewareId => "rejecting-lifecycle";
+
+        public string Version => "1";
+
+        public ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<AgentLifecycleDecision>(
+                lifecycleEvent is ModelDispatchingLifecycleEvent
+                    ? AgentLifecycleDecision.Reject(
+                        "model_dispatch_denied")
+                    : AgentLifecycleDecision.Continue);
+        }
+    }
+
+    private sealed class MutableIdentityLifecycleMiddleware :
+        IAgentLifecycleMiddleware
+    {
+        private string _middlewareId = "original-lifecycle";
+
+        public bool ThrowOnIdentityRead { get; set; }
+
+        public string MiddlewareId
+        {
+            get => ThrowOnIdentityRead
+                ? throw new InvalidOperationException("identity was re-read")
+                : _middlewareId;
+            set => _middlewareId = value;
+        }
+
+        public string Version => ThrowOnIdentityRead
+            ? throw new InvalidOperationException("version was re-read")
+            : "1";
+
+        public ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<AgentLifecycleDecision>(
+                AgentLifecycleDecision.Reject("expected-rejection"));
+        }
+    }
+
+    private sealed class GatedLifecycleMiddleware :
+        IAgentLifecycleMiddleware
+    {
+        public string MiddlewareId => "gated-lifecycle";
+
+        public string Version => "1";
+
+        public TaskCompletionSource Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            _ = lifecycleEvent;
+            _ = cancellationToken;
+            Entered.TrySetResult();
+            await Release.Task;
+            return AgentLifecycleDecision.Continue;
+        }
+    }
+
+    private sealed class FirstModelDispatchGate :
+        IAgentLifecycleMiddleware
+    {
+        private int _modelDispatches;
+
+        public string MiddlewareId => "first-model-dispatch-gate";
+
+        public string Version => "1";
+
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            if (lifecycleEvent is ModelDispatchingLifecycleEvent
+                && Interlocked.Increment(ref _modelDispatches) == 1)
+            {
+                Entered.TrySetResult(true);
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+
+            return AgentLifecycleDecision.Continue;
+        }
+    }
+
+    private sealed class GatedRunStartingMiddleware :
+        IAgentLifecycleMiddleware
+    {
+        private readonly bool _gateResume;
+
+        public GatedRunStartingMiddleware(bool gateResume)
+        {
+            _gateResume = gateResume;
+        }
+
+        public string MiddlewareId => _gateResume
+            ? "gated-resume"
+            : "gated-run";
+
+        public string Version => "1";
+
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            if (lifecycleEvent is RunStartingLifecycleEvent starting
+                && starting.IsResume == _gateResume)
+            {
+                Entered.TrySetResult(true);
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+
+            return AgentLifecycleDecision.Continue;
+        }
+    }
+
     private sealed class SingleToolCallProvider : IStreamingModelProvider
     {
         public string ProviderId => "single-tool-call";
@@ -2257,6 +3407,30 @@ public sealed class RuntimeBuilderTests
 
             cancellationToken.ThrowIfCancellationRequested();
             yield break;
+        }
+    }
+
+    private sealed class IgnoringRoutePolicy : IExecutionRoutePolicy
+    {
+        public string PolicyId => "ignoring-route";
+
+        public string Version => "1";
+
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<ExecutionRouteDecision> SelectAsync(
+            ExecutionRouteRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            await Release.Task;
+            return new ExecutionRouteDecision(
+                ExecutionPath.Direct,
+                "released",
+                PolicyId,
+                Version);
         }
     }
 

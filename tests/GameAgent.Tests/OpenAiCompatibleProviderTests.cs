@@ -613,6 +613,161 @@ public sealed class OpenAiCompatibleProviderTests
     }
 
     [Fact]
+    public async Task EncodesValidatedPerOperationInferenceControls()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                SupportsSeed = true,
+                SupportsPromptCacheKey = true,
+                SupportsPromptCacheRetention = true
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = false,
+            Temperature = 0.25,
+            Seed = 17,
+            PromptCachingEnabled = true,
+            PromptCacheKey = "world-prime",
+            PromptCacheRetention = PromptCacheRetentions.OneHour
+        };
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        var root = body.RootElement;
+        Assert.Equal(
+            "disabled",
+            root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.False(root.TryGetProperty("reasoning_effort", out _));
+        Assert.Equal(0.25, root.GetProperty("temperature").GetDouble());
+        Assert.Equal(17, root.GetProperty("seed").GetInt32());
+        Assert.Equal(
+            "world-prime",
+            root.GetProperty("prompt_cache_key").GetString());
+        Assert.Equal(
+            "1h",
+            root.GetProperty("prompt_cache_retention").GetString());
+    }
+
+    [Fact]
+    public async Task ExplicitReasoningDisableSuppressesDefaultEffort()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                ReasoningEffort = ModelReasoningEfforts.High,
+                ReasoningEffortRequiresThinkingMode = false
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = false
+        };
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        var root = body.RootElement;
+        Assert.Equal(
+            "disabled",
+            root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.False(root.TryGetProperty("reasoning_effort", out _));
+    }
+
+    [Fact]
+    public async Task NoneEffortWithoutBooleanIsAnExplicitDisable()
+    {
+        var transport = new FakeTransport(
+            Sse(
+                """
+                {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                """,
+                "[DONE]"));
+        var provider = new OpenAiCompatibleStreamingProvider(
+            new OpenAiCompatibleProviderOptions
+            {
+                ReasoningEffortRequiresThinkingMode = false
+            },
+            new StaticBearerTokenSource("test-secret"),
+            transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEffort = ModelReasoningEfforts.None
+        };
+
+        _ = await CollectAsync(provider.StreamAsync(request, default));
+
+        using var body = JsonDocument.Parse(transport.LastRequest!.Body);
+        var root = body.RootElement;
+        Assert.Equal(
+            "disabled",
+            root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.Equal(
+            ModelReasoningEfforts.None,
+            root.GetProperty("reasoning_effort").GetString());
+    }
+
+    [Fact]
+    public async Task UnsupportedPerOperationControlFailsBeforeTransport()
+    {
+        var transport = new FakeTransport(string.Empty);
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = true,
+            ReasoningTokenBudget = 2_048
+        };
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(request, default)));
+
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            error.Code);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
+    public async Task PromptCacheBypassWithoutWireMappingFailsBeforeTransport()
+    {
+        var transport = new FakeTransport(string.Empty);
+        var provider = CreateProvider(transport);
+        var request = Request();
+        request.Inference = new ModelInferenceOptions
+        {
+            PromptCachingEnabled = false
+        };
+
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => CollectAsync(provider.StreamAsync(request, default)));
+
+        Assert.Equal(
+            "provider_inference_control_unsupported",
+            error.Code);
+        Assert.Null(transport.LastRequest);
+    }
+
+    [Fact]
     public async Task RequiredToolChoiceWithoutToolsFailsBeforeTransport()
     {
         var transport = new FakeTransport(string.Empty);

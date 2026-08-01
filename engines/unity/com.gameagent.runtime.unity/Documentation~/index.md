@@ -32,6 +32,24 @@ operation identifiers, and receipts stay in engine-neutral assemblies.
 8. On shutdown, stop admission and await the host drain before destroying its
    GameObject.
 
+## Execution surfaces
+
+With a `BuiltUnityAgentRuntimeBackend`, the host exposes:
+
+- `RunAsync` for normal durable Agent work;
+- `RunRoutedAsync` for durable Direct/Agent/Workflow selection;
+- `CompleteAsync` for stateless single-provider-turn work;
+- `RunChildAsync` and `CancelChildren` for bounded delegation.
+
+`ModelInferenceOptions` and `ProviderRoutePreference` remain shared core DTOs,
+so reasoning, sampling, prompt-cache, and ordered route requests behave the
+same outside Unity. Child results retain durable root/parent/depth lineage. The
+game still stages and adjudicates concurrent world mutations.
+
+For delegation after restart or bounded-lineage-cache eviction, pass the
+persisted parent `AgentRun` to the corresponding `RunChildAsync` overload. A
+parent id alone cannot reconstruct ancestry that is no longer resident.
+
 The **Structured Tool Loop** sample is the smallest runnable composition and
 uses a deterministic provider, so it is safe to run without a network key.
 
@@ -77,12 +95,39 @@ simultaneous authoritative mutation.
 ## Backpressure and shutdown
 
 Bound active runs, dispatcher capacity, events per frame, and time spent per
-frame. Treat progress events as best effort; durable outcomes and stores are
-authoritative.
+frame. Treat progress events as best effort. Terminal completion/fault events
+have separately reserved bounded capacity, while the returned operation task
+and durable store remain authoritative. Prefer `RunFaultedDetailed` for
+concurrent work because it retains request identity and reconciliation status.
+Completion, detailed-fault, compatibility-fault, runtime-event, and
+application-pause subscribers are isolated from one another when a subscriber
+throws.
 
-`ShutdownAsync` stops admission, requests cancellation, drains active callbacks,
-stops owned backends, and flushes owned stores. If Unity tears down the process
-before completion, the next launch must use normal durable recovery.
+The facade takes a bounded owned snapshot of mutable custom-backend requests
+after active-run admission and before dispatch. Post-return caller mutation
+cannot race the backend, while snapshot failure returns run and cancellation
+capacity. Semantic completeness remains the injected backend's contract rather
+than an adapter-imposed rule.
+
+Terminal observers run on the Unity main thread. Their time budget is enforced
+between callbacks and cannot preempt a callback already running. Every
+subscriber must therefore be trusted, non-blocking, and constant-time; move
+long-running work out of the observer before returning.
+
+`ShutdownAsync` stops admission and terminal-reservation issuance, requests
+cancellation, drains active runtime work, waits for every issued reservation to
+publish or be abandoned, stops owned backends, and flushes owned stores.
+An ordinary per-run cancellation still waiting behind saturated callbacks is
+promoted onto the separately reserved shutdown lane. A single atomic gate
+executes the token cancellation once, while shutdown waits for both admitted
+dispatches before releasing the token source and their leases.
+Published terminal notifications are retained rather than invoked from a
+background shutdown thread. Later main-thread `Update` calls continue draining
+them after shutdown; for controlled teardown, await `ShutdownAsync`, then keep
+the host alive until `PendingTerminalObserverCount` is zero. If Unity destroys
+the host or tears down the process before that drain, the returned task and
+durable store remain authoritative and the next launch must use normal durable
+recovery.
 
 ## Deployment security
 

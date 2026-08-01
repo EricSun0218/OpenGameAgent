@@ -432,10 +432,14 @@ upsert member must carry committed provenance. The whole batch is rejected
 before the store is called if any upsert is uncommitted. A custom write store
 that implements only `IMemoryStore` keeps its existing single-write behavior;
 requesting a batch fails explicitly with `MemoryBatchNotSupportedException`.
-Runtime outbox writeback has the stronger
-`IIdempotentAtomicMemoryBatchStore` requirement and fails with
-`MemoryIdempotentBatchNotSupportedException` when durable deduplication is not
-available.
+Runtime outbox writeback has the stronger, versioned
+`IRuntimeAuthoritativeMemoryBatchStore` requirement. Implementations must
+evaluate `MemoryMutationAdmission.EnsureCanApply` against the record observed
+inside the same atomic transaction that applies the mutation. Bare upserts are
+therefore create-only; replacements and deletes carry a full authority-aware
+record digest expectation. A legacy idempotent store, or one advertising an
+unknown contract version, fails before it is called with
+`MemoryRuntimeMutationContractNotSupportedException`.
 
 The file store defaults are 10,000 live records, a 1 MiB frame payload,
 256 MiB of log data, and 100,000 mutation frames. They bound live state,
@@ -521,6 +525,39 @@ deduplication, fail-soft provider diagnostics, keyed prefetch, one-time
 prefetch consumption, and bounded shutdown. Runtime-managed writes require
 committed provenance. Memory is still derived and untrusted: it cannot settle
 an action request or replace a host receipt.
+
+Optional `IMemoryQueryTransformer` stages can rewrite only the semantic query
+payload before provider search. The lifecycle rejects any transformed query
+that broadens scope, tags, world, session, save revision, timeline, observer,
+game time, perspective, or result limits. Optional `IMemoryResultReranker`
+stages run after provider fusion and may only reorder and re-score already
+admitted record instances. Every stage is concurrency-limited, timed out, and
+fail-soft; invalid or hostile output falls back to the last runtime-owned
+snapshot.
+
+`GameAwareMemoryReranker` is the built-in game-oriented reranker. It combines
+provider score, explicit record importance, named game-clock recency, optional
+wall-clock recency, and tag/source diversity. Wall-clock weight defaults to
+zero, so paused worlds and accelerated calendars do not accidentally follow
+process time. Its greedy diversity pass is bounded by
+`MaxGreedyDiversitySelections` (256 by default and never below the query result
+count); candidates outside that prefix keep their existing order.
+
+```csharp
+await using var memory = new RuntimeMemoryLifecycle(
+    new IMemoryProvider[] { lexicalMemory, semanticMemory },
+    writeStore: semanticMemory,
+    options: new MemoryLifecycleOptions
+    {
+        RankingMode = MemoryRankingModes.ReciprocalRankFusion,
+        ProcessingStageTimeout = TimeSpan.FromMilliseconds(500)
+    },
+    queryTransformers: new[] { gameQueryTransformer },
+    resultRerankers: new IMemoryResultReranker[]
+    {
+        new GameAwareMemoryReranker()
+    });
+```
 
 Multi-provider ranking defaults to the historical raw-score comparison. That
 is appropriate when providers share one score scale. Set
@@ -644,7 +681,10 @@ IDs. Session-bound provenance cannot point at another session. Runtime
 integration further caps one policy result at 128 mutations and 512 KiB of
 record content by default; configurable limits can only be raised within the
 durable-event hard ceiling. The write store must implement
-`IIdempotentAtomicMemoryBatchStore`.
+`IRuntimeAuthoritativeMemoryBatchStore` and advertise
+`RuntimeMemoryMutationContract.CurrentVersion`. The lower-level
+`IIdempotentAtomicMemoryBatchStore` remains useful for application-managed
+batches, but is intentionally insufficient for runtime outbox writeback.
 
 Memory writes use a durable outbox:
 
@@ -663,6 +703,16 @@ policy upgrade because their policy identity, payload digest, and source
 evidence were already captured and validated. An empty mutation decision writes
 one small `memory.commit_settled` event instead of an empty prepared/completed
 pair, closing the crash window without writing a large no-op payload.
+
+Prepared events written before the authority-aware mutation contract carry no
+contract version. Recovery identifies only that historical shape and replays it
+through `ILegacyRuntimeMemoryBatchReplayStore`, preserving the single- and
+batch-upsert/delete rules that were in force when the event was prepared. The
+built-in deterministic, BM25, vector, and file stores implement this migration
+bridge. Custom stores that may have old pending outboxes must implement the
+bridge or recovery fails explicitly with
+`MemoryLegacyReplayNotSupportedException`; the legacy path is never used for a
+newly prepared commit.
 
 If committed source evidence exists but the process died before either a
 prepared batch or settlement, resume re-evaluates only with the policy ID and

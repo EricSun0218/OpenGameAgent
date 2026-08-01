@@ -1,6 +1,13 @@
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Runtime.ExceptionServices;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using GameAgent.Core;
 using GameAgent.Protocol;
 using Godot;
@@ -222,6 +229,216 @@ internal static class GodotCancellationDispatcher
     }
 }
 
+internal static class GodotRequestCancellationDispatcher
+{
+    internal const int Capacity = 8;
+    internal const int PendingCapacity = 4088;
+    internal const int ReservationCapacity = Capacity + PendingCapacity;
+
+    private static readonly object Sync = new();
+    private static readonly Queue<PendingCancellation> Pending = new();
+    private static int _activeCount;
+    private static int _reservationCount;
+
+    internal static int ActiveCount => Volatile.Read(ref _activeCount);
+
+    internal static int ReservationCount
+    {
+        get
+        {
+            lock (Sync)
+            {
+                return _reservationCount;
+            }
+        }
+    }
+
+    internal static int PendingCount
+    {
+        get
+        {
+            lock (Sync)
+            {
+                return Pending.Count;
+            }
+        }
+    }
+
+    internal static bool TryReserve(out Reservation? reservation)
+    {
+        lock (Sync)
+        {
+            if (_reservationCount >= ReservationCapacity)
+            {
+                reservation = null;
+                return false;
+            }
+
+            _reservationCount++;
+            reservation = new Reservation();
+            return true;
+        }
+    }
+
+    internal static bool TryDispatchReserved(
+        Reservation reservation,
+        Action cancellation,
+        out Task<Exception?> completion)
+    {
+        ArgumentNullException.ThrowIfNull(reservation);
+        ArgumentNullException.ThrowIfNull(cancellation);
+        var pending = new PendingCancellation(cancellation);
+        var schedule = false;
+        lock (Sync)
+        {
+            if (!reservation.TryMarkDispatched())
+            {
+                completion = Task.FromResult<Exception?>(
+                    new InvalidOperationException(
+                        "The request cancellation reservation is not available."));
+                return false;
+            }
+
+            if (_activeCount < Capacity)
+            {
+                _activeCount++;
+                schedule = true;
+            }
+            else if (Pending.Count < PendingCapacity)
+            {
+                Pending.Enqueue(pending);
+            }
+            else
+            {
+                reservation.ResetDispatch();
+                completion = Task.FromResult<Exception?>(
+                    new InvalidOperationException(
+                        "The request cancellation reservation invariant was violated."));
+                return false;
+            }
+        }
+
+        completion = pending.Completion.Task;
+        if (schedule)
+        {
+            try
+            {
+                _ = Task.Factory.StartNew(
+                    () => Execute(pending),
+                    CancellationToken.None,
+                    TaskCreationOptions.DenyChildAttach
+                    | TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
+            }
+            catch (Exception exception)
+            {
+                lock (Sync)
+                {
+                    _activeCount--;
+                }
+
+                reservation.ResetDispatch();
+                completion = Task.FromResult<Exception?>(exception);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void Execute(PendingCancellation pending)
+    {
+        PendingCancellation? current = pending;
+        while (current is not null)
+        {
+            Exception? failure = null;
+            try
+            {
+                current.Cancellation();
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+
+            current.Completion.TrySetResult(failure);
+            lock (Sync)
+            {
+                if (Pending.Count == 0)
+                {
+                    _activeCount--;
+                    current = null;
+                }
+                else
+                {
+                    current = Pending.Dequeue();
+                }
+            }
+        }
+    }
+
+    private static void ReleaseReservation(Reservation reservation)
+    {
+        lock (Sync)
+        {
+            if (!reservation.TryMarkReleased())
+            {
+                return;
+            }
+
+            _reservationCount--;
+        }
+    }
+
+    internal sealed class Reservation : IDisposable
+    {
+        private int _state;
+
+        internal bool TryMarkDispatched() =>
+            Interlocked.CompareExchange(ref _state, 1, 0) == 0;
+
+        internal void ResetDispatch()
+        {
+            _ = Interlocked.CompareExchange(ref _state, 0, 1);
+        }
+
+        internal bool TryMarkReleased()
+        {
+            while (true)
+            {
+                var state = Volatile.Read(ref _state);
+                if (state == 2)
+                {
+                    return false;
+                }
+
+                if (Interlocked.CompareExchange(ref _state, 2, state) == state)
+                {
+                    return true;
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            ReleaseReservation(this);
+        }
+    }
+
+    private sealed class PendingCancellation
+    {
+        internal PendingCancellation(Action cancellation)
+        {
+            Cancellation = cancellation;
+        }
+
+        internal Action Cancellation { get; }
+
+        internal TaskCompletionSource<Exception?> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+}
+
 [global::Godot.GlobalClass]
 public partial class GameAgentRuntimeNode : global::Godot.Node
 {
@@ -236,6 +453,14 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     [Signal]
     public delegate void RunCompletedEventHandler(GodotDictionary outcome);
+
+    [Signal]
+    public delegate void RoutedRunCompletedEventHandler(
+        GodotDictionary outcome);
+
+    [Signal]
+    public delegate void CompletionCompletedEventHandler(
+        GodotDictionary outcome);
 
     [Signal]
     public delegate void RunFailedEventHandler(GodotDictionary error);
@@ -267,6 +492,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     private readonly ConcurrentDictionary<string, Task> _activeRuns =
         new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RequestCancellationState>
+        _activeRequestCancellations = new(StringComparer.Ordinal);
     private readonly object _lifecycleGate = new();
     private CancellationTokenSource? _lifetimeCancellation;
     private GodotMainThreadDispatcher? _dispatcher;
@@ -277,6 +504,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     private GodotRuntimeEventPublisher? _runtimeEventPublisher;
     private IGodotRuntimeBackend? _backend;
     private IGodotDurableRuntimeBackend? _durableBackend;
+    private IGodotRoutedExecutionBackend? _routedBackend;
+    private IGodotChildAgentBackend? _childBackend;
     private MultiActorDecisionCoordinator? _multiActorCoordinator;
     private SemaphoreSlim? _actorBatchSlots;
     private GodotCancellationDispatcher.Reservation?
@@ -287,6 +516,7 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     private int _acceptingRuns;
     private int _exitStarted;
     private int _exitCleanupCompleted;
+    private int _exitCleanupScheduled;
     private int _lifecycleReservationReleaseScheduled;
     private int _stopRetryRequired;
     private int _shutdownIncomplete;
@@ -572,23 +802,20 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         GodotArray observations,
         GodotArray tools)
     {
-        HeadlessRunRequest request;
         try
         {
-            request = GodotProtocolVariantMapper.ToRunRequest(
-                run,
-                observations,
-                tools);
+            return StartMappedRun(
+                () => GodotProtocolVariantMapper.ToRunRequest(
+                    run,
+                    observations,
+                    tools));
         }
-        catch (Exception exception)
+        catch (FacadeRequestMappingException exception)
         {
-            PublishFacadeError("invalid_run_request", exception.Message);
+            PublishFacadeError(
+                "invalid_run_request",
+                exception.InnerException?.Message ?? exception.Message);
             return string.Empty;
-        }
-
-        try
-        {
-            return StartTypedRun(request);
         }
         catch (InvalidOperationException exception)
         {
@@ -601,22 +828,19 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         GodotDictionary run,
         GodotArray observations)
     {
-        DurableRunRequest request;
         try
         {
-            request = GodotProtocolVariantMapper.ToDurableRunRequest(
-                run,
-                observations);
+            return StartMappedDurableRun(
+                () => GodotProtocolVariantMapper.ToDurableRunRequest(
+                    run,
+                    observations));
         }
-        catch (Exception exception)
+        catch (FacadeRequestMappingException exception)
         {
-            PublishFacadeError("invalid_run_request", exception.Message);
+            PublishFacadeError(
+                "invalid_run_request",
+                exception.InnerException?.Message ?? exception.Message);
             return string.Empty;
-        }
-
-        try
-        {
-            return StartTypedDurableRun(request);
         }
         catch (InvalidOperationException exception)
         {
@@ -630,28 +854,161 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         GodotArray observations,
         GodotDictionary options)
     {
-        DurableRunRequest request;
         try
         {
-            request = GodotProtocolVariantMapper.ToDurableRunRequest(
-                run,
-                observations,
-                options);
+            return StartMappedDurableRun(
+                () => GodotProtocolVariantMapper.ToDurableRunRequest(
+                    run,
+                    observations,
+                    options));
         }
-        catch (Exception exception)
+        catch (FacadeRequestMappingException exception)
         {
-            PublishFacadeError("invalid_run_request", exception.Message);
+            PublishFacadeError(
+                "invalid_run_request",
+                exception.InnerException?.Message ?? exception.Message);
             return string.Empty;
-        }
-
-        try
-        {
-            return StartTypedDurableRun(request);
         }
         catch (InvalidOperationException exception)
         {
             PublishFacadeError("runtime_unavailable", exception.Message);
             return string.Empty;
+        }
+    }
+
+    public string start_routed_run(
+        GodotDictionary route,
+        GodotDictionary run,
+        GodotArray observations,
+        GodotDictionary runOptions,
+        GodotDictionary workflow)
+    {
+        try
+        {
+            return StartMappedRoutedRun(
+                () => GodotProtocolVariantMapper.ToRoutedExecutionRequest(
+                    route,
+                    run,
+                    observations,
+                    runOptions,
+                    workflow));
+        }
+        catch (FacadeRequestMappingException exception)
+        {
+            PublishFacadeError(
+                "invalid_routed_request",
+                exception.InnerException?.Message ?? exception.Message);
+            return string.Empty;
+        }
+        catch (InvalidOperationException exception)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string start_completion(GodotDictionary options)
+    {
+        try
+        {
+            return StartMappedCompletion(
+                () => GodotProtocolVariantMapper
+                    .ToSimpleCompletionRequest(options));
+        }
+        catch (FacadeRequestMappingException exception)
+        {
+            PublishFacadeError(
+                "invalid_completion_request",
+                exception.InnerException?.Message ?? exception.Message);
+            return string.Empty;
+        }
+        catch (InvalidOperationException exception)
+        {
+            PublishFacadeError("runtime_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string start_child_agent_run(
+        string parentRunId,
+        GodotDictionary run,
+        GodotArray observations,
+        GodotDictionary options)
+    {
+        try
+        {
+            return StartMappedChildRun(
+                parentRunId,
+                () => GodotProtocolVariantMapper.ToDurableRunRequest(
+                    run,
+                    observations,
+                    options));
+        }
+        catch (FacadeRequestMappingException exception)
+        {
+            PublishFacadeError(
+                "invalid_run_request",
+                exception.InnerException?.Message ?? exception.Message);
+            return string.Empty;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException)
+        {
+            PublishFacadeError(
+                "child_run_unavailable",
+                exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string start_child_agent_run_with_parent(
+        GodotDictionary parentRun,
+        GodotDictionary run,
+        GodotArray observations,
+        GodotDictionary options)
+    {
+        try
+        {
+            return StartMappedChildRun(
+                () => GodotProtocolVariantMapper.ToAgentRun(parentRun),
+                () => GodotProtocolVariantMapper.ToDurableRunRequest(
+                    run,
+                    observations,
+                    options));
+        }
+        catch (FacadeRequestMappingException exception)
+        {
+            PublishFacadeError(
+                "invalid_run_request",
+                exception.InnerException?.Message ?? exception.Message);
+            return string.Empty;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException)
+        {
+            PublishFacadeError(
+                "child_run_unavailable",
+                exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public int cancel_child_agent_runs(string parentRunId)
+    {
+        try
+        {
+            return CancelTypedChildren(parentRunId);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException)
+        {
+            PublishFacadeError(
+                "child_cancel_unavailable",
+                exception.Message);
+            return 0;
         }
     }
 
@@ -677,25 +1034,19 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         string runId,
         GodotDictionary options)
     {
-        GodotDurableResumeOptions resumeOptions;
         try
         {
-            resumeOptions =
-                GodotProtocolVariantMapper.ToDurableResumeOptions(options);
-        }
-        catch (Exception exception)
-        {
-            PublishFacadeError("invalid_resume_request", exception.Message);
-            return string.Empty;
-        }
-
-        try
-        {
-            return ResumeTypedDurableRun(
+            return ResumeMappedDurableRun(
                 runId,
-                resumeOptions.Continuation,
-                resumeOptions.Reconciler,
-                resumeOptions.Guard);
+                () => GodotProtocolVariantMapper
+                    .ToDurableResumeOptions(options));
+        }
+        catch (FacadeRequestMappingException exception)
+        {
+            PublishFacadeError(
+                "invalid_resume_request",
+                exception.InnerException?.Message ?? exception.Message);
+            return string.Empty;
         }
         catch (DurableRunResumeGuardException exception)
         {
@@ -713,22 +1064,19 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     public string start_agent_batch(GodotDictionary batch)
     {
-        MultiActorDecisionBatch mapped;
         try
         {
-            mapped = GodotMultiActorVariantMapper.ToDecisionBatch(
-                batch,
-                MaxActorBatchSize);
+            return StartMappedActorBatch(
+                () => GodotMultiActorVariantMapper.ToDecisionBatch(
+                    batch,
+                    MaxActorBatchSize));
         }
-        catch (Exception exception)
+        catch (FacadeRequestMappingException exception)
         {
-            PublishFacadeError("invalid_batch_request", exception.Message);
+            PublishFacadeError(
+                "invalid_batch_request",
+                exception.InnerException?.Message ?? exception.Message);
             return string.Empty;
-        }
-
-        try
-        {
-            return StartTypedActorBatch(mapped);
         }
         catch (InvalidOperationException exception)
         {
@@ -821,6 +1169,19 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             RunControlKinds.Cancel,
             observation: null);
 
+    public bool cancel_request(string requestId)
+    {
+        try
+        {
+            return CancelTypedRequest(requestId);
+        }
+        catch (ArgumentException exception)
+        {
+            PublishFacadeError("invalid_request_id", exception.Message);
+            return false;
+        }
+    }
+
     public bool interrupt_run(string runId) =>
         PostFacadeControl(
             runId,
@@ -858,6 +1219,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             ["max_active_runs"] = MaxActiveRuns,
             ["multi_actor_configured"] =
                 Volatile.Read(ref _multiActorCoordinator) is not null,
+            ["child_agents_configured"] =
+                Volatile.Read(ref _childBackend) is not null,
             ["guarded_participant_resume"] =
                 Volatile.Read(ref _guardedParticipantResumeSupported) != 0,
             ["max_actor_batch_size"] = MaxActorBatchSize,
@@ -920,6 +1283,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             }
 
             _durableBackend = backend;
+            _routedBackend = backend as IGodotRoutedExecutionBackend;
+            _childBackend = backend as IGodotChildAgentBackend;
             if (multiActorRuntime is not null)
             {
                 ConfigureMultiActorRuntimeCore(multiActorRuntime);
@@ -990,48 +1355,84 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
 
         IGodotRuntimeBackend backend;
-        CancellationToken cancellationToken;
-        string requestId;
-        Task runTask;
+        RunAdmission admission;
         lock (_lifecycleGate)
         {
-            if (Volatile.Read(ref _acceptingRuns) == 0)
-            {
-                throw new InvalidOperationException(
-                    "The Godot runtime host is not accepting new runs.");
-            }
-
-            if (_activeRuns.Count >= MaxActiveRuns)
-            {
-                throw new InvalidOperationException(
-                    "The Godot runtime host reached its active-run limit.");
-            }
-
+            EnsureCanStartRun();
             backend = Volatile.Read(ref _backend)
                 ?? throw new InvalidOperationException(
                     "Configure a runtime backend before starting a run.");
-            cancellationToken = _lifetimeCancellation?.Token
-                ?? throw new InvalidOperationException(
-                    "The Godot runtime node is not active.");
-            var requestSnapshot = SnapshotRequest(request);
-            requestId = Guid.NewGuid().ToString("N");
-            runTask = Task.Run(
-                () => ExecuteRunAsync(
-                    backend,
-                    requestId,
-                    requestSnapshot,
-                    cancellationToken),
-                CancellationToken.None);
-
-            if (!_activeRuns.TryAdd(requestId, runTask))
-            {
-                throw new InvalidOperationException(
-                    "Unable to track the Godot runtime request.");
-            }
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "runtime request");
         }
 
-        AttachRunRemoval(runTask, requestId);
-        return requestId;
+        HeadlessRunRequest snapshot;
+        try
+        {
+            snapshot = DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                request,
+                admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteRunAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string StartMappedRun(Func<HeadlessRunRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        IGodotRuntimeBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _backend)
+                ?? throw new InvalidOperationException(
+                    "Configure a runtime backend before starting a run.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "runtime request");
+        }
+
+        HeadlessRunRequest snapshot;
+        try
+        {
+            var request = requestFactory()
+                ?? throw new InvalidDataException(
+                    "The runtime request mapper returned null.");
+            snapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(request, admission.Token);
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteRunAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
     }
 
     internal string StartTypedDurableRun(DurableRunRequest request)
@@ -1042,37 +1443,498 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
 
         IGodotDurableRuntimeBackend backend;
-        CancellationToken cancellationToken;
-        string requestId;
-        Task runTask;
+        RunAdmission admission;
         lock (_lifecycleGate)
         {
             EnsureCanStartRun();
             backend = Volatile.Read(ref _durableBackend)
                 ?? throw new InvalidOperationException(
                     "Configure a durable runtime backend before starting a durable run.");
-            cancellationToken = _lifetimeCancellation?.Token
-                ?? throw new InvalidOperationException(
-                    "The Godot runtime node is not active.");
-            var requestSnapshot = SnapshotDurableRequest(request);
-            requestId = Guid.NewGuid().ToString("N");
-            runTask = Task.Run(
-                () => ExecuteDurableRunAsync(
-                    backend,
-                    requestId,
-                    requestSnapshot,
-                    cancellationToken),
-                CancellationToken.None);
-
-            if (!_activeRuns.TryAdd(requestId, runTask))
-            {
-                throw new InvalidOperationException(
-                    "Unable to track the Godot runtime request.");
-            }
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "durable request");
         }
 
-        AttachRunRemoval(runTask, requestId);
-        return requestId;
+        DurableRunRequest snapshot;
+        try
+        {
+            snapshot = DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                request,
+                admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteDurableRunAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string StartMappedDurableRun(
+        Func<DurableRunRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        IGodotDurableRuntimeBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _durableBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a durable runtime backend before starting a durable run.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "durable request");
+        }
+
+        DurableRunRequest snapshot;
+        try
+        {
+            var request = requestFactory()
+                ?? throw new InvalidDataException(
+                    "The durable request mapper returned null.");
+            snapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(request, admission.Token);
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteDurableRunAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    internal string StartTypedRoutedRun(
+        RoutedExecutionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        IGodotRoutedExecutionBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _routedBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting routed execution.");
+            admission = ReserveActiveRunLocked(
+                cancellationToken,
+                supportsRequestCancellation: true,
+                operationLabel: "routed request");
+        }
+
+        RoutedExecutionRequest snapshot;
+        try
+        {
+            snapshot = DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                request,
+                admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteRoutedRunAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string StartMappedRoutedRun(
+        Func<RoutedExecutionRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        IGodotRoutedExecutionBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _routedBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting routed execution.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: true,
+                operationLabel: "routed request");
+        }
+
+        RoutedExecutionRequest snapshot;
+        try
+        {
+            var request = requestFactory()
+                ?? throw new InvalidDataException(
+                    "The routed request mapper returned null.");
+            snapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(request, admission.Token);
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteRoutedRunAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    internal string StartTypedCompletion(
+        SimpleCompletionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        IGodotRoutedExecutionBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _routedBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting a completion.");
+            admission = ReserveActiveRunLocked(
+                cancellationToken,
+                supportsRequestCancellation: true,
+                operationLabel: "completion request");
+        }
+
+        SimpleCompletionRequest snapshot;
+        try
+        {
+            snapshot = DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                request,
+                admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteCompletionAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string StartMappedCompletion(
+        Func<SimpleCompletionRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        IGodotRoutedExecutionBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _routedBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting a completion.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: true,
+                operationLabel: "completion request");
+        }
+
+        SimpleCompletionRequest snapshot;
+        try
+        {
+            var request = requestFactory()
+                ?? throw new InvalidDataException(
+                    "The completion request mapper returned null.");
+            snapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(request, admission.Token);
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteCompletionAsync(
+                backend,
+                admission.RequestId,
+                snapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    internal string StartTypedChildRun(
+        string parentRunId,
+        DurableRunRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(parentRunId))
+        {
+            throw new ArgumentException(
+                "A parent run id is required.",
+                nameof(parentRunId));
+        }
+
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        return StartTypedChildRunCore(parentRunId, parentRun: null, request);
+    }
+
+    internal string StartTypedChildRun(
+        AgentRun parentRun,
+        DurableRunRequest request)
+    {
+        if (parentRun is null)
+        {
+            throw new ArgumentNullException(nameof(parentRun));
+        }
+
+        var parentRunId = RequiredId(
+            parentRun.RunId,
+            nameof(parentRun));
+        if (request is null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
+        return StartTypedChildRunCore(
+            parentRunId,
+            parentRun,
+            request);
+    }
+
+    private string StartTypedChildRunCore(
+        string parentRunId,
+        AgentRun? parentRun,
+        DurableRunRequest request)
+    {
+
+        IGodotChildAgentBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _childBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting a child run.");
+            if (parentRun is not null
+                && backend is not IGodotPersistentChildAgentBackend)
+            {
+                throw new InvalidOperationException(
+                    "This child-agent backend does not support persisted parent runs.");
+            }
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "child-agent request");
+        }
+
+        AgentRun? parentSnapshot;
+        DurableRunRequest requestSnapshot;
+        try
+        {
+            parentSnapshot = parentRun is null
+                ? null
+                : DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                    parentRun,
+                    admission.Token);
+            requestSnapshot = DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                request,
+                admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteChildRunAsync(
+                backend,
+                admission.RequestId,
+                parentRunId,
+                parentSnapshot,
+                requestSnapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string StartMappedChildRun(
+        string parentRunId,
+        Func<DurableRunRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        IGodotChildAgentBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _childBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting a child run.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "child-agent request");
+        }
+
+        DurableRunRequest requestSnapshot;
+        try
+        {
+            parentRunId = RequiredId(parentRunId, nameof(parentRunId));
+            var request = requestFactory()
+                ?? throw new InvalidDataException(
+                    "The child request mapper returned null.");
+            requestSnapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(request, admission.Token);
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteChildRunAsync(
+                backend,
+                admission.RequestId,
+                parentRunId,
+                null,
+                requestSnapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string StartMappedChildRun(
+        Func<AgentRun> parentFactory,
+        Func<DurableRunRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(parentFactory);
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        IGodotChildAgentBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _childBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a built runtime before starting a child run.");
+            if (backend is not IGodotPersistentChildAgentBackend)
+            {
+                throw new InvalidOperationException(
+                    "This child-agent backend does not support persisted parent runs.");
+            }
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "child-agent request");
+        }
+
+        string parentRunId;
+        AgentRun parentSnapshot;
+        DurableRunRequest requestSnapshot;
+        try
+        {
+            var parent = parentFactory()
+                ?? throw new InvalidDataException(
+                    "The parent-run mapper returned null.");
+            parentRunId = RequiredId(parent.RunId, nameof(parent.RunId));
+            var request = requestFactory()
+                ?? throw new InvalidDataException(
+                    "The child request mapper returned null.");
+            parentSnapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(parent, admission.Token);
+            requestSnapshot = DurableRunRequestSnapshotter
+                .SnapshotForBackendBoundary(request, admission.Token);
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteChildRunAsync(
+                backend,
+                admission.RequestId,
+                parentRunId,
+                parentSnapshot,
+                requestSnapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    internal int CancelTypedChildren(string parentRunId)
+    {
+        var backend = Volatile.Read(ref _childBackend)
+            ?? throw new InvalidOperationException(
+                "Configure a built runtime before cancelling child runs.");
+        return backend.CancelChildren(parentRunId);
+    }
+
+    internal bool CancelTypedRequest(string requestId)
+    {
+        requestId = RequiredId(requestId, nameof(requestId));
+        if (!_activeRequestCancellations.TryGetValue(
+                requestId,
+                out var cancellation))
+        {
+            return false;
+        }
+
+        return cancellation.TryDispatch();
     }
 
     internal string ResumeTypedDurableRun(
@@ -1087,9 +1949,7 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
 
         IGodotDurableRuntimeBackend backend;
-        CancellationToken cancellationToken;
-        string requestId;
-        Task runTask;
+        RunAdmission admission;
         lock (_lifecycleGate)
         {
             EnsureCanStartRun();
@@ -1105,32 +1965,111 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     DurableRunResumeGuardReasonCodes.NotSupported);
             }
 
-            cancellationToken = _lifetimeCancellation?.Token
-                ?? throw new InvalidOperationException(
-                    "The Godot runtime node is not active.");
-            var continuationSnapshot = SnapshotContinuation(continuation);
-            var guardSnapshot = SnapshotResumeGuard(guard);
-            requestId = Guid.NewGuid().ToString("N");
-            runTask = Task.Run(
-                () => ExecuteDurableResumeAsync(
-                    backend,
-                    requestId,
-                    runId,
-                    continuationSnapshot,
-                    reconciler,
-                    guardSnapshot,
-                    cancellationToken),
-                CancellationToken.None);
-
-            if (!_activeRuns.TryAdd(requestId, runTask))
-            {
-                throw new InvalidOperationException(
-                    "Unable to track the Godot runtime request.");
-            }
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "durable resume request");
         }
 
-        AttachRunRemoval(runTask, requestId);
-        return requestId;
+        DurableRunContinuation? continuationSnapshot;
+        DurableRunResumeGuard? guardSnapshot;
+        try
+        {
+            continuationSnapshot = DurableRunRequestSnapshotter.Snapshot(
+                continuation,
+                admission.Token);
+            guardSnapshot = DurableRunRequestSnapshotter.Snapshot(
+                guard,
+                admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteDurableResumeAsync(
+                backend,
+                admission.RequestId,
+                runId,
+                continuationSnapshot,
+                reconciler,
+                guardSnapshot,
+                admission.Token));
+        return admission.RequestId;
+    }
+
+    private string ResumeMappedDurableRun(
+        string runId,
+        Func<GodotDurableResumeOptions> optionsFactory)
+    {
+        ArgumentNullException.ThrowIfNull(optionsFactory);
+        IGodotDurableRuntimeBackend backend;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            backend = Volatile.Read(ref _durableBackend)
+                ?? throw new InvalidOperationException(
+                    "Configure a durable runtime backend before resuming a run.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "durable resume request");
+        }
+
+        DurableRunContinuation? continuationSnapshot;
+        IGameOperationReconciler? reconciler;
+        DurableRunResumeGuard? guardSnapshot;
+        try
+        {
+            runId = RequiredId(runId, nameof(runId));
+            var options = optionsFactory()
+                ?? throw new InvalidDataException(
+                    "The durable resume mapper returned null.");
+            if (options.Guard is not null
+                && (backend
+                        is not IGodotGuardedDurableRuntimeBackend guardedBackend
+                    || !guardedBackend.SupportsGuardedResume))
+            {
+                throw new DurableRunResumeGuardException(
+                    DurableRunResumeGuardReasonCodes.NotSupported);
+            }
+
+            continuationSnapshot = DurableRunRequestSnapshotter.Snapshot(
+                options.Continuation,
+                admission.Token);
+            reconciler = options.Reconciler;
+            guardSnapshot = DurableRunRequestSnapshotter.Snapshot(
+                options.Guard,
+                admission.Token);
+        }
+        catch (DurableRunResumeGuardException)
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            RollBackAdmission(admission);
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteDurableResumeAsync(
+                backend,
+                admission.RequestId,
+                runId,
+                continuationSnapshot,
+                reconciler,
+                guardSnapshot,
+                admission.Token));
+        return admission.RequestId;
     }
 
     internal string StartTypedActorBatch(MultiActorDecisionBatch batch)
@@ -1140,10 +2079,46 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             throw new ArgumentNullException(nameof(batch));
         }
 
-        var snapshot = SnapshotActorBatch(batch);
         return StartTrackedMultiActorOperation(
             requireGuardedResume: false,
-            (coordinator, requestId, cancellationToken) =>
+            cancellationToken => DurableRunRequestSnapshotter.Snapshot(
+                batch,
+                MaxActorBatchSize,
+                cancellationToken),
+            (coordinator, requestId, snapshot, cancellationToken) =>
+                ExecuteActorBatchAsync(
+                    coordinator,
+                    requestId,
+                    snapshot,
+                    cancellationToken));
+    }
+
+    private string StartMappedActorBatch(
+        Func<MultiActorDecisionBatch> batchFactory)
+    {
+        ArgumentNullException.ThrowIfNull(batchFactory);
+        return StartTrackedMultiActorOperation(
+            requireGuardedResume: false,
+            cancellationToken =>
+            {
+                try
+                {
+                    var batch = batchFactory()
+                        ?? throw new InvalidDataException(
+                            "The actor-batch mapper returned null.");
+                    return DurableRunRequestSnapshotter.Snapshot(
+                        batch,
+                        MaxActorBatchSize,
+                        cancellationToken);
+                }
+                catch (Exception exception)
+                    when (exception is not OutOfMemoryException
+                          and not StackOverflowException)
+                {
+                    throw new FacadeRequestMappingException(exception);
+                }
+            },
+            (coordinator, requestId, snapshot, cancellationToken) =>
                 ExecuteActorBatchAsync(
                     coordinator,
                     requestId,
@@ -1170,21 +2145,24 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             throw new ArgumentNullException(nameof(participant));
         }
 
-        var participantSnapshot = new MultiActorBatchParticipant(
-            participant.InputIndex,
-            participant.AgentId,
-            participant.RunId,
-            participant.DecisionKey);
-        var continuationSnapshot = SnapshotContinuation(continuation);
         return StartTrackedMultiActorOperation(
             requireGuardedResume: true,
-            (coordinator, requestId, cancellationToken) =>
+            cancellationToken => new ParticipantResumeSnapshot(
+                new MultiActorBatchParticipant(
+                    participant.InputIndex,
+                    participant.AgentId,
+                    participant.RunId,
+                    participant.DecisionKey),
+                DurableRunRequestSnapshotter.Snapshot(
+                    continuation,
+                    cancellationToken)),
+            (coordinator, requestId, snapshot, cancellationToken) =>
                 ExecuteActorParticipantResumeAsync(
                     coordinator,
                     requestId,
                     batchId,
-                    participantSnapshot,
-                    continuationSnapshot,
+                    snapshot.Participant,
+                    snapshot.Continuation,
                     reconciler,
                     semanticExpectation,
                     cancellationToken));
@@ -1210,39 +2188,42 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
         reasonCode =
             GodotMultiActorVariantMapper.ValidateReasonCode(reasonCode);
-        var participantSnapshot = new MultiActorBatchParticipant(
-            participant.InputIndex,
-            participant.AgentId,
-            participant.RunId,
-            participant.DecisionKey);
         return StartTrackedMultiActorOperation(
             requireGuardedResume: true,
-            (coordinator, requestId, cancellationToken) =>
+            _ => new MultiActorBatchParticipant(
+                participant.InputIndex,
+                participant.AgentId,
+                participant.RunId,
+                participant.DecisionKey),
+            (coordinator, requestId, snapshot, cancellationToken) =>
                 ExecuteActorParticipantAbandonAsync(
                     coordinator,
                     requestId,
                     batchId,
-                    participantSnapshot,
+                    snapshot,
                     reasonCode,
                     reconciler,
                     cancellationToken));
     }
 
-    private string StartTrackedMultiActorOperation(
+    private string StartTrackedMultiActorOperation<TSnapshot>(
         bool requireGuardedResume,
+        Func<CancellationToken, TSnapshot> snapshot,
         Func<
             MultiActorDecisionCoordinator,
             string,
+            TSnapshot,
             CancellationToken,
             Task> operation)
     {
+        ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(operation);
-        Task task;
-        string requestId;
+        MultiActorDecisionCoordinator coordinator;
+        RunAdmission admission;
         lock (_lifecycleGate)
         {
             EnsureCanStartRun();
-            var coordinator = Volatile.Read(ref _multiActorCoordinator)
+            coordinator = Volatile.Read(ref _multiActorCoordinator)
                 ?? throw new InvalidOperationException(
                     "Configure multi-actor coordination before starting a batch operation.");
             if (requireGuardedResume
@@ -1253,25 +2234,31 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     "The configured durable runtime does not support guarded participant resume.");
             }
 
-            var cancellationToken = _lifetimeCancellation?.Token
-                ?? throw new InvalidOperationException(
-                    "The Godot runtime node is not active.");
-            requestId = Guid.NewGuid().ToString("N");
-            task = Task.Run(
-                () => operation(
-                    coordinator,
-                    requestId,
-                    cancellationToken),
-                CancellationToken.None);
-            if (!_activeRuns.TryAdd(requestId, task))
-            {
-                throw new InvalidOperationException(
-                    "Unable to track the Godot batch request.");
-            }
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: false,
+                operationLabel: "batch request");
         }
 
-        AttachRunRemoval(task, requestId);
-        return requestId;
+        TSnapshot prepared;
+        try
+        {
+            prepared = snapshot(admission.Token);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => operation(
+                coordinator,
+                admission.RequestId,
+                prepared,
+                admission.Token));
+        return admission.RequestId;
     }
 
     internal bool TryPostTypedControl(
@@ -1350,7 +2337,15 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     private async Task StopCoreAsync()
     {
-        Volatile.Write(ref _acceptingRuns, 0);
+        Task[] admittedAtShutdown;
+        lock (_lifecycleGate)
+        {
+            // Admission and the shutdown owner snapshot form one transaction.
+            // A starter that won the gate is included; one that lost observes
+            // accepting=false and cannot appear after this snapshot.
+            Volatile.Write(ref _acceptingRuns, 0);
+            admittedAtShutdown = _activeRuns.Values.ToArray();
+        }
         Dispatcher.StopAccepting();
 
         Exception? shutdownError = null;
@@ -1374,7 +2369,7 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
         try
         {
-            var active = _activeRuns.Values
+            var active = admittedAtShutdown
                 .Append(cancellationTask)
                 .ToArray();
             var activeDrain = Task.WhenAll(active);
@@ -1723,7 +2718,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "run_cancelled",
                     "cancelled",
-                    "The runtime request was cancelled.")
+                    "The runtime request was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "headless_execution")
                 .ConfigureAwait(false);
         }
         catch (ObservationAdmissionException exception)
@@ -1741,7 +2738,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "runtime_backend_failed",
                     "runtime",
-                    "The runtime backend failed.")
+                    "The runtime backend failed.",
+                    reconciliationRequired: true,
+                    phase: "headless_execution")
                 .ConfigureAwait(false);
         }
     }
@@ -1766,7 +2765,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "run_cancelled",
                     "cancelled",
-                    "The durable runtime request was cancelled.")
+                    "The durable runtime request was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "durable_execution")
                 .ConfigureAwait(false);
         }
         catch (ObservationAdmissionException exception)
@@ -1784,7 +2785,131 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "runtime_backend_failed",
                     "runtime",
-                    "The durable runtime backend failed.")
+                    "The durable runtime backend failed.",
+                    reconciliationRequired: true,
+                    phase: "durable_execution")
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task ExecuteRoutedRunAsync(
+        IGodotRoutedExecutionBackend backend,
+        string requestId,
+        RoutedExecutionRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var outcome = await backend
+                .RunRoutedAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            await PublishRoutedOutcomeAsync(requestId, outcome)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    "routed_run_cancelled",
+                    "cancelled",
+                    "The routed runtime request was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "routed_execution")
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    "routed_runtime_failed",
+                    "runtime",
+                    "The routed runtime request failed.",
+                    reconciliationRequired: true,
+                    phase: "routed_execution")
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task ExecuteCompletionAsync(
+        IGodotRoutedExecutionBackend backend,
+        string requestId,
+        SimpleCompletionRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var outcome = await backend
+                .CompleteAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            await PublishCompletionOutcomeAsync(requestId, outcome)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    "completion_cancelled",
+                    "cancelled",
+                    "The stateless completion was cancelled.")
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    "completion_failed",
+                    "runtime",
+                    "The stateless completion failed.")
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task ExecuteChildRunAsync(
+        IGodotChildAgentBackend backend,
+        string requestId,
+        string parentRunId,
+        AgentRun? parentRun,
+        DurableRunRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = parentRun is null
+                ? await backend
+                    .RunChildAsync(
+                        parentRunId,
+                        request,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : await ((IGodotPersistentChildAgentBackend)backend)
+                    .RunChildAsync(
+                        parentRun,
+                        request,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            await PublishDurableOutcomeAsync(requestId, result.Outcome)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    "child_run_cancelled",
+                    "cancelled",
+                    "The child-agent run was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "child_execution")
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            await PublishRunFailureAsync(
+                    requestId,
+                    "child_run_failed",
+                    "runtime",
+                    "The child-agent run failed.",
+                    reconciliationRequired: true,
+                    phase: "child_execution")
                 .ConfigureAwait(false);
         }
     }
@@ -1825,7 +2950,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "resume_cancelled",
                     "cancelled",
-                    "The durable resume request was cancelled.")
+                    "The durable resume request was cancelled.",
+                    reconciliationRequired: true,
+                    phase: "durable_resume")
                 .ConfigureAwait(false);
         }
         catch (ObservationAdmissionException exception)
@@ -1852,7 +2979,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "runtime_resume_failed",
                     "runtime",
-                    "The durable runtime could not resume the run.")
+                    "The durable runtime could not resume the run.",
+                    reconciliationRequired: true,
+                    phase: "durable_resume")
                 .ConfigureAwait(false);
         }
     }
@@ -1943,7 +3072,13 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "batch_execution_failed",
                     "runtime",
-                    "The multi-actor batch could not be completed.")
+                    "The multi-actor batch could not be completed.",
+                    reconciliationRequired: slotHeld,
+                    phase: slotHeld ? "batch_execution" : "batch_admission",
+                    batchId: batch.BatchId,
+                    affectedRunIds: slotHeld
+                        ? batch.Runs.Select(item => item.Run.RunId).ToArray()
+                        : Array.Empty<string>())
                 .ConfigureAwait(false);
         }
         finally
@@ -2041,7 +3176,11 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "participant_resume_failed",
                     "runtime",
-                    "The participant could not be resumed.")
+                    "The participant could not be resumed.",
+                    reconciliationRequired: true,
+                    phase: "participant_resume",
+                    batchId: batchId,
+                    participant: participant)
                 .ConfigureAwait(false);
         }
     }
@@ -2121,7 +3260,11 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                     requestId,
                     "participant_abandon_failed",
                     "runtime",
-                    "The participant could not be durably abandoned.")
+                    "The participant could not be durably abandoned.",
+                    reconciliationRequired: true,
+                    phase: "participant_abandon",
+                    batchId: batchId,
+                    participant: participant)
                 .ConfigureAwait(false);
         }
     }
@@ -2160,6 +3303,128 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             },
             CancellationToken.None);
     }
+
+    private ValueTask PublishRoutedOutcomeAsync(
+        string requestId,
+        RoutedExecutionOutcome outcome)
+    {
+        var run = outcome.Run is null
+            ? JsonArrayBuilder.Null()
+            : JsonArrayBuilder.Object(
+                ("run", ProtocolJson.ToElement(outcome.Run.Run)),
+                ("finalOutput", outcome.Run.FinalOutput
+                    ?? JsonArrayBuilder.Null()),
+                ("errorCode", OptionalJson(outcome.Run.ErrorCode)),
+                ("errorCategory", OptionalJson(outcome.Run.ErrorCategory)),
+                ("safeErrorMessage",
+                    OptionalJson(outcome.Run.SafeErrorMessage)),
+                ("reconciliationRequired",
+                    JsonArrayBuilder.Boolean(
+                        outcome.Run.ReconciliationRequired)));
+        var workflow = outcome.Workflow is null
+            ? JsonArrayBuilder.Null()
+            : JsonArrayBuilder.Object(
+                ("runId", JsonArrayBuilder.String(outcome.Workflow.RunId)),
+                ("workflowId",
+                    JsonArrayBuilder.String(outcome.Workflow.WorkflowId)),
+                ("status", JsonArrayBuilder.String(outcome.Workflow.Status)),
+                ("reasonCode", OptionalJson(outcome.Workflow.ReasonCode)),
+                ("output", outcome.Workflow.Output
+                    ?? JsonArrayBuilder.Null()));
+        var payload = JsonArrayBuilder.Object(
+            ("path", JsonArrayBuilder.String(
+                outcome.Decision.Path.ToString().ToLowerInvariant())),
+            ("reasonCode",
+                JsonArrayBuilder.String(outcome.Decision.ReasonCode)),
+            ("policyId",
+                JsonArrayBuilder.String(outcome.Decision.PolicyId)),
+            ("policyVersion",
+                JsonArrayBuilder.String(outcome.Decision.PolicyVersion)),
+            ("run", run),
+            ("workflow", workflow));
+        return EventPump.PublishCriticalAsync(
+            new GodotEventMessage
+            {
+                Kind = GodotEventKinds.RoutedRunCompleted,
+                RequestId = requestId,
+                Json = payload.GetRawText()
+            },
+            CancellationToken.None);
+    }
+
+    private ValueTask PublishCompletionOutcomeAsync(
+        string requestId,
+        SimpleCompletionOutcome outcome)
+    {
+        var route = outcome.RouteIdentity is null
+            ? JsonArrayBuilder.Null()
+            : JsonArrayBuilder.Object(
+                ("providerId", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.ProviderId)),
+                ("modelId", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.ModelId)),
+                ("transportDialect", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.TransportDialect)),
+                ("hasBoundDialectSemantics", JsonArrayBuilder.Boolean(
+                    outcome.RouteIdentity.HasBoundDialectSemantics)),
+                ("dialectSemanticDigest", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.DialectSemanticDigest)),
+                ("capabilityDigest", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.CapabilityDigest)),
+                ("routePolicyVersion", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.RoutePolicyVersion)),
+                ("routePolicyDigest", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.RoutePolicyDigest)),
+                ("routeDigest", JsonArrayBuilder.String(
+                    outcome.RouteIdentity.RouteDigest)));
+        var usage = JsonArrayBuilder.Object(
+            ("inputTokens",
+                JsonArrayBuilder.Number(outcome.Usage.InputTokens)),
+            ("outputTokens",
+                JsonArrayBuilder.Number(outcome.Usage.OutputTokens)),
+            ("costUsd", JsonArrayBuilder.String(outcome.Usage.CostUsd)),
+            ("cacheReadTokens", OptionalNumber(
+                outcome.Usage.CacheReadTokens)),
+            ("cacheWriteTokens", OptionalNumber(
+                outcome.Usage.CacheWriteTokens)),
+            ("cacheMissTokens", OptionalNumber(
+                outcome.Usage.CacheMissTokens)),
+            ("reasoningTokens", OptionalNumber(
+                outcome.Usage.ReasoningTokens)),
+            ("providerTotalTokens", OptionalNumber(
+                outcome.Usage.ProviderTotalTokens)),
+            ("samples", JsonArrayBuilder.Number(
+                outcome.Usage.Samples)),
+            ("availability", JsonArrayBuilder.String(
+                outcome.Usage.Availability)));
+        var payload = JsonArrayBuilder.Object(
+            ("operationId",
+                JsonArrayBuilder.String(outcome.OperationId)),
+            ("providerId", JsonArrayBuilder.String(outcome.ProviderId)),
+            ("routeIdentity", route),
+            ("text", OptionalJson(outcome.Text)),
+            ("reasoningContent", OptionalJson(outcome.ReasoningContent)),
+            ("finishReason", OptionalJson(outcome.FinishReason)),
+            ("usage", usage));
+        return EventPump.PublishCriticalAsync(
+            new GodotEventMessage
+            {
+                Kind = GodotEventKinds.CompletionCompleted,
+                RequestId = requestId,
+                Json = payload.GetRawText()
+            },
+            CancellationToken.None);
+    }
+
+    private static JsonElement OptionalJson(string? value) =>
+        value is null
+            ? JsonArrayBuilder.Null()
+            : JsonArrayBuilder.String(value);
+
+    private static JsonElement OptionalNumber(int? value) =>
+        value.HasValue
+            ? JsonArrayBuilder.Number(value.Value)
+            : JsonArrayBuilder.Null();
 
     private bool PostFacadeObservationControl(
         string runId,
@@ -2223,7 +3488,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         string requestId,
         string code,
         string category,
-        string message)
+        string message,
+        bool reconciliationRequired = false,
+        string? phase = null)
     {
         try
         {
@@ -2235,7 +3502,9 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                         RequestId = requestId,
                         Code = code,
                         Category = category,
-                        Message = message
+                        Message = message,
+                        ReconciliationRequired = reconciliationRequired,
+                        Phase = phase
                     },
                     CancellationToken.None)
                 .ConfigureAwait(false);
@@ -2319,16 +3588,191 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
     }
 
+    private RunAdmission ReserveActiveRunLocked(
+        CancellationToken callerCancellation,
+        bool supportsRequestCancellation,
+        string operationLabel)
+    {
+        var lifetimeToken = _lifetimeCancellation?.Token
+            ?? throw new InvalidOperationException(
+                "The Godot runtime node is not active.");
+        RequestCancellationState? requestCancellation = null;
+        if (supportsRequestCancellation)
+        {
+            callerCancellation.ThrowIfCancellationRequested();
+        }
+
+        if (!GodotRequestCancellationDispatcher.TryReserve(
+                out var reservation))
+        {
+            throw new InvalidOperationException(
+                "The bounded operation-cancellation capacity is exhausted.");
+        }
+
+        try
+        {
+            // Every operation gets its own cancellation source. The lifetime
+            // token only queues these short dispatches, so a blocking callback
+            // owned by one backend cannot prevent another NPC/run from seeing
+            // shutdown cancellation.
+            requestCancellation = new RequestCancellationState(
+                new CancellationTokenSource(),
+                reservation!,
+                lifetimeToken,
+                supportsRequestCancellation
+                    ? callerCancellation
+                    : CancellationToken.None);
+        }
+        catch
+        {
+            reservation!.Dispose();
+            throw;
+        }
+
+        var requestId = Guid.NewGuid().ToString("N");
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            if (supportsRequestCancellation
+                && !_activeRequestCancellations.TryAdd(
+                    requestId,
+                    requestCancellation!))
+            {
+                throw new InvalidOperationException(
+                    $"Unable to track {operationLabel} cancellation.");
+            }
+
+            if (!_activeRuns.TryAdd(requestId, completion.Task))
+            {
+                throw new InvalidOperationException(
+                    $"Unable to track the Godot {operationLabel}.");
+            }
+        }
+        catch
+        {
+            _activeRequestCancellations.TryRemove(requestId, out _);
+            requestCancellation?.Dispose();
+            throw;
+        }
+
+        var admission = new RunAdmission(
+            requestId,
+            completion,
+            requestCancellation.Token,
+            requestCancellation);
+        AttachRunRemoval(completion.Task, requestId);
+        return admission;
+    }
+
+    private void StartAdmittedOperation(
+        RunAdmission admission,
+        Func<Task> operation)
+    {
+        Task running;
+        try
+        {
+            running = Task.Run(operation, CancellationToken.None);
+        }
+        catch
+        {
+            RollBackAdmission(admission);
+            throw;
+        }
+
+        _ = CompleteAdmittedOperationAsync(admission, running);
+    }
+
+    private async Task CompleteAdmittedOperationAsync(
+        RunAdmission admission,
+        Task running)
+    {
+        Exception? failure = null;
+        try
+        {
+            await running.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+
+        if (admission.RequestCancellation is not null)
+        {
+            var cancellationFailure = await admission.RequestCancellation
+                .CloseAndGetOwner()
+                .ConfigureAwait(false);
+            if (cancellationFailure is not null)
+            {
+                failure = failure is null
+                    ? cancellationFailure
+                    : new AggregateException(failure, cancellationFailure);
+            }
+
+            admission.RequestCancellation.Dispose();
+        }
+
+        if (failure is null)
+        {
+            admission.Completion.TrySetResult(true);
+        }
+        else
+        {
+            admission.Completion.TrySetException(failure);
+        }
+    }
+
+    private void RollBackAdmission(RunAdmission admission)
+    {
+        // Start methods are synchronous until the admitted operation is
+        // scheduled. If snapshotting or scheduling fails, the rejected
+        // request must stop consuming observable run capacity before the
+        // exception returns to its caller. Resource ownership still drains
+        // through the completion path below.
+        _activeRuns.TryRemove(admission.RequestId, out _);
+
+        if (admission.RequestCancellation is null)
+        {
+            admission.Completion.TrySetResult(true);
+            return;
+        }
+
+        _ = CompleteRolledBackAdmissionAsync(admission);
+    }
+
+    private static async Task CompleteRolledBackAdmissionAsync(
+        RunAdmission admission)
+    {
+        var cancellationFailure = await admission.RequestCancellation!
+            .CloseAndGetOwner()
+            .ConfigureAwait(false);
+        admission.RequestCancellation.Dispose();
+        if (cancellationFailure is null)
+        {
+            admission.Completion.TrySetResult(true);
+        }
+        else
+        {
+            admission.Completion.TrySetException(cancellationFailure);
+        }
+    }
+
     private void AttachRunRemoval(Task runTask, string requestId)
     {
         _ = runTask.ContinueWith(
             static (completedTask, state) =>
             {
-                _ = completedTask;
+                _ = completedTask.Exception;
                 var removal = (RunRemoval)state!;
                 removal.ActiveRuns.TryRemove(removal.RequestId, out _);
+                removal.ActiveRequestCancellations.TryRemove(
+                    removal.RequestId,
+                    out _);
             },
-            new RunRemoval(_activeRuns, requestId),
+            new RunRemoval(
+                _activeRuns,
+                _activeRequestCancellations,
+                requestId),
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
@@ -2400,6 +3844,33 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
 
     private void PublishOnMainThread(GodotEventMessage message)
     {
+        try
+        {
+            PublishOnMainThreadCore(message);
+        }
+        catch (GodotJsonNumberMappingException exception)
+        {
+            EmitSignal(
+                SignalName.RuntimeError,
+                ToErrorDictionary(
+                    new GodotEventMessage
+                    {
+                        RequestId = message.RequestId,
+                        Code = exception.ReasonCode,
+                        Category = "mapping",
+                        Message = exception.Message,
+                        ReconciliationRequired = message.Kind is
+                            GodotEventKinds.RunCompleted
+                            or GodotEventKinds.RoutedRunCompleted
+                            or GodotEventKinds.BatchCompleted
+                            or GodotEventKinds.BatchParticipantCompleted,
+                        Phase = "godot_variant_output"
+                    }));
+        }
+    }
+
+    private void PublishOnMainThreadCore(GodotEventMessage message)
+    {
         switch (message.Kind)
         {
             case GodotEventKinds.RuntimeStarted:
@@ -2426,6 +3897,26 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                             message.ReconciliationRequired
                     });
                 break;
+            case GodotEventKinds.RoutedRunCompleted:
+                {
+                    var outcome =
+                        GodotProtocolVariantMapper.ParseDictionary(
+                            message.Json!);
+                    outcome["request_id"] =
+                        message.RequestId ?? string.Empty;
+                    EmitSignal(SignalName.RoutedRunCompleted, outcome);
+                    break;
+                }
+            case GodotEventKinds.CompletionCompleted:
+                {
+                    var outcome =
+                        GodotProtocolVariantMapper.ParseDictionary(
+                            message.Json!);
+                    outcome["request_id"] =
+                        message.RequestId ?? string.Empty;
+                    EmitSignal(SignalName.CompletionCompleted, outcome);
+                    break;
+                }
             case GodotEventKinds.RunFailed:
                 EmitSignal(SignalName.RunFailed, ToErrorDictionary(message));
                 break;
@@ -2542,7 +4033,7 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             "The agent runtime exhausted bounded lifecycle shutdown retries.");
         if (Volatile.Read(ref _exitStarted) != 0)
         {
-            CompleteExitCleanup();
+            ScheduleExitCleanupAfterOwnerDrain();
         }
     }
 
@@ -2592,6 +4083,33 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         DisposeLifetimeCancellation();
     }
 
+    private void ScheduleExitCleanupAfterOwnerDrain()
+    {
+        if (Interlocked.Exchange(ref _exitCleanupScheduled, 1) != 0)
+        {
+            return;
+        }
+
+        Task[] owners;
+        lock (_lifecycleGate)
+        {
+            owners = _activeRuns.Values.ToArray();
+        }
+        var drain = owners.Length == 0
+            ? Task.CompletedTask
+            : Task.WhenAll(owners);
+        _ = drain.ContinueWith(
+            static (completed, state) =>
+            {
+                _ = completed.Exception;
+                ((GameAgentRuntimeNode)state!).CompleteExitCleanup();
+            },
+            this,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     internal static GodotDictionary ToErrorDictionary(GodotEventMessage message)
     {
         var affectedRunIds = new GodotArray();
@@ -2629,7 +4147,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             (long)MaxConcurrentActorRuns * MaxConcurrentActorBatches
             + MaxConcurrentParticipantOperations;
         if (DispatcherCapacity < 1
-            || MaxActiveRuns < 1
+            || MaxActiveRuns is < 1
+                or > GodotRequestCancellationDispatcher.ReservationCapacity
             || MaxActorBatchSize is < 1 or > 1_024
             || MaxConcurrentActorRuns is < 1 or > 1_024
             || MaxConcurrentActorBatches is < 1 or > 32
@@ -2648,107 +4167,32 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
     }
 
-    private static HeadlessRunRequest SnapshotRequest(HeadlessRunRequest request)
+    private static string RequiredId(
+        string? value,
+        string parameterName)
     {
-        return new HeadlessRunRequest
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 128)
         {
-            Run = ProtocolJson.DeserializeAgentRun(
-                ProtocolJson.Serialize(request.Run)),
-            Observations = request.Observations
-                .Select(item => ProtocolJson.DeserializeObservationEnvelope(
-                    ProtocolJson.Serialize(item)))
-                .ToArray(),
-            Tools = request.Tools
-                .Select(item => ProtocolJson.DeserializeToolDescriptor(
-                    ProtocolJson.Serialize(item)))
-                .ToArray()
-        };
-    }
-
-    private static DurableRunRequest SnapshotDurableRequest(
-        DurableRunRequest request)
-    {
-        return new DurableRunRequest
-        {
-            Run = ProtocolJson.DeserializeAgentRun(
-                ProtocolJson.Serialize(request.Run)),
-            Context = request.Context.Select(CloneContextCandidate).ToArray(),
-            ActiveSkills = request.ActiveSkills
-                .Select(item => new SkillReference(item.SkillId, item.Version))
-                .ToArray(),
-            InitialTranscript = request.InitialTranscript
-                .Select(item => NormalizedMessageJournalCodec.Decode(
-                    NormalizedMessageJournalCodec.Encode(item)))
-                .ToArray(),
-            LaneId = request.LaneId,
-            WorkloadClass = request.WorkloadClass
-        };
-    }
-
-    private static MultiActorDecisionBatch SnapshotActorBatch(
-        MultiActorDecisionBatch batch)
-    {
-        return new MultiActorDecisionBatch(
-            batch.BatchId,
-            batch.Coordinate,
-            batch.Runs.Select(SnapshotDurableRequest).ToArray(),
-            batch.AggregateBudget);
-    }
-
-    private static DurableRunContinuation? SnapshotContinuation(
-        DurableRunContinuation? continuation)
-    {
-        if (continuation is null)
-        {
-            return null;
+            throw new ArgumentException(
+                "A non-empty identifier of at most 128 ASCII characters is required.",
+                parameterName);
         }
 
-        return new DurableRunContinuation
+        foreach (var character in value)
         {
-            Context = continuation.Context
-                .Select(CloneContextCandidate)
-                .ToArray(),
-            ActiveSkills = continuation.ActiveSkills
-                .Select(item => new SkillReference(item.SkillId, item.Version))
-                .ToArray(),
-            ReplaceActiveSkills = continuation.ReplaceActiveSkills,
-            LaneId = continuation.LaneId,
-            WorkloadClass = continuation.WorkloadClass,
-            RequestCancellation = continuation.RequestCancellation
-        };
-    }
-
-    private static DurableRunResumeGuard? SnapshotResumeGuard(
-        DurableRunResumeGuard? guard)
-    {
-        if (guard is null)
-        {
-            return null;
+            var allowed = character is >= 'A' and <= 'Z'
+                          || character is >= 'a' and <= 'z'
+                          || character is >= '0' and <= '9'
+                          || character is '.' or '_' or ':' or '-';
+            if (!allowed)
+            {
+                throw new ArgumentException(
+                    "An identifier may contain only ASCII letters, digits, '.', '_', ':', and '-'.",
+                    parameterName);
+            }
         }
 
-        return new DurableRunResumeGuard
-        {
-            ExpectedBatchId = guard.ExpectedBatchId,
-            ExpectedAgentId = guard.ExpectedAgentId,
-            ExpectedDecisionKey = guard.ExpectedDecisionKey,
-            RequiredInt32ExtensionName =
-                guard.RequiredInt32ExtensionName,
-            MinimumInt32ExtensionValue =
-                guard.MinimumInt32ExtensionValue,
-            MaximumInt32ExtensionValue =
-                guard.MaximumInt32ExtensionValue,
-            ExpectedInt32ExtensionValue =
-                guard.ExpectedInt32ExtensionValue,
-            SemanticExtensionName = guard.SemanticExtensionName,
-            ExpectedSemanticExtensionSha256 =
-                guard.ExpectedSemanticExtensionSha256
-        };
-    }
-
-    private static ContextCandidate CloneContextCandidate(
-        ContextCandidate candidate)
-    {
-        return candidate.Clone();
+        return value;
     }
 
     private static Exception Combine(Exception? first, Exception next) =>
@@ -2804,17 +4248,150 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         string BatchId,
         IReadOnlyList<string> RunIds);
 
+    private sealed record ParticipantResumeSnapshot(
+        MultiActorBatchParticipant Participant,
+        DurableRunContinuation? Continuation);
+
+    private sealed class RunAdmission
+    {
+        internal RunAdmission(
+            string requestId,
+            TaskCompletionSource<bool> completion,
+            CancellationToken token,
+            RequestCancellationState? requestCancellation)
+        {
+            RequestId = requestId;
+            Completion = completion;
+            Token = token;
+            RequestCancellation = requestCancellation;
+        }
+
+        internal string RequestId { get; }
+
+        internal TaskCompletionSource<bool> Completion { get; }
+
+        internal CancellationToken Token { get; }
+
+        internal RequestCancellationState? RequestCancellation { get; }
+    }
+
+    private sealed class RequestCancellationState : IDisposable
+    {
+        private readonly object _sync = new();
+        private readonly CancellationTokenSource _source;
+        private readonly GodotRequestCancellationDispatcher.Reservation
+            _reservation;
+        private readonly CancellationTokenRegistration _lifetimeRegistration;
+        private readonly CancellationTokenRegistration _callerRegistration;
+        private Task<Exception?> _owner = Task.FromResult<Exception?>(null);
+        private bool _dispatchStarted;
+        private bool _closed;
+        private bool _disposed;
+
+        internal RequestCancellationState(
+            CancellationTokenSource source,
+            GodotRequestCancellationDispatcher.Reservation reservation,
+            CancellationToken lifetimeToken,
+            CancellationToken callerToken)
+        {
+            _source = source;
+            _reservation = reservation;
+            _lifetimeRegistration = lifetimeToken.Register(
+                static state =>
+                {
+                    _ = ((RequestCancellationState)state!).TryDispatch();
+                },
+                this);
+            _callerRegistration = callerToken.Register(
+                static state =>
+                {
+                    _ = ((RequestCancellationState)state!).TryDispatch();
+                },
+                this);
+        }
+
+        internal CancellationToken Token => _source.Token;
+
+        internal bool TryDispatch()
+        {
+            lock (_sync)
+            {
+                if (_closed || _dispatchStarted)
+                {
+                    return false;
+                }
+
+                if (!GodotRequestCancellationDispatcher.TryDispatchReserved(
+                        _reservation,
+                        _source.Cancel,
+                        out var owner))
+                {
+                    return false;
+                }
+
+                _owner = owner;
+                _dispatchStarted = true;
+                return true;
+            }
+        }
+
+        internal async Task<Exception?> CloseAndGetOwner()
+        {
+            Task<Exception?> owner;
+            lock (_sync)
+            {
+                _closed = true;
+                owner = _owner;
+            }
+
+            return await owner.ConfigureAwait(false);
+        }
+
+        public void Dispose()
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _closed = true;
+                _disposed = true;
+            }
+
+            _callerRegistration.Dispose();
+            _lifetimeRegistration.Dispose();
+            _source.Dispose();
+            _reservation.Dispose();
+        }
+    }
+
+    private sealed class FacadeRequestMappingException : Exception
+    {
+        internal FacadeRequestMappingException(Exception innerException)
+            : base("The engine request could not be mapped.", innerException)
+        {
+        }
+    }
+
     private sealed class RunRemoval
     {
         public RunRemoval(
             ConcurrentDictionary<string, Task> activeRuns,
+            ConcurrentDictionary<string, RequestCancellationState>
+                activeRequestCancellations,
             string requestId)
         {
             ActiveRuns = activeRuns;
+            ActiveRequestCancellations = activeRequestCancellations;
             RequestId = requestId;
         }
 
         public ConcurrentDictionary<string, Task> ActiveRuns { get; }
+
+        public ConcurrentDictionary<string, RequestCancellationState>
+            ActiveRequestCancellations { get; }
 
         public string RequestId { get; }
     }

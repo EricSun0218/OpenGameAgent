@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using GameAgent.Core;
 using GameAgent.Protocol;
 using GameAgent.Runtime;
@@ -29,6 +33,35 @@ public interface IGodotDurableRuntimeBackend
     bool TryPostControl(string runId, RunControlCommand command);
 
     ValueTask StopAsync(CancellationToken cancellationToken);
+}
+
+public interface IGodotRoutedExecutionBackend
+{
+    ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+        RoutedExecutionRequest request,
+        CancellationToken cancellationToken);
+
+    ValueTask<SimpleCompletionOutcome> CompleteAsync(
+        SimpleCompletionRequest request,
+        CancellationToken cancellationToken);
+}
+
+public interface IGodotChildAgentBackend
+{
+    ValueTask<ChildAgentRunResult> RunChildAsync(
+        string parentRunId,
+        DurableRunRequest request,
+        CancellationToken cancellationToken);
+
+    int CancelChildren(string parentRunId);
+}
+
+public interface IGodotPersistentChildAgentBackend
+{
+    ValueTask<ChildAgentRunResult> RunChildAsync(
+        AgentRun parentRun,
+        DurableRunRequest request,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -414,7 +447,10 @@ public sealed class GodotDurableRuntimeBackend
 
 public sealed class GodotBuiltRuntimeBackend
     : IGodotGuardedDurableRuntimeBackend,
-      IGodotControlRejectionBackend
+      IGodotControlRejectionBackend,
+      IGodotRoutedExecutionBackend,
+      IGodotChildAgentBackend,
+      IGodotPersistentChildAgentBackend
 {
     private readonly BuiltGameAgentRuntime _built;
     private readonly object _stopGate = new();
@@ -468,6 +504,37 @@ public sealed class GodotBuiltRuntimeBackend
             runId,
             command,
             out rejectionReason);
+
+    public ValueTask<RoutedExecutionOutcome> RunRoutedAsync(
+        RoutedExecutionRequest request,
+        CancellationToken cancellationToken) =>
+        _built.Execution.RunAsync(request, cancellationToken);
+
+    public ValueTask<SimpleCompletionOutcome> CompleteAsync(
+        SimpleCompletionRequest request,
+        CancellationToken cancellationToken) =>
+        _built.Completion.CompleteAsync(request, cancellationToken);
+
+    public ValueTask<ChildAgentRunResult> RunChildAsync(
+        string parentRunId,
+        DurableRunRequest request,
+        CancellationToken cancellationToken) =>
+        _built.Children.RunChildAsync(
+            parentRunId,
+            request,
+            cancellationToken);
+
+    public ValueTask<ChildAgentRunResult> RunChildAsync(
+        AgentRun parentRun,
+        DurableRunRequest request,
+        CancellationToken cancellationToken) =>
+        _built.Children.RunChildAsync(
+            parentRun,
+            request,
+            cancellationToken);
+
+    public int CancelChildren(string parentRunId) =>
+        _built.Children.CancelChildren(parentRunId);
 
     public ValueTask StopAsync(CancellationToken cancellationToken)
     {
@@ -679,6 +746,32 @@ public sealed class GodotRuntimeHost
 
     public string StartRun(DurableRunRequest request) =>
         _node.StartTypedDurableRun(request);
+
+    public string StartRoutedRun(
+        RoutedExecutionRequest request,
+        CancellationToken cancellationToken = default) =>
+        _node.StartTypedRoutedRun(request, cancellationToken);
+
+    public string StartCompletion(
+        SimpleCompletionRequest request,
+        CancellationToken cancellationToken = default) =>
+        _node.StartTypedCompletion(request, cancellationToken);
+
+    public string StartChildRun(
+        string parentRunId,
+        DurableRunRequest request) =>
+        _node.StartTypedChildRun(parentRunId, request);
+
+    public string StartChildRun(
+        AgentRun parentRun,
+        DurableRunRequest request) =>
+        _node.StartTypedChildRun(parentRun, request);
+
+    public int CancelChildren(string parentRunId) =>
+        _node.CancelTypedChildren(parentRunId);
+
+    public bool CancelRequest(string requestId) =>
+        _node.CancelTypedRequest(requestId);
 
     public string ResumeRun(
         string runId,

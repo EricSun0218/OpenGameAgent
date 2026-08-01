@@ -111,6 +111,14 @@ internal sealed class BoundedCancellationDispatcher
         return true;
     }
 
+    public async ValueTask<CancellationDispatchReservation> ReserveAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _capacity.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Interlocked.Increment(ref _reservations);
+        return new CancellationDispatchReservation(this);
+    }
+
     private void Release()
     {
         Interlocked.Decrement(ref _reservations);

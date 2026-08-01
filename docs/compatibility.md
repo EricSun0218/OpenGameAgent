@@ -9,8 +9,8 @@ until its real engine or toolchain gate has passed.
 | Godot host | Godot 4.7.1 .NET on Windows desktop and headless | Real Godot executable, isolated addon package, C# build, scene startup, signals, structured context, durable run/resume/control, main-thread action dispatch, and shutdown are exercised |
 | Unity host | Unity 2022.3 LTS or newer, Mono or IL2CPP | Package source and samples compile as .NET Standard 2.1; host conformance and package assembly gates pass without an Editor |
 
-macOS is not a supported or CI target. Linux validates the portable .NET
-solution; it is not a second full engine-release matrix.
+Linux validates the portable .NET solution; it is not a second full
+engine-release matrix. Engine release gates currently target Windows.
 
 ## Unity validation boundary
 
@@ -51,9 +51,25 @@ before release.
 
 `GameAgent.Providers.Anthropic` implements the named Messages SSE flow with
 client `tool_use` and `tool_result` blocks and pins the verified `2023-06-01`
-API version. Its current dialect is deliberately limited to text and client
-tools: reasoning, media, fallback blocks, and server-side tools are rejected
-explicitly. Tool-input JSON is accumulated incrementally and parsed only when
+API version. Configuration explicitly declares the selected route's thinking
+dialect as `none`, `manual_budget`, or `adaptive`; the adapter never infers it
+from a model name. Manual routes map fixed token budgets. Adaptive routes map
+only allow-listed `output_config.effort` values and separately declare whether
+the exact model accepts explicit thinking disable. Adaptive routes reject
+non-default sampling controls, while manual routes enforce their
+thinking-specific sampling restrictions. These declarations are covered by
+the durable route-policy digest.
+
+The adapter supports text, client tools, automatic prompt-cache control, and
+bounded thinking/redacted-thinking output.
+Extended thinking is currently rejected before transport when client tools are
+exposed because Anthropic requires the signed thinking block to be replayed
+unchanged on the next tool-result request; this adapter does not pretend that a
+plain reasoning string satisfies that provider-private continuation contract.
+An adaptive route therefore rejects tool use unless thinking is explicitly
+disabled on a route that declares disable support.
+Media, fallback blocks, and server-side tools are rejected explicitly.
+Tool-input JSON is accumulated incrementally and parsed only when
 its content block closes. Usage is emitted once from final cumulative counters;
 cache reads, writes, and misses remain unavailable when the response does not
 supply a complete cache-counter pair.
@@ -118,6 +134,16 @@ not be repeated on the same route. `RetryThenFailover` is for transient
 route-local failures. The legacy Boolean `retryable` constructor remains source
 compatible and maps to `AbortRun` or `RetryThenFailover`.
 
+## Persistence compatibility
+
+Current memory stores can read format version 1 without rewriting it. The first
+successful mutation appends a version 2 frame, after which a version-1-only
+runtime cannot reopen that file. If runtime rollback must remain possible, back
+up the memory file or upgrade a copy under a new path before allowing writes.
+The current reader supports pure version 1 history, pure version 2 history, and
+mixed version 1 followed by version 2 history; the older reader supports only
+pure version 1 history.
+
 The bundled HTTP adapter treats credential rejection, exhausted balance,
 missing or retired endpoints, and rejected redirects as route-local known-zero
 failures. Invalid request payloads remain request-fatal. Ambiguous timeouts and
@@ -157,10 +183,18 @@ and counted; no additional worker is created. Authoritative durable events
 remain replayable from the journal.
 
 Godot and Unity lifecycle owners reserve future cancellation capacity before
-they can accept work. The current process-wide bound is 72 owners per engine
-adapter: eight cancellation workers plus 64 queued owners. A reservation is
+they can accept work. Each lifecycle lane currently admits 72 owners per
+engine adapter: eight cancellation workers plus 64 queued owners. Godot request
+cancellation uses a separate process-wide lane with eight workers and 4,088
+queued reservations; Unity run cancellation likewise has a separate large
+data-plane lane and a distinct shutdown-promotion lane. A reservation is
 returned only after the real cancellation and owner-drain tasks finish, even
-when the public shutdown wait has already timed out.
+when the public shutdown wait has already timed out. Lifecycle teardown cannot
+therefore be displaced by the configured per-runtime active-run range.
+Core execution routers use the same bounded lifecycle dispatcher. Disposal
+waits for a lease only while that router still owns active work; natural drain
+wins the race and releases the router without expanding another runtime's
+blocked-callback failure domain.
 
 Operation reconciliation follows the same fail-closed rule. At most 64 queries
 may be detached process-wide, and the same world/run/operation identity cannot

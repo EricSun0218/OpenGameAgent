@@ -3,6 +3,31 @@ using GameAgent.Protocol;
 
 namespace GameAgent.Core;
 
+public static class DurableExecutionModes
+{
+    public const string Agent = "agent";
+
+    public const string Direct = "direct";
+
+    internal static string Normalize(string? value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || string.Equals(value, Agent, StringComparison.Ordinal))
+        {
+            return Agent;
+        }
+
+        if (string.Equals(value, Direct, StringComparison.Ordinal))
+        {
+            return Direct;
+        }
+
+        throw new ArgumentException(
+            "The durable execution mode is not supported.",
+            parameterName);
+    }
+}
+
 public sealed class DurableAgentRuntimeOptions
 {
     public int MaxConcurrentProviderCalls { get; set; } = 4;
@@ -231,6 +256,24 @@ public sealed class DurableRunRequest
 
     public string WorkloadClass { get; set; } =
         ProviderWorkloadClasses.Interactive;
+
+    /// <summary>
+    /// Selects the durable execution path. Direct runs retain context,
+    /// memory, journaling, and recovery but expose no tools or skills to the
+    /// model, so a successful response completes after one provider turn.
+    /// </summary>
+    public string ExecutionMode { get; set; } =
+        DurableExecutionModes.Agent;
+
+    /// <summary>
+    /// Optional per-run inference controls, durably captured for recovery.
+    /// </summary>
+    public ModelInferenceOptions? Inference { get; set; }
+
+    /// <summary>
+    /// Optional ordered selection of configured provider/model routes.
+    /// </summary>
+    public ProviderRoutePreference? RoutePreference { get; set; }
 
     /// <summary>
     /// Optional structured final-output schema. Strict final-output admission

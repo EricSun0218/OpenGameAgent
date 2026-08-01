@@ -468,7 +468,7 @@ public sealed class GroupInteractionTests
                 maxSharedScopeUtf8Bytes: 131_072));
         var alice = Identity("alice", 1);
         var scope = Json(
-            "{\"worldbook\":\"" + new string('s', 70_000) + "\"}");
+            "{\"structuredContext\":\"" + new string('s', 70_000) + "\"}");
         var created = await store.CreateAsync(
             new GroupInteractionCreateRequest(
                 "create-large",

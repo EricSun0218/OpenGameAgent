@@ -1,4 +1,8 @@
+using System;
 using System.Buffers;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using GameAgent.Core;
@@ -543,8 +547,7 @@ internal static class GodotMultiActorVariantMapper
         string path)
     {
         if (!value.TryGetProperty(propertyName, out var property)
-            || property.ValueKind != JsonValueKind.Number
-            || !property.TryGetInt32(out var result)
+            || !TryReadInt32(property, out var result)
             || result < minimum
             || result > maximum)
         {
@@ -563,8 +566,7 @@ internal static class GodotMultiActorVariantMapper
         string path)
     {
         if (!value.TryGetProperty(propertyName, out var property)
-            || property.ValueKind != JsonValueKind.Number
-            || !property.TryGetInt64(out var result)
+            || !TryReadInt64(property, out var result)
             || result < minimum
             || result > maximum)
         {
@@ -573,6 +575,61 @@ internal static class GodotMultiActorVariantMapper
         }
 
         return result;
+    }
+
+    private static bool TryReadInt32(JsonElement value, out int result)
+    {
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            result = default;
+            return false;
+        }
+
+        if (value.TryGetInt32(out result))
+        {
+            return true;
+        }
+
+        if (value.TryGetDouble(out var number)
+            && double.IsFinite(number)
+            && number >= int.MinValue
+            && number <= int.MaxValue
+            && number == Math.Truncate(number))
+        {
+            result = (int)number;
+            return true;
+        }
+
+        result = default;
+        return false;
+    }
+
+    private static bool TryReadInt64(JsonElement value, out long result)
+    {
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            result = default;
+            return false;
+        }
+
+        if (value.TryGetInt64(out result))
+        {
+            return true;
+        }
+
+        const double maximumExactInteger = 9_007_199_254_740_991d;
+        if (value.TryGetDouble(out var number)
+            && double.IsFinite(number)
+            && number >= -maximumExactInteger
+            && number <= maximumExactInteger
+            && number == Math.Truncate(number))
+        {
+            result = (long)number;
+            return true;
+        }
+
+        result = default;
+        return false;
     }
 
     private static void ValidateRequiredUtf8(

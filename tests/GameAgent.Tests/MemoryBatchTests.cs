@@ -228,6 +228,295 @@ public sealed class MemoryBatchTests
         Assert.Empty(await SearchAllAsync(store));
     }
 
+    [Theory]
+    [InlineData("deterministic")]
+    [InlineData("bm25")]
+    [InlineData("vector")]
+    public void BuiltInStoresAdvertiseCurrentRuntimeMutationContract(
+        string storeKind)
+    {
+        var store = Assert.IsAssignableFrom<
+            IRuntimeAuthoritativeMemoryBatchStore>(Store(storeKind));
+
+        Assert.Equal(
+            RuntimeMemoryMutationContract.CurrentVersion,
+            store.RuntimeMutationContractVersion);
+    }
+
+    [Theory]
+    [InlineData("deterministic")]
+    [InlineData("bm25")]
+    [InlineData("vector")]
+    public async Task BuiltInStoresRejectSameIdAcrossWorldOrScope(
+        string storeKind)
+    {
+        var store = Store(storeKind);
+        var original = BoundRecord(
+            "shared-id",
+            "npc:npc-1",
+            "world-a",
+            "save-a",
+            "original");
+        await store.UpsertAsync(original, CancellationToken.None);
+
+        var worldConflict = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.UpsertAsync(
+                    BoundRecord(
+                        "shared-id",
+                        "npc:npc-1",
+                        "world-b",
+                        "save-a",
+                        "other world"),
+                    CancellationToken.None)
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.NamespaceConflict,
+            worldConflict.ReasonCode);
+
+        var scopeConflict = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.UpsertAsync(
+                    BoundRecord(
+                        "shared-id",
+                        "npc:npc-2",
+                        "world-a",
+                        "save-a",
+                        "other scope"),
+                    CancellationToken.None)
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.NamespaceConflict,
+            scopeConflict.ReasonCode);
+
+        var saveConflict = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.UpsertAsync(
+                    BoundRecord(
+                        "shared-id",
+                        "npc:npc-1",
+                        "world-a",
+                        "save-b",
+                        "other save"),
+                    CancellationToken.None)
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.NamespaceConflict,
+            saveConflict.ReasonCode);
+
+        var retained = Assert.Single(
+            await store.SearchAsync(
+                new MemoryQuery(
+                    original.Scope,
+                    Json("{}"),
+                    worldId: "world-a",
+                    sessionId: "save-a",
+                    requireCommittedProvenance: true),
+                CancellationToken.None));
+        Assert.Contains(
+            "original",
+            retained.Record.Content.GetRawText(),
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("deterministic")]
+    [InlineData("bm25")]
+    [InlineData("vector")]
+    public async Task BuiltInStoresRequireExactRecordForGuardedDelete(
+        string storeKind)
+    {
+        var store = Store(storeKind);
+        var original = BoundRecord(
+            "shared-id",
+            "npc:npc-1",
+            "world-a",
+            "save-a",
+            "original");
+        await store.UpsertAsync(original, CancellationToken.None);
+
+        var conflict = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.ApplyAtomicBatchAsync(
+                    new[]
+                    {
+                        MemoryMutation.Delete(
+                            BoundRecord(
+                                "shared-id",
+                                "npc:npc-1",
+                                "world-b",
+                                "save-a",
+                                "original"))
+                    })
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.PreconditionFailed,
+            conflict.ReasonCode);
+
+        var stale = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.ApplyAtomicBatchAsync(
+                    new[]
+                    {
+                        MemoryMutation.Delete(
+                            BoundRecord(
+                                "shared-id",
+                                "npc:npc-1",
+                                "world-a",
+                                "save-a",
+                                "stale content"))
+                    })
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.PreconditionFailed,
+            stale.ReasonCode);
+
+        var deleted = await store.ApplyAtomicBatchAsync(
+            new[] { MemoryMutation.Delete(original) });
+        Assert.True(Assert.Single(deleted).Changed);
+        var replayed = await store.ApplyAtomicBatchAsync(
+            new[] { MemoryMutation.Delete(original) });
+        Assert.False(Assert.Single(replayed).Changed);
+    }
+
+    [Theory]
+    [InlineData("deterministic")]
+    [InlineData("bm25")]
+    [InlineData("vector")]
+    public async Task RuntimeStyleBatchesTreatBareUpsertAsCreateOnly(
+        string storeKind)
+    {
+        var store = (IIdempotentAtomicMemoryBatchStore)Store(storeKind);
+        var original = BoundRecord(
+            "conditional-id",
+            "npc:npc-1",
+            "world-a",
+            "save-a",
+            "version one");
+        var replacement = BoundRecord(
+            "conditional-id",
+            "npc:npc-1",
+            "world-a",
+            "save-a",
+            "version two");
+        await store.UpsertAsync(original, CancellationToken.None);
+
+        var unguarded = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.ApplyIdempotentAtomicBatchAsync(
+                    "unguarded-replace-" + storeKind,
+                    new[] { MemoryMutation.Upsert(replacement) })
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.PreconditionFailed,
+            unguarded.ReasonCode);
+
+        var replaced = await store.ApplyIdempotentAtomicBatchAsync(
+            "guarded-replace-" + storeKind,
+            new[] { MemoryMutation.Upsert(replacement, original) });
+        Assert.True(Assert.Single(replaced).Changed);
+
+        var stale = await Assert.ThrowsAsync<MemoryMutationConflictException>(
+            () => store.ApplyIdempotentAtomicBatchAsync(
+                    "stale-replace-" + storeKind,
+                    new[]
+                    {
+                        MemoryMutation.Upsert(
+                            BoundRecord(
+                                "conditional-id",
+                                "npc:npc-1",
+                                "world-a",
+                                "save-a",
+                                "version three"),
+                            original)
+                    })
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.PreconditionFailed,
+            stale.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData("deterministic", "timeline")]
+    [InlineData("deterministic", "epoch")]
+    [InlineData("deterministic", "observer")]
+    [InlineData("deterministic", "observer_incarnation")]
+    [InlineData("deterministic", "source_incarnation")]
+    [InlineData("deterministic", "perspective_kind")]
+    [InlineData("deterministic", "game_clock")]
+    [InlineData("deterministic", "game_timeline")]
+    [InlineData("deterministic", "game_epoch")]
+    [InlineData("bm25", "timeline")]
+    [InlineData("bm25", "observer_incarnation")]
+    [InlineData("bm25", "source_incarnation")]
+    [InlineData("bm25", "game_epoch")]
+    [InlineData("vector", "timeline")]
+    [InlineData("vector", "observer_incarnation")]
+    [InlineData("vector", "source_incarnation")]
+    [InlineData("vector", "game_epoch")]
+    public async Task BuiltInStoresIsolateGameSemanticAuthorities(
+        string storeKind,
+        string boundary)
+    {
+        var store = Store(storeKind);
+        var original = SemanticRecord("semantic-id");
+        var foreign = boundary switch
+        {
+            "timeline" => SemanticRecord(
+                "semantic-id",
+                timelineId: "timeline-fork",
+                gameTimeTimelineId: "timeline-fork"),
+            "epoch" => SemanticRecord(
+                "semantic-id",
+                timelineEpoch: 3,
+                gameTimeEpoch: 3),
+            "observer" => SemanticRecord(
+                "semantic-id",
+                observerEntityId: "npc-9"),
+            "observer_incarnation" => SemanticRecord(
+                "semantic-id",
+                observerIncarnation: 3),
+            "source_incarnation" => SemanticRecord(
+                "semantic-id",
+                sourceIncarnation: 4),
+            "perspective_kind" => SemanticRecord(
+                "semantic-id",
+                perspectiveKind: "rumor"),
+            "game_clock" => SemanticRecord(
+                "semantic-id",
+                gameTimeClockId: "dream-clock"),
+            "game_timeline" => SemanticRecord(
+                "semantic-id",
+                timelineId: "timeline-fork",
+                gameTimeTimelineId: "timeline-fork"),
+            "game_epoch" => SemanticRecord(
+                "semantic-id",
+                gameTimeEpoch: 3),
+            _ => throw new ArgumentOutOfRangeException(nameof(boundary))
+        };
+        await store.UpsertAsync(original, CancellationToken.None);
+
+        var overwrite = await Assert.ThrowsAsync<
+            MemoryMutationConflictException>(
+            () => store.UpsertAsync(foreign, CancellationToken.None)
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.NamespaceConflict,
+            overwrite.ReasonCode);
+
+        var delete = await Assert.ThrowsAsync<MemoryMutationConflictException>(
+            () => store.ApplyAtomicBatchAsync(
+                    new[] { MemoryMutation.Delete(foreign) })
+                .AsTask());
+        Assert.Equal(
+            MemoryBatchReasonCodes.PreconditionFailed,
+            delete.ReasonCode);
+
+        var retained = await store.ApplyAtomicBatchAsync(
+            new[] { MemoryMutation.Delete(original) });
+        Assert.True(Assert.Single(retained).Changed);
+    }
+
     private static async Task<IReadOnlyList<MemorySearchResult>>
         SearchAllAsync(IMemoryProvider store)
     {
@@ -250,6 +539,105 @@ public sealed class MemoryBatchTests
             50,
             DateTimeOffset.UnixEpoch,
             DateTimeOffset.UnixEpoch);
+    }
+
+    private static MemoryRecord BoundRecord(
+        string id,
+        string scope,
+        string worldId,
+        string? sessionId,
+        string text)
+    {
+        return new MemoryRecord(
+            id,
+            scope,
+            Json($$"""{"text":"{{text}}"}"""),
+            Array.Empty<string>(),
+            50,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            provenance: new MemoryProvenance(
+                worldId,
+                sessionId,
+                saveRevision: 1,
+                sourceRunId: "source-run",
+                sourceEventId: "source-event",
+                committed: true));
+    }
+
+    private static MemoryRecord SemanticRecord(
+        string id,
+        string timelineId = "timeline-main",
+        long timelineEpoch = 2,
+        string observerEntityId = "npc-1",
+        long observerIncarnation = 2,
+        string perspectiveKind = "observation",
+        long sourceIncarnation = 3,
+        string gameTimeClockId = "world-clock",
+        string gameTimeTimelineId = "timeline-main",
+        long gameTimeEpoch = 2)
+    {
+        return new MemoryRecord(
+            id,
+            "npc:npc-1",
+            Json("""{"text":"semantic memory"}"""),
+            Array.Empty<string>(),
+            50,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch,
+            provenance: new MemoryProvenance(
+                "world-a",
+                "save-a",
+                saveRevision: 5,
+                sourceRunId: "source-run",
+                sourceEventId: "source-event",
+                committed: true,
+                timelineId,
+                new GameKnowledgePerspective(
+                    new GameEntityIdentity(
+                        observerEntityId,
+                        observerIncarnation),
+                    perspectiveKind,
+                    new GameEntityIdentity("npc-2", sourceIncarnation)),
+                timelineEpoch),
+            gameTimeWindow: new GameTimeWindow(
+                validFrom: new GameTimePoint(
+                    gameTimeClockId,
+                    gameTimeTimelineId,
+                    gameTimeEpoch,
+                    tick: 10)));
+    }
+
+    private static IAtomicMemoryBatchStore Store(string kind)
+    {
+        return kind switch
+        {
+            "deterministic" => new DeterministicMemoryStore(),
+            "bm25" => new Bm25MemoryStore(),
+            "vector" => new VectorMemoryStore(new FixedEmbeddingProvider()),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+    }
+
+    private sealed class FixedEmbeddingProvider : IMemoryEmbeddingProvider
+    {
+        public string ProviderId => "fixed-embedding";
+
+        public string ModelId => "fixed-test";
+
+        public string Version => "1";
+
+        public int Dimensions => 2;
+
+        public ValueTask<ReadOnlyMemory<float>> EmbedAsync(
+            JsonElement value,
+            CancellationToken cancellationToken)
+        {
+            _ = value;
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<ReadOnlyMemory<float>>(
+                new float[] { 1, 0 });
+        }
     }
 
     private static JsonElement Json(string value)

@@ -24,6 +24,13 @@ The coordinate is stored in the run's `gameContext` extension and copied to
 host action requests. It does not assume that a tick is a frame, second, turn,
 day, or any other fixed unit.
 
+`epoch`, `tick`, save revision, and state version use exact integers because
+they are ordering and identity fences. That does not restrict game data to
+integers: ordinary context, workflow values, tool arguments, receipts, and
+outputs accept bounded JSON numbers, including fractions, negative values, and
+scientific notation. A game may use decimal strings or fixed-point integers
+when its own economy needs an exact cross-platform arithmetic contract.
+
 ## Advancing authoritative game context
 
 The run coordinate is a durable fence, not a one-time launch parameter. After
@@ -250,8 +257,9 @@ the same batch identifier cannot execute concurrently through two coordinator
 instances. A multi-process host must make its lifecycle implementation a
 durable ownership boundary: `BatchStartedAsync`, actor completion, and abort
 must compare an owner or attempt generation before accepting a write. The
-world-evolution runner already supplies its own durable owner-generation fence;
-a custom multi-process staging service must provide the equivalent guarantee.
+Use `WorkflowRunner` for fixed world-evolution workflows that need its durable
+lease and owner-generation fence. A custom multi-process staging service must
+provide the equivalent guarantee.
 
 Nonterminal participants are not retained in coordinator memory. Their batch,
 actor, decision, and input-order metadata travels with the durable run, so

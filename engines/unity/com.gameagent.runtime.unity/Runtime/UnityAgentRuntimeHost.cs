@@ -56,6 +56,7 @@ namespace GameAgent.Unity
 
         private UnityMainThreadDispatcher _dispatcher;
         private UnityMainThreadDispatcher _runtimeEventDispatcher;
+        private UnityTerminalObserverQueue _terminalObservers;
         private UnityRuntimeEventPublisher _eventPublisher;
         private UnityAgentRuntimeFacade _facade;
         private UnityBoundedCancellationDispatcher.Lease
@@ -74,9 +75,15 @@ namespace GameAgent.Unity
 
         public event Action<DurableRunOutcome> DurableRunCompleted;
 
+        public event Action<RoutedExecutionOutcome> RoutedRunCompleted;
+
+        public event Action<SimpleCompletionOutcome> CompletionCompleted;
+
         public event Action<RuntimeEvent> RuntimeEventPublished;
 
         public event Action<Exception> RunFaulted;
+
+        public event Action<UnityRunFault> RunFaultedDetailed;
 
         public event Action<bool> ApplicationPauseChanged;
 
@@ -132,6 +139,26 @@ namespace GameAgent.Unity
                 return _eventPublisher == null
                     ? 0
                     : _eventPublisher.DroppedEvents;
+            }
+        }
+
+        public int PendingTerminalObserverCount
+        {
+            get
+            {
+                return _terminalObservers == null
+                    ? 0
+                    : _terminalObservers.PendingCount;
+            }
+        }
+
+        public int TerminalObserverReservationCount
+        {
+            get
+            {
+                return _terminalObservers == null
+                    ? 0
+                    : _terminalObservers.ReservedCount;
             }
         }
 
@@ -257,9 +284,23 @@ namespace GameAgent.Unity
                     "Configure the Unity runtime host before starting a run.");
             }
 
-            var task = _facade.RunAsync(request, cancellationToken);
-            _ = PublishHeadlessRunResultAsync(task);
-            return task;
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.RunAsync(request, cancellationToken);
+                _ = PublishHeadlessRunResultAsync(
+                    task,
+                    terminal,
+                    request == null || request.Run == null
+                        ? null
+                        : request.Run.RunId);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
         }
 
         public Task<DurableRunOutcome> RunAsync(
@@ -272,9 +313,26 @@ namespace GameAgent.Unity
                     "Configure the Unity runtime host before starting a run.");
             }
 
-            var task = _facade.RunAsync(request, cancellationToken);
-            _ = PublishDurableRunResultAsync(task);
-            return task;
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.RunAsync(request, cancellationToken);
+                _ = PublishDurableRunResultAsync(
+                    task,
+                    terminal,
+                    "durable_run",
+                    request == null || request.Run == null
+                        ? null
+                        : request.Run.RunId,
+                    null,
+                    null);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
         }
 
         public Task<DurableRunOutcome> ResumeAsync(
@@ -290,13 +348,167 @@ namespace GameAgent.Unity
                     "Configure the Unity runtime host before resuming a run.");
             }
 
-            var task = _facade.ResumeAsync(
-                runId,
-                continuation,
-                reconciler,
-                cancellationToken);
-            _ = PublishDurableRunResultAsync(task);
-            return task;
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.ResumeAsync(
+                    runId,
+                    continuation,
+                    reconciler,
+                    cancellationToken);
+                _ = PublishDurableRunResultAsync(
+                    task,
+                    terminal,
+                    "durable_resume",
+                    runId,
+                    null,
+                    null);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
+        }
+
+        public Task<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before starting a routed run.");
+            }
+
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.RunRoutedAsync(request, cancellationToken);
+                _ = PublishRoutedRunResultAsync(
+                    task,
+                    terminal,
+                    request == null || request.Run == null
+                        || request.Run.Run == null
+                        ? null
+                        : request.Run.Run.RunId,
+                    request == null || request.Workflow == null
+                        ? null
+                        : request.Workflow.RunKey);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
+        }
+
+        public Task<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before starting a completion.");
+            }
+
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.CompleteAsync(request, cancellationToken);
+                _ = PublishCompletionResultAsync(
+                    task,
+                    terminal,
+                    request == null ? null : request.OperationId);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
+        }
+
+        public Task<ChildAgentRunResult> RunChildAsync(
+            string parentRunId,
+            DurableRunRequest request,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before starting a child run.");
+            }
+
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.RunChildAsync(
+                    parentRunId,
+                    request,
+                    cancellationToken);
+                _ = PublishChildRunResultAsync(
+                    task,
+                    terminal,
+                    request == null || request.Run == null
+                        ? null
+                        : request.Run.RunId,
+                    parentRunId);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
+        }
+
+        public Task<ChildAgentRunResult> RunChildAsync(
+            AgentRun parentRun,
+            DurableRunRequest request,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before starting a child run.");
+            }
+
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.RunChildAsync(
+                    parentRun,
+                    request,
+                    cancellationToken);
+                _ = PublishChildRunResultAsync(
+                    task,
+                    terminal,
+                    request == null || request.Run == null
+                        ? null
+                        : request.Run.RunId,
+                    parentRun == null ? null : parentRun.RunId);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
+        }
+
+        public int CancelChildren(string parentRunId)
+        {
+            if (_facade == null)
+            {
+                throw new InvalidOperationException(
+                    "Configure the Unity runtime host before cancelling child runs.");
+            }
+
+            return _facade.CancelChildren(parentRunId);
         }
 
         public Task<DurableRunOutcome> ResumeAsync(
@@ -313,14 +525,29 @@ namespace GameAgent.Unity
                     "Configure the Unity runtime host before resuming a run.");
             }
 
-            var task = _facade.ResumeAsync(
-                runId,
-                guard,
-                continuation,
-                reconciler,
-                cancellationToken);
-            _ = PublishDurableRunResultAsync(task);
-            return task;
+            var terminal = ReserveTerminalObserver();
+            try
+            {
+                var task = _facade.ResumeAsync(
+                    runId,
+                    guard,
+                    continuation,
+                    reconciler,
+                    cancellationToken);
+                _ = PublishDurableRunResultAsync(
+                    task,
+                    terminal,
+                    "durable_resume",
+                    runId,
+                    null,
+                    null);
+                return task;
+            }
+            catch
+            {
+                terminal.Dispose();
+                throw;
+            }
         }
 
         /// <summary>
@@ -377,14 +604,21 @@ namespace GameAgent.Unity
 
         private void Update()
         {
-            if (_dispatcher == null || _dispatcher.IsShutdown)
+            if (_dispatcher != null && !_dispatcher.IsShutdown)
             {
-                return;
+                _dispatcher.Pump(
+                    Math.Max(1, maxDispatchesPerFrame),
+                    Math.Max(0.01, dispatchBudgetMilliseconds));
             }
 
-            _dispatcher.Pump(
-                Math.Max(1, maxDispatchesPerFrame),
-                Math.Max(0.01, dispatchBudgetMilliseconds));
+            if (_terminalObservers != null)
+            {
+                _terminalObservers.Pump(
+                    Math.Max(1, maxDispatchesPerFrame),
+                    Math.Max(0.01, dispatchBudgetMilliseconds),
+                    Debug.LogException);
+            }
+
             if (_runtimeEventDispatcher != null
                 && !_runtimeEventDispatcher.IsShutdown)
             {
@@ -399,7 +633,7 @@ namespace GameAgent.Unity
             var handler = ApplicationPauseChanged;
             if (handler != null)
             {
-                handler(paused);
+                InvokeObserversIsolated(handler, paused);
             }
         }
 
@@ -539,7 +773,13 @@ namespace GameAgent.Unity
             var retryRequired = false;
             Task dispatcherDrain = null;
             Task runtimeEventDispatcherDrain = null;
+            Task terminalPublisherDrain = null;
             var dispatcherOwnerDrainCompleted = true;
+            if (_terminalObservers != null)
+            {
+                terminalPublisherDrain = _terminalObservers.StopAccepting();
+            }
+
             if (_facade != null)
             {
                 _facade.RequestShutdown();
@@ -673,11 +913,34 @@ namespace GameAgent.Unity
                         retryRequired = true;
                     }
                 }
+
+                if (terminalPublisherDrain != null)
+                {
+                    if (await WaitForLifecycleWorkAsync(
+                                terminalPublisherDrain)
+                            .ConfigureAwait(false))
+                    {
+                        await terminalPublisherDrain.ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        ObserveLateFault(terminalPublisherDrain);
+                        failures.Add(
+                            new TimeoutException(
+                                "Timed out while publishing Unity terminal observers."));
+                        retryRequired = true;
+                    }
+                }
             }
             finally
             {
                 try
                 {
+                    if (_terminalObservers != null)
+                    {
+                        _ = _terminalObservers.StopAccepting();
+                    }
+
                     if (_dispatcher != null
                         && _dispatcher.IsShutdown)
                     {
@@ -882,6 +1145,20 @@ namespace GameAgent.Unity
                 barrier);
         }
 
+        private UnityTerminalObserverQueue.Reservation
+            ReserveTerminalObserver()
+        {
+            var queue = _terminalObservers;
+            if (queue == null || !queue.TryReserve(out var reservation))
+            {
+                throw new InvalidOperationException(
+                    "The Unity terminal-observer capacity is exhausted. "
+                    + "Pump the runtime host before starting more work.");
+            }
+
+            return reservation;
+        }
+
         private static async Task AwaitWithCancellationAsync(
             Task shutdown,
             CancellationToken cancellationToken)
@@ -907,90 +1184,254 @@ namespace GameAgent.Unity
         }
 
         private async Task PublishHeadlessRunResultAsync(
-            Task<HeadlessRunOutcome> run)
+            Task<HeadlessRunOutcome> run,
+            UnityTerminalObserverQueue.Reservation terminal,
+            string runId)
         {
             try
             {
                 var outcome = await run.ConfigureAwait(false);
-                if (_dispatcher == null)
-                {
-                    return;
-                }
-
                 PostObserver(
+                    terminal,
                     () =>
                     {
                         var handler = RunCompleted;
                         if (handler != null)
                         {
-                            handler(outcome);
+                            InvokeObserversIsolated(handler, outcome);
                         }
                     });
             }
             catch (Exception exception)
             {
-                if (_dispatcher == null)
-                {
-                    return;
-                }
-
-                PostFault(exception);
+                PostFault(
+                    terminal,
+                    "headless_run",
+                    runId,
+                    null,
+                    null,
+                    true,
+                    exception);
+            }
+            finally
+            {
+                terminal.Dispose();
             }
         }
 
         private async Task PublishDurableRunResultAsync(
-            Task<DurableRunOutcome> run)
+            Task<DurableRunOutcome> run,
+            UnityTerminalObserverQueue.Reservation terminal,
+            string operationKind,
+            string runId,
+            string operationId,
+            string parentRunId)
         {
             try
             {
                 var outcome = await run.ConfigureAwait(false);
-                if (_dispatcher == null)
-                {
-                    return;
-                }
-
                 PostObserver(
+                    terminal,
                     () =>
                     {
                         var handler = DurableRunCompleted;
                         if (handler != null)
                         {
-                            handler(outcome);
+                            InvokeObserversIsolated(handler, outcome);
                         }
                     });
             }
             catch (Exception exception)
             {
-                if (_dispatcher == null)
-                {
-                    return;
-                }
-
-                PostFault(exception);
+                PostFault(
+                    terminal,
+                    operationKind,
+                    runId,
+                    operationId,
+                    parentRunId,
+                    true,
+                    exception);
+            }
+            finally
+            {
+                terminal.Dispose();
             }
         }
 
-        private void PostFault(Exception exception)
+        private async Task PublishChildRunResultAsync(
+            Task<ChildAgentRunResult> run,
+            UnityTerminalObserverQueue.Reservation terminal,
+            string runId,
+            string parentRunId)
         {
+            try
+            {
+                var result = await run.ConfigureAwait(false);
+                PostObserver(
+                    terminal,
+                    () =>
+                    {
+                        var handler = DurableRunCompleted;
+                        if (handler != null)
+                        {
+                            InvokeObserversIsolated(
+                                handler,
+                                result.Outcome);
+                        }
+                    });
+            }
+            catch (Exception exception)
+            {
+                PostFault(
+                    terminal,
+                    "child_run",
+                    runId,
+                    null,
+                    parentRunId,
+                    true,
+                    exception);
+            }
+            finally
+            {
+                terminal.Dispose();
+            }
+        }
+
+        private async Task PublishRoutedRunResultAsync(
+            Task<RoutedExecutionOutcome> run,
+            UnityTerminalObserverQueue.Reservation terminal,
+            string runId,
+            string operationId)
+        {
+            try
+            {
+                var outcome = await run.ConfigureAwait(false);
+                PostObserver(
+                    terminal,
+                    () =>
+                    {
+                        var handler = RoutedRunCompleted;
+                        if (handler != null)
+                        {
+                            InvokeObserversIsolated(handler, outcome);
+                        }
+                    });
+            }
+            catch (Exception exception)
+            {
+                PostFault(
+                    terminal,
+                    "routed_run",
+                    runId,
+                    operationId,
+                    null,
+                    true,
+                    exception);
+            }
+            finally
+            {
+                terminal.Dispose();
+            }
+        }
+
+        private async Task PublishCompletionResultAsync(
+            Task<SimpleCompletionOutcome> run,
+            UnityTerminalObserverQueue.Reservation terminal,
+            string operationId)
+        {
+            try
+            {
+                var outcome = await run.ConfigureAwait(false);
+                PostObserver(
+                    terminal,
+                    () =>
+                    {
+                        var handler = CompletionCompleted;
+                        if (handler != null)
+                        {
+                            InvokeObserversIsolated(handler, outcome);
+                        }
+                    });
+            }
+            catch (Exception exception)
+            {
+                PostFault(
+                    terminal,
+                    "completion",
+                    null,
+                    operationId,
+                    null,
+                    false,
+                    exception);
+            }
+            finally
+            {
+                terminal.Dispose();
+            }
+        }
+
+        private void PostFault(
+            UnityTerminalObserverQueue.Reservation terminal,
+            string operationKind,
+            string runId,
+            string operationId,
+            string parentRunId,
+            bool reconciliationRequired,
+            Exception exception)
+        {
+            var fault = new UnityRunFault(
+                operationKind,
+                runId,
+                operationId,
+                parentRunId,
+                reconciliationRequired,
+                exception);
             PostObserver(
+                terminal,
                 () =>
                 {
+                    var detailed = RunFaultedDetailed;
+                    if (detailed != null)
+                    {
+                        InvokeObserversIsolated(detailed, fault);
+                    }
+
                     var handler = RunFaulted;
                     if (handler != null)
                     {
-                        handler(exception);
+                        InvokeObserversIsolated(handler, exception);
                     }
                 });
         }
 
-        private void PostObserver(Action observer)
+        private static void InvokeObserversIsolated<T>(
+            Action<T> handlers,
+            T value)
         {
-            if (!_dispatcher.TryPost(observer))
+            var invocationList = handlers.GetInvocationList();
+            foreach (var candidate in invocationList)
+            {
+                try
+                {
+                    ((Action<T>)candidate)(value);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                }
+            }
+        }
+
+        private static void PostObserver(
+            UnityTerminalObserverQueue.Reservation terminal,
+            Action observer)
+        {
+            if (!terminal.Publish(observer))
             {
                 Debug.LogException(
                     new InvalidOperationException(
-                        "A Unity runtime observer callback was rejected "
-                        + "because the dispatcher is full or shutting down."));
+                        "A Unity terminal observer was rejected because "
+                        + "the host is shutting down."));
             }
         }
 
@@ -999,7 +1440,7 @@ namespace GameAgent.Unity
             var handler = RuntimeEventPublished;
             if (handler != null)
             {
-                handler(runtimeEvent);
+                InvokeObserversIsolated(handler, runtimeEvent);
             }
         }
 
@@ -1048,6 +1489,8 @@ namespace GameAgent.Unity
                 {
                     _dispatcher = new UnityMainThreadDispatcher(
                         Math.Max(1, dispatcherCapacity));
+                    _terminalObservers = new UnityTerminalObserverQueue(
+                        Math.Max(1, maxActiveRuns));
                     _dispatcherShutdownLease = lease;
                     _dispatcher.UnhandledException +=
                         exception => Debug.LogException(exception);

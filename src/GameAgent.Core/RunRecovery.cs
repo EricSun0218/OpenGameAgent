@@ -55,6 +55,13 @@ public sealed class RecoveredRun
     public string RecoveryWorkloadClass { get; set; } =
         ProviderWorkloadClasses.Interactive;
 
+    public string RecoveryExecutionMode { get; set; } =
+        DurableExecutionModes.Agent;
+
+    public ModelInferenceOptions? RecoveryInference { get; set; }
+
+    public ProviderRoutePreference? RecoveryRoutePreference { get; set; }
+
     public IReadOnlyList<ToolActivationRecord> RecoveryToolActivations
     { get; set; } = Array.Empty<ToolActivationRecord>();
 
@@ -1701,6 +1708,11 @@ public sealed class RunRecovery
             RecoveryWorkloadClass = ResolveRecoveryWorkloadClass(
                 lastSnapshot,
                 initialInput),
+            RecoveryExecutionMode = initialInput?.ExecutionMode
+                                    ?? DurableExecutionModes.Agent,
+            RecoveryInference = initialInput?.Inference?.CloneValidated(),
+            RecoveryRoutePreference =
+                initialInput?.RoutePreference?.CloneValidated(),
             RecoveryToolActivations = lastToolDisclosure?.Activations
                 .Select(item => item.Clone())
                 .ToArray()

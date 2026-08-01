@@ -131,6 +131,67 @@ public sealed class WorkflowCompilerTests
     }
 
     [Fact]
+    public void Compile_AcceptsExactScientificNumericBounds()
+    {
+        var schema = WorkflowTestData.Json(
+            """
+            {
+              "type": "number",
+              "minimum": -1e100,
+              "maximum": 1e100
+            }
+            """);
+        var stage = WorkflowStageDefinition.CreateStep(
+            "only",
+            new WorkflowStepReference("test/pass"),
+            schema,
+            schema);
+        var definition = new WorkflowDefinition(
+            "large-number-bounds",
+            "v1",
+            schema,
+            schema,
+            "only",
+            new[] { stage });
+
+        var compiled = new WorkflowCompiler().Compile(definition);
+
+        Assert.Single(compiled.Stages);
+    }
+
+    [Fact]
+    public void Compile_RejectsReversedScientificNumericBounds()
+    {
+        var schema = WorkflowTestData.Json(
+            """
+            {
+              "type": "number",
+              "minimum": 1e100,
+              "maximum": -1e100
+            }
+            """);
+        var stage = WorkflowStageDefinition.CreateStep(
+            "only",
+            new WorkflowStepReference("test/pass"),
+            schema,
+            schema);
+        var definition = new WorkflowDefinition(
+            "reversed-large-number-bounds",
+            "v1",
+            schema,
+            schema,
+            "only",
+            new[] { stage });
+
+        var exception = Assert.Throws<WorkflowCompilationException>(
+            () => new WorkflowCompiler().Compile(definition));
+
+        Assert.Contains(
+            exception.Diagnostics,
+            item => item.Code == WorkflowReasonCodes.SchemaInvalid);
+    }
+
+    [Fact]
     public void ConstructorsEnumerateInsteadOfTrustingReportedCount()
     {
         var schema = WorkflowTestData.StringSchema();

@@ -14,7 +14,7 @@ public sealed class AnthropicMessagesStreamingProvider :
     private const string WireContentType =
         "application/json; charset=utf-8";
     private const string RoutePolicyVersion =
-        "anthropic-messages.route-policy.v1";
+        "anthropic-messages.route-policy.v2";
 
     private static readonly UTF8Encoding StrictUtf8 =
         new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -57,7 +57,9 @@ public sealed class AnthropicMessagesStreamingProvider :
             "sse.named-event-json.2023-06-01.v1",
             "anthropic.tool-use-result.v1",
             "anthropic.cumulative-usage-cache.v1",
-            "unsupported.v1",
+            "anthropic.thinking-output."
+            + _options.ThinkingDialect
+            + ".v2",
             WireContentType);
         _routeMetadata = new ProviderRouteMetadata(
             _options.Model,
@@ -598,6 +600,27 @@ public sealed class AnthropicMessagesStreamingProvider :
             canonical,
             "maxOutputTokens",
             options.MaxOutputTokens.ToString(CultureInfo.InvariantCulture));
+        AddPolicy(
+            canonical,
+            "thinkingDialect",
+            options.ThinkingDialect);
+        AddPolicy(
+            canonical,
+            "defaultReasoningTokenBudget",
+            options.DefaultReasoningTokenBudget?.ToString(
+                CultureInfo.InvariantCulture) ?? string.Empty);
+        AddPolicy(
+            canonical,
+            "supportsThinkingDisable",
+            options.SupportsThinkingDisable ? "true" : "false");
+        AddPolicy(
+            canonical,
+            "supportedReasoningEfforts",
+            string.Join(",", options.SupportedReasoningEfforts));
+        AddPolicy(
+            canonical,
+            "supportsSamplingControls",
+            options.SupportsSamplingControls ? "true" : "false");
         AddPolicy(
             canonical,
             "maxContextTokens",

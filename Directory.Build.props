@@ -20,8 +20,8 @@
     <PackageTags>game;ai;agent;runtime;godot;unity</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <NuGetAudit>true</NuGetAudit>
-    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAudit Condition="'$(NuGetAudit)' == ''">true</NuGetAudit>
+    <NuGetAuditMode Condition="'$(NuGetAuditMode)' == ''">all</NuGetAuditMode>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
   <ItemGroup Condition="'$(IsPackable)' != 'false'">

@@ -244,7 +244,47 @@ internal sealed class AnthropicSseParser
                         id,
                         toolNameDelta: name,
                         argumentsJsonDelta: null)
-                };
+                    };
+                }
+            case "thinking":
+                {
+                    var initial = ReadString(
+                        block,
+                        "thinking",
+                        1_048_576,
+                        allowEmpty: true);
+                    var hasInitialSignature = false;
+                    if (block.TryGetProperty("signature", out var signature))
+                    {
+                        if (signature.ValueKind != JsonValueKind.String)
+                        {
+                            throw Protocol(
+                                "An Anthropic thinking signature is invalid.");
+                        }
+
+                        EnsureUtf8Limit(
+                            signature.GetString() ?? string.Empty,
+                            65_536,
+                            "An Anthropic thinking signature exceeded its limit.");
+                        hasInitialSignature = true;
+                    }
+
+                    _activeBlock = ActiveBlock.Thinking(
+                        index,
+                        hasInitialSignature);
+                    return initial.Length == 0
+                        ? Array.Empty<ModelStreamEvent>()
+                        : new[] { EventReasoning(initial) };
+                }
+            case "redacted_thinking":
+                {
+                    _ = ReadString(
+                        block,
+                        "data",
+                        65_536,
+                        allowEmpty: false);
+                    _activeBlock = ActiveBlock.RedactedThinking(index);
+                    return Array.Empty<ModelStreamEvent>();
                 }
             default:
                 throw new ProviderException(
@@ -293,6 +333,48 @@ internal sealed class AnthropicSseParser
             };
         }
 
+        if (active.Kind == ActiveBlockKind.Thinking)
+        {
+            if (string.Equals(
+                    type,
+                    "thinking_delta",
+                    StringComparison.Ordinal))
+            {
+                return new[]
+                {
+                    EventReasoning(
+                        ReadString(
+                            delta,
+                            "thinking",
+                            1_048_576,
+                            allowEmpty: true))
+                };
+            }
+
+            if (string.Equals(
+                    type,
+                    "signature_delta",
+                    StringComparison.Ordinal))
+            {
+                _ = ReadString(
+                    delta,
+                    "signature",
+                    65_536,
+                    allowEmpty: false);
+                active.MarkThinkingSignature();
+                return Array.Empty<ModelStreamEvent>();
+            }
+
+            throw Protocol(
+                "An Anthropic thinking block received an invalid delta.");
+        }
+
+        if (active.Kind == ActiveBlockKind.RedactedThinking)
+        {
+            throw Protocol(
+                "An Anthropic redacted-thinking block received a delta.");
+        }
+
         if (!string.Equals(
                 type,
                 "input_json_delta",
@@ -333,6 +415,13 @@ internal sealed class AnthropicSseParser
         }
 
         var events = new List<ModelStreamEvent>(1);
+        if (active.Kind == ActiveBlockKind.Thinking
+            && !active.SawThinkingSignature)
+        {
+            throw Protocol(
+                "An Anthropic thinking block ended without a signature.");
+        }
+
         if (active.Kind == ActiveBlockKind.Tool)
         {
             var finalInput = active.FinalToolInput();
@@ -815,6 +904,17 @@ internal sealed class AnthropicSseParser
         };
     }
 
+    private ModelStreamEvent EventReasoning(string reasoning)
+    {
+        return new ModelStreamEvent
+        {
+            StreamAttemptId = _streamAttemptId,
+            Ordinal = _ordinal++,
+            Kind = ModelStreamEventKinds.ReasoningDelta,
+            ReasoningDelta = reasoning
+        };
+    }
+
     private ModelStreamEvent EventTool(
         string id,
         string? toolNameDelta,
@@ -896,7 +996,9 @@ internal sealed class AnthropicSseParser
     private enum ActiveBlockKind
     {
         Text,
-        Tool
+        Tool,
+        Thinking,
+        RedactedThinking
     }
 
     private sealed class ActiveBlock
@@ -932,6 +1034,8 @@ internal sealed class AnthropicSseParser
 
         internal bool SawInputDelta { get; private set; }
 
+        internal bool SawThinkingSignature { get; private set; }
+
         internal int InputLength => _input.Length;
 
         internal static ActiveBlock Text(int index)
@@ -959,6 +1063,44 @@ internal sealed class AnthropicSseParser
                 name,
                 initialInput,
                 initialInputHasProperties);
+        }
+
+        internal static ActiveBlock Thinking(
+            int index,
+            bool sawSignature)
+        {
+            return new ActiveBlock(
+                index,
+                ActiveBlockKind.Thinking,
+                null,
+                null,
+                string.Empty,
+                initialInputHasProperties: false)
+            {
+                SawThinkingSignature = sawSignature
+            };
+        }
+
+        internal static ActiveBlock RedactedThinking(int index)
+        {
+            return new ActiveBlock(
+                index,
+                ActiveBlockKind.RedactedThinking,
+                null,
+                null,
+                string.Empty,
+                initialInputHasProperties: false);
+        }
+
+        internal void MarkThinkingSignature()
+        {
+            if (SawThinkingSignature)
+            {
+                throw Protocol(
+                    "Anthropic repeated a thinking signature.");
+            }
+
+            SawThinkingSignature = true;
         }
 
         internal void AppendToolInput(

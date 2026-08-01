@@ -75,9 +75,9 @@ try {
                 -PackageArchive $archivePath
         }
         catch {
-            $rejected = $_.Exception.Message.Contains(
+            $rejected = $_.Exception.Message.IndexOf(
                 "unsafe entry",
-                [StringComparison]::OrdinalIgnoreCase)
+                [StringComparison]::OrdinalIgnoreCase) -ge 0
         }
 
         if (-not $rejected) {

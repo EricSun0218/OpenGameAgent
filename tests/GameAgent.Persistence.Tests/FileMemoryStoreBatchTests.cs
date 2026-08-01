@@ -796,6 +796,427 @@ public sealed class FileMemoryStoreBatchTests
         }
     }
 
+    [Fact]
+    public async Task VersionOneBareReplacementReplaysBeforeVersionTwoWrites()
+    {
+        var path = CreateMemoryPath();
+        try
+        {
+            var create = LegacyFrame(
+                revision: 1,
+                batch: false,
+                contentVersion: 1);
+            var replace = LegacyFrame(
+                revision: 2,
+                batch: true,
+                contentVersion: 2);
+            var log = new byte[create.Length + replace.Length];
+            Buffer.BlockCopy(create, 0, log, 0, create.Length);
+            Buffer.BlockCopy(
+                replace,
+                0,
+                log,
+                create.Length,
+                replace.Length);
+            await File.WriteAllBytesAsync(path, log);
+
+            await using (var recovered = new FileMemoryStore(path))
+            {
+                Assert.Equal(2, recovered.Revision);
+                var existing = Assert.Single(
+                    await SearchAllAsync(recovered)).Record;
+                Assert.Equal(
+                    2,
+                    existing.Content.GetProperty("version").GetInt32());
+
+                var replacement = Record(
+                    "legacy-id",
+                    """{"version":3}""");
+                var committed = await recovered
+                    .ApplyIdempotentAtomicBatchAsync(
+                        "version-two-replacement",
+                        new[]
+                        {
+                            MemoryMutation.Upsert(replacement, existing)
+                        });
+                Assert.True(Assert.Single(committed).Changed);
+                Assert.Equal(3, recovered.Revision);
+            }
+
+            await using var reopened = new FileMemoryStore(path);
+            Assert.Equal(3, reopened.Revision);
+            var final = Assert.Single(await SearchAllAsync(reopened)).Record;
+            Assert.Equal(
+                3,
+                final.Content.GetProperty("version").GetInt32());
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task VersionOneSingleUpsertKeepsHistoricalReplacementSemantics()
+    {
+        var path = CreateMemoryPath();
+        try
+        {
+            var create = LegacyFrame(
+                revision: 1,
+                batch: false,
+                contentVersion: 1,
+                scope: "old-scope");
+            var replace = LegacyFrame(
+                revision: 2,
+                batch: false,
+                contentVersion: 2,
+                scope: "replacement-scope");
+            var log = new byte[create.Length + replace.Length];
+            Buffer.BlockCopy(create, 0, log, 0, create.Length);
+            Buffer.BlockCopy(
+                replace,
+                0,
+                log,
+                create.Length,
+                replace.Length);
+            await File.WriteAllBytesAsync(path, log);
+
+            await using var recovered = new FileMemoryStore(path);
+            Assert.Equal(2, recovered.Revision);
+            var existing = Assert.Single(
+                await recovered.SearchAsync(
+                    new MemoryQuery(
+                        "replacement-scope",
+                        Json("{}"),
+                        maxResults: 128,
+                        maxUtf8Bytes: 1_048_576),
+                    CancellationToken.None)).Record;
+            Assert.Equal("replacement-scope", existing.Scope);
+            Assert.Equal(
+                2,
+                existing.Content.GetProperty("version").GetInt32());
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyOutboxReplayPersistsExplicitVersionTwoMarker()
+    {
+        var path = CreateMemoryPath();
+        try
+        {
+            await using (var store = new FileMemoryStore(path))
+            {
+                await store.UpsertAsync(
+                    ScopedRecord(
+                        "legacy-outbox-id",
+                        "old-scope",
+                        "old"),
+                    CancellationToken.None);
+                var result = await store
+                    .ApplyLegacyIdempotentAtomicBatchAsync(
+                        "legacy-outbox-commit",
+                        new[]
+                        {
+                            MemoryMutation.Upsert(
+                                ScopedRecord(
+                                    "legacy-outbox-id",
+                                    "replacement-scope",
+                                    "replacement"))
+                        });
+                Assert.True(Assert.Single(result).Changed);
+            }
+
+            await using var reopened = new FileMemoryStore(path);
+            var replacement = Assert.Single(
+                await reopened.SearchAsync(
+                    new MemoryQuery(
+                        "replacement-scope",
+                        Json("{}"),
+                        maxResults: 128,
+                        maxUtf8Bytes: 1_048_576),
+                    CancellationToken.None)).Record;
+            Assert.Equal(
+                "replacement",
+                replacement.Content.GetProperty("value").GetString());
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task VersionTwoLegacyMarkerWithoutCommitIdentityIsCorrupt()
+    {
+        var path = CreateMemoryPath();
+        try
+        {
+            await File.WriteAllBytesAsync(
+                path,
+                LegacyFrame(
+                    revision: 1,
+                    batch: true,
+                    contentVersion: 1,
+                    formatVersion: 2,
+                    mutationContractVersion: 0));
+
+            var error = Assert.Throws<MemoryStoreCorruptionException>(
+                () => new FileMemoryStore(path));
+
+            Assert.Contains(
+                "legacy replay marker requires an idempotent commit identity",
+                error.Message,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task VersionOneBatchCannotDeclareMutationContractMarker()
+    {
+        var path = CreateMemoryPath();
+        try
+        {
+            await File.WriteAllBytesAsync(
+                path,
+                LegacyFrame(
+                    revision: 1,
+                    batch: true,
+                    contentVersion: 1,
+                    mutationContractVersion: 0));
+
+            var error = Assert.Throws<MemoryStoreCorruptionException>(
+                () => new FileMemoryStore(path));
+
+            Assert.Contains(
+                "version 1 batch cannot declare a mutation contract version",
+                error.Message,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task FileStoreRejectsCrossWorldReuseAndRecoversGuardedDelete()
+    {
+        var path = CreateMemoryPath();
+        var original = BoundRecord(
+            "shared-id",
+            "world-a",
+            "save-a",
+            "original");
+        try
+        {
+            await using (var store = new FileMemoryStore(path))
+            {
+                await store.UpsertAsync(original, CancellationToken.None);
+
+                var overwrite = await Assert.ThrowsAsync<
+                    MemoryMutationConflictException>(
+                    () => store.UpsertAsync(
+                            BoundRecord(
+                                "shared-id",
+                                "world-b",
+                                "save-a",
+                                "foreign"),
+                            CancellationToken.None)
+                        .AsTask());
+                Assert.Equal(
+                    MemoryBatchReasonCodes.NamespaceConflict,
+                    overwrite.ReasonCode);
+                Assert.Equal(1, store.Revision);
+
+                var delete = await Assert.ThrowsAsync<
+                    MemoryMutationConflictException>(
+                    () => store.ApplyAtomicBatchAsync(
+                            new[]
+                            {
+                                MemoryMutation.Delete(
+                                    BoundRecord(
+                                        "shared-id",
+                                        "world-b",
+                                        "save-a",
+                                        "original"))
+                            })
+                        .AsTask());
+                Assert.Equal(
+                    MemoryBatchReasonCodes.PreconditionFailed,
+                    delete.ReasonCode);
+                Assert.Equal(1, store.Revision);
+
+                var committed = await store.ApplyIdempotentAtomicBatchAsync(
+                    "guarded-delete-commit",
+                    new[] { MemoryMutation.Delete(original) });
+                Assert.True(Assert.Single(committed).Changed);
+                Assert.Equal(2, store.Revision);
+            }
+
+            await using var recovered = new FileMemoryStore(path);
+            Assert.Equal(2, recovered.Revision);
+            Assert.Empty(await SearchAllAsync(recovered));
+            var replayed = await recovered.ApplyIdempotentAtomicBatchAsync(
+                "guarded-delete-commit",
+                new[] { MemoryMutation.Delete(original) });
+            Assert.False(Assert.Single(replayed).Changed);
+            Assert.Equal(2, recovered.Revision);
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task FileStoreConditionalReplacementSurvivesRecovery()
+    {
+        var path = CreateMemoryPath();
+        var original = BoundRecord(
+            "conditional-id",
+            "world-a",
+            "save-a",
+            "version one");
+        var replacement = BoundRecord(
+            "conditional-id",
+            "world-a",
+            "save-a",
+            "version two");
+        try
+        {
+            await using (var store = new FileMemoryStore(path))
+            {
+                await store.UpsertAsync(original, CancellationToken.None);
+
+                var unguarded = await Assert.ThrowsAsync<
+                    MemoryMutationConflictException>(
+                    () => store.ApplyIdempotentAtomicBatchAsync(
+                            "unguarded-replacement",
+                            new[] { MemoryMutation.Upsert(replacement) })
+                        .AsTask());
+                Assert.Equal(
+                    MemoryBatchReasonCodes.PreconditionFailed,
+                    unguarded.ReasonCode);
+                Assert.Equal(1, store.Revision);
+
+                var replaced = await store.ApplyIdempotentAtomicBatchAsync(
+                    "guarded-replacement",
+                    new[]
+                    {
+                        MemoryMutation.Upsert(replacement, original)
+                    });
+                Assert.True(Assert.Single(replaced).Changed);
+                Assert.Equal(2, store.Revision);
+            }
+
+            await using var recovered = new FileMemoryStore(path);
+            Assert.Equal(2, recovered.Revision);
+            var replayed = await recovered.ApplyIdempotentAtomicBatchAsync(
+                "guarded-replacement",
+                new[] { MemoryMutation.Upsert(replacement, original) });
+            Assert.False(Assert.Single(replayed).Changed);
+            Assert.Equal(2, recovered.Revision);
+
+            var stale = await Assert.ThrowsAsync<
+                MemoryMutationConflictException>(
+                () => recovered.ApplyIdempotentAtomicBatchAsync(
+                        "stale-replacement",
+                        new[] { MemoryMutation.Upsert(original, original) })
+                    .AsTask());
+            Assert.Equal(
+                MemoryBatchReasonCodes.PreconditionFailed,
+                stale.ReasonCode);
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
+    [Fact]
+    public async Task FileRecoveryPreservesGameSemanticAuthorityEnvelope()
+    {
+        var path = CreateMemoryPath();
+        var original = SemanticRecord("semantic-id");
+        var foreign = new[]
+        {
+            SemanticRecord(
+                "semantic-id",
+                timelineId: "timeline-fork",
+                gameTimeTimelineId: "timeline-fork"),
+            SemanticRecord(
+                "semantic-id",
+                timelineEpoch: 3,
+                gameTimeEpoch: 3),
+            SemanticRecord(
+                "semantic-id",
+                observerIncarnation: 3),
+            SemanticRecord(
+                "semantic-id",
+                sourceIncarnation: 4),
+            SemanticRecord(
+                "semantic-id",
+                perspectiveKind: "rumor"),
+            SemanticRecord(
+                "semantic-id",
+                gameTimeClockId: "dream-clock"),
+            SemanticRecord(
+                "semantic-id",
+                timelineId: "timeline-fork",
+                gameTimeTimelineId: "timeline-fork"),
+            SemanticRecord(
+                "semantic-id",
+                gameTimeEpoch: 3)
+        };
+        try
+        {
+            await using (var store = new FileMemoryStore(path))
+            {
+                await store.UpsertAsync(original, CancellationToken.None);
+            }
+
+            await using var recovered = new FileMemoryStore(path);
+            foreach (var candidate in foreign)
+            {
+                var overwrite = await Assert.ThrowsAsync<
+                    MemoryMutationConflictException>(
+                    () => recovered.UpsertAsync(
+                            candidate,
+                            CancellationToken.None)
+                        .AsTask());
+                Assert.Equal(
+                    MemoryBatchReasonCodes.NamespaceConflict,
+                    overwrite.ReasonCode);
+
+                var delete = await Assert.ThrowsAsync<
+                    MemoryMutationConflictException>(
+                    () => recovered.ApplyAtomicBatchAsync(
+                            new[] { MemoryMutation.Delete(candidate) })
+                        .AsTask());
+                Assert.Equal(
+                    MemoryBatchReasonCodes.PreconditionFailed,
+                    delete.ReasonCode);
+            }
+
+            var retained = await recovered.ApplyAtomicBatchAsync(
+                new[] { MemoryMutation.Delete(original) });
+            Assert.True(Assert.Single(retained).Changed);
+        }
+        finally
+        {
+            DeleteMemoryDirectory(path);
+        }
+    }
+
     private static async Task<IReadOnlyList<MemorySearchResult>>
         SearchAllAsync(IMemoryProvider store)
     {
@@ -826,6 +1247,108 @@ public sealed class FileMemoryStoreBatchTests
             50,
             timestamp,
             timestamp);
+    }
+
+    private static MemoryRecord ScopedRecord(
+        string id,
+        string scope,
+        string value)
+    {
+        var timestamp = new DateTimeOffset(
+            2026,
+            7,
+            30,
+            0,
+            0,
+            0,
+            TimeSpan.Zero);
+        return new MemoryRecord(
+            id,
+            scope,
+            Json("{\"value\":\"" + value + "\"}"),
+            Array.Empty<string>(),
+            50,
+            timestamp,
+            timestamp);
+    }
+
+    private static MemoryRecord BoundRecord(
+        string id,
+        string worldId,
+        string? sessionId,
+        string text)
+    {
+        var timestamp = new DateTimeOffset(
+            2026,
+            7,
+            30,
+            0,
+            0,
+            0,
+            TimeSpan.Zero);
+        return new MemoryRecord(
+            id,
+            "shared",
+            Json($$"""{"text":"{{text}}"}"""),
+            Array.Empty<string>(),
+            50,
+            timestamp,
+            timestamp,
+            provenance: new MemoryProvenance(
+                worldId,
+                sessionId,
+                saveRevision: 1,
+                sourceRunId: "source-run",
+                sourceEventId: "source-event",
+                committed: true));
+    }
+
+    private static MemoryRecord SemanticRecord(
+        string id,
+        string timelineId = "timeline-main",
+        long timelineEpoch = 2,
+        long observerIncarnation = 2,
+        string perspectiveKind = "observation",
+        long sourceIncarnation = 3,
+        string gameTimeClockId = "world-clock",
+        string gameTimeTimelineId = "timeline-main",
+        long gameTimeEpoch = 2)
+    {
+        var timestamp = new DateTimeOffset(
+            2026,
+            7,
+            30,
+            0,
+            0,
+            0,
+            TimeSpan.Zero);
+        return new MemoryRecord(
+            id,
+            "shared",
+            Json("""{"text":"semantic memory"}"""),
+            Array.Empty<string>(),
+            50,
+            timestamp,
+            timestamp,
+            provenance: new MemoryProvenance(
+                "world-a",
+                "save-a",
+                saveRevision: 5,
+                sourceRunId: "source-run",
+                sourceEventId: "source-event",
+                committed: true,
+                timelineId: timelineId,
+                perspective: new GameKnowledgePerspective(
+                    new GameEntityIdentity("npc-1", observerIncarnation),
+                    perspectiveKind,
+                    new GameEntityIdentity("npc-2", sourceIncarnation)),
+                timelineEpoch: timelineEpoch),
+            gameTimeWindow: new GameTimeWindow(
+                validFrom: new GameTimePoint(
+                    gameTimeClockId,
+                    gameTimeTimelineId,
+                    gameTimeEpoch,
+                    tick: 10)));
     }
 
     private static JsonElement Json(string value)
@@ -900,6 +1423,78 @@ public sealed class FileMemoryStoreBatchTests
         buffer[offset + 1] = (byte)(value >> 8);
         buffer[offset + 2] = (byte)(value >> 16);
         buffer[offset + 3] = (byte)(value >> 24);
+    }
+
+    private static byte[] LegacyFrame(
+        long revision,
+        bool batch,
+        int contentVersion,
+        string scope = "shared",
+        int formatVersion = 1,
+        int? mutationContractVersion = null)
+    {
+        var payloadBuffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(payloadBuffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("formatVersion", formatVersion);
+            writer.WriteNumber("revision", revision);
+            writer.WriteString("operation", batch ? "batch" : "upsert");
+            if (mutationContractVersion.HasValue)
+            {
+                writer.WriteNumber(
+                    "mutationContractVersion",
+                    mutationContractVersion.Value);
+            }
+            if (batch)
+            {
+                writer.WritePropertyName("mutations");
+                writer.WriteStartArray();
+                writer.WriteStartObject();
+                writer.WriteString("operation", "upsert");
+                writer.WritePropertyName("record");
+                WriteLegacyRecord(writer, contentVersion, scope);
+                writer.WriteEndObject();
+                writer.WriteEndArray();
+            }
+            else
+            {
+                writer.WritePropertyName("record");
+                WriteLegacyRecord(writer, contentVersion, scope);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        var payload = payloadBuffer.WrittenSpan.ToArray();
+        var frame = new byte[checked(12 + payload.Length + 4)];
+        WriteUInt32(frame, 0, 0x314D4147);
+        WriteUInt32(frame, 4, checked((uint)payload.Length));
+        WriteUInt32(frame, 8, ComputeCrc32(payload));
+        payload.CopyTo(frame.AsSpan(12));
+        WriteUInt32(frame, 12 + payload.Length, 0x54494D43);
+        return frame;
+    }
+
+    private static void WriteLegacyRecord(
+        Utf8JsonWriter writer,
+        int contentVersion,
+        string scope)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("memoryId", "legacy-id");
+        writer.WriteString("scope", scope);
+        writer.WritePropertyName("content");
+        writer.WriteStartObject();
+        writer.WriteNumber("version", contentVersion);
+        writer.WriteEndObject();
+        writer.WritePropertyName("tags");
+        writer.WriteStartArray();
+        writer.WriteEndArray();
+        writer.WriteNumber("importance", 50);
+        writer.WriteString("createdAt", DateTimeOffset.UnixEpoch);
+        writer.WriteString("updatedAt", DateTimeOffset.UnixEpoch);
+        writer.WriteEndObject();
     }
 
     private static uint ComputeCrc32(byte[] value)

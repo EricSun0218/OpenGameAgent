@@ -18,6 +18,9 @@ making workflow order part of frame timing.
   persisted with explicit byte, item, attempt, duration, and parallelism caps.
 - Fan-in and reduction order follow compiled definition order, never task
   completion order.
+- Numeric schema bounds are compared from their exact JSON tokens rather than
+  narrowed to CLR `decimal` or binary Float, including bounded scientific
+  notation such as `1e100`.
 
 The in-memory store is useful for embedded sessions and tests. A durable store
 must validate snapshots, integrity evidence, and recovery state before
@@ -49,6 +52,14 @@ Recovery follows these rules:
 Completed agent output still has to pass the workflow stage's declared output
 schema. Agent failure, cancellation, interruption, and budget exhaustion map to
 stable workflow reason codes.
+
+The default terminal policy is fail-closed. For an explicitly optional branch,
+the game adapter may also implement
+`IWorkflowAgentTerminalOutcomeProjector`. Returning `true` converts that
+terminal outcome into a normal local fallback, which must still pass the stage
+output schema; returning `false` preserves failure. Only game code can decide
+whether a failed simulation branch is optional, so the workflow core never
+invents a fallback.
 
 ## Authority boundary
 

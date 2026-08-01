@@ -147,6 +147,32 @@ internal static class RuntimeProtocolInputGuard
         int maximumUtf8Bytes,
         string parameterName)
     {
+        var snapshot = SnapshotAgentRunForSerialization(
+            value,
+            limits,
+            maximumUtf8Bytes,
+            parameterName);
+        ProtocolValidator.EnsureValid(snapshot);
+        return snapshot;
+    }
+
+    public static AgentRun SnapshotAgentRunForBackendBoundaryBeforeSerialization(
+        AgentRun value,
+        JsonValueLimits limits,
+        int maximumUtf8Bytes,
+        string parameterName) =>
+        SnapshotAgentRunForSerialization(
+            value,
+            limits,
+            maximumUtf8Bytes,
+            parameterName);
+
+    private static AgentRun SnapshotAgentRunForSerialization(
+        AgentRun value,
+        JsonValueLimits limits,
+        int maximumUtf8Bytes,
+        string parameterName)
+    {
         if (value is null)
         {
             throw new ArgumentNullException(parameterName);
@@ -186,7 +212,7 @@ internal static class RuntimeProtocolInputGuard
         budget.AddString(snapshot.TerminalReason);
         budget.AddString(snapshot.CompletionIntent);
         budget.AddExtensions(snapshot.Extensions);
-        ProtocolValidator.EnsureValid(snapshot);
+        OwnExtensionValues(snapshot.Extensions);
         return snapshot;
     }
 
@@ -551,6 +577,20 @@ internal static class RuntimeProtocolInputGuard
         return snapshot;
     }
 
+    private static void OwnExtensionValues(
+        Dictionary<string, JsonElement>? extensions)
+    {
+        if (extensions is null || extensions.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var key in extensions.Keys.ToArray())
+        {
+            extensions[key] = extensions[key].Clone();
+        }
+    }
+
     private static JsonElement? SnapshotJson(JsonElement? value)
     {
         return value.HasValue
@@ -748,6 +788,26 @@ internal static class RuntimeProtocolInputGuard
 
 public static class JsonValueInspector
 {
+    /// <summary>
+    /// Compares two finite JSON number tokens without narrowing them to a
+    /// binary floating-point or decimal CLR type.
+    /// </summary>
+    public static bool TryCompareNumbers(
+        JsonElement left,
+        JsonElement right,
+        out int comparison)
+    {
+        if (!JsonNumberValue.TryParse(left, out var leftValue)
+            || !JsonNumberValue.TryParse(right, out var rightValue))
+        {
+            comparison = 0;
+            return false;
+        }
+
+        comparison = leftValue.CompareTo(rightValue);
+        return true;
+    }
+
     public static int ValidateAndMeasure(
         JsonElement value,
         JsonValueLimits limits,

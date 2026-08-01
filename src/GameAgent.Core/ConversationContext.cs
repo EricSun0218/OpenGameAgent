@@ -6,6 +6,30 @@ using System.Text.Json;
 
 namespace GameAgent.Core;
 
+public interface IConversationContextEngine
+{
+    string EngineId { get; }
+
+    string Version { get; }
+
+    bool CleanupCompleted { get; }
+
+    ValueTask<ConversationContextView> PrepareAsync(
+        string runId,
+        string turnId,
+        IReadOnlyList<NormalizedMessage> transcript,
+        IReadOnlyCollection<string>? stablePrefixMessageIds = null,
+        CancellationToken cancellationToken = default);
+
+    void RegisterCheckpoint(JsonElement checkpoint);
+
+    /// <summary>
+    /// Returns false only when bounded lifecycle cancellation admission was
+    /// unavailable and shutdown should be retried.
+    /// </summary>
+    ValueTask<bool> StopAsync();
+}
+
 public sealed class ConversationContextOptions
 {
     private const int Mebibyte = 1_048_576;
@@ -449,7 +473,7 @@ internal static class ConversationSummaryEnvelope
 
 public sealed class ConversationContextReport
 {
-    internal ConversationContextReport(
+    public ConversationContextReport(
         int inputMessageCount,
         int outputMessageCount,
         int droppedMessageCount,
@@ -461,6 +485,18 @@ public sealed class ConversationContextReport
         string sourceDigest,
         string viewDigest)
     {
+        if (inputMessageCount < 0
+            || outputMessageCount < 0
+            || outputMessageCount > inputMessageCount
+            || droppedMessageCount < 0
+            || inputUtf8Bytes < 0
+            || outputUtf8Bytes < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(inputMessageCount),
+                "Conversation context report counts and sizes are invalid.");
+        }
+
         InputMessageCount = inputMessageCount;
         OutputMessageCount = outputMessageCount;
         DroppedMessageCount = droppedMessageCount;
@@ -469,8 +505,14 @@ public sealed class ConversationContextReport
         Compacted = compacted;
         CompactionFailed = compactionFailed;
         CompactionSkippedByCooldown = compactionSkippedByCooldown;
-        SourceDigest = sourceDigest;
-        ViewDigest = viewDigest;
+        SourceDigest = RuntimeGuard.RequiredUtf8(
+            sourceDigest,
+            128,
+            nameof(sourceDigest));
+        ViewDigest = RuntimeGuard.RequiredUtf8(
+            viewDigest,
+            128,
+            nameof(viewDigest));
     }
 
     public int InputMessageCount { get; }
@@ -521,13 +563,42 @@ public sealed class ConversationContextReport
 
 public sealed partial class ConversationContextView
 {
-    internal ConversationContextView(
+    private const int MaximumPublicMessages = 16_384;
+    private const int MaximumPublicUtf8Bytes = 64 * 1_048_576;
+
+    public ConversationContextView(
         IReadOnlyList<NormalizedMessage> messages,
         ConversationContextReport report)
     {
+        if (messages is null)
+        {
+            throw new ArgumentNullException(nameof(messages));
+        }
+
+        Report = report ?? throw new ArgumentNullException(nameof(report));
+        var input = RuntimeInputGuard.CopyBounded(
+            messages,
+            MaximumPublicMessages,
+            message => message
+                       ?? throw new ArgumentException(
+                           "Conversation context views cannot contain null messages.",
+                           nameof(messages)),
+            nameof(messages),
+            "conversation_view_messages_exceeded");
+        _ = RuntimePromptBuilder.MeasurePrompt(
+            input,
+            Array.Empty<GameAgent.Protocol.ToolDescriptor>(),
+            MaximumPublicMessages,
+            MaximumPublicUtf8Bytes,
+            estimatedBytesPerToken: 4);
         Messages = new ReadOnlyCollection<NormalizedMessage>(
-            messages.ToArray());
-        Report = report;
+            RuntimeInputGuard.CopyBounded(
+                input,
+                MaximumPublicMessages,
+                message => NormalizedMessageJournalCodec
+                    .CloneValidated(message),
+                nameof(messages),
+                "conversation_view_messages_exceeded"));
     }
 
     public IReadOnlyList<NormalizedMessage> Messages { get; }
@@ -535,7 +606,8 @@ public sealed partial class ConversationContextView
     public ConversationContextReport Report { get; }
 }
 
-public sealed partial class ConversationContextManager
+public sealed partial class ConversationContextManager :
+    IConversationContextEngine
 {
     private const int MaximumCooldownEntries = 4_096;
     private const int CooldownMaintenanceInterval = 256;
@@ -577,6 +649,10 @@ public sealed partial class ConversationContextManager
             metrics: null)
     {
     }
+
+    public string EngineId => "bounded-conversation-context";
+
+    public string Version => "1";
 
     internal ConversationContextManager(
         ConversationContextOptions options,
@@ -810,10 +886,10 @@ public sealed partial class ConversationContextManager
 
     internal int DetachedCompactionCount => _detachedCompactions.Count;
 
-    internal bool CleanupCompleted =>
+    public bool CleanupCompleted =>
         Volatile.Read(ref _resourcesDisposed) != 0;
 
-    internal async ValueTask<bool> StopAsync()
+    public async ValueTask<bool> StopAsync()
     {
         Task cleanup;
         await _stopGate.WaitAsync().ConfigureAwait(false);
@@ -1764,7 +1840,7 @@ public sealed partial class ConversationContextManager
             prepared.Messages.ToArray());
     }
 
-    private static string[] SnapshotStablePrefixMessageIds(
+    internal static string[] SnapshotStablePrefixMessageIds(
         IReadOnlyCollection<string>? stablePrefixMessageIds,
         IReadOnlyList<NormalizedMessage> transcript,
         ConversationContextOptions options)
@@ -2237,7 +2313,7 @@ public sealed partial class ConversationContextManager
             + $"{maximumJsonNodes} JSON nodes.");
     }
 
-    private static int Measure(IReadOnlyList<NormalizedMessage> messages)
+    internal static int Measure(IReadOnlyList<NormalizedMessage> messages)
     {
         var bytes = 0;
         foreach (var message in messages)
@@ -2253,7 +2329,7 @@ public sealed partial class ConversationContextManager
             NormalizedMessageJournalCodec.EncodeText(message));
     }
 
-    private static string Digest(IReadOnlyList<NormalizedMessage> messages)
+    internal static string Digest(IReadOnlyList<NormalizedMessage> messages)
     {
         var digest = new CanonicalDigestBuilder();
         digest.Add("type", "conversation-context");
@@ -2267,7 +2343,7 @@ public sealed partial class ConversationContextManager
         return digest.Finish();
     }
 
-    private static string Digest(IReadOnlyList<string> serializedMessages)
+    internal static string Digest(IReadOnlyList<string> serializedMessages)
     {
         var digest = new CanonicalDigestBuilder();
         digest.Add("type", "conversation-context");

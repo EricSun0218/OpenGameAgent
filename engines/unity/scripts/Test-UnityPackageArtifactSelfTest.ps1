@@ -372,6 +372,25 @@ finally {
     )
     if ($isExpectedTemporaryDirectory -and
         (Test-Path -LiteralPath $resolvedTemporaryRoot -PathType Container)) {
-        Remove-Item -LiteralPath $resolvedTemporaryRoot -Recurse -Force
+        try {
+            Remove-Item -LiteralPath $resolvedTemporaryRoot -Recurse -Force
+        }
+        catch {
+            if ([Environment]::OSVersion.Platform -ne
+                [PlatformID]::Win32NT) {
+                throw
+            }
+
+            # Windows PowerShell normalizes trailing dots and spaces while
+            # removing paths. The self-test intentionally creates those names,
+            # so retry the already validated temp root through an extended path.
+            $extendedPath = if ($resolvedTemporaryRoot.StartsWith('\\')) {
+                '\\?\UNC\' + $resolvedTemporaryRoot.Substring(2)
+            }
+            else {
+                '\\?\' + $resolvedTemporaryRoot
+            }
+            [IO.Directory]::Delete($extendedPath, $true)
+        }
     }
 }

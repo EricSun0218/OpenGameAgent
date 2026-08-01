@@ -28,6 +28,11 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     private IToolDisclosurePolicy? _toolDisclosurePolicy;
     private IFinalOutputAdmissionPolicy? _finalOutputAdmissionPolicy;
     private IConversationCompactor? _conversationCompactor;
+    private IConversationContextEngine? _conversationContextEngine;
+    private IReadOnlyList<AgentLifecycleMiddlewareRegistration>
+        _lifecycleMiddlewares =
+            Array.Empty<AgentLifecycleMiddlewareRegistration>();
+    private AgentLifecyclePipelineOptions? _lifecycleOptions;
     private RuntimeMemoryLifecycle? _memoryLifecycle;
     private IRuntimeMemoryPolicy? _memoryPolicy;
     private RuntimeMemoryIntegrationOptions? _memoryOptions;
@@ -35,12 +40,16 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
     private ProviderRetryPolicy _retryPolicy = new();
     private ProviderRouteResilienceOptions _providerRouteResilience = new();
     private DurableAgentRuntimeOptions _runtimeOptions = new();
+    private ChildAgentSupervisorOptions _childAgentOptions = new();
     private RunRecoveryOptions _recoveryOptions = new();
     private ContextCompilerOptions _contextOptions = new();
     private IRuntimeTokenEstimator _tokenEstimator =
         ScriptAwareTokenEstimator.Shared;
     private IRuntimeMetricsSink? _metricsSink;
     private RuntimeMetricsOptions? _metricsOptions;
+    private IExecutionRoutePolicy? _executionRoutePolicy;
+    private ExecutionRouterOptions? _executionRouterOptions;
+    private IRoutedWorkflowRuntime? _routedWorkflowRuntime;
     private ToolSchedulerLimits _schedulerLimits = new();
     private readonly object _disposeSync = new();
     private int _disposeRetryRequired;
@@ -268,8 +277,29 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         IConversationCompactor compactor)
     {
         ThrowIfFinished();
+        if (_conversationContextEngine is not null)
+        {
+            throw new InvalidOperationException(
+                "A custom conversation context engine is already configured.");
+        }
+
         _conversationCompactor =
             compactor ?? throw new ArgumentNullException(nameof(compactor));
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithConversationContextEngine(
+        IConversationContextEngine engine)
+    {
+        ThrowIfFinished();
+        if (_conversationCompactor is not null)
+        {
+            throw new InvalidOperationException(
+                "A built-in conversation compactor is already configured.");
+        }
+
+        _conversationContextEngine = engine
+            ?? throw new ArgumentNullException(nameof(engine));
         return this;
     }
 
@@ -332,6 +362,16 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         ThrowIfFinished();
         _runtimeOptions =
             options ?? throw new ArgumentNullException(nameof(options));
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithChildAgentSupervisorOptions(
+        ChildAgentSupervisorOptions options)
+    {
+        ThrowIfFinished();
+        _childAgentOptions = options
+                             ?? throw new ArgumentNullException(
+                                 nameof(options));
         return this;
     }
 
@@ -401,6 +441,48 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         return this;
     }
 
+    public GameAgentRuntimeBuilder WithLifecycleMiddleware(
+        IEnumerable<AgentLifecycleMiddlewareRegistration> middleware,
+        AgentLifecyclePipelineOptions? options = null)
+    {
+        ThrowIfFinished();
+        if (middleware is null)
+        {
+            throw new ArgumentNullException(nameof(middleware));
+        }
+
+        var maximum = options?.MaxMiddlewares ?? 16;
+        _lifecycleMiddlewares = CopyCatalogBounded(
+            middleware,
+            maximum,
+            nameof(middleware),
+            "lifecycle_middleware_count_exceeded");
+        _lifecycleOptions = options;
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithExecutionRoutePolicy(
+        IExecutionRoutePolicy policy,
+        ExecutionRouterOptions? options = null)
+    {
+        ThrowIfFinished();
+        _executionRoutePolicy = policy
+                                ?? throw new ArgumentNullException(
+                                    nameof(policy));
+        _executionRouterOptions = options;
+        return this;
+    }
+
+    public GameAgentRuntimeBuilder WithRoutedWorkflowRuntime(
+        IRoutedWorkflowRuntime runtime)
+    {
+        ThrowIfFinished();
+        _routedWorkflowRuntime = runtime
+                                 ?? throw new ArgumentNullException(
+                                     nameof(runtime));
+        return this;
+    }
+
     public BuiltGameAgentRuntime Build()
     {
         ThrowIfFinished();
@@ -437,14 +519,19 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
                 _ids,
                 _publisher);
             _ownedDisposables.Add(journal);
+            var providerRunner = new ProviderAttemptRunner(
+                _providers.ToArray(),
+                _retryPolicy,
+                new SystemRuntimeDelay(),
+                _ids,
+                routeResilienceOptions: _providerRouteResilience,
+                clock: _clock);
+            var lifecycle = new AgentLifecyclePipeline(
+                _lifecycleMiddlewares,
+                _lifecycleOptions);
+            _ownedDisposables.Add(lifecycle);
             var runtime = new DurableAgentRuntime(
-                new ProviderAttemptRunner(
-                    _providers.ToArray(),
-                    _retryPolicy,
-                    new SystemRuntimeDelay(),
-                    _ids,
-                    routeResilienceOptions: _providerRouteResilience,
-                    clock: _clock),
+                providerRunner,
                 _host,
                 journal,
                 new RunRecovery(
@@ -473,9 +560,39 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
                     _finalOutputAdmissionPolicy,
                 tokenEstimator: _tokenEstimator,
                 metricsSink: _metricsSink,
-                metricsOptions: _metricsOptions);
+                metricsOptions: _metricsOptions,
+                conversationContextEngine: _conversationContextEngine,
+                lifecyclePipeline: lifecycle);
+            var completion = new SimpleCompletionRuntime(
+                providerRunner,
+                _ids,
+                new SimpleCompletionRuntimeOptions
+                {
+                    MaxConcurrentProviderCalls =
+                        _runtimeOptions.MaxConcurrentProviderCalls,
+                    MaxConcurrentBackgroundProviderCalls =
+                        _runtimeOptions.MaxConcurrentBackgroundProviderCalls,
+                    MaxMessages = Math.Min(
+                        _runtimeOptions.MaxTranscriptMessages,
+                        4_096),
+                    MaxPromptUtf8Bytes = _runtimeOptions.MaxPromptUtf8Bytes,
+                    EstimatedPromptBytesPerToken =
+                        _runtimeOptions.EstimatedPromptBytesPerToken
+                },
+                runtime.ProviderAdmission);
+            var execution = new RoutedExecutionRuntime(
+                runtime,
+                _routedWorkflowRuntime,
+                _executionRoutePolicy,
+                _executionRouterOptions);
+            var children = new ChildAgentSupervisor(
+                runtime,
+                _childAgentOptions);
             var result = new BuiltGameAgentRuntime(
                 runtime,
+                completion,
+                execution,
+                children,
                 toolRegistry,
                 skillRegistry,
                 _store,
@@ -635,6 +752,9 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
 
     internal BuiltGameAgentRuntime(
         DurableAgentRuntime runtime,
+        SimpleCompletionRuntime completion,
+        RoutedExecutionRuntime execution,
+        ChildAgentSupervisor children,
         ToolCatalogRegistry tools,
         SkillCatalogRegistry skills,
         IDurableSessionStore store,
@@ -644,6 +764,9 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         bool ownsMemoryLifecycle)
     {
         Runtime = runtime;
+        Completion = completion;
+        Execution = execution;
+        Children = children;
         Tools = tools;
         Skills = skills;
         _store = store;
@@ -654,6 +777,12 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
     }
 
     public DurableAgentRuntime Runtime { get; }
+
+    public SimpleCompletionRuntime Completion { get; }
+
+    public RoutedExecutionRuntime Execution { get; }
+
+    public ChildAgentSupervisor Children { get; }
 
     public ToolCatalogRegistry Tools { get; }
 
@@ -709,6 +838,22 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
     private async Task StopCoreAsync()
     {
         List<Exception>? errors = null;
+        var executionDrained = await Execution.StopAsync()
+            .ConfigureAwait(false);
+        var childrenDrained = await Children.StopAsync().ConfigureAwait(false);
+        var completionDrained = false;
+        try
+        {
+            completionDrained = await Completion
+                .StopWithDrainResultAsync()
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Volatile.Write(ref _shutdownRetryRequired, 1);
+            ExceptionDispatchInfo.Capture(exception).Throw();
+        }
+
         try
         {
             await Runtime.WaitForShutdownDrainAsync().ConfigureAwait(false);
@@ -718,6 +863,50 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
             Volatile.Write(ref _shutdownRetryRequired, 1);
             ExceptionDispatchInfo.Capture(exception).Throw();
         }
+
+        if (!childrenDrained)
+        {
+            childrenDrained = await Children.StopAsync()
+                .ConfigureAwait(false);
+        }
+
+        if (!completionDrained)
+        {
+            completionDrained = await Completion
+                .StopWithDrainResultAsync()
+                .ConfigureAwait(false);
+        }
+
+        if (!completionDrained)
+        {
+            Volatile.Write(ref _shutdownRetryRequired, 1);
+            throw new InvalidOperationException(
+                "Stateless completion operations did not drain during shutdown.");
+        }
+
+        if (!childrenDrained)
+        {
+            Volatile.Write(ref _shutdownRetryRequired, 1);
+            throw new InvalidOperationException(
+                "Child-agent operations did not drain during shutdown.");
+        }
+
+        if (!executionDrained)
+        {
+            executionDrained = await Execution.StopAsync()
+                .ConfigureAwait(false);
+        }
+
+        if (!executionDrained)
+        {
+            Volatile.Write(ref _shutdownRetryRequired, 1);
+            throw new InvalidOperationException(
+                "Routed execution operations did not drain during shutdown.");
+        }
+
+        await Execution.DisposeAsync().ConfigureAwait(false);
+        await Completion.DisposeAsync().ConfigureAwait(false);
+        await Children.DisposeAsync().ConfigureAwait(false);
 
         try
         {

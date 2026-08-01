@@ -30,6 +30,12 @@ The package includes Core, Protocol, Persistence, Runtime, Workflow, and both
 built-in streaming provider adapters. The game supplies credentials, tools,
 state, rules, and authoritative action handlers.
 
+`UnityAgentRuntimeHost` exposes durable `RunAsync`, `RunRoutedAsync`, stateless
+`CompleteAsync`, bounded `RunChildAsync`, and `CancelChildren`. Per-operation
+reasoning, sampling, prompt-cache, and provider-route controls travel on the
+shared request DTOs. Child results use the same durable completion event path;
+the game remains responsible for simultaneous-action resolution.
+
 Current evidence covers managed compilation, package structure, artifact
 loading, lifecycle tests, and host conformance. A real Unity Editor/Player gate
 is available but has not been executed for this alpha because no licensed

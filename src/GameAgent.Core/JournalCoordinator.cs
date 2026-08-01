@@ -47,6 +47,7 @@ public sealed class JournalCoordinator : IDisposable
             Array.Empty<ContextCandidate>(),
             Array.Empty<SkillReference>(),
             ProviderWorkloadClasses.Interactive,
+            DurableExecutionModes.Agent,
             cancellationToken);
     }
 
@@ -63,6 +64,7 @@ public sealed class JournalCoordinator : IDisposable
                 initialContext,
                 activeSkills,
                 ProviderWorkloadClasses.Interactive,
+                DurableExecutionModes.Agent,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -73,6 +75,52 @@ public sealed class JournalCoordinator : IDisposable
         IReadOnlyList<ContextCandidate> initialContext,
         IReadOnlyList<SkillReference> activeSkills,
         string workloadClass,
+        CancellationToken cancellationToken)
+    {
+        await CommitRunStartAsync(
+                run,
+                initialTranscript,
+                initialContext,
+                activeSkills,
+                workloadClass,
+                DurableExecutionModes.Agent,
+                inference: null,
+                routePreference: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask CommitRunStartAsync(
+        AgentRun run,
+        IReadOnlyList<NormalizedMessage> initialTranscript,
+        IReadOnlyList<ContextCandidate> initialContext,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
+        string executionMode,
+        CancellationToken cancellationToken)
+    {
+        await CommitRunStartAsync(
+                run,
+                initialTranscript,
+                initialContext,
+                activeSkills,
+                workloadClass,
+                executionMode,
+                inference: null,
+                routePreference: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async ValueTask CommitRunStartAsync(
+        AgentRun run,
+        IReadOnlyList<NormalizedMessage> initialTranscript,
+        IReadOnlyList<ContextCandidate> initialContext,
+        IReadOnlyList<SkillReference> activeSkills,
+        string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
+        ProviderRoutePreference? routePreference,
         CancellationToken cancellationToken)
     {
         if (run is null)
@@ -98,6 +146,9 @@ public sealed class JournalCoordinator : IDisposable
         workloadClass = ProviderWorkloadClasses.Normalize(
             workloadClass,
             nameof(workloadClass));
+        executionMode = DurableExecutionModes.Normalize(
+            executionMode,
+            nameof(executionMode));
         var preparingTimestamp = MonotonicNow(run);
         var preparingTransition = RunStateMachine.Plan(
             run,
@@ -121,6 +172,12 @@ public sealed class JournalCoordinator : IDisposable
                        workloadClass,
                        ProviderWorkloadClasses.Interactive,
                        StringComparison.Ordinal)
+                   || !string.Equals(
+                       executionMode,
+                       DurableExecutionModes.Agent,
+                       StringComparison.Ordinal)
+                   || inference is not null
+                   || routePreference is not null
                     ? 1
                     : 0)))
         {
@@ -139,7 +196,13 @@ public sealed class JournalCoordinator : IDisposable
             || !string.Equals(
                 workloadClass,
                 ProviderWorkloadClasses.Interactive,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal)
+            || !string.Equals(
+                executionMode,
+                DurableExecutionModes.Agent,
+                StringComparison.Ordinal)
+            || inference is not null
+            || routePreference is not null)
         {
             runtimeEvents.Add(
                 CreateEvent(
@@ -149,7 +212,10 @@ public sealed class JournalCoordinator : IDisposable
                     DurableRunInputJournalCodec.Encode(
                         initialContext,
                         activeSkills,
-                        workloadClass),
+                        workloadClass,
+                        executionMode,
+                        inference,
+                        routePreference),
                     turnId: null,
                     attemptId: null,
                     streamAttemptId: null,

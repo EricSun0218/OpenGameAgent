@@ -661,8 +661,27 @@ internal sealed class RuntimeMemoryAgentLoop
             for (var index = 0; index < snapshot.Length; index++)
             {
                 var mutation = snapshot[index];
+                var expected = mutation.ExpectedRecord;
+                if (expected is not null
+                    && !ExpectationBelongsToRun(
+                        expected,
+                        run,
+                        context.Coordinate))
+                {
+                    throw new RuntimeMemoryIntegrationException(
+                        RuntimeMemoryIntegrationReasonCodes.PolicyResultInvalid,
+                        "A runtime-managed memory expectation targets another game context.");
+                }
+
                 if (mutation.Kind != MemoryMutationKind.Upsert)
                 {
+                    if (expected is null)
+                    {
+                        throw new RuntimeMemoryIntegrationException(
+                            RuntimeMemoryIntegrationReasonCodes.PolicyResultInvalid,
+                            "A runtime-managed memory delete requires an expected record.");
+                    }
+
                     continue;
                 }
 
@@ -687,7 +706,11 @@ internal sealed class RuntimeMemoryAgentLoop
                     && !string.Equals(
                         provenance.SessionId,
                         run.SessionId,
-                        StringComparison.Ordinal))
+                        StringComparison.Ordinal)
+                    || !AuthorityBelongsToRun(
+                        MemoryRecordAuthorityEnvelope.FromRecord(record),
+                        run,
+                        context.Coordinate))
                 {
                     throw new RuntimeMemoryIntegrationException(
                         RuntimeMemoryIntegrationReasonCodes
@@ -743,14 +766,33 @@ internal sealed class RuntimeMemoryAgentLoop
 
         try
         {
-            await _lifecycle.CommitIdempotentAtomicBatchAsync(
-                    prepared.CommitId,
-                    prepared.Mutations,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            if (prepared.MutationContractVersion
+                == PreparedRuntimeMemoryCommit.LegacyMutationContractVersion)
+            {
+                await _lifecycle.ReplayLegacyIdempotentAtomicBatchAsync(
+                        prepared.CommitId,
+                        prepared.Mutations,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await _lifecycle.CommitIdempotentAtomicBatchAsync(
+                        prepared.CommitId,
+                        prepared.Mutations,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
+            throw;
+        }
+        catch (MemoryLegacyReplayNotSupportedException)
+        {
+            // This is a permanent store-capability mismatch, not a transient
+            // commit failure. Preserve the stable migration signal so a host
+            // can stop retrying and configure an explicit legacy replay bridge.
             throw;
         }
         catch (Exception exception)
@@ -804,7 +846,10 @@ internal sealed class RuntimeMemoryAgentLoop
             || prepared.Mutations.Count
             > (enforceConfiguredLimits
                 ? _options.MaxCommitMutations
-                : 256))
+                : 256)
+            || prepared.MutationContractVersion
+            is not PreparedRuntimeMemoryCommit.LegacyMutationContractVersion
+                and not RuntimeMemoryMutationContract.CurrentVersion)
         {
             throw new RuntimeMemoryIntegrationException(
                 RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
@@ -840,10 +885,43 @@ internal sealed class RuntimeMemoryAgentLoop
         }
 
         var bytes = 0L;
+        var coordinate = GameContextEnvelope.TryRead(run, out var current)
+            ? current
+            : null;
         foreach (var mutation in snapshot)
         {
+            var expected = mutation.ExpectedRecord;
+            var legacy = prepared.MutationContractVersion
+                         == PreparedRuntimeMemoryCommit
+                             .LegacyMutationContractVersion;
+            if (legacy && expected is not null)
+            {
+                throw new RuntimeMemoryIntegrationException(
+                    RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+                    "A legacy prepared memory mutation has an unexpected "
+                    + "record expectation.");
+            }
+
+            if (expected is not null
+                && !ExpectationBelongsToRun(
+                    expected,
+                    run,
+                    coordinate))
+            {
+                throw new RuntimeMemoryIntegrationException(
+                    RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+                    "A prepared memory expectation targets another game context.");
+            }
+
             if (mutation.Kind != MemoryMutationKind.Upsert)
             {
+                if (!legacy && expected is null)
+                {
+                    throw new RuntimeMemoryIntegrationException(
+                        RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
+                        "A prepared memory delete has no expected record.");
+                }
+
                 continue;
             }
 
@@ -870,7 +948,11 @@ internal sealed class RuntimeMemoryAgentLoop
                 && !string.Equals(
                     provenance.SessionId,
                     run.SessionId,
-                    StringComparison.Ordinal))
+                    StringComparison.Ordinal)
+                || !AuthorityBelongsToRun(
+                    MemoryRecordAuthorityEnvelope.FromRecord(record),
+                    run,
+                    coordinate))
             {
                 throw new RuntimeMemoryIntegrationException(
                     RuntimeMemoryIntegrationReasonCodes.RecoveryRecordInvalid,
@@ -952,6 +1034,9 @@ internal sealed class RuntimeMemoryAgentLoop
             : null;
         var maximumSaveRevision = requested.MaximumSaveRevision;
         var timelineId = requested.TimelineId;
+        var timelineEpoch = requested.EnforceTimelineEpoch
+            ? requested.TimelineEpoch
+            : null;
         var observer = requested.Observer;
         var gameTime = requested.GameTime;
         var includeAllPerspectives = requested.IncludeAllPerspectives;
@@ -992,6 +1077,13 @@ internal sealed class RuntimeMemoryAgentLoop
 
             if (coordinate.GameTime is not null)
             {
+                if (timelineEpoch.HasValue
+                    && timelineEpoch.Value != coordinate.GameTime.Epoch)
+                {
+                    throw InvalidRecallPlan(
+                        "The memory query targets a different timeline epoch.");
+                }
+
                 if (gameTime is not null
                     && (!coordinate.GameTime.IsComparableTo(gameTime)
                         || gameTime.Tick > coordinate.GameTime.Tick))
@@ -1018,7 +1110,8 @@ internal sealed class RuntimeMemoryAgentLoop
             timelineId,
             observer,
             gameTime,
-            includeAllPerspectives);
+            includeAllPerspectives,
+            timelineEpoch);
     }
 
     private static RuntimeMemoryIntegrationException InvalidRecallPlan(
@@ -1027,6 +1120,107 @@ internal sealed class RuntimeMemoryAgentLoop
         return new RuntimeMemoryIntegrationException(
             RuntimeMemoryIntegrationReasonCodes.PolicyResultInvalid,
             message);
+    }
+
+    private static bool ExpectationBelongsToRun(
+        MemoryRecordExpectation expectation,
+        AgentRun run,
+        GameContextCoordinate? coordinate)
+    {
+        return expectation.HasProvenance
+               && expectation.Authority.Committed
+               && string.Equals(
+                   expectation.WorldId,
+                   run.WorldId,
+                   StringComparison.Ordinal)
+               && (expectation.SessionId is null
+                   || string.Equals(
+                       expectation.SessionId,
+                       run.SessionId,
+                       StringComparison.Ordinal))
+               && AuthorityBelongsToRun(
+                   expectation.Authority,
+                   run,
+                   coordinate);
+    }
+
+    private static bool AuthorityBelongsToRun(
+        MemoryRecordAuthorityEnvelope authority,
+        AgentRun run,
+        GameContextCoordinate? coordinate)
+    {
+        if (!authority.HasProvenance
+            || !string.Equals(
+                authority.WorldId,
+                run.WorldId,
+                StringComparison.Ordinal)
+            || authority.SessionId is not null
+            && !string.Equals(
+                authority.SessionId,
+                run.SessionId,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (coordinate is null)
+        {
+            return authority.TimelineId is null
+                   && !authority.TimelineEpoch.HasValue
+                   && !authority.HasPerspective
+                   && !authority.HasGameTimeWindow;
+        }
+
+        if (!string.Equals(
+                coordinate.WorldId,
+                authority.WorldId,
+                StringComparison.Ordinal)
+            || authority.SessionId is not null
+            && !string.Equals(
+                coordinate.SessionId ?? run.SessionId,
+                authority.SessionId,
+                StringComparison.Ordinal)
+            || authority.SaveRevision > coordinate.SaveRevision
+            || authority.TimelineId is not null
+            && !string.Equals(
+                authority.TimelineId,
+                coordinate.TimelineId,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var gameTime = coordinate.GameTime;
+        if (authority.TimelineEpoch.HasValue
+            && (gameTime is null
+                || authority.TimelineEpoch.Value != gameTime.Epoch))
+        {
+            return false;
+        }
+
+        if (authority.HasPerspective
+            && (coordinate.Observer is null
+                || !string.Equals(
+                    authority.ObserverEntityId,
+                    coordinate.Observer.EntityId,
+                    StringComparison.Ordinal)
+                || authority.ObserverIncarnation
+                != coordinate.Observer.Incarnation))
+        {
+            return false;
+        }
+
+        return !authority.HasGameTimeWindow
+               || gameTime is not null
+               && string.Equals(
+                   authority.GameTimeClockId,
+                   gameTime.ClockId,
+                   StringComparison.Ordinal)
+               && string.Equals(
+                   authority.GameTimeTimelineId,
+                   gameTime.TimelineId,
+                   StringComparison.Ordinal)
+               && authority.GameTimeEpoch == gameTime.Epoch;
     }
 
     private static MemoryRecallReport FilterRecallReport(
@@ -1304,13 +1498,17 @@ internal sealed class RuntimeMemoryRecallSelection
 
 internal sealed class PreparedRuntimeMemoryCommit
 {
+    public const int LegacyMutationContractVersion = 0;
+
     public PreparedRuntimeMemoryCommit(
         string commitId,
         string turnId,
         string policyId,
         string policyVersion,
         string payloadDigest,
-        IReadOnlyList<MemoryMutation> mutations)
+        IReadOnlyList<MemoryMutation> mutations,
+        int mutationContractVersion =
+            RuntimeMemoryMutationContract.CurrentVersion)
     {
         CommitId = RuntimeGuard.RequiredUtf8(
             commitId,
@@ -1332,6 +1530,16 @@ internal sealed class PreparedRuntimeMemoryCommit
         }
 
         PayloadDigest = payloadDigest;
+        if (mutationContractVersion is not LegacyMutationContractVersion
+            && mutationContractVersion
+            != RuntimeMemoryMutationContract.CurrentVersion)
+        {
+            throw new InvalidDataException(
+                "A prepared memory commit has an unsupported mutation "
+                + "contract version.");
+        }
+
+        MutationContractVersion = mutationContractVersion;
         var count = mutations.Count;
         var snapshot = new MemoryMutation[count];
         for (var index = 0; index < count; index++)
@@ -1354,6 +1562,8 @@ internal sealed class PreparedRuntimeMemoryCommit
 
     public string PayloadDigest { get; }
 
+    public int MutationContractVersion { get; }
+
     public IReadOnlyList<MemoryMutation> Mutations { get; }
 }
 
@@ -1375,6 +1585,9 @@ internal static class RuntimeMemoryCommitJournalCodec
             writer.WriteString("policyId", prepared.PolicyId);
             writer.WriteString("policyVersion", prepared.PolicyVersion);
             writer.WriteString("payloadDigest", prepared.PayloadDigest);
+            writer.WriteNumber(
+                "mutationContractVersion",
+                prepared.MutationContractVersion);
             writer.WritePropertyName("mutations");
             writer.WriteStartArray();
             foreach (var mutation in prepared.Mutations)
@@ -1408,7 +1621,10 @@ internal static class RuntimeMemoryCommitJournalCodec
                 payload,
                 new JsonValueLimits(maxUtf8Bytes: MaxEncodedUtf8Bytes),
                 nameof(payload));
-            RequireObject(payload, 6);
+            var hasMutationContractVersion = payload.TryGetProperty(
+                "mutationContractVersion",
+                out var mutationContractVersionJson);
+            RequireObject(payload, hasMutationContractVersion ? 7 : 6);
             var commitId = RequiredString(payload, "commitId", 256);
             var turnId = RequiredString(payload, "turnId", 128);
             var policyId = RequiredString(payload, "policyId", 128);
@@ -1420,6 +1636,16 @@ internal static class RuntimeMemoryCommitJournalCodec
                 payload,
                 "payloadDigest",
                 64);
+            var mutationContractVersion = hasMutationContractVersion
+                && mutationContractVersionJson.TryGetInt32(
+                    out var parsedMutationContractVersion)
+                    ? parsedMutationContractVersion
+                    : hasMutationContractVersion
+                        ? throw new InvalidDataException(
+                            "A prepared memory commit has an invalid "
+                            + "mutation contract version.")
+                        : PreparedRuntimeMemoryCommit
+                            .LegacyMutationContractVersion;
             if (!string.Equals(
                     turnId,
                     expectedTurnId,
@@ -1473,7 +1699,8 @@ internal static class RuntimeMemoryCommitJournalCodec
                 policyId,
                 policyVersion,
                 payloadDigest,
-                mutations);
+                mutations,
+                mutationContractVersion);
         }
         catch (RuntimeMemoryIntegrationException)
         {
@@ -1651,6 +1878,12 @@ internal static class RuntimeMemoryCommitJournalCodec
                     "An upsert memory mutation has no record."));
         }
 
+        if (mutation.ExpectedRecord is not null)
+        {
+            writer.WritePropertyName("expectedRecord");
+            WriteExpectation(writer, mutation.ExpectedRecord);
+        }
+
         writer.WriteEndObject();
     }
 
@@ -1664,10 +1897,19 @@ internal static class RuntimeMemoryCommitJournalCodec
 
         var kind = RequiredString(value, "kind", 16);
         var memoryId = RequiredString(value, "memoryId", 128);
+        var expectation = value.TryGetProperty(
+            "expectedRecord",
+            out var expectationJson)
+            ? ReadExpectation(expectationJson)
+            : null;
         if (string.Equals(kind, "delete", StringComparison.Ordinal))
         {
-            RequireObject(value, 2);
-            return MemoryMutation.Delete(memoryId);
+            RequireObject(value, expectation is null ? 2 : 3);
+            return MemoryMutation.Restore(
+                MemoryMutationKind.Delete,
+                memoryId,
+                record: null,
+                expectedRecord: expectation);
         }
 
         if (!string.Equals(kind, "upsert", StringComparison.Ordinal))
@@ -1676,7 +1918,7 @@ internal static class RuntimeMemoryCommitJournalCodec
                 "A memory mutation has an unknown kind.");
         }
 
-        RequireObject(value, 3);
+        RequireObject(value, expectation is null ? 3 : 4);
         var record = ReadRecord(value.GetProperty("record"));
         if (!string.Equals(
                 memoryId,
@@ -1687,7 +1929,188 @@ internal static class RuntimeMemoryCommitJournalCodec
                 "A memory mutation id does not match its record.");
         }
 
-        return MemoryMutation.Upsert(record);
+        return MemoryMutation.Restore(
+            MemoryMutationKind.Upsert,
+            memoryId,
+            record,
+            expectation);
+    }
+
+    private static void WriteExpectation(
+        Utf8JsonWriter writer,
+        MemoryRecordExpectation expectation)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("memoryId", expectation.MemoryId);
+        writer.WriteString("scope", expectation.Scope);
+        writer.WriteBoolean("hasProvenance", expectation.HasProvenance);
+        var authority = expectation.Authority;
+        if (expectation.WorldId is not null)
+        {
+            writer.WriteString("worldId", expectation.WorldId);
+        }
+
+        if (expectation.SessionId is not null)
+        {
+            writer.WriteString("sessionId", expectation.SessionId);
+        }
+
+        if (authority.SaveRevision.HasValue)
+        {
+            writer.WriteNumber("saveRevision", authority.SaveRevision.Value);
+        }
+
+        writer.WriteBoolean("committed", authority.Committed);
+        if (authority.TimelineId is not null)
+        {
+            writer.WriteString("timelineId", authority.TimelineId);
+        }
+
+        if (authority.TimelineEpoch.HasValue)
+        {
+            writer.WriteNumber("timelineEpoch", authority.TimelineEpoch.Value);
+        }
+
+        writer.WriteBoolean("hasPerspective", authority.HasPerspective);
+        if (authority.ObserverEntityId is not null)
+        {
+            writer.WriteString(
+                "observerEntityId",
+                authority.ObserverEntityId);
+        }
+
+        if (authority.ObserverIncarnation.HasValue)
+        {
+            writer.WriteNumber(
+                "observerIncarnation",
+                authority.ObserverIncarnation.Value);
+        }
+
+        if (authority.PerspectiveKind is not null)
+        {
+            writer.WriteString(
+                "perspectiveKind",
+                authority.PerspectiveKind);
+        }
+
+        writer.WriteBoolean("hasSource", authority.HasSource);
+        if (authority.SourceEntityId is not null)
+        {
+            writer.WriteString("sourceEntityId", authority.SourceEntityId);
+        }
+
+        if (authority.SourceIncarnation.HasValue)
+        {
+            writer.WriteNumber(
+                "sourceIncarnation",
+                authority.SourceIncarnation.Value);
+        }
+
+        writer.WriteBoolean(
+            "hasGameTimeWindow",
+            authority.HasGameTimeWindow);
+        if (authority.GameTimeClockId is not null)
+        {
+            writer.WriteString(
+                "gameTimeClockId",
+                authority.GameTimeClockId);
+        }
+
+        if (authority.GameTimeTimelineId is not null)
+        {
+            writer.WriteString(
+                "gameTimeTimelineId",
+                authority.GameTimeTimelineId);
+        }
+
+        if (authority.GameTimeEpoch.HasValue)
+        {
+            writer.WriteNumber(
+                "gameTimeEpoch",
+                authority.GameTimeEpoch.Value);
+        }
+
+        writer.WriteString("recordDigest", expectation.RecordDigest);
+        writer.WriteEndObject();
+    }
+
+    private static MemoryRecordExpectation ReadExpectation(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object
+            || value.EnumerateObject().Count() is < 8 or > 22
+            || !value.TryGetProperty(
+                "hasProvenance",
+                out var hasProvenanceJson)
+            || hasProvenanceJson.ValueKind is not JsonValueKind.True
+                and not JsonValueKind.False
+            || !TryRequiredBoolean(value, "committed", out var committed)
+            || !TryRequiredBoolean(
+                value,
+                "hasPerspective",
+                out var hasPerspective)
+            || !TryRequiredBoolean(value, "hasSource", out var hasSource)
+            || !TryRequiredBoolean(
+                value,
+                "hasGameTimeWindow",
+                out var hasGameTimeWindow))
+        {
+            throw new InvalidDataException(
+                "A memory record expectation is malformed.");
+        }
+
+        foreach (var property in value.EnumerateObject())
+        {
+            if (property.Name is not "memoryId"
+                and not "scope"
+                and not "hasProvenance"
+                and not "worldId"
+                and not "sessionId"
+                and not "saveRevision"
+                and not "committed"
+                and not "timelineId"
+                and not "timelineEpoch"
+                and not "hasPerspective"
+                and not "observerEntityId"
+                and not "observerIncarnation"
+                and not "perspectiveKind"
+                and not "hasSource"
+                and not "sourceEntityId"
+                and not "sourceIncarnation"
+                and not "hasGameTimeWindow"
+                and not "gameTimeClockId"
+                and not "gameTimeTimelineId"
+                and not "gameTimeEpoch"
+                and not "recordDigest")
+            {
+                throw new InvalidDataException(
+                    "A memory record expectation contains an unknown property.");
+            }
+        }
+
+        var authority = MemoryRecordAuthorityEnvelope.Restore(
+            hasProvenanceJson.GetBoolean(),
+            OptionalString(value, "worldId", 128),
+            OptionalString(value, "sessionId", 128),
+            OptionalInt64(value, "saveRevision"),
+            committed,
+            OptionalString(value, "timelineId", 128),
+            OptionalInt64(value, "timelineEpoch"),
+            hasPerspective,
+            OptionalString(value, "observerEntityId", 128),
+            OptionalInt64(value, "observerIncarnation"),
+            OptionalString(value, "perspectiveKind", 128),
+            hasSource,
+            OptionalString(value, "sourceEntityId", 128),
+            OptionalInt64(value, "sourceIncarnation"),
+            hasGameTimeWindow,
+            OptionalString(value, "gameTimeClockId", 128),
+            OptionalString(value, "gameTimeTimelineId", 128),
+            OptionalInt64(value, "gameTimeEpoch"));
+        return MemoryRecordExpectation.Restore(
+            RequiredString(value, "memoryId", 128),
+            RequiredString(value, "scope", 256),
+            authority,
+            RequiredString(value, "recordDigest", 64));
     }
 
     private static void WriteRecord(Utf8JsonWriter writer, MemoryRecord record)
@@ -2045,6 +2468,41 @@ internal static class RuntimeMemoryCommitJournalCodec
                 : throw new InvalidDataException(
                     $"Memory journal property '{propertyName}' is invalid.")
             : null;
+    }
+
+    private static long? OptionalInt64(
+        JsonElement value,
+        string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        if (!property.TryGetInt64(out var result))
+        {
+            throw new InvalidDataException(
+                $"Memory journal property '{propertyName}' is invalid.");
+        }
+
+        return result;
+    }
+
+    private static bool TryRequiredBoolean(
+        JsonElement value,
+        string propertyName,
+        out bool result)
+    {
+        result = false;
+        if (!value.TryGetProperty(propertyName, out var property)
+            || property.ValueKind is not JsonValueKind.True
+                and not JsonValueKind.False)
+        {
+            return false;
+        }
+
+        result = property.GetBoolean();
+        return true;
     }
 
     private static bool TryDate(

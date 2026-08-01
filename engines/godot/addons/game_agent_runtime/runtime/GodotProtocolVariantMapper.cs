@@ -1,3 +1,9 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Numerics;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -8,6 +14,19 @@ using GodotDictionary = global::Godot.Collections.Dictionary;
 
 namespace GameAgent.Godot;
 
+internal sealed class GodotJsonNumberMappingException : JsonException
+{
+    internal GodotJsonNumberMappingException(
+        string reasonCode,
+        string message)
+        : base(message)
+    {
+        ReasonCode = reasonCode;
+    }
+
+    internal string ReasonCode { get; }
+}
+
 public static class GodotProtocolVariantMapper
 {
     private const int MaximumOptionsUtf8Bytes = 1_048_576;
@@ -15,6 +34,7 @@ public static class GodotProtocolVariantMapper
     private const int MaximumActionReceiptUtf8Bytes = 262_144;
     private const int MaximumActiveSkills = 128;
     private const int MaximumTranscriptMessages = 2_048;
+    private const int MaximumCompletionMessages = 4_096;
     private const int MaximumContextCandidates = 512;
     private const int MaximumMessageParts = 256;
     private const int MaximumLaneIdUtf8Bytes = 256;
@@ -33,7 +53,28 @@ public static class GodotProtocolVariantMapper
             activeSkills: Array.Empty<SkillReference>(),
             initialTranscript: Array.Empty<NormalizedMessage>(),
             laneId: null,
-            ProviderWorkloadClasses.Interactive);
+            ProviderWorkloadClasses.Interactive,
+            DurableExecutionModes.Agent,
+            inference: null,
+            routePreference: null);
+    }
+
+    public static AgentRun ToAgentRun(GodotDictionary run)
+    {
+        if (run is null)
+        {
+            throw new ArgumentNullException(nameof(run));
+        }
+
+        var ingressBudget = new GodotVariantIngressBudget(
+            MaximumIngressAggregateUtf8Bytes,
+            MaximumIngressAggregateNodes);
+        return ReadAgentRun(
+            GodotVariantInputGuard.StringifyAndNormalizeDictionary(
+                run,
+                "parent_run",
+                maximumUtf8Bytes: 1_048_576,
+                ingressBudget: ingressBudget));
     }
 
     public static DurableRunRequest ToDurableRunRequest(
@@ -56,7 +97,10 @@ public static class GodotProtocolVariantMapper
             "active_skills",
             "workload_class",
             "lane_id",
-            "initial_transcript");
+            "initial_transcript",
+            "execution_mode",
+            "inference",
+            "provider_route");
 
         return ToDurableRunRequestCore(
             run,
@@ -65,7 +109,183 @@ public static class GodotProtocolVariantMapper
             ReadInitialTranscript(root),
             ReadOptionalLaneId(root),
             ReadStartWorkloadClass(root),
+            ReadExecutionMode(root),
+            ReadInference(root),
+            ReadProviderRoutePreference(root),
             ingressBudget);
+    }
+
+    public static RoutedExecutionRequest ToRoutedExecutionRequest(
+        GodotDictionary route,
+        GodotDictionary run,
+        GodotArray observations,
+        GodotDictionary runOptions,
+        GodotDictionary workflow)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        ArgumentNullException.ThrowIfNull(run);
+        ArgumentNullException.ThrowIfNull(observations);
+        ArgumentNullException.ThrowIfNull(runOptions);
+        ArgumentNullException.ThrowIfNull(workflow);
+
+        var ingressBudget = new GodotVariantIngressBudget(
+            MaximumIngressAggregateUtf8Bytes,
+            MaximumIngressAggregateNodes);
+        using var routeDocument = ParseOptions(route, ingressBudget);
+        var routeRoot = routeDocument.RootElement;
+        RejectUnknown(
+            routeRoot,
+            "operation_kind",
+            "explicit_path",
+            "requirements",
+            "signal");
+
+        DurableRunRequest? durable = null;
+        if (run.Count > 0)
+        {
+            using var optionsDocument = ParseOptions(
+                runOptions,
+                ingressBudget);
+            var optionsRoot = optionsDocument.RootElement;
+            RejectUnknown(
+                optionsRoot,
+                "active_skills",
+                "workload_class",
+                "lane_id",
+                "initial_transcript",
+                "execution_mode",
+                "inference",
+                "provider_route");
+            durable = ToDurableRunRequestCore(
+                run,
+                observations,
+                ReadActiveSkills(optionsRoot),
+                ReadInitialTranscript(optionsRoot),
+                ReadOptionalLaneId(optionsRoot),
+                ReadStartWorkloadClass(optionsRoot),
+                ReadExecutionMode(optionsRoot),
+                ReadInference(optionsRoot),
+                ReadProviderRoutePreference(optionsRoot),
+                ingressBudget);
+        }
+        else if (observations.Count > 0 || runOptions.Count > 0)
+        {
+            throw new JsonException(
+                "A routed request without run data cannot contain "
+                + "observations or run_options.");
+        }
+
+        RoutedWorkflowRequest? workflowRequest = null;
+        if (workflow.Count > 0)
+        {
+            using var workflowDocument = ParseOptions(
+                workflow,
+                ingressBudget);
+            var workflowRoot = workflowDocument.RootElement;
+            RejectUnknown(
+                workflowRoot,
+                "workflow_id",
+                "run_key",
+                "owner_id",
+                "input");
+            if (!workflowRoot.TryGetProperty("input", out var input))
+            {
+                throw new JsonException(
+                    "workflow.input is required.");
+            }
+
+            workflowRequest = new RoutedWorkflowRequest
+            {
+                WorkflowId = ReadRequiredString(
+                    workflowRoot,
+                    "workflow_id",
+                    128,
+                    "workflow.workflow_id"),
+                RunKey = ReadRequiredString(
+                    workflowRoot,
+                    "run_key",
+                    256,
+                    "workflow.run_key"),
+                OwnerId = ReadRequiredString(
+                    workflowRoot,
+                    "owner_id",
+                    128,
+                    "workflow.owner_id"),
+                Input = ProtocolJson.DeserializeJsonElement(
+                    input.GetRawText())
+            };
+        }
+
+        return new RoutedExecutionRequest
+        {
+            Route = new ExecutionRouteRequest
+            {
+                OperationKind = ReadOptionalString(
+                        routeRoot,
+                        "operation_kind",
+                        128,
+                        "route.operation_kind")
+                    ?? "game-operation",
+                ExplicitPath = ReadOptionalExecutionPath(routeRoot),
+                Requirements = ReadExecutionRequirements(routeRoot),
+                Signal = routeRoot.TryGetProperty("signal", out var signal)
+                    ? ProtocolJson.DeserializeJsonElement(
+                        signal.GetRawText())
+                    : null
+            },
+            Run = durable,
+            Workflow = workflowRequest
+        };
+    }
+
+    public static SimpleCompletionRequest ToSimpleCompletionRequest(
+        GodotDictionary options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var ingressBudget = new GodotVariantIngressBudget(
+            MaximumIngressAggregateUtf8Bytes,
+            MaximumIngressAggregateNodes);
+        using var document = ParseOptions(options, ingressBudget);
+        var root = document.RootElement;
+        RejectUnknown(
+            root,
+            "operation_id",
+            "messages",
+            "workload_class",
+            "estimated_prompt_tokens",
+            "max_output_tokens",
+            "inference",
+            "provider_route");
+        if (!root.TryGetProperty("messages", out var messages))
+        {
+            throw new JsonException("options.messages is required.");
+        }
+
+        return new SimpleCompletionRequest
+        {
+            OperationId = ReadOptionalString(
+                root,
+                "operation_id",
+                128,
+                "options.operation_id"),
+            Messages = ReadMessages(
+                messages,
+                "options.messages",
+                MaximumCompletionMessages),
+            WorkloadClass = ReadStartWorkloadClass(root),
+            EstimatedPromptTokens = ReadOptionalNullableInt32(
+                root,
+                "estimated_prompt_tokens",
+                0,
+                16_777_216),
+            MaxOutputTokens = ReadOptionalNullableInt32(
+                root,
+                "max_output_tokens",
+                1,
+                1_000_000),
+            Inference = ReadInference(root),
+            RoutePreference = ReadProviderRoutePreference(root)
+        };
     }
 
     public static DurableRunContinuation ToDurableRunContinuation(
@@ -306,6 +526,9 @@ public static class GodotProtocolVariantMapper
         IReadOnlyList<NormalizedMessage> initialTranscript,
         string? laneId,
         string workloadClass,
+        string executionMode,
+        ModelInferenceOptions? inference,
+        ProviderRoutePreference? routePreference,
         GodotVariantIngressBudget? sharedIngressBudget = null)
     {
         if (run is null)
@@ -367,7 +590,10 @@ public static class GodotProtocolVariantMapper
             ActiveSkills = activeSkills,
             InitialTranscript = initialTranscript,
             LaneId = laneId,
-            WorkloadClass = workloadClass
+            WorkloadClass = workloadClass,
+            ExecutionMode = executionMode,
+            Inference = inference,
+            RoutePreference = routePreference
         };
     }
 
@@ -482,34 +708,257 @@ public static class GodotProtocolVariantMapper
             throw new ArgumentNullException(nameof(receipt));
         }
 
+        var json = GodotVariantInputGuard.StringifyAndNormalizeDictionary(
+            receipt,
+            "action_receipt",
+            MaximumActionReceiptUtf8Bytes);
         var value = ProtocolJson.DeserializeActionReceipt(
-            GodotVariantInputGuard.StringifyAndNormalizeDictionary(
-                receipt,
-                "action_receipt",
-                MaximumActionReceiptUtf8Bytes));
+            NormalizeProtocolIntegers(
+                json,
+                AgentRunObjectKind.ActionReceipt));
         ProtocolValidator.EnsureValid(value);
         return value;
     }
 
     private static AgentRun ReadAgentRun(string json)
     {
-        var value = ProtocolJson.DeserializeAgentRun(json);
-        ProtocolValidator.EnsureValid(value);
-        return value;
+        // The engine adapter owns structural mapping and bounded snapshots;
+        // semantic completeness remains the injected backend's contract. The
+        // built runtime performs its own strict protocol validation.
+        return ProtocolJson.DeserializeAgentRun(
+            NormalizeAgentRunProtocolIntegers(json));
+    }
+
+    private enum AgentRunObjectKind
+    {
+        Root,
+        Budget,
+        Usage,
+        Observation,
+        ResourceReference,
+        ActionReceipt,
+        ToolDescriptor,
+        Opaque
+    }
+
+    private static string NormalizeAgentRunProtocolIntegers(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(
+                   stream,
+                   new JsonWriterOptions
+                   {
+                       Encoder =
+                           JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                   }))
+        {
+            WriteAgentRunObject(
+                writer,
+                document.RootElement,
+                AgentRunObjectKind.Root);
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteAgentRunObject(
+        Utf8JsonWriter writer,
+        JsonElement element,
+        AgentRunObjectKind kind)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            element.WriteTo(writer);
+            return;
+        }
+
+        writer.WriteStartObject();
+        foreach (var property in element.EnumerateObject())
+        {
+            writer.WritePropertyName(property.Name);
+            var childKind = kind == AgentRunObjectKind.Root
+                ? property.Name switch
+                {
+                    "budget" => AgentRunObjectKind.Budget,
+                    "usage" => AgentRunObjectKind.Usage,
+                    _ => AgentRunObjectKind.Opaque
+                }
+                : kind == AgentRunObjectKind.Observation
+                    && property.Name == "resourceRef"
+                    ? AgentRunObjectKind.ResourceReference
+                : AgentRunObjectKind.Opaque;
+
+            if (IsAgentRunIntegerProperty(kind, property.Name))
+            {
+                WriteGodotProtocolInteger(
+                    writer,
+                    property.Value,
+                    IsAgentRunInt64Property(kind, property.Name),
+                    property.Name);
+            }
+            else if (childKind != AgentRunObjectKind.Opaque)
+            {
+                WriteAgentRunObject(writer, property.Value, childKind);
+            }
+            else if (kind == AgentRunObjectKind.ActionReceipt
+                && property.Name == "authoritativeObservations"
+                && property.Value.ValueKind == JsonValueKind.Array)
+            {
+                writer.WriteStartArray();
+                foreach (var item in property.Value.EnumerateArray())
+                {
+                    WriteAgentRunObject(
+                        writer,
+                        item,
+                        AgentRunObjectKind.Observation);
+                }
+
+                writer.WriteEndArray();
+            }
+            else
+            {
+                // Extension and game-authored payloads are deliberately
+                // opaque. A Float such as 1.0 must stay a Float there.
+                property.Value.WriteTo(writer);
+            }
+        }
+
+        writer.WriteEndObject();
+    }
+
+    private static bool IsAgentRunIntegerProperty(
+        AgentRunObjectKind kind,
+        string propertyName)
+    {
+        return kind switch
+        {
+            AgentRunObjectKind.Root =>
+                propertyName is "revision" or "runtimeGeneration",
+            AgentRunObjectKind.Budget => propertyName is
+                "maxTurns" or "maxDurationMs" or "maxTokens"
+                or "maxActions",
+            AgentRunObjectKind.Usage => propertyName is
+                "turns" or "durationMs" or "inputTokens"
+                or "outputTokens" or "providerUsageSamples"
+                or "cacheReadTokens" or "cacheWriteTokens"
+                or "cacheMissTokens" or "reasoningTokens"
+                or "providerTotalTokens" or "actions"
+                or "unaccountedProviderAttempts",
+            AgentRunObjectKind.Observation => propertyName is
+                "ttlMs" or "sequence" or "priority",
+            AgentRunObjectKind.ResourceReference =>
+                propertyName == "sizeBytes",
+            AgentRunObjectKind.ActionReceipt =>
+                propertyName == "revision",
+            AgentRunObjectKind.ToolDescriptor =>
+                propertyName == "timeoutMs",
+            _ => false
+        };
+    }
+
+    private static bool IsAgentRunInt64Property(
+        AgentRunObjectKind kind,
+        string propertyName)
+    {
+        return kind == AgentRunObjectKind.Root
+            || (kind == AgentRunObjectKind.Budget
+                && propertyName == "maxDurationMs")
+            || (kind == AgentRunObjectKind.Usage
+                && propertyName == "durationMs")
+            || (kind == AgentRunObjectKind.Observation
+                && propertyName is "ttlMs" or "sequence")
+            || kind is AgentRunObjectKind.ResourceReference
+                or AgentRunObjectKind.ActionReceipt;
+    }
+
+    private static void WriteGodotProtocolInteger(
+        Utf8JsonWriter writer,
+        JsonElement value,
+        bool isInt64,
+        string propertyName)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            value.WriteTo(writer);
+            return;
+        }
+
+        if (value.TryGetInt64(out var exactInteger))
+        {
+            writer.WriteNumberValue(exactInteger);
+            return;
+        }
+
+        if (!value.TryGetDouble(out var number)
+            || !double.IsFinite(number)
+            || number != Math.Truncate(number))
+        {
+            throw new JsonException(
+                $"AgentRun.{propertyName} must be an integer.");
+        }
+
+        const double maximumSafeInteger = 9_007_199_254_740_991d;
+        var minimum = isInt64
+            ? -maximumSafeInteger
+            : int.MinValue;
+        var maximum = isInt64
+            ? maximumSafeInteger
+            : int.MaxValue;
+        if (number < minimum || number > maximum)
+        {
+            throw new GodotJsonNumberMappingException(
+                "godot_json_number_precision_loss",
+                $"AgentRun.{propertyName} cannot be recovered exactly from a Godot Float; construct that protocol field as a Variant Int.");
+        }
+
+        writer.WriteNumberValue((long)number);
     }
 
     private static ObservationEnvelope ReadObservation(string json)
     {
-        var value = ProtocolJson.DeserializeObservationEnvelope(json);
+        var value = ProtocolJson.DeserializeObservationEnvelope(
+            NormalizeProtocolIntegers(
+                json,
+                AgentRunObjectKind.Observation));
         ProtocolValidator.EnsureValid(value);
         return value;
     }
 
     private static ToolDescriptor ReadToolDescriptor(string json)
     {
-        var value = ProtocolJson.DeserializeToolDescriptor(json);
+        var value = ProtocolJson.DeserializeToolDescriptor(
+            NormalizeProtocolIntegers(
+                json,
+                AgentRunObjectKind.ToolDescriptor));
         ProtocolValidator.EnsureValid(value);
         return value;
+    }
+
+    private static string NormalizeProtocolIntegers(
+        string json,
+        AgentRunObjectKind kind)
+    {
+        using var document = JsonDocument.Parse(json);
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(
+                   stream,
+                   new JsonWriterOptions
+                   {
+                       Encoder =
+                           JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                   }))
+        {
+            WriteAgentRunObject(writer, document.RootElement, kind);
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
     }
 
     public static GodotDictionary ToDictionary(AgentRun value) =>
@@ -650,17 +1099,29 @@ public static class GodotProtocolVariantMapper
             return Array.Empty<NormalizedMessage>();
         }
 
+        return ReadMessages(
+            value,
+            "options.initial_transcript",
+            MaximumTranscriptMessages);
+    }
+
+    private static IReadOnlyList<NormalizedMessage> ReadMessages(
+        JsonElement value,
+        string path,
+        int maximumMessages)
+    {
+
         if (value.ValueKind != JsonValueKind.Array)
         {
             throw new JsonException(
-                "options.initial_transcript must be an Array.");
+                $"{path} must be an Array.");
         }
 
-        if (value.GetArrayLength() > MaximumTranscriptMessages)
+        if (value.GetArrayLength() > maximumMessages)
         {
             throw new JsonException(
-                "options.initial_transcript cannot exceed "
-                + $"{MaximumTranscriptMessages} items.");
+                $"{path} cannot exceed "
+                + $"{maximumMessages} items.");
         }
 
         var result = new List<NormalizedMessage>(value.GetArrayLength());
@@ -670,11 +1131,11 @@ public static class GodotProtocolVariantMapper
         {
             var message = NormalizedMessageJournalCodec.Decode(
                 ProtocolJson.DeserializeJsonElement(item.GetRawText()));
-            ValidateMessage(message, index);
+            ValidateMessage(message, index, path);
             if (!ids.Add(message.MessageId))
             {
                 throw new JsonException(
-                    $"options.initial_transcript[{index}].messageId is duplicated.");
+                    $"{path}[{index}].messageId is duplicated.");
             }
 
             result.Add(message);
@@ -686,16 +1147,17 @@ public static class GodotProtocolVariantMapper
 
     private static void ValidateMessage(
         NormalizedMessage message,
-        int index)
+        int index,
+        string path = "options.initial_transcript")
     {
         ValidateRequiredUtf8(
             message.MessageId,
             MaximumMessageIdUtf8Bytes,
-            $"options.initial_transcript[{index}].messageId");
+            $"{path}[{index}].messageId");
         if (!IsIdentifier(message.MessageId))
         {
             throw new JsonException(
-                $"options.initial_transcript[{index}].messageId is invalid.");
+                $"{path}[{index}].messageId is invalid.");
         }
 
         if (message.Role is not (
@@ -705,15 +1167,86 @@ public static class GodotProtocolVariantMapper
                 or NormalizedRoles.Tool))
         {
             throw new JsonException(
-                $"options.initial_transcript[{index}].role is unsupported.");
+                $"{path}[{index}].role is unsupported.");
         }
 
         if (message.Parts.Count > MaximumMessageParts)
         {
             throw new JsonException(
-                $"options.initial_transcript[{index}].parts cannot exceed "
+                $"{path}[{index}].parts cannot exceed "
                 + $"{MaximumMessageParts} items.");
         }
+    }
+
+    private static ExecutionPath? ReadOptionalExecutionPath(
+        JsonElement route)
+    {
+        if (!route.TryGetProperty("explicit_path", out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new JsonException("route.explicit_path must be a String.");
+        }
+
+        return value.GetString() switch
+        {
+            "direct" => ExecutionPath.Direct,
+            "agent" => ExecutionPath.Agent,
+            "workflow" => ExecutionPath.Workflow,
+            _ => throw new JsonException(
+                "route.explicit_path must be 'direct', 'agent', or "
+                + "'workflow'.")
+        };
+    }
+
+    private static ExecutionRequirements ReadExecutionRequirements(
+        JsonElement route)
+    {
+        if (!route.TryGetProperty("requirements", out var value))
+        {
+            return ExecutionRequirements.None;
+        }
+
+        if (value.ValueKind != JsonValueKind.Array
+            || value.GetArrayLength() > 6)
+        {
+            throw new JsonException(
+                "route.requirements must be an Array with at most 6 items.");
+        }
+
+        var result = ExecutionRequirements.None;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var index = 0;
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String
+                || item.GetString() is not string name
+                || !seen.Add(name))
+            {
+                throw new JsonException(
+                    $"route.requirements[{index}] must be a unique String.");
+            }
+
+            result |= name switch
+            {
+                "tools" => ExecutionRequirements.Tools,
+                "skills" => ExecutionRequirements.Skills,
+                "durable_effects" =>
+                    ExecutionRequirements.DurableEffects,
+                "multiple_model_turns" =>
+                    ExecutionRequirements.MultipleModelTurns,
+                "workflow" => ExecutionRequirements.Workflow,
+                "parallel_actors" => ExecutionRequirements.ParallelActors,
+                _ => throw new JsonException(
+                    $"route.requirements[{index}] is unsupported.")
+            };
+            index++;
+        }
+
+        return result;
     }
 
     private static IReadOnlyList<ContextCandidate> ReadContext(
@@ -862,6 +1395,149 @@ public static class GodotProtocolVariantMapper
                ?? ProviderWorkloadClasses.Interactive;
     }
 
+    private static string ReadExecutionMode(JsonElement options)
+    {
+        if (!options.TryGetProperty("execution_mode", out var value))
+        {
+            return DurableExecutionModes.Agent;
+        }
+
+        if (value.ValueKind != JsonValueKind.String
+            || value.GetString() is not (
+                DurableExecutionModes.Agent
+                or DurableExecutionModes.Direct))
+        {
+            throw new JsonException(
+                "options.execution_mode must be 'agent' or 'direct'.");
+        }
+
+        return value.GetString()!;
+    }
+
+    private static ModelInferenceOptions? ReadInference(
+        JsonElement options)
+    {
+        if (!options.TryGetProperty("inference", out var value))
+        {
+            return null;
+        }
+
+        EnsureObject(value, "options.inference");
+        RejectUnknown(
+            value,
+            "reasoning_enabled",
+            "reasoning_effort",
+            "reasoning_token_budget",
+            "temperature",
+            "top_p",
+            "seed",
+            "prompt_caching_enabled",
+            "prompt_cache_key",
+            "prompt_cache_retention");
+        try
+        {
+            return new ModelInferenceOptions
+            {
+                ReasoningEnabled = ReadOptionalNullableBoolean(
+                    value,
+                    "reasoning_enabled"),
+                ReasoningEffort = ReadOptionalString(
+                    value,
+                    "reasoning_effort",
+                    16,
+                    "options.inference.reasoning_effort"),
+                ReasoningTokenBudget = ReadOptionalNullableInt32(
+                    value,
+                    "reasoning_token_budget",
+                    1,
+                    1_000_000),
+                Temperature = ReadOptionalNullableDouble(
+                    value,
+                    "temperature"),
+                TopP = ReadOptionalNullableDouble(value, "top_p"),
+                Seed = ReadOptionalNullableInt32(
+                    value,
+                    "seed",
+                    int.MinValue,
+                    int.MaxValue),
+                PromptCachingEnabled = ReadOptionalNullableBoolean(
+                    value,
+                    "prompt_caching_enabled"),
+                PromptCacheKey = ReadOptionalString(
+                    value,
+                    "prompt_cache_key",
+                    256,
+                    "options.inference.prompt_cache_key"),
+                PromptCacheRetention = ReadOptionalString(
+                    value,
+                    "prompt_cache_retention",
+                    8,
+                    "options.inference.prompt_cache_retention")
+            }.CloneValidated();
+        }
+        catch (ArgumentException exception)
+        {
+            throw new JsonException(
+                "options.inference is invalid.",
+                exception);
+        }
+    }
+
+    private static ProviderRoutePreference? ReadProviderRoutePreference(
+        JsonElement options)
+    {
+        if (!options.TryGetProperty("provider_route", out var value))
+        {
+            return null;
+        }
+
+        EnsureObject(value, "options.provider_route");
+        RejectUnknown(value, "provider_ids", "allow_unlisted_fallback");
+        if (!value.TryGetProperty("provider_ids", out var providerIds)
+            || providerIds.ValueKind != JsonValueKind.Array
+            || providerIds.GetArrayLength() is < 1 or > 16)
+        {
+            throw new JsonException(
+                "options.provider_route.provider_ids must contain 1 through 16 strings.");
+        }
+
+        var ids = providerIds
+            .EnumerateArray()
+            .Select(
+                (item, index) =>
+                {
+                    if (item.ValueKind != JsonValueKind.String)
+                    {
+                        throw new JsonException(
+                            $"options.provider_route.provider_ids[{index}] must be a String.");
+                    }
+
+                    var id = item.GetString();
+                    ValidateRequiredUtf8(
+                        id,
+                        128,
+                        $"options.provider_route.provider_ids[{index}]");
+                    return id!;
+                })
+            .ToArray();
+        try
+        {
+            return new ProviderRoutePreference
+            {
+                ProviderIds = ids,
+                AllowUnlistedFallback = ReadOptionalBoolean(
+                    value,
+                    "allow_unlisted_fallback")
+            }.CloneValidated();
+        }
+        catch (ArgumentException exception)
+        {
+            throw new JsonException(
+                "options.provider_route is invalid.",
+                exception);
+        }
+    }
+
     private static string? ReadResumeWorkloadClass(JsonElement options) =>
         ReadWorkloadClass(options);
 
@@ -971,6 +1647,44 @@ public static class GodotProtocolVariantMapper
         };
     }
 
+    private static bool? ReadOptionalNullableBoolean(
+        JsonElement value,
+        string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => throw new JsonException(
+                $"options.{propertyName} must be a Boolean.")
+        };
+    }
+
+    private static double? ReadOptionalNullableDouble(
+        JsonElement value,
+        string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property))
+        {
+            return null;
+        }
+
+        if (property.ValueKind != JsonValueKind.Number
+            || !property.TryGetDouble(out var result)
+            || !double.IsFinite(result))
+        {
+            throw new JsonException(
+                $"options.{propertyName} must be a finite number.");
+        }
+
+        return result;
+    }
+
     private static int ReadOptionalInt32(
         JsonElement value,
         string propertyName,
@@ -983,8 +1697,7 @@ public static class GodotProtocolVariantMapper
             return defaultValue;
         }
 
-        if (property.ValueKind != JsonValueKind.Number
-            || !property.TryGetInt32(out var result)
+        if (!TryReadInt32(property, out var result)
             || result < minimum
             || result > maximum)
         {
@@ -1007,8 +1720,7 @@ public static class GodotProtocolVariantMapper
             return null;
         }
 
-        if (property.ValueKind != JsonValueKind.Number
-            || !property.TryGetInt32(out var result)
+        if (!TryReadInt32(property, out var result)
             || result < minimum
             || result > maximum)
         {
@@ -1031,8 +1743,7 @@ public static class GodotProtocolVariantMapper
             return null;
         }
 
-        if (property.ValueKind != JsonValueKind.Number
-            || !property.TryGetInt64(out var result)
+        if (!TryReadInt64(property, out var result)
             || result < minimum
             || result > maximum)
         {
@@ -1042,6 +1753,61 @@ public static class GodotProtocolVariantMapper
         }
 
         return result;
+    }
+
+    private static bool TryReadInt32(JsonElement value, out int result)
+    {
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            result = default;
+            return false;
+        }
+
+        if (value.TryGetInt32(out result))
+        {
+            return true;
+        }
+
+        if (value.TryGetDouble(out var number)
+            && double.IsFinite(number)
+            && number >= int.MinValue
+            && number <= int.MaxValue
+            && number == Math.Truncate(number))
+        {
+            result = (int)number;
+            return true;
+        }
+
+        result = default;
+        return false;
+    }
+
+    private static bool TryReadInt64(JsonElement value, out long result)
+    {
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            result = default;
+            return false;
+        }
+
+        if (value.TryGetInt64(out result))
+        {
+            return true;
+        }
+
+        const double maximumExactInteger = 9_007_199_254_740_991d;
+        if (value.TryGetDouble(out var number)
+            && double.IsFinite(number)
+            && number >= -maximumExactInteger
+            && number <= maximumExactInteger
+            && number == Math.Truncate(number))
+        {
+            result = (long)number;
+            return true;
+        }
+
+        result = default;
+        return false;
     }
 
     private static DateTimeOffset? ReadOptionalDateTimeOffset(
@@ -1175,18 +1941,22 @@ public static class GodotProtocolVariantMapper
                         break;
                     }
 
+                    // Preserve the validated JSON lexeme for values that
+                    // originated as Godot Float. Reformatting 1.0 or -0.0 as
+                    // an integer changes the Variant type/sign on a round trip;
+                    // casting an integral double at 2^63 also saturates to
+                    // long.MaxValue. Exact integer tokens already took the
+                    // TryGetInt64 branch above.
                     var number = element.GetDouble();
-                    if (double.IsFinite(number)
-                        && number >= long.MinValue
-                        && number <= long.MaxValue
-                        && number == Math.Truncate(number))
+                    if (!double.IsFinite(number))
                     {
-                        writer.WriteNumberValue((long)number);
+                        throw new JsonException(
+                            "A Godot JSON number must be finite.");
                     }
-                    else
-                    {
-                        writer.WriteNumberValue(number);
-                    }
+
+                    writer.WriteRawValue(
+                        element.GetRawText(),
+                        skipInputValidation: false);
 
                     break;
                 }
@@ -1209,12 +1979,20 @@ public static class GodotProtocolVariantMapper
     private static GodotDictionary ToDictionary(JsonElement element)
     {
         var result = new GodotDictionary();
-        foreach (var property in element.EnumerateObject())
+        try
         {
-            result[property.Name] = ToVariant(property.Value);
-        }
+            foreach (var property in element.EnumerateObject())
+            {
+                result[property.Name] = ToVariant(property.Value);
+            }
 
-        return result;
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     private static global::Godot.Variant ToVariant(JsonElement element)
@@ -1226,12 +2004,20 @@ public static class GodotProtocolVariantMapper
             case JsonValueKind.Array:
                 {
                     var array = new GodotArray();
-                    foreach (var item in element.EnumerateArray())
+                    try
                     {
-                        array.Add(ToVariant(item));
-                    }
+                        foreach (var item in element.EnumerateArray())
+                        {
+                            array.Add(ToVariant(item));
+                        }
 
-                    return array;
+                        return array;
+                    }
+                    catch
+                    {
+                        array.Dispose();
+                        throw;
+                    }
                 }
             case JsonValueKind.String:
                 return element.GetString() ?? string.Empty;
@@ -1241,7 +2027,7 @@ public static class GodotProtocolVariantMapper
                     return integer;
                 }
 
-                return element.GetDouble();
+                return ToGodotFloat(element);
             case JsonValueKind.True:
                 return true;
             case JsonValueKind.False:
@@ -1253,6 +2039,251 @@ public static class GodotProtocolVariantMapper
                 throw new JsonException(
                     $"Unsupported JSON token '{element.ValueKind}'.");
         }
+    }
+
+    private static double ToGodotFloat(JsonElement element)
+    {
+        if (!element.TryGetDouble(out var number)
+            || !double.IsFinite(number))
+        {
+            throw new GodotJsonNumberMappingException(
+                "godot_json_number_out_of_range",
+                "A JSON number cannot be represented as a finite Godot Variant number.");
+        }
+
+        using var roundTrip = JsonDocument.Parse(
+            number.ToString("R", CultureInfo.InvariantCulture));
+        if (!HaveSameDecimalValue(element, roundTrip.RootElement)
+            && !IsExactDoubleValue(element, number))
+        {
+            throw new GodotJsonNumberMappingException(
+                "godot_json_number_precision_loss",
+                "A JSON number cannot be represented by Godot Variant without precision loss; encode exact decimal values as JSON strings.");
+        }
+
+        return number;
+    }
+
+    private static bool HaveSameDecimalValue(
+        JsonElement first,
+        JsonElement second)
+    {
+        if (!TryReadDecimalNumber(
+                first.GetRawText().AsSpan(),
+                out var firstNegative,
+                out var firstSignificand,
+                out var firstExponent)
+            || !TryReadDecimalNumber(
+                second.GetRawText().AsSpan(),
+                out var secondNegative,
+                out var secondSignificand,
+                out var secondExponent))
+        {
+            return false;
+        }
+
+        if (firstSignificand.IsZero && secondSignificand.IsZero)
+        {
+            return true;
+        }
+
+        return firstNegative == secondNegative
+               && firstSignificand == secondSignificand
+               && firstExponent == secondExponent;
+    }
+
+    private static bool IsExactDoubleValue(
+        JsonElement element,
+        double number)
+    {
+        if (!TryReadDecimalNumber(
+                element.GetRawText().AsSpan(),
+                out var negative,
+                out var decimalSignificand,
+                out var decimalExponent))
+        {
+            return false;
+        }
+
+        if (decimalSignificand.IsZero)
+        {
+            return number == 0;
+        }
+
+        var bits = unchecked((ulong)BitConverter.DoubleToInt64Bits(number));
+        var doubleNegative = (bits & 0x8000_0000_0000_0000UL) != 0;
+        if (negative != doubleNegative)
+        {
+            return false;
+        }
+
+        var exponentBits = (int)((bits >> 52) & 0x7ffUL);
+        var fraction = bits & 0x000f_ffff_ffff_ffffUL;
+        var binarySignificand = exponentBits == 0
+            ? fraction
+            : fraction | (1UL << 52);
+        var binaryExponent = exponentBits == 0
+            ? -1_074
+            : exponentBits - 1_023 - 52;
+
+        var decimalNumerator = decimalSignificand;
+        var decimalDenominator = BigInteger.One;
+        if (decimalExponent >= 0)
+        {
+            decimalNumerator *= BigInteger.Pow(10, decimalExponent);
+        }
+        else
+        {
+            decimalDenominator = BigInteger.Pow(10, -decimalExponent);
+        }
+
+        var binaryNumerator = new BigInteger(binarySignificand);
+        var binaryDenominator = BigInteger.One;
+        if (binaryExponent >= 0)
+        {
+            binaryNumerator <<= binaryExponent;
+        }
+        else
+        {
+            binaryDenominator <<= -binaryExponent;
+        }
+
+        return decimalNumerator * binaryDenominator
+               == binaryNumerator * decimalDenominator;
+    }
+
+    private static bool TryReadDecimalNumber(
+        ReadOnlySpan<char> value,
+        out bool negative,
+        out BigInteger significand,
+        out int decimalExponent)
+    {
+        const int maximumSignificantDigits = 1_024;
+        const int maximumAbsoluteExponent = 2_048;
+
+        negative = value.Length > 0 && value[0] == '-';
+        significand = BigInteger.Zero;
+        decimalExponent = 0;
+        var mantissaStart = negative ? 1 : 0;
+        var exponentIndex = value.Length;
+        for (var index = mantissaStart; index < value.Length; index++)
+        {
+            if (value[index] is 'e' or 'E')
+            {
+                exponentIndex = index;
+                break;
+            }
+        }
+
+        var digits = new StringBuilder(32);
+        var afterDecimalPoint = false;
+        var foundNonZero = false;
+        long fractionDigits = 0;
+        long trailingZeros = 0;
+        for (var index = mantissaStart; index < exponentIndex; index++)
+        {
+            var character = value[index];
+            if (character == '.')
+            {
+                afterDecimalPoint = true;
+                continue;
+            }
+
+            if (afterDecimalPoint)
+            {
+                fractionDigits++;
+            }
+
+            if (!foundNonZero)
+            {
+                if (character == '0')
+                {
+                    continue;
+                }
+
+                foundNonZero = true;
+                digits.Append(character);
+                continue;
+            }
+
+            if (character == '0')
+            {
+                trailingZeros++;
+                continue;
+            }
+
+            if (digits.Length + trailingZeros + 1
+                > maximumSignificantDigits)
+            {
+                return false;
+            }
+
+            digits.Append('0', (int)trailingZeros);
+            trailingZeros = 0;
+            digits.Append(character);
+        }
+
+        if (!foundNonZero)
+        {
+            return true;
+        }
+
+        if (digits.Length > maximumSignificantDigits)
+        {
+            return false;
+        }
+
+        long explicitExponent = 0;
+        if (exponentIndex < value.Length)
+        {
+            var index = exponentIndex + 1;
+            var exponentNegative = false;
+            if (value[index] is '+' or '-')
+            {
+                exponentNegative = value[index] == '-';
+                index++;
+            }
+
+            var maximumParsedExponent = (long)value.Length
+                                        + maximumAbsoluteExponent;
+            for (; index < value.Length; index++)
+            {
+                var digit = value[index] - '0';
+                if (explicitExponent
+                    > (maximumParsedExponent - digit) / 10)
+                {
+                    return false;
+                }
+
+                explicitExponent = explicitExponent * 10 + digit;
+            }
+
+            if (exponentNegative)
+            {
+                explicitExponent = -explicitExponent;
+            }
+        }
+
+        var resolvedExponent = explicitExponent
+                               - fractionDigits
+                               + trailingZeros;
+        if (resolvedExponent is < -maximumAbsoluteExponent
+            or > maximumAbsoluteExponent)
+        {
+            return false;
+        }
+
+        if (!BigInteger.TryParse(
+                digits.ToString(),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out significand))
+        {
+            return false;
+        }
+
+        decimalExponent = (int)resolvedExponent;
+        return true;
     }
 }
 
@@ -1332,7 +2363,7 @@ internal sealed class GodotVariantIngressBudget
 internal static class GodotVariantInputGuard
 {
     private const int MaximumDepth = 64;
-    private const int MaximumContainerItems = 2_048;
+    private const int MaximumContainerItems = 4_096;
     private const int MaximumStringUtf8Bytes = 65_536;
     private const int MaximumObjectNodes = 131_072;
     private const int MaximumLargeObjectNodes = 262_144;
@@ -1369,7 +2400,7 @@ internal static class GodotVariantInputGuard
                 maximumNodes);
         budget.AdmitGraph(graph.Nodes, graph.EstimatedUtf8Bytes, path);
 
-        var raw = global::Godot.Json.Stringify(value);
+        var raw = SerializeDictionary(value);
         var rawUtf8Bytes = GetUtf8ByteCount(raw, path);
         if (rawUtf8Bytes > maximumUtf8Bytes)
         {
@@ -1379,8 +2410,7 @@ internal static class GodotVariantInputGuard
 
         budget.AdmitRaw(rawUtf8Bytes, path);
 
-        var normalized =
-            GodotProtocolVariantMapper.NormalizeJsonNumbers(raw);
+        var normalized = raw;
         var normalizedUtf8Bytes =
             GetUtf8ByteCount(normalized, path);
         if (normalizedUtf8Bytes > maximumUtf8Bytes)
@@ -1391,6 +2421,135 @@ internal static class GodotVariantInputGuard
 
         budget.AdmitNormalized(normalizedUtf8Bytes, path);
         return normalized;
+    }
+
+    private static string SerializeDictionary(GodotDictionary value)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(
+                   stream,
+                   new JsonWriterOptions
+                   {
+                       Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                   }))
+        {
+            WriteDictionary(writer, value);
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteDictionary(
+        Utf8JsonWriter writer,
+        GodotDictionary value)
+    {
+        writer.WriteStartObject();
+        foreach (var pair in value)
+        {
+            var key = pair.Key;
+            var child = pair.Value;
+            try
+            {
+                writer.WritePropertyName(key.AsString());
+                WriteVariant(writer, child);
+            }
+            finally
+            {
+                key.Dispose();
+                child.Dispose();
+            }
+        }
+
+        writer.WriteEndObject();
+    }
+
+    private static void WriteArray(Utf8JsonWriter writer, GodotArray value)
+    {
+        writer.WriteStartArray();
+        for (var index = 0; index < value.Count; index++)
+        {
+            var child = value[index];
+            try
+            {
+                WriteVariant(writer, child);
+            }
+            finally
+            {
+                child.Dispose();
+            }
+        }
+
+        writer.WriteEndArray();
+    }
+
+    private static void WriteVariant(
+        Utf8JsonWriter writer,
+        global::Godot.Variant value)
+    {
+        switch (value.VariantType)
+        {
+            case global::Godot.Variant.Type.Nil:
+                writer.WriteNullValue();
+                return;
+            case global::Godot.Variant.Type.Bool:
+                writer.WriteBooleanValue(value.AsBool());
+                return;
+            case global::Godot.Variant.Type.Int:
+                writer.WriteNumberValue(value.AsInt64());
+                return;
+            case global::Godot.Variant.Type.Float:
+                WriteFloat(writer, value.AsDouble());
+                return;
+            case global::Godot.Variant.Type.String:
+            case global::Godot.Variant.Type.StringName:
+                writer.WriteStringValue(value.AsString());
+                return;
+            case global::Godot.Variant.Type.Dictionary:
+                using (var dictionary = value.AsGodotDictionary())
+                {
+                    WriteDictionary(writer, dictionary);
+                }
+
+                return;
+            case global::Godot.Variant.Type.Array:
+                using (var array = value.AsGodotArray())
+                {
+                    WriteArray(writer, array);
+                }
+
+                return;
+            default:
+                throw new JsonException(
+                    $"Unsupported Godot Variant type '{value.VariantType}'.");
+        }
+    }
+
+    private static void WriteFloat(Utf8JsonWriter writer, double value)
+    {
+        if (!double.IsFinite(value))
+        {
+            throw new JsonException("A Godot JSON number must be finite.");
+        }
+
+        string token;
+        if (value == 0d
+            && BitConverter.DoubleToInt64Bits(value)
+            == BitConverter.DoubleToInt64Bits(-0.0d))
+        {
+            token = "-0.0";
+        }
+        else
+        {
+            token = value.ToString("R", CultureInfo.InvariantCulture);
+            if (token.IndexOf('.') < 0
+                && token.IndexOf('E') < 0
+                && token.IndexOf('e') < 0)
+            {
+                token += ".0";
+            }
+        }
+
+        writer.WriteRawValue(token, skipInputValidation: false);
     }
 
     private static int GetUtf8ByteCount(string value, string path)

@@ -457,6 +457,7 @@ public sealed class ProviderRequestSanitizer : IProviderRequestAdapter
             Messages = messages,
             Tools = tools,
             MaxOutputTokens = source.MaxOutputTokens,
+            Inference = source.Inference?.CloneValidated(),
             OpaqueContinuationState =
                 source.OpaqueContinuationState?.Snapshot()
         };

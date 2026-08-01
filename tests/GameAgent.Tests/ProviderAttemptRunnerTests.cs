@@ -1196,6 +1196,57 @@ public sealed class ProviderAttemptRunnerTests
     }
 
     [Fact]
+    public async Task PreferredModelRouteDispatchesOnlyConfiguredSelection()
+    {
+        var firstCalls = 0;
+        var selectedCalls = 0;
+        var first = new TestStreamingProvider(
+            "first",
+            request =>
+            {
+                Interlocked.Increment(ref firstCalls);
+                return SuccessfulEvents(request);
+            });
+        var selected = new TestStreamingProvider(
+            "selected",
+            request =>
+            {
+                Interlocked.Increment(ref selectedCalls);
+                return SuccessfulEvents(request);
+            });
+        var runner = new ProviderAttemptRunner(
+            new[] { first, selected },
+            new ProviderRetryPolicy
+            {
+                MaxAttemptsPerProvider = 1,
+                InitialDelay = TimeSpan.Zero,
+                MaxDelay = TimeSpan.Zero
+            },
+            new ImmediateDelay(),
+            new SequentialIdGenerator());
+        var plan = runner.CaptureRoutePlan(
+            new ProviderRoutePreference
+            {
+                ProviderIds = new[] { "selected" }
+            });
+
+        var result = await runner.RunAsync(
+            "run-selected",
+            "attempt-selected",
+            "turn-selected",
+            Array.Empty<NormalizedMessage>(),
+            Array.Empty<ToolDescriptor>(),
+            new AttemptFence(),
+            null,
+            CancellationToken.None,
+            routePlan: plan);
+
+        Assert.Equal("selected", result.ProviderId);
+        Assert.Equal(0, firstCalls);
+        Assert.Equal(1, selectedCalls);
+    }
+
+    [Fact]
     public async Task RetryPresentationNeverConcatenatesAbandonedPartialText()
     {
         var calls = 0;

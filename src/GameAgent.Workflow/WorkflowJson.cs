@@ -650,9 +650,11 @@ internal static class WorkflowSchema
                     "Numeric schemas require minimum and maximum.");
             }
 
-            if (!minimum.TryGetDecimal(out var minimumValue)
-                || !maximum.TryGetDecimal(out var maximumValue)
-                || minimumValue > maximumValue)
+            if (!JsonValueInspector.TryCompareNumbers(
+                    minimum,
+                    maximum,
+                    out var comparison)
+                || comparison > 0)
             {
                 return Invalid(
                     label,

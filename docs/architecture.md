@@ -30,17 +30,27 @@ engine types out of it.
 The core owns:
 
 - run and turn lifecycle;
+- stateless completion and durable direct/agent/workflow routing;
 - normalized provider messages;
 - provider retries and stale-stream fences;
 - tool and skill snapshots;
-- context compilation plus memory interfaces, a bounded in-memory store, and
-  a crash-tolerant file-backed store;
+- context compilation plus a replaceable bounded context engine;
+- memory interfaces, bounded query/reranking stages, a bounded in-memory store,
+  and a crash-tolerant file-backed store;
 - tool scheduling;
 - budgets and bounded queues;
 - control commands;
+- typed lifecycle middleware and bounded child Agent supervision;
 - journaling, operation ledgers, and recovery.
 
 The core targets `netstandard2.1` and does not reference an engine SDK.
+
+The execution surfaces are deliberately distinct. Stateless completion avoids
+session and journal overhead for isolated model calls. Durable direct execution
+keeps context, memory, accounting, and recovery but performs one tool-free model
+turn. Agent execution owns the bounded tool loop. Workflow execution owns a
+fixed recoverable graph around Agent steps. Routing therefore optimizes latency
+without allowing a cheap path to silently omit required capabilities.
 
 Game-semantic coordinates remain engine-neutral. Named clocks, timelines,
 save/state revisions, entity incarnations, observer perspective, spatial scope,
@@ -488,6 +498,13 @@ still returned when that gate is not enabled.
 ## Local and remote responsibilities
 
 The runtime, journal, context compiler, scheduler, and engine host run locally.
-The model provider is replaceable and may be local or remote. Cloud services are
-optional for the open-source runtime, but are appropriate for credential
-protection, quotas, moderation, billing, fleet telemetry, and hosted memory.
+The model provider is replaceable and may be local or remote. A complete Agent
+loop, including workflow orchestration, game-time semantics, memory, durable
+state, recovery, and action settlement, does not require a hosted runtime.
+
+A commercial game may put a narrow model gateway in front of a remote provider
+to protect credentials, enforce quotas, moderate requests, and meter usage.
+That gateway is transport infrastructure: it does not own the Agent loop or
+move game rules, state, workflow decisions, saves, or authoritative action
+settlement out of the game. Custom remote stores and telemetry sinks are
+possible extension choices, not dependencies or the default architecture.

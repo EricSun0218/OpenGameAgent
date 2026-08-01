@@ -1,10 +1,43 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json;
+using GameAgent.Core;
 using Xunit;
 
 namespace GameAgent.Workflow.Tests;
 
 public sealed class WorkflowRunnerTests
 {
+    [Fact]
+    public async Task RoutedWorkflowRuntimeExecutesRegisteredWorkflow()
+    {
+        var executor = new PassExecutor();
+        var workflow = CompileSingleStepWorkflow(
+            executor.Kind,
+            WorkflowTestData.StringSchema(),
+            WorkflowTestData.StringSchema());
+        var routed = new RoutedWorkflowRuntime(
+            new WorkflowRunner(
+                new InMemoryWorkflowRunStore(),
+                new WorkflowStepExecutorRegistry(new[] { executor })),
+            new[] { workflow });
+
+        var outcome = await routed.RunAsync(
+            new RoutedWorkflowRequest
+            {
+                WorkflowId = "single",
+                RunKey = "routed",
+                OwnerId = "owner",
+                Input = WorkflowTestData.Json("\"value\"")
+            },
+            default);
+
+        Assert.Equal("single", outcome.WorkflowId);
+        Assert.Equal("completed", outcome.Status);
+        Assert.Equal("value", outcome.Output!.Value.GetString());
+        Assert.Equal(1, executor.Calls);
+    }
+
     [Fact]
     public async Task IndependentRootsRunInParallelAndReduceInStableOrder()
     {
@@ -326,6 +359,223 @@ public sealed class WorkflowRunnerTests
         Assert.Equal(1, executor.Calls);
     }
 
+    [Fact]
+    public async Task WorkflowDeadlineFencesANonCooperativeExecutor()
+    {
+        var executor = new NonCooperativeDeadlineExecutor();
+        var schema = WorkflowTestData.StringSchema();
+        var workflow = CompileSingleStepWorkflow(
+            executor.Kind,
+            schema,
+            schema,
+            new WorkflowLimits(maxDurationMs: 100));
+        var store = new InMemoryWorkflowRunStore();
+        var runner = new WorkflowRunner(
+            store,
+            new WorkflowStepExecutorRegistry(new[] { executor }),
+            options: new WorkflowRunnerOptions(
+                leaseDuration: TimeSpan.FromMilliseconds(300)));
+
+        var execution = runner.ExecuteAsync(
+                workflow,
+                new WorkflowRunRequest(
+                    "deadline-run",
+                    "owner-a",
+                    WorkflowTestData.Json("\"input\"")))
+            .AsTask();
+        await executor.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(WorkflowRunStatus.Failed, result.Status);
+        Assert.Equal(WorkflowReasonCodes.LimitExceeded, result.ReasonCode);
+        var persisted = await store.ReadAsync(
+            result.RunId,
+            CancellationToken.None);
+        Assert.NotNull(persisted);
+        Assert.Null(persisted.Lease);
+
+        executor.Release.TrySetResult(true);
+        await executor.Finished.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(executor.LateCheckpointAccepted);
+    }
+
+    [Fact]
+    public async Task CancellationOwnershipIsReservedBeforeExecutorDispatch()
+    {
+        await WaitForConditionAsync(
+            () => WorkflowCancellationDispatcher.ActiveReservations == 0,
+            TimeSpan.FromSeconds(2));
+        var capacity = WorkflowCancellationDispatcher.ReservationCapacity;
+        var executor = new ReservationHoldingExecutor(capacity);
+        var schema = WorkflowTestData.StringSchema();
+        var workflow = CompileSingleStepWorkflow(
+            executor.Kind,
+            schema,
+            schema);
+        var runner = new WorkflowRunner(
+            new InMemoryWorkflowRunStore(),
+            new WorkflowStepExecutorRegistry(new[] { executor }));
+        var owners = Enumerable.Range(0, capacity)
+            .Select(index => runner.ExecuteAsync(
+                    workflow,
+                    new WorkflowRunRequest(
+                        "reservation-owner-" + index,
+                        "owner-a",
+                        WorkflowTestData.Json("\"input\"")))
+                .AsTask())
+            .ToArray();
+
+        try
+        {
+            await executor.AllEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(capacity, executor.Calls);
+            Assert.Equal(
+                capacity,
+                WorkflowCancellationDispatcher.ActiveReservations);
+
+            var overflow = runner.ExecuteAsync(
+                    workflow,
+                    new WorkflowRunRequest(
+                        "reservation-overflow",
+                        "owner-a",
+                        WorkflowTestData.Json("\"input\"")))
+                .AsTask();
+            var failure = await Assert.ThrowsAsync<
+                WorkflowExecutorInterruptedException>(() => overflow);
+
+            Assert.Contains(
+                "cancellation capacity",
+                failure.Message,
+                StringComparison.Ordinal);
+            Assert.Equal(capacity, executor.Calls);
+        }
+        finally
+        {
+            executor.ReleaseAll();
+        }
+
+        var completed = await Task.WhenAll(owners)
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.All(
+            completed,
+            run => Assert.Equal(WorkflowRunStatus.Completed, run.Status));
+        await WaitForConditionAsync(
+            () => WorkflowCancellationDispatcher.ActiveReservations == 0,
+            TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task CompletedInvocationCancelsOutstandingWorkflowTimers()
+    {
+        var executor = new ReservationHoldingExecutor(expectedCalls: 1);
+        var delays = new TrackingWorkflowDelayFactory();
+        var schema = WorkflowTestData.StringSchema();
+        var workflow = CompileSingleStepWorkflow(
+            executor.Kind,
+            schema,
+            schema);
+        var runner = new WorkflowRunner(
+            new InMemoryWorkflowRunStore(),
+            new WorkflowStepExecutorRegistry(new[] { executor }),
+            clock: null,
+            options: null,
+            delayFactory: delays);
+        var execution = runner.ExecuteAsync(
+                workflow,
+                new WorkflowRunRequest(
+                    "timer-cleanup",
+                    "owner-a",
+                    WorkflowTestData.Json("\"input\"")))
+            .AsTask();
+
+        await executor.AllEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await delays.TwoCreated.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        executor.ReleaseAll();
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitForConditionAsync(
+            () => delays.Active == 0,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal(WorkflowRunStatus.Completed, result.Status);
+        Assert.Equal(2, delays.Created);
+        Assert.Equal(2, delays.Cancelled);
+    }
+
+    [Fact]
+    public async Task DetachedInvocationKeepsExecutionTokenAliveUntilItEnds()
+    {
+        await WaitForConditionAsync(
+            () => WorkflowCancellationDispatcher.ActiveReservations == 0,
+            TimeSpan.FromSeconds(2));
+        var executor = new LateRegistrationExecutor();
+        var delays = new TrackingWorkflowDelayFactory();
+        var schema = WorkflowTestData.StringSchema();
+        var workflow = CompileSingleStepWorkflow(
+            executor.Kind,
+            schema,
+            schema,
+            new WorkflowLimits(maxDurationMs: 100));
+        var runner = new WorkflowRunner(
+            new InMemoryWorkflowRunStore(),
+            new WorkflowStepExecutorRegistry(new[] { executor }),
+            clock: null,
+            options: new WorkflowRunnerOptions(
+                leaseDuration: TimeSpan.FromSeconds(3)),
+            delayFactory: delays);
+        var execution = runner.ExecuteAsync(
+                workflow,
+                new WorkflowRunRequest(
+                    "late-token-registration",
+                    "owner-a",
+                    WorkflowTestData.Json("\"input\"")))
+            .AsTask();
+
+        try
+        {
+            await executor.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var result = await execution.WaitAsync(TimeSpan.FromSeconds(2));
+            await executor.ProbeCompleted.Task.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            await WaitForConditionAsync(
+                () => delays.Active == 0,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(WorkflowRunStatus.Failed, result.Status);
+            Assert.Equal(WorkflowReasonCodes.LimitExceeded, result.ReasonCode);
+            Assert.True(executor.LateRegistrationSucceeded);
+            Assert.Equal(
+                1,
+                WorkflowCancellationDispatcher.ActiveReservations);
+            Assert.Equal(2, delays.Created);
+            Assert.Equal(1, delays.Cancelled);
+        }
+        finally
+        {
+            executor.Release.TrySetResult(true);
+        }
+
+        await executor.Finished.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitForConditionAsync(
+            () => WorkflowCancellationDispatcher.ActiveReservations == 0,
+            TimeSpan.FromSeconds(2));
+    }
+
+    private static async Task WaitForConditionAsync(
+        Func<bool> condition,
+        TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (deadline.Elapsed >= timeout)
+            {
+                Assert.Fail("The expected condition was not reached in time.");
+            }
+
+            await Task.Delay(10);
+        }
+    }
+
     private static CompiledWorkflow CompileParallelWorkflow()
     {
         var seed = WorkflowTestData.SeedSchema();
@@ -395,7 +645,8 @@ public sealed class WorkflowRunnerTests
     private static CompiledWorkflow CompileSingleStepWorkflow(
         string kind,
         JsonElement inputSchema,
-        JsonElement outputSchema)
+        JsonElement outputSchema,
+        WorkflowLimits? limits = null)
     {
         var stage = WorkflowStageDefinition.CreateStep(
             "only",
@@ -409,7 +660,224 @@ public sealed class WorkflowRunnerTests
                 inputSchema,
                 outputSchema,
                 "only",
-                new[] { stage }));
+                new[] { stage },
+                limits));
+    }
+
+    private sealed class NonCooperativeDeadlineExecutor
+        : IWorkflowStepExecutor
+    {
+        public string Kind => "test/non-cooperative-deadline";
+
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Finished { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool LateCheckpointAccepted { get; private set; }
+
+        public ValueTask<WorkflowStepResult> ExecuteAsync(
+            WorkflowStepContext context,
+            JsonElement input,
+            CancellationToken cancellationToken) =>
+            ExecuteCoreAsync(context, input);
+
+        public ValueTask<WorkflowStepResult> RecoverAsync(
+            WorkflowStepContext context,
+            JsonElement input,
+            CancellationToken cancellationToken) =>
+            ExecuteCoreAsync(context, input);
+
+        private async ValueTask<WorkflowStepResult> ExecuteCoreAsync(
+            WorkflowStepContext context,
+            JsonElement input)
+        {
+            Entered.TrySetResult(true);
+            await Release.Task;
+            LateCheckpointAccepted = await context.SaveCheckpointAsync(
+                WorkflowTestData.Json("\"late\""),
+                CancellationToken.None);
+            Finished.TrySetResult(true);
+            return WorkflowStepResult.Completed(input);
+        }
+    }
+
+    private sealed class ReservationHoldingExecutor : IWorkflowStepExecutor
+    {
+        private readonly int _expectedCalls;
+        private readonly ConcurrentBag<TaskCompletionSource<bool>> _releases =
+            new();
+        private int _calls;
+
+        public ReservationHoldingExecutor(int expectedCalls)
+        {
+            _expectedCalls = expectedCalls;
+        }
+
+        public string Kind => "test/reservation-holding";
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public TaskCompletionSource<bool> AllEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<WorkflowStepResult> ExecuteAsync(
+            WorkflowStepContext context,
+            JsonElement input,
+            CancellationToken cancellationToken) =>
+            ExecuteCoreAsync(input);
+
+        public ValueTask<WorkflowStepResult> RecoverAsync(
+            WorkflowStepContext context,
+            JsonElement input,
+            CancellationToken cancellationToken) =>
+            ExecuteCoreAsync(input);
+
+        public void ReleaseAll()
+        {
+            foreach (var release in _releases)
+            {
+                release.TrySetResult(true);
+            }
+        }
+
+        private async ValueTask<WorkflowStepResult> ExecuteCoreAsync(
+            JsonElement input)
+        {
+            var release = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _releases.Add(release);
+            if (Interlocked.Increment(ref _calls) == _expectedCalls)
+            {
+                AllEntered.TrySetResult(true);
+            }
+
+            await release.Task;
+            return WorkflowStepResult.Completed(input);
+        }
+    }
+
+    private sealed class TrackingWorkflowDelayFactory : IWorkflowDelayFactory
+    {
+        private int _active;
+        private int _cancelled;
+        private int _created;
+
+        public int Active => Volatile.Read(ref _active);
+
+        public int Cancelled => Volatile.Read(ref _cancelled);
+
+        public int Created => Volatile.Read(ref _created);
+
+        public TaskCompletionSource<bool> TwoCreated { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task DelayAsync(
+            TimeSpan delay,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _active);
+            if (Interlocked.Increment(ref _created) >= 2)
+            {
+                TwoCreated.TrySetResult(true);
+            }
+
+            return ObserveAsync(delay, cancellationToken);
+        }
+
+        private async Task ObserveAsync(
+            TimeSpan delay,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                Interlocked.Increment(ref _cancelled);
+                throw;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
+            }
+        }
+    }
+
+    private sealed class LateRegistrationExecutor : IWorkflowStepExecutor
+    {
+        public string Kind => "test/late-token-registration";
+
+        public TaskCompletionSource<bool> Entered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> ProbeCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> Finished { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool LateRegistrationSucceeded { get; private set; } = true;
+
+        public ValueTask<WorkflowStepResult> ExecuteAsync(
+            WorkflowStepContext context,
+            JsonElement input,
+            CancellationToken cancellationToken) =>
+            ExecuteCoreAsync(input, cancellationToken);
+
+        public ValueTask<WorkflowStepResult> RecoverAsync(
+            WorkflowStepContext context,
+            JsonElement input,
+            CancellationToken cancellationToken) =>
+            ExecuteCoreAsync(input, cancellationToken);
+
+        private async ValueTask<WorkflowStepResult> ExecuteCoreAsync(
+            JsonElement input,
+            CancellationToken cancellationToken)
+        {
+            Entered.TrySetResult(true);
+            try
+            {
+                await Task.Delay(
+                    Timeout.InfiniteTimeSpan,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+            }
+
+            var probe = Stopwatch.StartNew();
+            while (probe.Elapsed < TimeSpan.FromMilliseconds(150))
+            {
+                try
+                {
+                    using var registration = cancellationToken.Register(
+                        static () => { });
+                }
+                catch (ObjectDisposedException)
+                {
+                    LateRegistrationSucceeded = false;
+                    break;
+                }
+
+                await Task.Delay(1);
+            }
+
+            ProbeCompleted.TrySetResult(true);
+            await Release.Task;
+            Finished.TrySetResult(true);
+            return WorkflowStepResult.Completed(input);
+        }
     }
 
     private sealed class ParallelValueExecutor : IWorkflowStepExecutor

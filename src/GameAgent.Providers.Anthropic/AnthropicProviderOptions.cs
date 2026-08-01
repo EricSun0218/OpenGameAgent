@@ -3,6 +3,20 @@ using System.Text;
 
 namespace GameAgent.Providers.Anthropic;
 
+public static class AnthropicThinkingDialects
+{
+    public const string None = "none";
+
+    public const string ManualBudget = "manual_budget";
+
+    public const string Adaptive = "adaptive";
+
+    internal static bool IsKnown(string value) =>
+        string.Equals(value, None, StringComparison.Ordinal)
+        || string.Equals(value, ManualBudget, StringComparison.Ordinal)
+        || string.Equals(value, Adaptive, StringComparison.Ordinal);
+}
+
 public sealed class AnthropicProviderOptions
 {
     public string ProviderId { get; set; } = "anthropic";
@@ -15,6 +29,30 @@ public sealed class AnthropicProviderOptions
     public string Model { get; set; } = string.Empty;
 
     public int MaxOutputTokens { get; set; } = 8_192;
+
+    /// <summary>
+    /// Declares the exact thinking request dialect accepted by this model
+    /// route. The safe default makes no reasoning-control claim.
+    /// </summary>
+    public string ThinkingDialect { get; set; } =
+        AnthropicThinkingDialects.None;
+
+    public int? DefaultReasoningTokenBudget { get; set; }
+
+    /// <summary>
+    /// Applies only to adaptive routes whose exact model accepts an explicit
+    /// disabled thinking object.
+    /// </summary>
+    public bool SupportsThinkingDisable { get; set; }
+
+    /// <summary>
+    /// Exact effort values accepted through output_config.effort by this
+    /// route. Applies only to the adaptive dialect.
+    /// </summary>
+    public IReadOnlyList<string> SupportedReasoningEfforts { get; set; } =
+        Array.Empty<string>();
+
+    public bool SupportsSamplingControls { get; set; }
 
     public int MaxContextTokens { get; set; } = 200_000;
 
@@ -50,6 +88,11 @@ public sealed class AnthropicProviderOptions
             ApiVersion = ApiVersion,
             Model = Model,
             MaxOutputTokens = MaxOutputTokens,
+            ThinkingDialect = ThinkingDialect,
+            DefaultReasoningTokenBudget = DefaultReasoningTokenBudget,
+            SupportsThinkingDisable = SupportsThinkingDisable,
+            SupportedReasoningEfforts = SnapshotEfforts(),
+            SupportsSamplingControls = SupportsSamplingControls,
             MaxContextTokens = MaxContextTokens,
             MaxSseLineCharacters = MaxSseLineCharacters,
             MaxSseEventCharacters = MaxSseEventCharacters,
@@ -127,6 +170,66 @@ public sealed class AnthropicProviderOptions
                 "Provider limits must be positive.");
         }
 
+        if (DefaultReasoningTokenBudget.HasValue
+            && (DefaultReasoningTokenBudget.Value < 1_024
+                || DefaultReasoningTokenBudget.Value >= MaxOutputTokens))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(DefaultReasoningTokenBudget));
+        }
+
+        if (!AnthropicThinkingDialects.IsKnown(ThinkingDialect))
+        {
+            throw new ArgumentException(
+                "The Anthropic thinking dialect is unsupported.",
+                nameof(ThinkingDialect));
+        }
+
+        if (DefaultReasoningTokenBudget.HasValue
+            && !string.Equals(
+                ThinkingDialect,
+                AnthropicThinkingDialects.ManualBudget,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "A default reasoning-token budget requires the manual-budget dialect.",
+                nameof(DefaultReasoningTokenBudget));
+        }
+
+        if (SupportsThinkingDisable
+            && !string.Equals(
+                ThinkingDialect,
+                AnthropicThinkingDialects.Adaptive,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Explicit thinking disable applies only to adaptive routes.",
+                nameof(SupportsThinkingDisable));
+        }
+
+        var efforts = SnapshotEfforts();
+        if (efforts.Count != 0
+            && !string.Equals(
+                ThinkingDialect,
+                AnthropicThinkingDialects.Adaptive,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Reasoning effort applies only to adaptive routes.",
+                nameof(SupportedReasoningEfforts));
+        }
+
+        if (SupportsSamplingControls
+            && string.Equals(
+                ThinkingDialect,
+                AnthropicThinkingDialects.Adaptive,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Adaptive thinking routes do not accept non-default sampling controls.",
+                nameof(SupportsSamplingControls));
+        }
+
         if (MaxSseEventCharacters > MaxStreamCharacters)
         {
             throw new ArgumentException(
@@ -154,6 +257,63 @@ public sealed class AnthropicProviderOptions
         ValidatePrice(
             OutputUsdPerMillionTokens,
             nameof(OutputUsdPerMillionTokens));
+    }
+
+    private IReadOnlyList<string> SnapshotEfforts()
+    {
+        if (SupportedReasoningEfforts is null)
+        {
+            throw new ArgumentNullException(nameof(SupportedReasoningEfforts));
+        }
+
+        if (SupportedReasoningEfforts.Count > 5)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(SupportedReasoningEfforts));
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<string>(SupportedReasoningEfforts.Count);
+        foreach (var effort in SupportedReasoningEfforts)
+        {
+            if (!string.Equals(
+                    effort,
+                    GameAgent.Core.ModelReasoningEfforts.Low,
+                    StringComparison.Ordinal)
+                && !string.Equals(
+                    effort,
+                    GameAgent.Core.ModelReasoningEfforts.Medium,
+                    StringComparison.Ordinal)
+                && !string.Equals(
+                    effort,
+                    GameAgent.Core.ModelReasoningEfforts.High,
+                    StringComparison.Ordinal)
+                && !string.Equals(
+                    effort,
+                    GameAgent.Core.ModelReasoningEfforts.ExtraHigh,
+                    StringComparison.Ordinal)
+                && !string.Equals(
+                    effort,
+                    GameAgent.Core.ModelReasoningEfforts.Maximum,
+                    StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "The Anthropic route declares an unsupported effort value.",
+                    nameof(SupportedReasoningEfforts));
+            }
+
+            if (!seen.Add(effort))
+            {
+                throw new ArgumentException(
+                    "Anthropic route effort values must be unique.",
+                    nameof(SupportedReasoningEfforts));
+            }
+
+            result.Add(effort);
+        }
+
+        result.Sort(StringComparer.Ordinal);
+        return result.AsReadOnly();
     }
 
     private static void ValidateRequiredText(

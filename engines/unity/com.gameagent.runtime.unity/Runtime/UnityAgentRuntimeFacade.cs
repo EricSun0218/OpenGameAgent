@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using GameAgent.Core;
+using GameAgent.Protocol;
 
 namespace GameAgent.Unity
 {
@@ -311,11 +312,12 @@ namespace GameAgent.Unity
     internal static class UnityRunCancellationDispatcher
     {
         internal const int Capacity = 8;
+        internal const int PendingCapacity = 4096;
 
         private static readonly UnityBoundedCancellationDispatcher Dispatcher =
             new UnityBoundedCancellationDispatcher(
                 Capacity,
-                0,
+                PendingCapacity,
                 "The process run cancellation dispatcher is at capacity.");
 
         internal static int ActiveCount
@@ -323,11 +325,87 @@ namespace GameAgent.Unity
             get { return Dispatcher.ActiveCount; }
         }
 
+        internal static int PendingCount
+        {
+            get { return Dispatcher.PendingCount; }
+        }
+
+        internal static int LeaseCount
+        {
+            get { return Dispatcher.LeaseCount; }
+        }
+
+        internal static bool TryAcquireLease(
+            out UnityBoundedCancellationDispatcher.Lease lease)
+        {
+            return Dispatcher.TryAcquireLease(out lease);
+        }
+
         internal static bool TryDispatch(
+            UnityBoundedCancellationDispatcher.Lease lease,
             Action cancellation,
             out Task<Exception> completion)
         {
-            return Dispatcher.TryDispatch(cancellation, out completion);
+            return Dispatcher.TryDispatch(
+                lease,
+                cancellation,
+                out completion);
+        }
+
+        internal static void ReleaseLease(
+            UnityBoundedCancellationDispatcher.Lease lease)
+        {
+            Dispatcher.ReleaseLease(lease);
+        }
+    }
+
+    internal static class UnityShutdownRunCancellationDispatcher
+    {
+        internal const int Capacity = 8;
+        internal const int PendingCapacity = 4096;
+
+        private static readonly UnityBoundedCancellationDispatcher Dispatcher =
+            new UnityBoundedCancellationDispatcher(
+                Capacity,
+                PendingCapacity,
+                "The process shutdown-run cancellation dispatcher is at capacity.");
+
+        internal static int ActiveCount
+        {
+            get { return Dispatcher.ActiveCount; }
+        }
+
+        internal static int PendingCount
+        {
+            get { return Dispatcher.PendingCount; }
+        }
+
+        internal static int LeaseCount
+        {
+            get { return Dispatcher.LeaseCount; }
+        }
+
+        internal static bool TryAcquireLease(
+            out UnityBoundedCancellationDispatcher.Lease lease)
+        {
+            return Dispatcher.TryAcquireLease(out lease);
+        }
+
+        internal static bool TryDispatch(
+            UnityBoundedCancellationDispatcher.Lease lease,
+            Action cancellation,
+            out Task<Exception> completion)
+        {
+            return Dispatcher.TryDispatch(
+                lease,
+                cancellation,
+                out completion);
+        }
+
+        internal static void ReleaseLease(
+            UnityBoundedCancellationDispatcher.Lease lease)
+        {
+            Dispatcher.ReleaseLease(lease);
         }
     }
 
@@ -415,6 +493,8 @@ namespace GameAgent.Unity
             HeadlessRunRequest,
             HeadlessRunOutcome> _headlessBackend;
         private readonly IUnityDurableAgentRuntimeBackend _durableBackend;
+        private readonly IUnityRoutedExecutionBackend _routedBackend;
+        private readonly IUnityChildAgentBackend _childBackend;
         private readonly ISessionStore _sessionStore;
         private readonly bool _ownsSessionStore;
         private readonly bool _ownsBackend;
@@ -424,10 +504,8 @@ namespace GameAgent.Unity
             _shutdownLease;
         private readonly CancellationTokenSource _shutdown =
             new CancellationTokenSource();
-        private readonly Dictionary<Task, CancellationTokenSource> _activeRuns =
-            new Dictionary<Task, CancellationTokenSource>();
-        private readonly HashSet<Task<Exception>> _activeCancellations =
-            new HashSet<Task<Exception>>();
+        private readonly Dictionary<Task, ActiveRunCancellation> _activeRuns =
+            new Dictionary<Task, ActiveRunCancellation>();
         private readonly TaskCompletionSource<bool> _shutdownSignalCompleted =
             new TaskCompletionSource<bool>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -520,6 +598,8 @@ namespace GameAgent.Unity
             ValidateMaxActiveRuns(maxActiveRuns);
             _durableBackend = backend
                 ?? throw new ArgumentNullException(nameof(backend));
+            _routedBackend = backend as IUnityRoutedExecutionBackend;
+            _childBackend = backend as IUnityChildAgentBackend;
             _sessionStore = sessionStore
                 ?? throw new ArgumentNullException(nameof(sessionStore));
             _ownsSessionStore = ownsSessionStore;
@@ -662,7 +742,11 @@ namespace GameAgent.Unity
             }
 
             return RunTrackedAsync(
-                token => _headlessBackend.RunAsync(request, token),
+                token => _headlessBackend.RunAsync(
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        request,
+                        token),
+                    token),
                 cancellationToken);
         }
 
@@ -683,7 +767,11 @@ namespace GameAgent.Unity
             }
 
             return RunTrackedAsync(
-                token => _durableBackend.RunAsync(request, token),
+                token => _durableBackend.RunAsync(
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        request,
+                        token),
+                    token),
                 cancellationToken);
         }
 
@@ -709,12 +797,156 @@ namespace GameAgent.Unity
             }
 
             return RunTrackedAsync(
-                token => _durableBackend.ResumeAsync(
-                    runId,
-                    continuation,
-                    reconciler,
+                token =>
+                {
+                    var continuationSnapshot =
+                        DurableRunRequestSnapshotter.Snapshot(
+                            continuation,
+                            token);
+                    return _durableBackend.ResumeAsync(
+                        runId,
+                        continuationSnapshot,
+                        reconciler,
+                        token);
+                },
+                cancellationToken);
+        }
+
+        public Task<RoutedExecutionOutcome> RunRoutedAsync(
+            RoutedExecutionRequest request,
+            CancellationToken cancellationToken =
+                default(CancellationToken))
+        {
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
+            if (_routedBackend == null)
+            {
+                throw new InvalidOperationException(
+                    "This facade is not configured with routed execution.");
+            }
+
+            return RunTrackedAsync(
+                token => _routedBackend.RunRoutedAsync(
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        request,
+                        token),
                     token),
                 cancellationToken);
+        }
+
+        public Task<SimpleCompletionOutcome> CompleteAsync(
+            SimpleCompletionRequest request,
+            CancellationToken cancellationToken =
+                default(CancellationToken))
+        {
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
+            if (_routedBackend == null)
+            {
+                throw new InvalidOperationException(
+                    "This facade is not configured with stateless completion.");
+            }
+
+            return RunTrackedAsync(
+                token => _routedBackend.CompleteAsync(
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        request,
+                        token),
+                    token),
+                cancellationToken);
+        }
+
+        public Task<ChildAgentRunResult> RunChildAsync(
+            string parentRunId,
+            DurableRunRequest request,
+            CancellationToken cancellationToken =
+                default(CancellationToken))
+        {
+            if (string.IsNullOrWhiteSpace(parentRunId))
+            {
+                throw new ArgumentException(
+                    "A parent run id is required.",
+                    nameof(parentRunId));
+            }
+
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
+            if (_childBackend == null)
+            {
+                throw new InvalidOperationException(
+                    "This facade is not configured with child-agent supervision.");
+            }
+
+            return RunTrackedAsync(
+                token => _childBackend.RunChildAsync(
+                    parentRunId,
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        request,
+                        token),
+                    token),
+                cancellationToken);
+        }
+
+        public Task<ChildAgentRunResult> RunChildAsync(
+            AgentRun parentRun,
+            DurableRunRequest request,
+            CancellationToken cancellationToken =
+                default(CancellationToken))
+        {
+            if (parentRun == null)
+            {
+                throw new ArgumentNullException(nameof(parentRun));
+            }
+
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
+
+            if (_childBackend == null)
+            {
+                throw new InvalidOperationException(
+                    "This facade is not configured with child-agent supervision.");
+            }
+
+            var persistentBackend = _childBackend
+                as IUnityPersistentChildAgentBackend;
+            if (persistentBackend == null)
+            {
+                throw new InvalidOperationException(
+                    "This child-agent backend does not support persisted parent runs.");
+            }
+
+            return RunTrackedAsync(
+                token => persistentBackend.RunChildAsync(
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        parentRun,
+                        token),
+                    DurableRunRequestSnapshotter.SnapshotForBackendBoundary(
+                        request,
+                        token),
+                    token),
+                cancellationToken);
+        }
+
+        public int CancelChildren(string parentRunId)
+        {
+            if (_childBackend == null)
+            {
+                throw new InvalidOperationException(
+                    "This facade is not configured with child-agent supervision.");
+            }
+
+            return _childBackend.CancelChildren(parentRunId);
         }
 
         /// <summary>
@@ -776,10 +1008,12 @@ namespace GameAgent.Unity
             return RunTrackedAsync(
                 token => backend.ResumeAsync(
                     runId,
-                    continuation,
+                    DurableRunRequestSnapshotter.Snapshot(
+                        continuation,
+                        token),
                     reconciler,
                     token,
-                    guard),
+                    DurableRunRequestSnapshotter.Snapshot(guard, token)),
                 cancellationToken);
         }
 
@@ -787,7 +1021,8 @@ namespace GameAgent.Unity
             Func<CancellationToken, ValueTask<TOutcome>> start,
             CancellationToken cancellationToken)
         {
-            CancellationTokenSource linked;
+            cancellationToken.ThrowIfCancellationRequested();
+            ActiveRunCancellation activeCancellation;
             var completion = new TaskCompletionSource<TOutcome>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_sync)
@@ -804,23 +1039,56 @@ namespace GameAgent.Unity
                         _maxActiveRuns);
                 }
 
-                linked = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    _shutdown.Token);
-                _activeRuns.Add(completion.Task, linked);
+                if (!UnityRunCancellationDispatcher.TryAcquireLease(
+                        out var cancellationLease))
+                {
+                    throw new InvalidOperationException(
+                        "The process run cancellation capacity is exhausted.");
+                }
+
+                if (!UnityShutdownRunCancellationDispatcher.TryAcquireLease(
+                        out var shutdownCancellationLease))
+                {
+                    UnityRunCancellationDispatcher.ReleaseLease(
+                        cancellationLease);
+                    throw new InvalidOperationException(
+                        "The process shutdown-run cancellation capacity is exhausted.");
+                }
+
+                activeCancellation = new ActiveRunCancellation(
+                    cancellationLease,
+                    shutdownCancellationLease);
+                try
+                {
+                    activeCancellation.Attach(
+                        cancellationToken,
+                        _shutdown.Token);
+                    _activeRuns.Add(completion.Task, activeCancellation);
+                }
+                catch
+                {
+                    ObserveLateFault(
+                        activeCancellation.DisposeAfterRunAsync());
+                    throw;
+                }
             }
 
             try
             {
-                var pending = start(linked.Token);
+                var pending = start(activeCancellation.Token);
                 _ = CompleteRunAsync(
                     pending,
                     completion,
-                    linked);
+                    activeCancellation);
             }
-            catch
+            catch (Exception exception)
             {
-                CompleteTrackedRun(completion.Task, linked);
+                completion.TrySetException(exception);
+                ObserveLateFault(completion.Task);
+                ObserveLateFault(
+                    CompleteTrackedRunAsync(
+                        completion.Task,
+                        activeCancellation));
                 throw;
             }
 
@@ -829,63 +1097,20 @@ namespace GameAgent.Unity
 
         public void CancelActiveRuns()
         {
-            Task<Exception> cancellation;
-            var accepted = false;
+            ActiveRunCancellation[] active;
             lock (_sync)
             {
-                var active = _activeRuns.Values.ToArray();
+                active = _activeRuns.Values.ToArray();
 
                 if (active.Length == 0)
                 {
                     return;
                 }
-
-                accepted = UnityRunCancellationDispatcher.TryDispatch(
-                    () => CancelSources(active),
-                    out cancellation);
-                if (accepted)
-                {
-                    _activeCancellations.Add(cancellation);
-                }
             }
 
-            if (!accepted)
-            {
-                throw cancellation.GetAwaiter().GetResult();
-            }
-
-            _ = ObserveCancellationAsync(cancellation);
-        }
-
-        private static void CancelSources(
-            CancellationTokenSource[] active)
-        {
-            List<Exception> failures = null;
             foreach (var cancellation in active)
             {
-                try
-                {
-                    cancellation.Cancel();
-                }
-                catch (ObjectDisposedException)
-                {
-                }
-                catch (Exception exception)
-                {
-                    if (failures == null)
-                    {
-                        failures = new List<Exception>();
-                    }
-
-                    failures.Add(exception);
-                }
-            }
-
-            if (failures != null)
-            {
-                throw new AggregateException(
-                    "One or more run cancellation callbacks failed.",
-                    failures);
+                cancellation.TryCancel(forShutdown: false);
             }
         }
 
@@ -948,17 +1173,13 @@ namespace GameAgent.Unity
             }
 
             Task[] active;
-            Task<Exception>[] cancellations;
             var shutdownCancellation = admission.Completion;
             lock (_sync)
             {
                 active = _activeRuns.Keys.ToArray();
-                cancellations = _activeCancellations.ToArray();
             }
 
-            var cancellationWork = cancellations
-                .Concat(new[] { shutdownCancellation })
-                .ToArray();
+            var cancellationWork = new[] { shutdownCancellation };
             var drainWork = active
                 .Concat(cancellationWork.Cast<Task>())
                 .ToArray();
@@ -1178,29 +1399,6 @@ namespace GameAgent.Unity
             }
         }
 
-        private async Task ObserveCancellationAsync(
-            Task<Exception> cancellation)
-        {
-            Exception failure;
-            try
-            {
-                failure = await cancellation.ConfigureAwait(false);
-            }
-            catch (Exception exception)
-            {
-                failure = exception;
-            }
-
-            lock (_sync)
-            {
-                _activeCancellations.Remove(cancellation);
-                if (failure != null && _cancellationFailure == null)
-                {
-                    _cancellationFailure = failure;
-                }
-            }
-        }
-
         private void RecordCancellationFailure(Exception failure)
         {
             lock (_sync)
@@ -1305,31 +1503,40 @@ namespace GameAgent.Unity
         private async Task CompleteRunAsync<TOutcome>(
             ValueTask<TOutcome> pending,
             TaskCompletionSource<TOutcome> completion,
-            CancellationTokenSource cancellation)
+            ActiveRunCancellation cancellation)
         {
             try
             {
                 var result = await pending.ConfigureAwait(false);
-                CompleteTrackedRun(completion.Task, cancellation);
+                await CompleteTrackedRunAsync(
+                        completion.Task,
+                        cancellation)
+                    .ConfigureAwait(false);
                 completion.TrySetResult(result);
             }
             catch (OperationCanceledException)
             {
-                CompleteTrackedRun(completion.Task, cancellation);
+                await CompleteTrackedRunAsync(
+                        completion.Task,
+                        cancellation)
+                    .ConfigureAwait(false);
                 completion.TrySetCanceled();
             }
             catch (Exception exception)
             {
-                CompleteTrackedRun(completion.Task, cancellation);
+                await CompleteTrackedRunAsync(
+                        completion.Task,
+                        cancellation)
+                    .ConfigureAwait(false);
                 completion.TrySetException(exception);
             }
         }
 
-        private void CompleteTrackedRun(
+        private async Task CompleteTrackedRunAsync(
             Task completed,
-            CancellationTokenSource expectedCancellation)
+            ActiveRunCancellation expectedCancellation)
         {
-            CancellationTokenSource removed = null;
+            ActiveRunCancellation removed = null;
             lock (_sync)
             {
                 if (_activeRuns.TryGetValue(
@@ -1346,8 +1553,179 @@ namespace GameAgent.Unity
 
             if (removed != null)
             {
-                removed.Dispose();
+                var failure = await removed.DisposeAfterRunAsync()
+                    .ConfigureAwait(false);
+                if (failure != null)
+                {
+                    RecordCancellationFailure(failure);
+                }
             }
+        }
+
+        private sealed class ActiveRunCancellation
+        {
+            private readonly object _sync = new object();
+            private readonly CancellationTokenSource _source =
+                new CancellationTokenSource();
+            private readonly UnityBoundedCancellationDispatcher.Lease _lease;
+            private readonly UnityBoundedCancellationDispatcher.Lease
+                _shutdownLease;
+            private CancellationTokenRegistration _callerRegistration;
+            private CancellationTokenRegistration _shutdownRegistration;
+            private Task<Exception> _normalDispatch;
+            private Task<Exception> _shutdownDispatch;
+            private int _cancelExecutionStarted;
+            private bool _attached;
+            private bool _disposed;
+
+            internal ActiveRunCancellation(
+                UnityBoundedCancellationDispatcher.Lease lease,
+                UnityBoundedCancellationDispatcher.Lease shutdownLease)
+            {
+                _lease = lease
+                    ?? throw new ArgumentNullException(nameof(lease));
+                _shutdownLease = shutdownLease
+                    ?? throw new ArgumentNullException(nameof(shutdownLease));
+            }
+
+            internal CancellationToken Token
+            {
+                get { return _source.Token; }
+            }
+
+            internal void Attach(
+                CancellationToken caller,
+                CancellationToken shutdown)
+            {
+                lock (_sync)
+                {
+                    if (_attached || _disposed)
+                    {
+                        throw new InvalidOperationException(
+                            "Run cancellation is already attached.");
+                    }
+
+                    _attached = true;
+                }
+
+                _callerRegistration = caller.Register(
+                    state => ((ActiveRunCancellation)state)
+                        .TryCancel(forShutdown: false),
+                    this);
+                _shutdownRegistration = shutdown.Register(
+                    state => ((ActiveRunCancellation)state)
+                        .TryCancel(forShutdown: true),
+                    this);
+            }
+
+            internal bool TryCancel(bool forShutdown)
+            {
+                lock (_sync)
+                {
+                    if (_disposed
+                        || forShutdown && _shutdownDispatch != null
+                        || !forShutdown && _normalDispatch != null
+                        || Volatile.Read(ref _cancelExecutionStarted) != 0)
+                    {
+                        return false;
+                    }
+
+                    Task<Exception> dispatch;
+                    var accepted = forShutdown
+                        ? UnityShutdownRunCancellationDispatcher.TryDispatch(
+                            _shutdownLease,
+                            CancelOnce,
+                            out dispatch)
+                        : UnityRunCancellationDispatcher.TryDispatch(
+                            _lease,
+                            CancelOnce,
+                            out dispatch);
+                    if (!accepted)
+                    {
+                        return false;
+                    }
+
+                    if (forShutdown)
+                    {
+                        _shutdownDispatch = dispatch;
+                    }
+                    else
+                    {
+                        _normalDispatch = dispatch;
+                    }
+                    return true;
+                }
+            }
+
+            private void CancelOnce()
+            {
+                if (Interlocked.CompareExchange(
+                        ref _cancelExecutionStarted,
+                        1,
+                        0) == 0)
+                {
+                    _source.Cancel();
+                }
+            }
+
+            internal async Task<Exception> DisposeAfterRunAsync()
+            {
+                Task<Exception> normalDispatch;
+                Task<Exception> shutdownDispatch;
+                lock (_sync)
+                {
+                    if (_disposed)
+                    {
+                        return null;
+                    }
+
+                    _disposed = true;
+                    normalDispatch = _normalDispatch;
+                    shutdownDispatch = _shutdownDispatch;
+                }
+
+                _callerRegistration.Dispose();
+                _shutdownRegistration.Dispose();
+                var failures = new List<Exception>();
+                foreach (var dispatch in new[]
+                         {
+                             normalDispatch,
+                             shutdownDispatch
+                         })
+                {
+                    if (dispatch == null)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var failure = await dispatch.ConfigureAwait(false);
+                        if (failure != null)
+                        {
+                            failures.Add(failure);
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add(exception);
+                    }
+                }
+
+                _source.Dispose();
+                UnityRunCancellationDispatcher.ReleaseLease(_lease);
+                UnityShutdownRunCancellationDispatcher.ReleaseLease(
+                    _shutdownLease);
+                return failures.Count switch
+                {
+                    0 => null,
+                    1 => failures[0],
+                    _ => new AggregateException(
+                        "Run cancellation dispatch failed.",
+                        failures).Flatten()
+                };
+            }
+
         }
 
         private static void ValidateMaxActiveRuns(int maxActiveRuns)

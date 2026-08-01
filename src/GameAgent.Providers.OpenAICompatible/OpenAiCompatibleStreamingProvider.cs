@@ -696,6 +696,30 @@ public sealed class OpenAiCompatibleStreamingProvider :
             options.ReasoningEffortRequiresThinkingMode ? "true" : "false");
         AddRoutePolicyField(
             canonical,
+            "supportsPerRequestReasoning",
+            options.SupportsPerRequestReasoning ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "supportsSamplingControls",
+            options.SupportsSamplingControls ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "supportsSeed",
+            options.SupportsSeed ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "automaticPromptCaching",
+            options.AutomaticPromptCaching ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "supportsPromptCacheKey",
+            options.SupportsPromptCacheKey ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
+            "supportsPromptCacheRetention",
+            options.SupportsPromptCacheRetention ? "true" : "false");
+        AddRoutePolicyField(
+            canonical,
             "toolChoice",
             options.ToolChoice ?? string.Empty);
         AddRoutePolicyField(
@@ -1077,6 +1101,7 @@ public sealed class OpenAiCompatibleStreamingProvider :
                 Messages = messages,
                 Tools = tools,
                 MaxOutputTokens = source.MaxOutputTokens,
+                Inference = source.Inference?.CloneValidated(),
                 OpaqueContinuationState =
                     source.OpaqueContinuationState?.Snapshot()
             };
@@ -1230,6 +1255,28 @@ public sealed class OpenAiCompatibleStreamingProvider :
 
     private byte[] BuildRequestBody(StreamingModelRequest request)
     {
+        var inference = request.Inference?.CloneValidated();
+        ValidateInferenceSupport(inference);
+        var requestedReasoningEffort = inference?.ReasoningEffort;
+        var reasoningDisabled = inference?.ReasoningEnabled == false
+                                || string.Equals(
+                                    requestedReasoningEffort,
+                                    ModelReasoningEfforts.None,
+                                    StringComparison.Ordinal);
+        var thinkingMode = inference?.ReasoningEnabled switch
+        {
+            true => "enabled",
+            false => "disabled",
+            _ => reasoningDisabled ? "disabled" : _options.ThinkingMode
+        };
+        var reasoningEffort = reasoningDisabled
+            ? string.Equals(
+                requestedReasoningEffort,
+                ModelReasoningEfforts.None,
+                StringComparison.Ordinal)
+                ? ModelReasoningEfforts.None
+                : null
+            : requestedReasoningEffort ?? _options.ReasoningEffort;
         using var buffer = new BoundedByteBufferWriter(
             MaxRequestBodyUtf8Bytes);
         using (var writer = new Utf8JsonWriter(buffer))
@@ -1244,24 +1291,49 @@ public sealed class OpenAiCompatibleStreamingProvider :
                         request.MaxOutputTokens.Value,
                         _options.MaxOutputTokens)
                     : _options.MaxOutputTokens);
-            if (_options.ThinkingMode is not null)
+            if (thinkingMode is not null)
             {
                 writer.WritePropertyName("thinking");
                 writer.WriteStartObject();
-                writer.WriteString("type", _options.ThinkingMode);
+                writer.WriteString("type", thinkingMode);
                 writer.WriteEndObject();
             }
 
-            if (_options.ReasoningEffort is not null
+            if (reasoningEffort is not null
                 && (!_options.ReasoningEffortRequiresThinkingMode
                     || string.Equals(
-                        _options.ThinkingMode,
+                        thinkingMode,
                         "enabled",
                         StringComparison.Ordinal)))
             {
                 writer.WriteString(
                     "reasoning_effort",
-                    _options.ReasoningEffort);
+                    reasoningEffort);
+            }
+
+            if (inference?.Temperature is double temperature)
+            {
+                writer.WriteNumber("temperature", temperature);
+            }
+
+            if (inference?.TopP is double topP)
+            {
+                writer.WriteNumber("top_p", topP);
+            }
+
+            if (inference?.Seed is int seed)
+            {
+                writer.WriteNumber("seed", seed);
+            }
+
+            if (inference?.PromptCacheKey is string promptCacheKey)
+            {
+                writer.WriteString("prompt_cache_key", promptCacheKey);
+            }
+
+            if (inference?.PromptCacheRetention is string retention)
+            {
+                writer.WriteString("prompt_cache_retention", retention);
             }
 
             if (_options.IncludeUsage)
@@ -1313,6 +1385,69 @@ public sealed class OpenAiCompatibleStreamingProvider :
 
         return buffer.WrittenSpan.ToArray();
     }
+
+    private void ValidateInferenceSupport(ModelInferenceOptions? inference)
+    {
+        if (inference is null)
+        {
+            return;
+        }
+
+        if ((inference.ReasoningEnabled.HasValue
+             || inference.ReasoningEffort is not null)
+            && !_options.SupportsPerRequestReasoning)
+        {
+            throw UnsupportedInference("reasoning control");
+        }
+
+        if (inference.ReasoningTokenBudget.HasValue)
+        {
+            throw UnsupportedInference("reasoning token budget");
+        }
+
+        if ((inference.Temperature.HasValue || inference.TopP.HasValue)
+            && !_options.SupportsSamplingControls)
+        {
+            throw UnsupportedInference("sampling control");
+        }
+
+        if (inference.Seed.HasValue && !_options.SupportsSeed)
+        {
+            throw UnsupportedInference("seed");
+        }
+
+        if (inference.PromptCachingEnabled == false)
+        {
+            throw UnsupportedInference("prompt-cache bypass");
+        }
+
+        if (inference.PromptCachingEnabled == true
+            && !_options.AutomaticPromptCaching
+            && inference.PromptCacheKey is null)
+        {
+            throw UnsupportedInference("automatic prompt caching");
+        }
+
+        if (inference.PromptCacheKey is not null
+            && !_options.SupportsPromptCacheKey)
+        {
+            throw UnsupportedInference("prompt-cache key");
+        }
+
+        if (inference.PromptCacheRetention is not null
+            && !_options.SupportsPromptCacheRetention)
+        {
+            throw UnsupportedInference("prompt-cache retention");
+        }
+    }
+
+    private static ProviderException UnsupportedInference(string control) =>
+        new(
+            "provider_inference_control_unsupported",
+            "capability",
+            $"The selected provider route does not support {control}.",
+            ProviderFailureDisposition.Failover,
+            usageKnownToBeZero: true);
 
     private sealed class BoundedByteBufferWriter :
         IBufferWriter<byte>,
