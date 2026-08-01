@@ -105,8 +105,17 @@ namespace GameAgent.Unity.Tests
                 {
                     try
                     {
-                        EditorSceneManager.RestoreSceneManagerSetup(
-                            previousSceneSetup);
+                        if (previousSceneSetup.Length == 0)
+                        {
+                            EditorSceneManager.NewScene(
+                                NewSceneSetup.EmptyScene,
+                                NewSceneMode.Single);
+                        }
+                        else
+                        {
+                            EditorSceneManager.RestoreSceneManagerSetup(
+                                previousSceneSetup);
+                        }
                     }
                     finally
                     {

@@ -13,17 +13,20 @@ namespace GameAgent.Unity.Tests
         [UnityTest]
         public IEnumerator HostSurvivesAFrameAndPumpsPostedWork()
         {
+            Assert.That(Application.isPlaying, Is.True);
             var root = new GameObject("GameAgentRuntimeTest");
             var host = root.AddComponent<UnityAgentRuntimeHost>();
+            var frameProbe = root.AddComponent<UnityFrameProbe>();
             var invoked = false;
 
-            yield return null;
+            yield return new WaitForSecondsRealtime(0.01f);
+            Assert.That(frameProbe.WasUpdated, Is.True);
             Assert.That(host.Dispatcher.TryPost(() => invoked = true), Is.True);
-            yield return null;
+            yield return new WaitForSecondsRealtime(0.01f);
             Assert.That(invoked, Is.True);
 
             UnityEngine.Object.Destroy(root);
-            yield return null;
+            yield return new WaitForSecondsRealtime(0.01f);
         }
 
         [UnityTest]
@@ -48,7 +51,7 @@ namespace GameAgent.Unity.Tests
             var framesRemaining = 600;
             while (!pending.IsCompleted && framesRemaining-- > 0)
             {
-                yield return null;
+                yield return new WaitForSecondsRealtime(0.01f);
             }
 
             Assert.That(pending.IsCompleted, Is.True);
@@ -68,12 +71,12 @@ namespace GameAgent.Unity.Tests
             var shutdown = host.ShutdownAsync(CancellationToken.None);
             while (!shutdown.IsCompleted)
             {
-                yield return null;
+                yield return new WaitForSecondsRealtime(0.01f);
             }
             shutdown.GetAwaiter().GetResult();
 
             UnityEngine.Object.Destroy(root);
-            yield return null;
+            yield return new WaitForSecondsRealtime(0.01f);
             Directory.Delete(directory, true);
         }
     }

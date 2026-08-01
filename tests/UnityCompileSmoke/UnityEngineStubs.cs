@@ -8,6 +8,10 @@ namespace UnityEngine
         {
         }
 
+        public static void DestroyImmediate(Object target)
+        {
+        }
+
         public static void DontDestroyOnLoad(Object target)
         {
         }
@@ -24,6 +28,13 @@ namespace UnityEngine
 
     public class MonoBehaviour : Behaviour
     {
+    }
+
+    public sealed class WaitForSecondsRealtime
+    {
+        public WaitForSecondsRealtime(float seconds)
+        {
+        }
     }
 
     public class GameObject : Object
@@ -57,6 +68,11 @@ namespace UnityEngine
 
     public static class Application
     {
+        public static bool isPlaying
+        {
+            get { return true; }
+        }
+
         public static string persistentDataPath
         {
             get { return "."; }

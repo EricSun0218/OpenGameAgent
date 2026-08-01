@@ -47,10 +47,15 @@ function Invoke-UnityEditor {
     $process = Start-Process `
         -FilePath $editor `
         -ArgumentList $argumentLine `
-        -Wait `
         -PassThru `
         -WindowStyle Hidden
-    return $process.ExitCode
+    try {
+        $process.WaitForExit()
+        return $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
 }
 
 function Read-UnityLogTail {

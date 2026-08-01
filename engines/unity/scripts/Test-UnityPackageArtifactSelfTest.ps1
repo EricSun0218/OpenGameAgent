@@ -313,6 +313,40 @@ try {
                 $mutated,
                 [Text.UTF8Encoding]::new($false))
         }
+    Assert-CopiedArtifactMutationRejected `
+        -Name 'missing-assembly-definition-dependency' `
+        -ExpectedMessage 'assembly definition dependency set is invalid' `
+        -Mutation {
+            param($fixture)
+            $path = Join-Path $fixture (
+                'Runtime' +
+                [IO.Path]::DirectorySeparatorChar +
+                'GameAgent.Unity.asmdef')
+            $definition = Get-Content -LiteralPath $path -Raw |
+                ConvertFrom-Json
+            $definition.precompiledReferences = @(
+                $definition.precompiledReferences |
+                    Where-Object { $_ -ne 'GameAgent.Core.dll' })
+            $definition | ConvertTo-Json -Depth 10 |
+                Set-Content -LiteralPath $path -Encoding UTF8
+        }
+    Assert-CopiedArtifactMutationRejected `
+        -Name 'disabled-assembly-definition-override' `
+        -ExpectedMessage 'assembly definition does not override references' `
+        -Mutation {
+            param($fixture)
+            $path = Join-Path $fixture (
+                'Tests' +
+                [IO.Path]::DirectorySeparatorChar +
+                'Runtime' +
+                [IO.Path]::DirectorySeparatorChar +
+                'GameAgent.Unity.PlayModeTests.asmdef')
+            $definition = Get-Content -LiteralPath $path -Raw |
+                ConvertFrom-Json
+            $definition.overrideReferences = $false
+            $definition | ConvertTo-Json -Depth 10 |
+                Set-Content -LiteralPath $path -Encoding UTF8
+        }
 
     if ($ExpectSymbols) {
         $symbolMetaRelativePath =

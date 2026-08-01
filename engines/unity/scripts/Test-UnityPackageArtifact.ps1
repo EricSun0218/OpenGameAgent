@@ -132,6 +132,9 @@ $required = @(
     'LICENSE.md',
     'THIRD PARTY NOTICES.md',
     'Runtime/GameAgent.Unity.asmdef',
+    'Tests/Runtime/GameAgent.Unity.PlayModeTests.asmdef',
+    'Tests/Editor/GameAgent.Unity.EditorTests.asmdef',
+    'Samples~/StructuredToolLoop/GameAgent.Unity.StructuredToolLoopSample.asmdef',
     'Runtime/Plugins/GameAgent.Protocol.dll',
     'Runtime/Plugins/GameAgent.Core.dll',
     'Runtime/Plugins/GameAgent.Persistence.dll',
@@ -220,6 +223,32 @@ $expectedPluginNames = @(
     'System.Text.Encodings.Web.dll',
     'System.Text.Json.dll',
     'System.Threading.Tasks.Extensions.dll')
+$assemblyDefinitionPaths = @(
+    'Runtime/GameAgent.Unity.asmdef',
+    'Tests/Runtime/GameAgent.Unity.PlayModeTests.asmdef',
+    'Tests/Editor/GameAgent.Unity.EditorTests.asmdef',
+    'Samples~/StructuredToolLoop/GameAgent.Unity.StructuredToolLoopSample.asmdef')
+foreach ($relativePath in $assemblyDefinitionPaths) {
+    $nativePath = $relativePath.Replace(
+        '/',
+        [IO.Path]::DirectorySeparatorChar)
+    $definition = Get-Content -LiteralPath (
+        Join-Path $artifact.FullName $nativePath) -Raw |
+        ConvertFrom-Json
+    if (-not [bool]$definition.overrideReferences) {
+        throw "The Unity assembly definition does not override references: '$relativePath'."
+    }
+
+    $actualReferences = @(
+        $definition.precompiledReferences |
+            ForEach-Object { [string]$_ } |
+            Sort-Object)
+    $expectedReferences = @($expectedPluginNames | Sort-Object)
+    if ([string]::Join("`n", $actualReferences) -cne
+        [string]::Join("`n", $expectedReferences)) {
+        throw "The Unity assembly definition dependency set is invalid: '$relativePath'."
+    }
+}
 $expectedPluginPaths = @(
     $expectedPluginNames |
         ForEach-Object { 'Runtime/Plugins/' + $_ } |

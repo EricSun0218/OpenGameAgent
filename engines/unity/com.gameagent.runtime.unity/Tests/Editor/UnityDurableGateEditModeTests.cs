@@ -51,7 +51,7 @@ namespace GameAgent.Unity.Tests
                 host.ShutdownAsync(CancellationToken.None)
                     .GetAwaiter()
                     .GetResult();
-                UnityEngine.Object.Destroy(root);
+                UnityEngine.Object.DestroyImmediate(root);
                 Directory.Delete(directory, true);
             }
         }

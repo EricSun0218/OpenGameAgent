@@ -15,6 +15,10 @@
 - Added Unity-safe structured DTO bridges.
 - Added sample, EditMode/PlayMode tests, stub conformance, and Player
   build-and-execution gates with durable pass markers for Mono and IL2CPP.
+- Pinned the complete managed dependency closure in every assembly definition
+  so runtime, tests, and samples compile consistently in the Unity Editor.
+- Hardened Editor gates for edit-mode cleanup, batch-mode frame scheduling,
+  empty-scene projects, and deterministic Unity process completion.
 - Added a reserved terminal-observer queue that cannot be displaced by
   main-thread action traffic and rejects new work before a terminal event could
   become unobservable. Controlled shutdown waits for every reservation already
