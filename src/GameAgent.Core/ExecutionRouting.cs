@@ -654,13 +654,11 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
 
                 try
                 {
+                    var dispatch = reservation!.DispatchAsync(_shutdown);
                     _shutdownCancellationTask =
-                        reservation!.DispatchAsync(_shutdown);
-                    _ = _shutdownCancellationTask.ContinueWith(
-                        _ => reservation.Dispose(),
-                        CancellationToken.None,
-                        TaskContinuationOptions.ExecuteSynchronously,
-                        TaskScheduler.Default);
+                        ReleaseShutdownReservationAsync(
+                            dispatch,
+                            reservation);
                 }
                 catch
                 {
@@ -781,19 +779,32 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
 
             try
             {
+                var dispatch = reservation.DispatchAsync(_shutdown);
                 _shutdownCancellationTask =
-                    reservation.DispatchAsync(_shutdown);
-                _ = _shutdownCancellationTask.ContinueWith(
-                    _ => reservation.Dispose(),
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
+                    ReleaseShutdownReservationAsync(
+                        dispatch,
+                        reservation);
             }
             catch
             {
                 reservation.Dispose();
                 throw;
             }
+        }
+    }
+
+    private static async Task ReleaseShutdownReservationAsync(
+        Task dispatch,
+        BoundedCancellationDispatcher.CancellationDispatchReservation
+            reservation)
+    {
+        try
+        {
+            await dispatch.ConfigureAwait(false);
+        }
+        finally
+        {
+            reservation.Dispose();
         }
     }
 

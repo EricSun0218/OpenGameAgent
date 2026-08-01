@@ -1576,9 +1576,11 @@ public sealed class UnityHostConformanceTests
             Assert.Equal(
                 1,
                 UnityShutdownRunCancellationDispatcher.ActiveCount);
-            Assert.Equal(
-                0,
-                UnityLifecycleCancellationDispatcher.ActiveCount);
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => UnityLifecycleCancellationDispatcher.ActiveCount
+                        == 0,
+                    TimeSpan.FromSeconds(2)));
         }
         finally
         {
