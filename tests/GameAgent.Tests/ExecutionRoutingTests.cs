@@ -4,6 +4,15 @@ using GameAgent.Protocol;
 
 namespace GameAgent.Tests;
 
+[CollectionDefinition(
+    ProcessCancellationWorkerPoolCollection.Name,
+    DisableParallelization = true)]
+public sealed class ProcessCancellationWorkerPoolCollection
+{
+    public const string Name = "Process cancellation worker pool";
+}
+
+[Collection(ProcessCancellationWorkerPoolCollection.Name)]
 public sealed class ExecutionRoutingTests
 {
     [Fact]

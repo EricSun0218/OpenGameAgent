@@ -838,22 +838,44 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
     private async Task StopCoreAsync()
     {
         List<Exception>? errors = null;
-        var executionDrained = await Execution.StopAsync()
-            .ConfigureAwait(false);
-        var childrenDrained = await Children.StopAsync().ConfigureAwait(false);
-        var completionDrained = false;
+        var executionStop = StartShutdown(Execution.StopAsync);
+        var childrenStop = StartShutdown(Children.StopAsync);
+        var completionStop = StartShutdown(
+            Completion.StopWithDrainResultAsync);
+        var runtimeStop = StartShutdown(Runtime.StopAsync);
+        var initialStops = Task.WhenAll(
+            executionStop,
+            childrenStop,
+            completionStop,
+            runtimeStop);
         try
         {
-            completionDrained = await Completion
-                .StopWithDrainResultAsync()
-                .ConfigureAwait(false);
+            await initialStops.ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             Volatile.Write(ref _shutdownRetryRequired, 1);
-            ExceptionDispatchInfo.Capture(exception).Throw();
+            var failures = initialStops.Exception?
+                .Flatten()
+                .InnerExceptions;
+            if (failures is null || failures.Count == 0)
+            {
+                ExceptionDispatchInfo.Capture(exception).Throw();
+            }
+
+            if (failures.Count == 1)
+            {
+                ExceptionDispatchInfo.Capture(failures[0]).Throw();
+            }
+
+            throw new AggregateException(
+                "One or more runtime layers failed to begin shutdown.",
+                failures);
         }
 
+        var executionDrained = executionStop.Result;
+        var childrenDrained = childrenStop.Result;
+        var completionDrained = completionStop.Result;
         try
         {
             await Runtime.WaitForShutdownDrainAsync().ConfigureAwait(false);
@@ -969,6 +991,30 @@ public sealed class BuiltGameAgentRuntime : IAsyncDisposable
         throw new AggregateException(
             "One or more runtime resources failed to shut down.",
             errors);
+    }
+
+    private static Task<T> StartShutdown<T>(Func<ValueTask<T>> start)
+    {
+        try
+        {
+            return start().AsTask();
+        }
+        catch (Exception exception)
+        {
+            return Task.FromException<T>(exception);
+        }
+    }
+
+    private static Task StartShutdown(Func<ValueTask> start)
+    {
+        try
+        {
+            return start().AsTask();
+        }
+        catch (Exception exception)
+        {
+            return Task.FromException(exception);
+        }
     }
 
     private async Task CompleteSharedShutdownAsync(
