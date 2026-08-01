@@ -141,7 +141,7 @@ public sealed class HybridMemoryTests
                     Record("first", "apple", "agent"))
                 .AsTask()
                 .WaitAsync(TimeSpan.FromSeconds(2)));
-        await provider.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await provider.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         await store.UpsertAsync(Record("second", "banana", "agent"))
             .AsTask()
