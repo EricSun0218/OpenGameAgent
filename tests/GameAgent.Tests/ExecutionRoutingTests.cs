@@ -388,9 +388,10 @@ public sealed class ExecutionRoutingTests
     {
         var agent = new RecordingAgentRuntime();
         using var release = new ManualResetEventSlim(false);
+        var policy = new BlockingCancellationCallbackPolicy(release);
         var router = new RoutedExecutionRuntime(
             agent,
-            policy: new BlockingCancellationCallbackPolicy(release),
+            policy: policy,
             options: new ExecutionRouterOptions
             {
                 PolicyTimeout = TimeSpan.FromMilliseconds(25),
@@ -411,11 +412,219 @@ public sealed class ExecutionRoutingTests
             Assert.Equal(
                 ExecutionRouteReasonCodes.PolicyTimeoutFallback,
                 outcome.Decision.ReasonCode);
+            await policy.CancellationCallbackEntered.Task.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert.False(policy.CancellationRanOnThreadPool);
         }
         finally
         {
             release.Set();
+            await router.DisposeAsync();
         }
+    }
+
+    [Fact]
+    public async Task IsolatedCancellationContainsCallbackFailureAndReleasesCapacity()
+    {
+        var dispatcher = new BoundedCancellationDispatcher(capacity: 1);
+        var cancellation = IsolatedCancellationLease.Create(dispatcher);
+        var idle = IsolatedCancellationLease.Create(dispatcher);
+        await idle.DisposeAsync();
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var ranOnThreadPool = true;
+        using var registration = cancellation.Token.Register(
+            () =>
+            {
+                ranOnThreadPool = Thread.CurrentThread.IsThreadPoolThread;
+                callbackEntered.TrySetResult(true);
+                throw new InvalidOperationException("untrusted callback");
+            });
+
+        Assert.True(cancellation.TryCancel());
+        await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await cancellation.DisposeAsync();
+
+        Assert.False(ranOnThreadPool);
+        Assert.Equal(0, dispatcher.ActiveReservations);
+
+        Assert.True(dispatcher.TryReserve(out var occupied));
+        var rejected = IsolatedCancellationLease.Create(dispatcher);
+        Assert.False(rejected.TryCancel());
+        await rejected.DisposeAsync();
+        Assert.Equal(1, dispatcher.ActiveReservations);
+        occupied!.Dispose();
+
+        var next = IsolatedCancellationLease.Create(dispatcher);
+        var nextCallback = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var nextRegistration = next.Token.Register(
+            () => nextCallback.TrySetResult(true));
+        Assert.True(next.TryCancel());
+        await nextCallback.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await next.DisposeAsync();
+        Assert.Equal(0, dispatcher.ActiveReservations);
+    }
+
+    [Fact]
+    public async Task SaturatedMemoryCancellationCannotStarveOtherDomains()
+    {
+        var capacity = ProcessCancellationWorkerPool.WorkersPerClass
+                       + ProcessCancellationWorkerPool.QueueCapacityPerClass;
+        var extensionDispatcher = new BoundedCancellationDispatcher(
+            capacity + 1,
+            CancellationWorkerClass.MemoryExtension);
+        var leases = new List<IsolatedCancellationLease>();
+        var registrations = new List<CancellationTokenRegistration>();
+        using var release = new ManualResetEventSlim(false);
+        IsolatedCancellationLease? rejected = null;
+        try
+        {
+            var entered = Enumerable.Range(
+                    0,
+                    ProcessCancellationWorkerPool.WorkersPerClass)
+                .Select(
+                    _ => new TaskCompletionSource<bool>(
+                        TaskCreationOptions.RunContinuationsAsynchronously))
+                .ToArray();
+            for (var index = 0; index < entered.Length; index++)
+            {
+                var lease = IsolatedCancellationLease.Create(
+                    extensionDispatcher);
+                var signal = entered[index];
+                registrations.Add(lease.Token.Register(
+                    () =>
+                    {
+                        signal.TrySetResult(true);
+                        release.Wait();
+                    }));
+                leases.Add(lease);
+                Assert.True(lease.TryCancel());
+            }
+
+            await Task.WhenAll(entered.Select(item => item.Task))
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            for (var index = 0;
+                 index < ProcessCancellationWorkerPool.QueueCapacityPerClass;
+                 index++)
+            {
+                var lease = IsolatedCancellationLease.Create(
+                    extensionDispatcher);
+                registrations.Add(lease.Token.Register(() => release.Wait()));
+                leases.Add(lease);
+                Assert.True(lease.TryCancel());
+            }
+
+            rejected = IsolatedCancellationLease.Create(extensionDispatcher);
+            Assert.False(rejected.TryCancel());
+            Assert.True(extensionDispatcher.TryReserve(out var directRejected));
+            using var directSource = new CancellationTokenSource();
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => directRejected!.DispatchAsync(directSource));
+
+            var controlDispatcher = new BoundedCancellationDispatcher(
+                capacity: 1,
+                workerClass: CancellationWorkerClass.ControlPlane);
+            var control = IsolatedCancellationLease.Create(controlDispatcher);
+            var controlEntered = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using var controlRegistration = control.Token.Register(
+                () => controlEntered.TrySetResult(true));
+            Assert.True(control.TryCancel());
+            await controlEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await control.DisposeAsync();
+            Assert.Equal(0, controlDispatcher.ActiveReservations);
+
+            var policyDispatcher = new BoundedCancellationDispatcher(
+                capacity: 1,
+                workerClass: CancellationWorkerClass.ExecutionPolicy);
+            var policy = IsolatedCancellationLease.Create(policyDispatcher);
+            var policyEntered = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using var policyRegistration = policy.Token.Register(
+                () => policyEntered.TrySetResult(true));
+            Assert.True(policy.TryCancel());
+            await policyEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await policy.DisposeAsync();
+            Assert.Equal(0, policyDispatcher.ActiveReservations);
+        }
+        finally
+        {
+            release.Set();
+            await Task.WhenAll(
+                leases.Select(lease => lease.DisposeAsync().AsTask()))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            if (rejected is not null)
+            {
+                await rejected.DisposeAsync();
+            }
+            foreach (var registration in registrations)
+            {
+                registration.Dispose();
+            }
+        }
+
+        var recovered = IsolatedCancellationLease.Create(extensionDispatcher);
+        var recoveredCallback = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var recoveredRegistration = recovered.Token.Register(
+            () => recoveredCallback.TrySetResult(true));
+        Assert.True(recovered.TryCancel());
+        await recoveredCallback.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await recovered.DisposeAsync();
+        Assert.Equal(0, extensionDispatcher.ActiveReservations);
+    }
+
+    [Fact]
+    public async Task HealthyPolicyIsNotRejectedByOccupiedCancellationLane()
+    {
+        var policyDispatcher = new BoundedCancellationDispatcher(capacity: 1);
+        Assert.True(policyDispatcher.TryReserve(out var occupied));
+        await using var router = new RoutedExecutionRuntime(
+            new RecordingAgentRuntime(),
+            workflow: null,
+            new AlwaysDirectPolicy(),
+            new ExecutionRouterOptions(),
+            BoundedCancellationDispatcher.LifecycleShared,
+            policyDispatcher);
+
+        var admittedWhileOccupied = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequest("policy-capacity-occupied")
+            });
+
+        Assert.Equal("always_direct", admittedWhileOccupied.Decision.ReasonCode);
+        occupied!.Dispose();
+        Assert.Equal(0, policyDispatcher.ActiveReservations);
+    }
+
+    [Fact]
+    public async Task ConcurrentLeaseDisposalWaitsForCancellationDispatch()
+    {
+        var dispatcher = new BoundedCancellationDispatcher(capacity: 1);
+        var cancellation = IsolatedCancellationLease.Create(dispatcher);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        using var registration = cancellation.Token.Register(
+            () =>
+            {
+                entered.TrySetResult(true);
+                release.Wait();
+            });
+
+        Assert.True(cancellation.TryCancel());
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var first = cancellation.DisposeAsync().AsTask();
+        var second = cancellation.DisposeAsync().AsTask();
+        Assert.False(first.IsCompleted);
+        Assert.False(second.IsCompleted);
+
+        release.Set();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(0, dispatcher.ActiveReservations);
     }
 
     [Fact]
@@ -911,16 +1120,28 @@ public sealed class ExecutionRoutingTests
 
         public string Version => "1";
 
+        public TaskCompletionSource CancellationCallbackEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool CancellationRanOnThreadPool { get; private set; }
+
         public async ValueTask<ExecutionRouteDecision> SelectAsync(
             ExecutionRouteRequest request,
             CancellationToken cancellationToken)
         {
             _ = request;
-            using var registration = cancellationToken.Register(
-                () => _release.Wait());
-            await Task.Delay(
+            var cancellation = Task.Delay(
                 Timeout.InfiniteTimeSpan,
                 cancellationToken);
+            using var registration = cancellationToken.Register(
+                () =>
+                {
+                    CancellationRanOnThreadPool =
+                        Thread.CurrentThread.IsThreadPoolThread;
+                    CancellationCallbackEntered.TrySetResult();
+                    _release.Wait();
+                });
+            await cancellation;
             throw new InvalidOperationException("unreachable");
         }
     }

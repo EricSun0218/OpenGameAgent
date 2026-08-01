@@ -775,21 +775,29 @@ public sealed class AgentLifecyclePipeline : IDisposable
                 : AgentLifecycleDecision.Continue;
         }
 
-        var deadline = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            _shutdown.Token);
-        deadline.CancelAfter(operationTimeout);
+        var cancellation = IsolatedCancellationLease.Create(
+            BoundedCancellationDispatcher.AgentLifecycleShared);
+        if (cancellationToken.IsCancellationRequested
+            || _shutdown.IsCancellationRequested)
+        {
+            await cancellation.DisposeAsync().ConfigureAwait(false);
+            _slots.Release();
+            cancellationToken.ThrowIfCancellationRequested();
+            _shutdown.Token.ThrowIfCancellationRequested();
+        }
+
         Task<AgentLifecycleDecision> operation;
         try
         {
+            var middlewareToken = cancellation.Token;
             operation = Task.Run(
                 async () => await registration.Middleware
-                    .HandleAsync(lifecycleEvent, deadline.Token)
+                    .HandleAsync(lifecycleEvent, middlewareToken)
                     .ConfigureAwait(false));
         }
         catch (Exception exception)
         {
-            deadline.Dispose();
+            await cancellation.DisposeAsync().ConfigureAwait(false);
             _slots.Release();
             return registration.Required
                 ? throw new AgentLifecycleMiddlewareException(
@@ -799,18 +807,20 @@ public sealed class AgentLifecyclePipeline : IDisposable
                 : AgentLifecycleDecision.Continue;
         }
 
-        var timeout = Task.Delay(operationTimeout);
-        var callerCancellation = Task.Delay(
-            Timeout.InfiniteTimeSpan,
+        using var signals = new OperationDeadlineSignals(
+            operationTimeout,
             cancellationToken);
+        using var shutdownRegistration = _shutdown.Token.Register(
+            () => cancellation.TryCancel());
         var completed = await Task.WhenAny(
                 operation,
-                timeout,
-                callerCancellation)
+                signals.Timeout,
+                signals.Cancellation)
             .ConfigureAwait(false);
         if (!ReferenceEquals(completed, operation))
         {
-            TrackDetached(operation, deadline);
+            _ = cancellation.TryCancel();
+            TrackDetached(operation, cancellation);
             cancellationToken.ThrowIfCancellationRequested();
             return registration.Required
                 ? throw new AgentLifecycleMiddlewareException(
@@ -821,7 +831,7 @@ public sealed class AgentLifecyclePipeline : IDisposable
                 : AgentLifecycleDecision.Continue;
         }
 
-        deadline.Dispose();
+        cancellation.DisposeDetached();
         _slots.Release();
         try
         {
@@ -844,7 +854,7 @@ public sealed class AgentLifecyclePipeline : IDisposable
 
     private void TrackDetached(
         Task operation,
-        CancellationTokenSource deadline)
+        IsolatedCancellationLease cancellation)
     {
         long id;
         TaskCompletionSource<bool> start;
@@ -857,7 +867,7 @@ public sealed class AgentLifecyclePipeline : IDisposable
             cleanup = CompleteDetachedAsync(
                 id,
                 operation,
-                deadline,
+                cancellation,
                 start.Task);
         }
         while (!_detached.TryAdd(id, cleanup));
@@ -874,7 +884,7 @@ public sealed class AgentLifecyclePipeline : IDisposable
     private async Task CompleteDetachedAsync(
         long id,
         Task operation,
-        CancellationTokenSource deadline,
+        IsolatedCancellationLease cancellation,
         Task start)
     {
         await start.ConfigureAwait(false);
@@ -891,7 +901,7 @@ public sealed class AgentLifecyclePipeline : IDisposable
         }
         finally
         {
-            deadline.Dispose();
+            cancellation.DisposeDetached();
             _slots.Release();
             _detached.TryRemove(id, out _);
             PulseIdle();

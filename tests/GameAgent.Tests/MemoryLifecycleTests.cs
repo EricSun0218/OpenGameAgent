@@ -550,6 +550,27 @@ public sealed class MemoryLifecycleTests
     }
 
     [Fact]
+    public async Task ProviderTimeoutDispatchesCancellationAndReleasesSlot()
+    {
+        var provider = new CancellationAwareProvider();
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { provider },
+            options: new MemoryLifecycleOptions
+            {
+                ProviderTimeout = TimeSpan.FromMilliseconds(25),
+                MaxConcurrentProviderCalls = 1,
+                ShutdownTimeout = TimeSpan.FromSeconds(2)
+            });
+
+        var report = await lifecycle.RecallAsync(
+            Query("cancel-provider", worldId: "world"));
+
+        Assert.True(report.IsPartial);
+        Assert.Contains(provider.ProviderId, report.FailedProviderIds);
+        await provider.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
     public async Task DisposeWaitsForDetachedProviderCleanup()
     {
         var provider = new NonCooperativeBlockingProvider();
@@ -989,6 +1010,29 @@ public sealed class MemoryLifecycleTests
     }
 
     [Fact]
+    public async Task ProcessingTimeoutDispatchesCancellationAndReleasesSlot()
+    {
+        var transformer = new CancellationAwareQueryTransformer();
+        var provider = new QueryRecordingProvider();
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new[] { provider },
+            options: new MemoryLifecycleOptions
+            {
+                ProcessingStageTimeout = TimeSpan.FromMilliseconds(25),
+                MaxConcurrentProviderCalls = 1,
+                ShutdownTimeout = TimeSpan.FromSeconds(2)
+            },
+            queryTransformers: new[] { transformer });
+
+        await lifecycle.RecallAsync(Query("original"));
+
+        await transformer.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(
+            "original",
+            provider.Query!.Query.GetProperty("text").GetString());
+    }
+
+    [Fact]
     public async Task DetachedQueryTransformerKeepsItsOriginalStageInput()
     {
         var scheduler = new DeferredFirstTaskScheduler();
@@ -1334,6 +1378,27 @@ public sealed class MemoryLifecycleTests
         }
 
         public void Release() => _release.TrySetResult(true);
+    }
+
+    private sealed class CancellationAwareQueryTransformer
+        : IMemoryQueryTransformer
+    {
+        public string TransformerId => "cancellation-aware-query";
+
+        public string Version => "1";
+
+        public TaskCompletionSource<bool> Cancelled { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<MemoryQuery> TransformAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            using var registration = cancellationToken.Register(
+                () => Cancelled.TrySetResult(true));
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return query;
+        }
     }
 
     private sealed class RecordingQueryTransformer : IMemoryQueryTransformer
@@ -1758,6 +1823,25 @@ public sealed class MemoryLifecycleTests
         public void Release()
         {
             _release.TrySetResult(true);
+        }
+    }
+
+    private sealed class CancellationAwareProvider : IMemoryProvider
+    {
+        public string ProviderId => "cancellation-aware-provider";
+
+        public TaskCompletionSource<bool> Cancelled { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<IReadOnlyList<MemorySearchResult>> SearchAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            using var registration = cancellationToken.Register(
+                () => Cancelled.TrySetResult(true));
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return Array.Empty<MemorySearchResult>();
         }
     }
 

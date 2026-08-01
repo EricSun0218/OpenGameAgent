@@ -175,12 +175,13 @@ to be available.
 ## In-process callback boundary
 
 The runtime cannot forcibly terminate arbitrary game or plugin code in the same
-process. It instead bounds the damage: data-plane cancellation, lifecycle
-cancellation, and synchronous event observers use independent process-wide
-worker pools. A blocked callback retains its slot until it actually returns.
-When a pool is full, new work is rejected or the live notification is dropped
-and counted; no additional worker is created. Authoritative durable events
-remain replayable from the journal.
+process. It instead bounds the damage. Core cancellation domains have separate
+admission lanes backed by fixed control-plane, data-plane, and per-extension-domain
+worker classes, so one extension cannot consume workers reserved for shutdown or
+another extension. Engine data-plane cancellation and synchronous event observers
+retain their own bounded worker boundaries. A blocked callback retains its slot
+until it actually returns. When a boundary is full, no additional worker is
+created. Authoritative durable events remain replayable from the journal.
 
 Godot and Unity lifecycle owners reserve future cancellation capacity before
 they can accept work. Each lifecycle lane currently admits 72 owners per

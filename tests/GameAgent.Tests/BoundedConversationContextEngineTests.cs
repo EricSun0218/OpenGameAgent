@@ -38,6 +38,37 @@ public sealed class BoundedConversationContextEngineTests
     }
 
     [Fact]
+    public async Task PreparationTimeoutDispatchesCancellationAndReleasesSlot()
+    {
+        var cancelled = NewSignal();
+        var engine = new DelegateContextEngine(
+            async (messages, cancellationToken) =>
+            {
+                using var registration = cancellationToken.Register(
+                    () => cancelled.TrySetResult(true));
+                await Task.Delay(
+                    Timeout.InfiniteTimeSpan,
+                    cancellationToken);
+                return View(messages);
+            });
+        var wrapper = new BoundedConversationContextEngine(
+            engine,
+            Options());
+        var messages = Messages();
+
+        await Assert.ThrowsAsync<TimeoutException>(
+            () => wrapper.PrepareAsync(
+                    "cancellation-run",
+                    "cancellation-turn",
+                    messages,
+                    messages.Select(message => message.MessageId).ToArray())
+                .AsTask());
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(await WaitForStopAsync(wrapper));
+        Assert.True(wrapper.CleanupCompleted);
+    }
+
+    [Fact]
     public async Task OversizedCustomViewIsRejectedByRuntimeLimits()
     {
         var engine = new DelegateContextEngine(

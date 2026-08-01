@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace GameAgent.Core;
@@ -72,9 +73,12 @@ internal sealed class BoundedCancellationDispatcher
     internal const int DefaultCapacity = 64;
 
     private readonly SemaphoreSlim _capacity;
+    private readonly CancellationWorkerClass _workerClass;
     private int _reservations;
 
-    public BoundedCancellationDispatcher(int capacity = DefaultCapacity)
+    public BoundedCancellationDispatcher(
+        int capacity = DefaultCapacity,
+        CancellationWorkerClass workerClass = CancellationWorkerClass.DataPlane)
     {
         if (capacity < 1)
         {
@@ -82,17 +86,39 @@ internal sealed class BoundedCancellationDispatcher
         }
 
         _capacity = new SemaphoreSlim(capacity, capacity);
+        _workerClass = workerClass;
     }
 
-    public static BoundedCancellationDispatcher Shared { get; } = new();
+    public static BoundedCancellationDispatcher Shared { get; } = new(
+        workerClass: CancellationWorkerClass.DataPlane);
 
     public static BoundedCancellationDispatcher LifecycleShared { get; } =
-        new();
+        new(workerClass: CancellationWorkerClass.ControlPlane);
+
+    public static BoundedCancellationDispatcher ExecutionPolicyShared
+    {
+        get;
+    } = new(workerClass: CancellationWorkerClass.ExecutionPolicy);
+
+    public static BoundedCancellationDispatcher AgentLifecycleShared
+    {
+        get;
+    } = new(workerClass: CancellationWorkerClass.AgentLifecycle);
+
+    public static BoundedCancellationDispatcher ConversationContextShared
+    {
+        get;
+    } = new(workerClass: CancellationWorkerClass.ConversationContext);
+
+    public static BoundedCancellationDispatcher MemoryExtensionShared
+    {
+        get;
+    } = new(workerClass: CancellationWorkerClass.MemoryExtension);
 
     public static BoundedCancellationDispatcher SkillContentResolverShared
     {
         get;
-    } = new();
+    } = new(workerClass: CancellationWorkerClass.SkillContentResolver);
 
     internal int ActiveReservations =>
         Volatile.Read(ref _reservations);
@@ -139,6 +165,20 @@ internal sealed class BoundedCancellationDispatcher
 
         public Task DispatchAsync(CancellationTokenSource cancellation)
         {
+            if (!TryDispatch(cancellation, out var dispatch))
+            {
+                return Task.FromException(
+                    new InvalidOperationException(
+                        "Cancellation worker capacity is exhausted."));
+            }
+
+            return dispatch;
+        }
+
+        internal bool TryDispatch(
+            CancellationTokenSource cancellation,
+            out Task dispatch)
+        {
             if (cancellation is null)
             {
                 throw new ArgumentNullException(nameof(cancellation));
@@ -152,7 +192,22 @@ internal sealed class BoundedCancellationDispatcher
 
             try
             {
-                return Task.Run(() => SafeCancel(cancellation));
+                if (!ProcessCancellationWorkerPool.TryQueue(
+                        _owner._workerClass,
+                        () =>
+                        {
+                            SafeCancel(cancellation);
+                            return true;
+                        },
+                        out var queued))
+                {
+                    Dispose();
+                    dispatch = Task.CompletedTask;
+                    return false;
+                }
+
+                dispatch = queued;
+                return true;
             }
             catch
             {
@@ -176,7 +231,8 @@ internal sealed class BoundedCancellationDispatcher
 
             try
             {
-                return Task.Run(
+                if (!ProcessCancellationWorkerPool.TryQueue(
+                    _owner._workerClass,
                     () =>
                     {
                         try
@@ -187,7 +243,14 @@ internal sealed class BoundedCancellationDispatcher
                         {
                             return false;
                         }
-                    });
+                    },
+                    out var dispatch))
+                {
+                    Dispose();
+                    return Task.FromResult(false);
+                }
+
+                return dispatch;
             }
             catch
             {
@@ -217,6 +280,284 @@ internal sealed class BoundedCancellationDispatcher
                 // Host callbacks cannot escape the isolated cancellation
                 // worker or consume additional dispatcher reservations.
             }
+        }
+    }
+}
+
+internal enum CancellationWorkerClass
+{
+    ControlPlane,
+    DataPlane,
+    ExecutionPolicy,
+    AgentLifecycle,
+    ConversationContext,
+    MemoryExtension,
+    SkillContentResolver
+}
+
+internal static class ProcessCancellationWorkerPool
+{
+    internal const int WorkersPerClass = 2;
+    internal const int QueueCapacityPerClass = 64;
+    private static readonly Lazy<WorkerPool> ControlPlane = new(
+        () => new WorkerPool("control", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> DataPlane = new(
+        () => new WorkerPool("data", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> ExecutionPolicy = new(
+        () => new WorkerPool("policy", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> AgentLifecycle = new(
+        () => new WorkerPool("agent-lifecycle", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> ConversationContext = new(
+        () => new WorkerPool("context", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> MemoryExtension = new(
+        () => new WorkerPool("memory", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> SkillContentResolver = new(
+        () => new WorkerPool("skill-content", QueueCapacityPerClass));
+
+    internal static bool TryQueue(
+        CancellationWorkerClass workerClass,
+        Func<bool> callback,
+        out Task<bool> completion)
+    {
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+
+        return Pool(workerClass).TryQueue(callback, out completion);
+    }
+
+    private static WorkerPool Pool(CancellationWorkerClass workerClass) =>
+        workerClass switch
+        {
+            CancellationWorkerClass.ControlPlane => ControlPlane.Value,
+            CancellationWorkerClass.DataPlane => DataPlane.Value,
+            CancellationWorkerClass.ExecutionPolicy => ExecutionPolicy.Value,
+            CancellationWorkerClass.AgentLifecycle => AgentLifecycle.Value,
+            CancellationWorkerClass.ConversationContext =>
+                ConversationContext.Value,
+            CancellationWorkerClass.MemoryExtension => MemoryExtension.Value,
+            CancellationWorkerClass.SkillContentResolver =>
+                SkillContentResolver.Value,
+            _ => throw new ArgumentOutOfRangeException(nameof(workerClass))
+        };
+
+    private sealed class WorkerPool
+    {
+        private readonly BlockingCollection<WorkItem> _queue;
+
+        public WorkerPool(string name, int queueCapacity)
+        {
+            _queue = new BlockingCollection<WorkItem>(
+                new ConcurrentQueue<WorkItem>(),
+                queueCapacity);
+            for (var index = 0; index < WorkersPerClass; index++)
+            {
+                var worker = new Thread(Work)
+                {
+                    IsBackground = true,
+                    Name = $"game-agent-cancellation-{name}-{index}"
+                };
+                worker.Start();
+            }
+        }
+
+        public bool TryQueue(
+            Func<bool> callback,
+            out Task<bool> completion)
+        {
+            var item = new WorkItem(callback);
+            if (!_queue.TryAdd(item))
+            {
+                completion = Task.FromResult(false);
+                return false;
+            }
+
+            completion = item.Completion;
+            return true;
+        }
+
+        private void Work()
+        {
+            foreach (var item in _queue.GetConsumingEnumerable())
+            {
+                item.Run();
+            }
+        }
+    }
+
+    private sealed class WorkItem
+    {
+        private readonly Func<bool> _callback;
+        private readonly TaskCompletionSource<bool> _completion = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public WorkItem(Func<bool> callback)
+        {
+            _callback = callback;
+        }
+
+        public Task<bool> Completion => _completion.Task;
+
+        public void Run()
+        {
+            try
+            {
+                _completion.TrySetResult(_callback());
+            }
+            catch
+            {
+                _completion.TrySetResult(false);
+            }
+        }
+    }
+}
+
+internal sealed class OperationDeadlineSignals : IDisposable
+{
+    private readonly CancellationTokenSource _timeoutStop = new();
+    private readonly CancellationTokenRegistration _cancellationRegistration;
+
+    public OperationDeadlineSignals(
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        Timeout = Task.Delay(timeout, _timeoutStop.Token);
+        var cancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _cancellationRegistration = cancellationToken.Register(
+            static state => ((TaskCompletionSource<bool>)state!)
+                .TrySetResult(true),
+            cancelled);
+        Cancellation = cancelled.Task;
+    }
+
+    public Task Timeout { get; }
+
+    public Task Cancellation { get; }
+
+    public void Dispose()
+    {
+        _cancellationRegistration.Dispose();
+        _timeoutStop.Cancel();
+        _timeoutStop.Dispose();
+    }
+}
+
+internal sealed class IsolatedCancellationLease : IAsyncDisposable
+{
+    private readonly CancellationTokenSource _source = new();
+    private readonly BoundedCancellationDispatcher _dispatcher;
+    private readonly object _sync = new();
+    private Task? _dispatch;
+    private Task? _disposal;
+    private bool _cancellationAttempted;
+
+    private IsolatedCancellationLease(
+        BoundedCancellationDispatcher dispatcher)
+    {
+        _dispatcher = dispatcher;
+    }
+
+    public CancellationToken Token => _source.Token;
+
+    public static IsolatedCancellationLease Create(
+        BoundedCancellationDispatcher dispatcher)
+    {
+        if (dispatcher is null)
+        {
+            throw new ArgumentNullException(nameof(dispatcher));
+        }
+
+        return new IsolatedCancellationLease(dispatcher);
+    }
+
+    public bool TryCancel()
+    {
+        lock (_sync)
+        {
+            if (_disposal is not null || _cancellationAttempted)
+            {
+                return false;
+            }
+
+            _cancellationAttempted = true;
+            if (!_dispatcher.TryReserve(out var reservation))
+            {
+                _dispatch = Task.CompletedTask;
+                return false;
+            }
+
+            try
+            {
+                var accepted = reservation!.TryDispatch(
+                    _source,
+                    out var dispatched);
+                _dispatch = accepted
+                    ? ReleaseWhenCompleteAsync(dispatched, reservation)
+                    : Task.CompletedTask;
+                return accepted;
+            }
+            catch
+            {
+                reservation!.Dispose();
+                _dispatch = Task.CompletedTask;
+                return false;
+            }
+
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Task disposal;
+        lock (_sync)
+        {
+            _disposal ??= DisposeCoreAsync(_dispatch);
+            disposal = _disposal;
+        }
+
+        await disposal.ConfigureAwait(false);
+    }
+
+    public void DisposeDetached()
+    {
+        var disposal = DisposeAsync().AsTask();
+        _ = disposal.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously
+            | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
+    }
+
+    private async Task DisposeCoreAsync(Task? dispatch)
+    {
+        try
+        {
+            if (dispatch is not null)
+            {
+                await dispatch.ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _source.Dispose();
+        }
+    }
+
+    private static async Task ReleaseWhenCompleteAsync(
+        Task dispatch,
+        BoundedCancellationDispatcher.CancellationDispatchReservation
+            reservation)
+    {
+        try
+        {
+            await dispatch.ConfigureAwait(false);
+        }
+        finally
+        {
+            reservation.Dispose();
         }
     }
 }

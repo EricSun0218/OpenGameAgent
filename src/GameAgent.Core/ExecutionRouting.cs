@@ -259,6 +259,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
     private readonly SemaphoreSlim _policySlots;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly BoundedCancellationDispatcher _shutdownDispatcher;
+    private readonly BoundedCancellationDispatcher
+        _policyCancellationDispatcher;
     private readonly object _lifecycleSync = new();
     private readonly string _policyId;
     private readonly string _policyVersion;
@@ -281,7 +283,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             workflow,
             policy,
             options,
-            BoundedCancellationDispatcher.LifecycleShared)
+            BoundedCancellationDispatcher.LifecycleShared,
+            BoundedCancellationDispatcher.ExecutionPolicyShared)
     {
     }
 
@@ -291,14 +294,34 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
         IExecutionRoutePolicy? policy,
         ExecutionRouterOptions? options,
         BoundedCancellationDispatcher shutdownDispatcher)
+        : this(
+            agent,
+            workflow,
+            policy,
+            options,
+            shutdownDispatcher,
+            BoundedCancellationDispatcher.ExecutionPolicyShared)
+    {
+    }
+
+    internal RoutedExecutionRuntime(
+        IDurableAgentRuntime agent,
+        IRoutedWorkflowRuntime? workflow,
+        IExecutionRoutePolicy? policy,
+        ExecutionRouterOptions? options,
+        BoundedCancellationDispatcher shutdownDispatcher,
+        BoundedCancellationDispatcher policyCancellationDispatcher)
     {
         _agent = agent ?? throw new ArgumentNullException(nameof(agent));
         _workflow = workflow;
         _policy = policy ?? new DeterministicExecutionRoutePolicy();
         _options = (options ?? new ExecutionRouterOptions()).Snapshot();
         _shutdownDispatcher = shutdownDispatcher
-                              ?? throw new ArgumentNullException(
-                                  nameof(shutdownDispatcher));
+                               ?? throw new ArgumentNullException(
+                                   nameof(shutdownDispatcher));
+        _policyCancellationDispatcher = policyCancellationDispatcher
+                                        ?? throw new ArgumentNullException(
+                                            nameof(policyCancellationDispatcher));
         try
         {
             _policyId = RuntimeGuard.RequiredUtf8(
@@ -431,18 +454,31 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
                 validationRequest);
         }
 
+        if (cancellationToken.IsCancellationRequested)
+        {
+            _policySlots.Release();
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        var policyCancellation = IsolatedCancellationLease.Create(
+            _policyCancellationDispatcher);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            await policyCancellation.DisposeAsync().ConfigureAwait(false);
+            _policySlots.Release();
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         Task<ExecutionRouteDecision> evaluation;
-        var policyDeadline = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken);
-        policyDeadline.CancelAfter(_options.PolicyTimeout);
         var nestedEntered = false;
         try
         {
+            var policyToken = policyCancellation.Token;
             EnterNestedOperation();
             nestedEntered = true;
             evaluation = Task.Run(
                 async () => await _policy
-                    .SelectAsync(policyRequest, policyDeadline.Token)
+                    .SelectAsync(policyRequest, policyToken)
                     .ConfigureAwait(false));
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -451,35 +487,37 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             {
                 ExitOperation();
             }
-            policyDeadline.Dispose();
+            await policyCancellation.DisposeAsync().ConfigureAwait(false);
             _policySlots.Release();
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyErrorFallback,
                 validationRequest);
         }
 
-        var timeout = Task.Delay(_options.PolicyTimeout);
-        var callerCancellation = Task.Delay(
-            Timeout.InfiniteTimeSpan,
+        using var signals = new OperationDeadlineSignals(
+            _options.PolicyTimeout,
             cancellationToken);
         var completed = await Task.WhenAny(
                 evaluation,
-                timeout,
-                callerCancellation)
+                signals.Timeout,
+                signals.Cancellation)
             .ConfigureAwait(false);
-        if (ReferenceEquals(completed, callerCancellation))
+        if (ReferenceEquals(completed, signals.Cancellation))
         {
+            _ = policyCancellation.TryCancel();
             _ = ReleasePolicySlotWhenSettledAsync(
                 evaluation,
-                policyDeadline);
+                policyCancellation);
             cancellationToken.ThrowIfCancellationRequested();
+            throw new OperationCanceledException(cancellationToken);
         }
 
         if (!ReferenceEquals(completed, evaluation))
         {
+            _ = policyCancellation.TryCancel();
             _ = ReleasePolicySlotWhenSettledAsync(
                 evaluation,
-                policyDeadline);
+                policyCancellation);
             cancellationToken.ThrowIfCancellationRequested();
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyTimeoutFallback,
@@ -506,7 +544,7 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
         }
         finally
         {
-            policyDeadline.Dispose();
+            await policyCancellation.DisposeAsync().ConfigureAwait(false);
             _policySlots.Release();
             ExitOperation();
         }
@@ -514,7 +552,7 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
 
     private async Task ReleasePolicySlotWhenSettledAsync(
         Task<ExecutionRouteDecision> evaluation,
-        CancellationTokenSource policyDeadline)
+        IsolatedCancellationLease policyCancellation)
     {
         try
         {
@@ -525,7 +563,7 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
         }
         finally
         {
-            policyDeadline.Dispose();
+            policyCancellation.DisposeDetached();
             _policySlots.Release();
             ExitOperation();
         }

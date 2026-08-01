@@ -570,18 +570,25 @@ public sealed class VectorMemoryStore :
         await _embeddingSlots.WaitAsync(cancellationToken)
             .ConfigureAwait(false);
         var releaseSlot = true;
-        CancellationTokenSource? deadline = null;
+        IsolatedCancellationLease? cancellation = null;
         try
         {
-            deadline = CancellationTokenSource
-                .CreateLinkedTokenSource(cancellationToken);
-            deadline.CancelAfter(_options.EmbeddingTimeout);
+            cancellation = IsolatedCancellationLease.Create(
+                BoundedCancellationDispatcher.MemoryExtensionShared);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using var signals = new OperationDeadlineSignals(
+                _options.EmbeddingTimeout,
+                cancellationToken);
             Task<ReadOnlyMemory<float>> operation;
             try
             {
-                operation = _embeddingProvider
-                    .EmbedAsync(value.Clone(), deadline.Token)
-                    .AsTask();
+                var providerToken = cancellation.Token;
+                var input = value.Clone();
+                operation = Task.Run(
+                    async () => await _embeddingProvider
+                        .EmbedAsync(input, providerToken)
+                        .ConfigureAwait(false));
             }
             catch (OperationCanceledException)
                 when (!cancellationToken.IsCancellationRequested)
@@ -590,27 +597,28 @@ public sealed class VectorMemoryStore :
                     "Memory embedding exceeded its configured timeout.");
             }
 
-            var timeoutOrCancellation = Task.Delay(
-                Timeout.InfiniteTimeSpan,
-                deadline.Token);
             var completed = await Task.WhenAny(
                     operation,
-                    timeoutOrCancellation)
+                    signals.Timeout,
+                    signals.Cancellation)
                 .ConfigureAwait(false);
             if (!ReferenceEquals(completed, operation))
             {
-                deadline.Cancel();
+                _ = cancellation.TryCancel();
                 releaseSlot = false;
-                var detachedDeadline = deadline;
-                deadline = null;
+                var detachedCancellation = cancellation;
+                cancellation = null;
                 _ = ObserveDetachedEmbeddingAsync(
                     operation,
-                    detachedDeadline);
+                    detachedCancellation);
                 cancellationToken.ThrowIfCancellationRequested();
                 throw new TimeoutException(
                     "Memory embedding exceeded its configured timeout.");
             }
 
+            await cancellation.DisposeAsync().ConfigureAwait(false);
+            cancellation = null;
+            cancellationToken.ThrowIfCancellationRequested();
             ReadOnlyMemory<float> memory;
             try
             {
@@ -661,18 +669,9 @@ public sealed class VectorMemoryStore :
         }
         finally
         {
-            if (deadline is not null)
+            if (cancellation is not null)
             {
-                try
-                {
-                    deadline.Cancel();
-                }
-                catch (AggregateException)
-                {
-                    // Provider cancellation callbacks cannot invalidate a
-                    // completed embedding result.
-                }
-                deadline.Dispose();
+                await cancellation.DisposeAsync().ConfigureAwait(false);
             }
             if (releaseSlot)
             {
@@ -683,7 +682,7 @@ public sealed class VectorMemoryStore :
 
     private async Task ObserveDetachedEmbeddingAsync(
         Task<ReadOnlyMemory<float>> operation,
-        CancellationTokenSource deadline)
+        IsolatedCancellationLease cancellation)
     {
         try
         {
@@ -696,7 +695,7 @@ public sealed class VectorMemoryStore :
         }
         finally
         {
-            deadline.Dispose();
+            cancellation.DisposeDetached();
             _embeddingSlots.Release();
         }
     }

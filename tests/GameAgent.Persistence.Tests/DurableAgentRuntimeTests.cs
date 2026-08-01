@@ -6343,12 +6343,14 @@ public sealed class DurableAgentRuntimeTests
                 maxProviderAttempts: 2,
                 delay);
             var run = Run(clock.UtcNow);
-            run.Budget.MaxDurationMs = 200;
+            run.Budget.MaxDurationMs = 2_000;
 
-            var outcome = await runtime.RunAsync(
+            var running = runtime.RunAsync(
                     new DurableRunRequest { Run = run })
-                .AsTask()
-                .WaitAsync(TimeSpan.FromSeconds(3));
+                .AsTask();
+            await delay.Started.Task.WaitAsync(TestWaitTimeout);
+            var outcome = await running
+                .WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
             Assert.Equal("max_duration", outcome.Run.TerminalReason);
@@ -8417,6 +8419,9 @@ public sealed class DurableAgentRuntimeTests
 
     private sealed class BlockingCancellationDelay : IRuntimeDelay
     {
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public TaskCompletionSource CallbackInvoked { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -8437,6 +8442,7 @@ public sealed class DurableAgentRuntimeTests
                     CallbackInvoked.TrySetResult();
                     Release.Task.GetAwaiter().GetResult();
                 });
+            Started.TrySetResult();
             await cancellation;
         }
     }

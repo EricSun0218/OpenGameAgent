@@ -108,46 +108,53 @@ internal sealed class BoundedConversationContextEngine :
                     "Conversation context engine capacity was exhausted.");
             }
 
-            var deadline = CancellationTokenSource
-                .CreateLinkedTokenSource(linked.Token);
-            deadline.CancelAfter(_options.CompactionTimeout);
+            var cancellation = IsolatedCancellationLease.Create(
+                BoundedCancellationDispatcher.ConversationContextShared);
+            if (linked.IsCancellationRequested)
+            {
+                await cancellation.DisposeAsync().ConfigureAwait(false);
+                _slots.Release();
+                linked.Token.ThrowIfCancellationRequested();
+            }
+
             Task<ConversationContextView> operation;
             try
             {
+                var contextToken = cancellation.Token;
                 operation = Task.Run(
                     async () => await _inner.PrepareAsync(
                             runId,
                             turnId,
                             input,
                             stableIds,
-                            deadline.Token)
+                            contextToken)
                         .ConfigureAwait(false));
             }
             catch
             {
-                deadline.Dispose();
+                await cancellation.DisposeAsync().ConfigureAwait(false);
                 _slots.Release();
                 throw;
             }
 
-            var timeout = Task.Delay(_options.CompactionTimeout);
-            var cancelled = Task.Delay(
-                Timeout.InfiniteTimeSpan,
+            using var signals = new OperationDeadlineSignals(
+                _options.CompactionTimeout,
                 linked.Token);
             var completed = await Task.WhenAny(
                     operation,
-                    timeout,
-                    cancelled)
+                    signals.Timeout,
+                    signals.Cancellation)
                 .ConfigureAwait(false);
             if (!ReferenceEquals(completed, operation))
             {
-                TrackDetached(operation, deadline);
+                _ = cancellation.TryCancel();
+                TrackDetached(operation, cancellation);
                 linked.Token.ThrowIfCancellationRequested();
                 throw new TimeoutException(
                     "Conversation context engine exceeded its deadline.");
             }
 
-            deadline.Dispose();
+            cancellation.DisposeDetached();
             _slots.Release();
             var view = await operation.ConfigureAwait(false)
                        ?? throw new InvalidDataException(
@@ -187,9 +194,6 @@ internal sealed class BoundedConversationContextEngine :
                     "Conversation context engine capacity was exhausted.");
             }
 
-            var deadline = CancellationTokenSource
-                .CreateLinkedTokenSource(_shutdown.Token);
-            deadline.CancelAfter(_options.CompactionTimeout);
             Task operation;
             try
             {
@@ -198,7 +202,6 @@ internal sealed class BoundedConversationContextEngine :
             }
             catch
             {
-                deadline.Dispose();
                 _slots.Release();
                 throw;
             }
@@ -213,7 +216,7 @@ internal sealed class BoundedConversationContextEngine :
                     .GetResult();
                 if (!ReferenceEquals(completed, operation))
                 {
-                    TrackDetached(operation, deadline);
+                    TrackDetached(operation, cancellation: null);
                     detached = true;
                     throw new TimeoutException(
                         "Conversation context checkpoint registration exceeded its deadline.");
@@ -225,7 +228,6 @@ internal sealed class BoundedConversationContextEngine :
             {
                 if (!detached)
                 {
-                    deadline.Dispose();
                     _slots.Release();
                 }
             }
@@ -448,7 +450,9 @@ internal sealed class BoundedConversationContextEngine :
                 ConversationContextManager.Digest(output)));
     }
 
-    private void TrackDetached(Task operation, CancellationTokenSource deadline)
+    private void TrackDetached(
+        Task operation,
+        IsolatedCancellationLease? cancellation)
     {
         long id;
         TaskCompletionSource<bool> start;
@@ -461,7 +465,7 @@ internal sealed class BoundedConversationContextEngine :
             cleanup = CompleteDetachedAsync(
                 id,
                 operation,
-                deadline,
+                cancellation,
                 start.Task);
         }
         while (!_detached.TryAdd(id, cleanup));
@@ -478,7 +482,7 @@ internal sealed class BoundedConversationContextEngine :
     private async Task CompleteDetachedAsync(
         long id,
         Task operation,
-        CancellationTokenSource deadline,
+        IsolatedCancellationLease? cancellation,
         Task start)
     {
         await start.ConfigureAwait(false);
@@ -494,7 +498,7 @@ internal sealed class BoundedConversationContextEngine :
         }
         finally
         {
-            deadline.Dispose();
+            cancellation?.DisposeDetached();
             _slots.Release();
             _detached.TryRemove(id, out _);
             PulseIdle();

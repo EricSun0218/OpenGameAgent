@@ -395,17 +395,23 @@ public sealed class ChildAgentSupervisorTests
     public async Task ShutdownAndParentCancellationDoNotRunCallbacksInline()
     {
         var entered = NewSignal();
+        var callbackEntered = NewSignal();
         using var callbackRelease = new ManualResetEventSlim(false);
         var runtime = new DelegateRuntime(
             async (request, cancellationToken) =>
             {
                 _ = request;
-                using var registration = cancellationToken.Register(
-                    () => callbackRelease.Wait());
-                entered.TrySetResult(true);
-                await Task.Delay(
+                var cancellation = Task.Delay(
                     Timeout.InfiniteTimeSpan,
                     cancellationToken);
+                using var registration = cancellationToken.Register(
+                    () =>
+                    {
+                        callbackEntered.TrySetResult(true);
+                        callbackRelease.Wait();
+                    });
+                entered.TrySetResult(true);
+                await cancellation;
                 throw new InvalidOperationException("unreachable");
             });
         var supervisor = new ChildAgentSupervisor(
@@ -420,14 +426,21 @@ public sealed class ChildAgentSupervisorTests
             .AsTask();
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        Assert.Equal(
-            1,
-            supervisor.CancelChildren("blocking-callback-parent"));
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(500));
-        Assert.False(await supervisor.StopAsync());
+        try
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            Assert.Equal(
+                1,
+                supervisor.CancelChildren("blocking-callback-parent"));
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(500));
+            await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(await supervisor.StopAsync());
+        }
+        finally
+        {
+            callbackRelease.Set();
+        }
 
-        callbackRelease.Set();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => child);
         await supervisor.DisposeAsync();
     }

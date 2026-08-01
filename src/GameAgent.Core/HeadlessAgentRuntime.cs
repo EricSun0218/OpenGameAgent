@@ -2083,6 +2083,7 @@ public sealed class HeadlessAgentRuntime
             var cancellation = _expirationCancellation;
             if (cancellation is null || cancellation.IsCompleted)
             {
+                _ = cancellation?.Exception;
                 Cleanup();
             }
             else
@@ -2137,7 +2138,15 @@ public sealed class HeadlessAgentRuntime
         {
             try
             {
-                await cancellation.ConfigureAwait(false);
+                try
+                {
+                    await cancellation.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Expiration has already won. Capacity rejection cannot
+                    // replace the bounded run outcome.
+                }
             }
             finally
             {

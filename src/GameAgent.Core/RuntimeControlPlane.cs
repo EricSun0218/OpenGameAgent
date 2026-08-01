@@ -552,7 +552,16 @@ public sealed class RuntimeControlPlane
         {
             try
             {
-                await cancellationTask.ConfigureAwait(false);
+                try
+                {
+                    await cancellationTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The command remains durably admitted in the mailbox.
+                    // A saturated cancellation worker must not fault this
+                    // fire-and-forget ownership cleanup.
+                }
             }
             finally
             {

@@ -7853,7 +7853,15 @@ public sealed class DurableAgentRuntime :
                     // A cancellation callback cannot replace the run outcome.
                 }
 
-                await cancellationTask.ConfigureAwait(false);
+                try
+                {
+                    await cancellationTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The run already owns its terminal deadline decision.
+                    // Observe cancellation-dispatch rejection before cleanup.
+                }
             }
             finally
             {

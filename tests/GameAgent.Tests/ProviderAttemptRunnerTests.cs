@@ -2314,8 +2314,13 @@ public sealed class ProviderAttemptRunnerTests
                 dispatcher.ActiveReservations,
                 1,
                 capacity);
-            Assert.Equal(capacity - 1, waitDelay.Started);
-            Assert.Equal(waitDelay.Started, waitDelay.Callbacks);
+            Assert.InRange(waitDelay.Started, 1, capacity - 1);
+            Assert.InRange(
+                waitDelay.Callbacks,
+                1,
+                Math.Min(
+                    waitDelay.Started,
+                    ProcessCancellationWorkerPool.WorkersPerClass));
         }
         finally
         {
@@ -2326,6 +2331,7 @@ public sealed class ProviderAttemptRunnerTests
             SpinWait.SpinUntil(
                 () => dispatcher.ActiveReservations == 0,
                 TimeSpan.FromSeconds(10)));
+        Assert.Equal(waitDelay.Started, waitDelay.Callbacks);
     }
 
     [Fact]

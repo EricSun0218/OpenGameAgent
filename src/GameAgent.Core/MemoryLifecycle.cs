@@ -541,6 +541,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var enteredSlot = false;
+        IsolatedCancellationLease? providerCancellation = null;
         try
         {
             enteredSlot = await _providerSlots.WaitAsync(
@@ -554,47 +555,50 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
                     providerId);
             }
 
-            var providerDeadline =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
-            providerDeadline.CancelAfter(_options.ProviderTimeout);
+            providerCancellation = IsolatedCancellationLease.Create(
+                BoundedCancellationDispatcher.MemoryExtensionShared);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             Task<IReadOnlyList<MemorySearchResult>> operation;
             try
             {
+                var providerToken = providerCancellation.Token;
                 operation = Task.Run(
                     async () => await provider
-                        .SearchAsync(query, providerDeadline.Token)
+                        .SearchAsync(query, providerToken)
                         .ConfigureAwait(false));
             }
             catch
             {
-                providerDeadline.Dispose();
                 throw;
             }
 
-            var timeout = Task.Delay(_options.ProviderTimeout);
-            var callerCancelled = new TaskCompletionSource<bool>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            using var registration = cancellationToken.Register(
-                state => ((TaskCompletionSource<bool>)state!)
-                    .TrySetResult(true),
-                callerCancelled);
+            using var signals = new OperationDeadlineSignals(
+                _options.ProviderTimeout,
+                cancellationToken);
             var completed = await Task.WhenAny(
                     operation,
-                    timeout,
-                    callerCancelled.Task)
+                    signals.Timeout,
+                    signals.Cancellation)
                 .ConfigureAwait(false);
             if (!ReferenceEquals(completed, operation))
             {
+                _ = providerCancellation.TryCancel();
+                TrackDetachedProviderCall(operation, providerCancellation);
+                providerCancellation = null;
                 enteredSlot = false;
-                TrackDetachedProviderCall(operation, providerDeadline);
                 cancellationToken.ThrowIfCancellationRequested();
                 return ProviderRecallReport.Failure(
                     index,
                     providerId);
             }
 
-            providerDeadline.Dispose();
+            await providerCancellation.DisposeAsync().ConfigureAwait(false);
+            providerCancellation = null;
+            cancellationToken.ThrowIfCancellationRequested();
             var recalled = await operation.ConfigureAwait(false);
             if (recalled is null)
             {
@@ -643,6 +647,10 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         }
         finally
         {
+            if (providerCancellation is not null)
+            {
+                await providerCancellation.DisposeAsync().ConfigureAwait(false);
+            }
             if (enteredSlot)
             {
                 _providerSlots.Release();
@@ -652,7 +660,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
 
     private void TrackDetachedProviderCall(
         Task operation,
-        CancellationTokenSource deadline)
+        IsolatedCancellationLease cancellation)
     {
         long id;
         TaskCompletionSource<bool> start;
@@ -665,7 +673,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             cleanup = CompleteDetachedProviderCallAsync(
                 id,
                 operation,
-                deadline,
+                cancellation,
                 start.Task);
         }
         while (!_detachedProviderCalls.TryAdd(id, cleanup));
@@ -681,7 +689,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
     private async Task CompleteDetachedProviderCallAsync(
         long id,
         Task operation,
-        CancellationTokenSource deadline,
+        IsolatedCancellationLease cancellation,
         Task start)
     {
         await start.ConfigureAwait(false);
@@ -706,7 +714,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         {
             try
             {
-                deadline.Dispose();
+                cancellation.DisposeDetached();
                 _providerSlots.Release();
             }
             finally
@@ -1249,58 +1257,76 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             return fallback;
         }
 
-        var deadline = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken);
-        deadline.CancelAfter(_options.ProcessingStageTimeout);
-        Task<T> operation;
+        IsolatedCancellationLease? stageCancellation =
+            IsolatedCancellationLease.Create(
+                BoundedCancellationDispatcher.MemoryExtensionShared);
+        var transferred = false;
         try
         {
-            operation = Task.Factory.StartNew(
-                    () => operationFactory(deadline.Token),
-                    CancellationToken.None,
-                    TaskCreationOptions.DenyChildAttach,
-                    _processingTaskScheduler)
-                .Unwrap();
-        }
-        catch
-        {
-            deadline.Dispose();
-            _providerSlots.Release();
-            return fallback;
-        }
-
-        var timeout = Task.Delay(_options.ProcessingStageTimeout);
-        var callerCancellation = Task.Delay(
-            Timeout.InfiniteTimeSpan,
-            cancellationToken);
-        var completed = await Task.WhenAny(
-                operation,
-                timeout,
-                callerCancellation)
-            .ConfigureAwait(false);
-        if (!ReferenceEquals(completed, operation))
-        {
-            TrackDetachedProviderCall(operation, deadline);
             cancellationToken.ThrowIfCancellationRequested();
-            return fallback;
-        }
+            Task<T> operation;
+            try
+            {
+                var stageToken = stageCancellation.Token;
+                operation = Task.Factory.StartNew(
+                        () => operationFactory(stageToken),
+                        CancellationToken.None,
+                        TaskCreationOptions.DenyChildAttach,
+                        _processingTaskScheduler)
+                    .Unwrap();
+            }
+            catch
+            {
+                return fallback;
+            }
 
-        deadline.Dispose();
-        _providerSlots.Release();
-        try
-        {
-            return await operation.ConfigureAwait(false);
+            using var signals = new OperationDeadlineSignals(
+                _options.ProcessingStageTimeout,
+                cancellationToken);
+            var completed = await Task.WhenAny(
+                    operation,
+                    signals.Timeout,
+                    signals.Cancellation)
+                .ConfigureAwait(false);
+            if (!ReferenceEquals(completed, operation))
+            {
+                _ = stageCancellation.TryCancel();
+                TrackDetachedProviderCall(operation, stageCancellation);
+                stageCancellation = null;
+                transferred = true;
+                cancellationToken.ThrowIfCancellationRequested();
+                return fallback;
+            }
+
+            await stageCancellation.DisposeAsync().ConfigureAwait(false);
+            stageCancellation = null;
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return await operation.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                return fallback;
+            }
         }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
+        finally
         {
-            throw;
-        }
-        catch (Exception exception)
-            when (exception is not OutOfMemoryException
-                  and not StackOverflowException)
-        {
-            return fallback;
+            if (stageCancellation is not null)
+            {
+                await stageCancellation.DisposeAsync().ConfigureAwait(false);
+            }
+            if (!transferred)
+            {
+                _providerSlots.Release();
+            }
         }
     }
 

@@ -92,6 +92,27 @@ public sealed class AgentLifecycleMiddlewareFailureTests
         Assert.True(await pipeline.StopAsync());
     }
 
+    [Fact]
+    public async Task TimeoutDispatchesMiddlewareCancellationAndDrainsSlot()
+    {
+        var middleware = new CancellationAwareMiddleware();
+        using var pipeline = Pipeline(middleware, required: true);
+
+        var error = await Assert.ThrowsAsync<AgentLifecycleMiddlewareException>(
+            () => pipeline.InvokeAsync(
+                    Event("cancellation-aware-timeout"),
+                    allowRejection: true,
+                    CancellationToken.None)
+                .AsTask());
+
+        Assert.Equal("middleware_timeout", error.ReasonCode);
+        await middleware.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            () => pipeline.DetachedCallCount == 0,
+            TimeSpan.FromSeconds(2));
+        Assert.True(await pipeline.StopAsync());
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -240,6 +261,28 @@ public sealed class AgentLifecycleMiddlewareFailureTests
             }
 
             throw new InvalidOperationException("middleware failed");
+        }
+    }
+
+    private sealed class CancellationAwareMiddleware
+        : IAgentLifecycleMiddleware
+    {
+        public string MiddlewareId => "cancellation-aware";
+
+        public string Version => "1";
+
+        public TaskCompletionSource<bool> Cancelled { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            _ = lifecycleEvent;
+            using var registration = cancellationToken.Register(
+                () => Cancelled.TrySetResult(true));
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable");
         }
     }
 }

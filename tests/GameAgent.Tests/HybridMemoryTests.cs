@@ -126,6 +126,30 @@ public sealed class HybridMemoryTests
     }
 
     [Fact]
+    public async Task SynchronousEmbeddingPrefixIsTimedOutAndSlotRecovers()
+    {
+        var provider = new SynchronouslyBlockingEmbeddingProvider();
+        var store = new VectorMemoryStore(
+            provider,
+            capacity: 2,
+            options: new VectorMemoryStoreOptions(
+                maxConcurrentEmbeddings: 1,
+                embeddingTimeout: TimeSpan.FromMilliseconds(25)));
+
+        await Assert.ThrowsAsync<TimeoutException>(
+            () => store.UpsertAsync(
+                    Record("first", "apple", "agent"))
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(2)));
+        await provider.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await store.UpsertAsync(Record("second", "banana", "agent"))
+            .AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
     public async Task EmbeddingDeadlineQuarantinesProviderThatIgnoresCancellation()
     {
         var provider = new NonCooperativeEmbeddingProvider();
@@ -393,6 +417,42 @@ public sealed class HybridMemoryTests
             _ = value;
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return new float[] { 1, 0 };
+        }
+    }
+
+    private sealed class SynchronouslyBlockingEmbeddingProvider
+        : IMemoryEmbeddingProvider
+    {
+        private int _callCount;
+
+        public string ProviderId => "sync-blocking-embedding";
+
+        public string ModelId => "sync-blocking-test";
+
+        public string Version => "1";
+
+        public int Dimensions => 2;
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public TaskCompletionSource<bool> Cancelled { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<ReadOnlyMemory<float>> EmbedAsync(
+            JsonElement value,
+            CancellationToken cancellationToken)
+        {
+            _ = value;
+            if (Interlocked.Increment(ref _callCount) == 1)
+            {
+                using var registration = cancellationToken.Register(
+                    () => Cancelled.TrySetResult(true));
+                cancellationToken.WaitHandle.WaitOne();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            return new ValueTask<ReadOnlyMemory<float>>(
+                new float[] { 1, 0 });
         }
     }
 

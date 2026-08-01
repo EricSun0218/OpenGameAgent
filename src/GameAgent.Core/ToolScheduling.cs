@@ -1542,7 +1542,15 @@ public sealed class ToolBatchScheduler
         try
         {
             await ObserveDetachedAsync(operation).ConfigureAwait(false);
-            await cancellationTask.ConfigureAwait(false);
+            try
+            {
+                await cancellationTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // The tool result is already fenced. Observe cancellation
+                // dispatch rejection without replacing that result.
+            }
         }
         finally
         {

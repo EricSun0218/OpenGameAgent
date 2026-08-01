@@ -1118,18 +1118,18 @@ public sealed partial class ConversationContextManager :
             CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken,
                 _shutdown.Token);
-        var deadline = CancellationTokenSource.CreateLinkedTokenSource(
+        using var admissionDeadline =
+            CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
             _shutdown.Token);
-        deadline.CancelAfter(absoluteDeadline.Remaining);
+        admissionDeadline.CancelAfter(absoluteDeadline.Remaining);
         try
         {
-            await _compactionSlots.WaitAsync(deadline.Token)
+            await _compactionSlots.WaitAsync(admissionDeadline.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            deadline.Dispose();
             cancellationToken.ThrowIfCancellationRequested();
             _shutdown.Token.ThrowIfCancellationRequested();
             throw new TimeoutException(
@@ -1137,29 +1137,38 @@ public sealed partial class ConversationContextManager :
         }
         catch
         {
-            deadline.Dispose();
             throw;
         }
 
         if (absoluteDeadline.Remaining <= TimeSpan.Zero)
         {
-            deadline.Dispose();
             _compactionSlots.Release();
             throw new TimeoutException(
                 "Conversation compaction exceeded its deadline.");
         }
 
+        var cancellation = IsolatedCancellationLease.Create(
+            BoundedCancellationDispatcher.ConversationContextShared);
+        if (waitCancellation.IsCancellationRequested)
+        {
+            await cancellation.DisposeAsync().ConfigureAwait(false);
+            _compactionSlots.Release();
+            cancellationToken.ThrowIfCancellationRequested();
+            _shutdown.Token.ThrowIfCancellationRequested();
+        }
+
         Task<ConversationCompactionResult> operation;
         try
         {
+            var compactionToken = cancellation.Token;
             operation = Task.Run(
                 async () => await _compactor
-                    .CompactAsync(request, deadline.Token)
+                    .CompactAsync(request, compactionToken)
                     .ConfigureAwait(false));
         }
         catch
         {
-            deadline.Dispose();
+            await cancellation.DisposeAsync().ConfigureAwait(false);
             _compactionSlots.Release();
             throw;
         }
@@ -1167,19 +1176,24 @@ public sealed partial class ConversationContextManager :
         var remaining = absoluteDeadline.Remaining;
         if (remaining <= TimeSpan.Zero)
         {
-            TrackDetachedCompaction(operation, deadline);
+            _ = cancellation.TryCancel();
+            TrackDetachedCompaction(operation, cancellation);
             throw new TimeoutException(
                 "Conversation compaction exceeded its deadline.");
         }
 
-        var timeout = Task.Delay(
+        using var signals = new OperationDeadlineSignals(
             remaining,
             waitCancellation.Token);
-        var completed = await Task.WhenAny(operation, timeout)
+        var completed = await Task.WhenAny(
+                operation,
+                signals.Timeout,
+                signals.Cancellation)
             .ConfigureAwait(false);
         if (!ReferenceEquals(completed, operation))
         {
-            TrackDetachedCompaction(operation, deadline);
+            _ = cancellation.TryCancel();
+            TrackDetachedCompaction(operation, cancellation);
             cancellationToken.ThrowIfCancellationRequested();
             _shutdown.Token.ThrowIfCancellationRequested();
             throw new TimeoutException(
@@ -1188,6 +1202,8 @@ public sealed partial class ConversationContextManager :
 
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            _shutdown.Token.ThrowIfCancellationRequested();
             ConversationCompactionResult? result = null;
             Exception? primaryFailure = null;
             try
@@ -1202,7 +1218,7 @@ public sealed partial class ConversationContextManager :
                 primaryFailure = exception;
             }
 
-            deadline.Token.ThrowIfCancellationRequested();
+            cancellation.Token.ThrowIfCancellationRequested();
             var analysis = result is not null
                            && string.Equals(
                                result.SourceDigest,
@@ -1212,13 +1228,13 @@ public sealed partial class ConversationContextManager :
                 : null;
             analysis ??= ConversationSummaryQuality.Analyze(
                 request,
-                deadline.Token);
+                cancellation.Token);
             if (result is not null
                 && ConversationSummaryQuality.TryCreateAdmittedSummary(
                     request,
                     result,
                     analysis,
-                    deadline.Token,
+                    cancellation.Token,
                     out var admitted,
                     out _))
             {
@@ -1237,12 +1253,12 @@ public sealed partial class ConversationContextManager :
                 ConversationSummaryQuality.CreateDeterministicResult(
                     request,
                     analysis,
-                    deadline.Token);
+                    cancellation.Token);
             if (!ConversationSummaryQuality.TryCreateAdmittedSummary(
                     request,
                     fallback,
                     analysis,
-                    deadline.Token,
+                    cancellation.Token,
                     out admitted,
                     out var fallbackRejection))
             {
@@ -1255,14 +1271,14 @@ public sealed partial class ConversationContextManager :
         }
         finally
         {
-            deadline.Dispose();
+            await cancellation.DisposeAsync().ConfigureAwait(false);
             _compactionSlots.Release();
         }
     }
 
     private void TrackDetachedCompaction(
         Task operation,
-        CancellationTokenSource deadline)
+        IsolatedCancellationLease cancellation)
     {
         long id;
         TaskCompletionSource<bool> start;
@@ -1275,7 +1291,7 @@ public sealed partial class ConversationContextManager :
             cleanup = CompleteDetachedCompactionAsync(
                 id,
                 operation,
-                deadline,
+                cancellation,
                 start.Task);
         }
         while (!_detachedCompactions.TryAdd(id, cleanup));
@@ -1291,7 +1307,7 @@ public sealed partial class ConversationContextManager :
     private async Task CompleteDetachedCompactionAsync(
         long id,
         Task operation,
-        CancellationTokenSource deadline,
+        IsolatedCancellationLease cancellation,
         Task start)
     {
         await start.ConfigureAwait(false);
@@ -1316,7 +1332,7 @@ public sealed partial class ConversationContextManager :
         {
             try
             {
-                deadline.Dispose();
+                cancellation.DisposeDetached();
                 _compactionSlots.Release();
             }
             finally

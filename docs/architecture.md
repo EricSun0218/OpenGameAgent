@@ -94,13 +94,19 @@ whose handlers ignored cancellation and returned late. It accepts lower
 JSON depth, node, string, and container sizes.
 
 Callbacks that can enter application code are isolated by process-wide
-boundaries as well as per-runtime queues. Data-plane cancellation callbacks,
-lifecycle cancellation callbacks, and buffered event-observer workers use
-three independent bounded dispatchers. A permanently blocking callback can
-consume one slot in its own class, but cannot create an unbounded number of
-workers or exhaust shutdown capacity through data-plane work. Capacity
-exhaustion is fail-fast and observable; it is not an attempt to terminate
-uncooperative application code.
+boundaries as well as per-runtime queues. Data-plane, lifecycle, execution
+policy, conversation-context, and memory-extension cancellation callbacks use
+independent bounded admission lanes. Control-plane, data-plane, execution-policy,
+agent-lifecycle, conversation-context, memory-extension, and skill-content
+cancellation each has its own fixed process-wide worker class with two dedicated
+workers and a bounded queue. Buffered event observers have their own worker
+boundary. A blocking extension therefore cannot starve ordinary task
+continuations, shutdown, or another extension domain. A permanently blocking
+callback retains one worker and one lane reservation until it returns; once its
+worker class or lane is full, later cancellation attempts fail safely while the
+owning operation remains detached and bounded by its normal shutdown policy.
+This isolates resource growth but does not attempt to terminate uncooperative
+application code.
 
 `DurableAgentRuntime.StopAsync` is intentionally bounded. It reports whether
 active runs and detached work drained within their configured windows, while

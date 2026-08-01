@@ -738,8 +738,11 @@ public sealed class ChildAgentSupervisor : IAsyncDisposable
                     return false;
                 }
 
-                _dispatch = _reservation.DispatchAsync(_source);
-                return true;
+                var accepted = _reservation.TryDispatch(
+                    _source,
+                    out var dispatch);
+                _dispatch = dispatch;
+                return accepted;
             }
         }
 
