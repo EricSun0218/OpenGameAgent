@@ -119,6 +119,7 @@ Then follow:
 - [Execution and extension reference](docs/execution-and-extension-reference.md)
 - [Route work and supervise child Agents](docs/how-to-route-and-supervise-agents.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
+- [Living-world integration](docs/living-world-integration.md)
 - [Runtime capability model](docs/runtime-capability-model.md)
 - [Media and generated content](docs/media-and-generated-content.md)
 - [Durable workflows](docs/durable-workflows.md)

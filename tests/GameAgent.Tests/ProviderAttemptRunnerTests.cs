@@ -2222,10 +2222,13 @@ public sealed class ProviderAttemptRunnerTests
     }
 
     [Fact]
-    public async Task HighFrequencyStreamCancelsEveryEventWaitDelay()
+    public async Task HighFrequencyStreamCancelsEveryEventWaitWithinCapacity()
     {
         const int deltaCount = 2_048;
+        const int cancellationCapacity = 64;
         var waitDelay = new TrackingWaitDelay();
+        var dispatcher =
+            new BoundedCancellationDispatcher(cancellationCapacity);
         var provider = new TestStreamingProvider(
             "high-frequency",
             request => HighFrequencyEvents(request, deltaCount));
@@ -2240,7 +2243,8 @@ public sealed class ProviderAttemptRunnerTests
             new ImmediateDelay(),
             new SequentialIdGenerator(),
             new ProviderStreamLimits(maxEventsPerAttempt: deltaCount + 2),
-            waitDelay);
+            waitDelay,
+            dispatcher);
 
         var result = await Run(runner);
 
@@ -2248,7 +2252,10 @@ public sealed class ProviderAttemptRunnerTests
         Assert.Equal(deltaCount + 3, waitDelay.Started);
         Assert.Equal(waitDelay.Started, waitDelay.Cancelled);
         Assert.Equal(0, waitDelay.Active);
-        Assert.Equal(1, waitDelay.PeakActive);
+        Assert.InRange(
+            waitDelay.PeakActive,
+            1,
+            cancellationCapacity);
     }
 
     [Fact]

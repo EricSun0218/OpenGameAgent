@@ -7,6 +7,9 @@ returns a final result.
 
 Before mapping a larger character or simulation system, read
 [game integration patterns](game-integration-patterns.md).
+For persistent characters, delayed messages, group scenes, world events, and
+high-level tactics, also read
+[living-world integration](living-world-integration.md).
 
 ## 1. Establish the boundary
 

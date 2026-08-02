@@ -54,6 +54,8 @@
 - Added fail-fast aggregate token, action, duration, and cost reservations for
   multi-actor batches, recorded in each admitted batch manifest.
 - Added a repeatable 64-actor coordination allocation and latency smoke gate.
+- Added a living-world integration recipe for persistent characters, delayed
+  messages, group scenes, evolving events, high-level tactics, and media.
 - Added bounded, paged presentation-chunk replay with explicit expired and
   ahead cursor outcomes for reconnecting engine UI consumers.
 - Restricted pluggable conversation compactors to audited, low-authority
