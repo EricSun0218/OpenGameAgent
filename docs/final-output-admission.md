@@ -112,6 +112,12 @@ thread so a synchronous prefix cannot extend the wall timeout. Cancellation
 callbacks also use a bounded dispatcher and never run inline on the runtime
 thread.
 
+Policy execution capacity is process-wide as well as runtime-local. If all
+execution leases are held by unsettled policies, a new evaluation fails closed
+with `final_output_admission_policy_capacity_exhausted`; it is not queued behind
+an uncooperative callback. The lease is returned only when the complete policy
+evaluation settles, including any asynchronous suffix.
+
 An implementation that ignores cancellation remains isolated and keeps its
 evaluation slot until it actually returns. Shutdown waits only for the bounded
 policy window. After shutdown:

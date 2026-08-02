@@ -490,6 +490,7 @@ internal sealed class FinalOutputAdmissionEvaluator
     private readonly FinalOutputAdmissionOptions _options;
     private readonly SemaphoreSlim _slots;
     private readonly BoundedCancellationDispatcher _cancellationDispatcher;
+    private readonly BoundedPolicyExecutionDispatcher _policyDispatcher;
     private readonly object _lifecycleSync = new();
     private readonly HashSet<Task> _detachedEvaluations = new();
     private TaskCompletionSource<bool>? _detachedEvaluationsDrained;
@@ -498,7 +499,8 @@ internal sealed class FinalOutputAdmissionEvaluator
     public FinalOutputAdmissionEvaluator(
         IFinalOutputAdmissionPolicy policy,
         FinalOutputAdmissionOptions options,
-        BoundedCancellationDispatcher? cancellationDispatcher = null)
+        BoundedCancellationDispatcher? cancellationDispatcher = null,
+        BoundedPolicyExecutionDispatcher? policyDispatcher = null)
     {
         _policy = policy ?? throw new ArgumentNullException(nameof(policy));
         _options = options.Snapshot();
@@ -515,6 +517,8 @@ internal sealed class FinalOutputAdmissionEvaluator
             _options.MaxConcurrentEvaluations);
         _cancellationDispatcher = cancellationDispatcher
                                   ?? BoundedCancellationDispatcher.Shared;
+        _policyDispatcher = policyDispatcher
+                            ?? BoundedPolicyExecutionDispatcher.Shared;
     }
 
     public string PolicyId { get; }
@@ -590,11 +594,15 @@ internal sealed class FinalOutputAdmissionEvaluator
             policyCancellation = new CancellationTokenSource();
             try
             {
-                evaluation = Task.Run(
-                    async () => await _policy.EvaluateAsync(
+                if (!_policyDispatcher.TryExecute(
+                        () => _policy.EvaluateAsync(
                             request,
-                            policyCancellation.Token)
-                        .ConfigureAwait(false));
+                            policyCancellation.Token),
+                        out evaluation))
+                {
+                    return FinalOutputAdmissionDecision.Reject(
+                        "final_output_admission_policy_capacity_exhausted");
+                }
             }
             catch (Exception exception) when (
                 exception is not OutOfMemoryException)

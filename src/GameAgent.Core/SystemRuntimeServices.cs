@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 
 namespace GameAgent.Core;
 
@@ -286,6 +287,83 @@ internal sealed class BoundedCancellationDispatcher
                 // worker or consume additional dispatcher reservations.
             }
         }
+    }
+}
+
+internal sealed class BoundedPolicyExecutionDispatcher
+{
+    internal const int DefaultCapacity = 64;
+
+    private readonly SemaphoreSlim _capacity;
+    private int _activeExecutions;
+
+    public BoundedPolicyExecutionDispatcher(
+        int capacity = DefaultCapacity)
+    {
+        if (capacity < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        }
+
+        _capacity = new SemaphoreSlim(capacity, capacity);
+    }
+
+    public static BoundedPolicyExecutionDispatcher Shared { get; } = new();
+
+    internal int ActiveExecutions =>
+        Volatile.Read(ref _activeExecutions);
+
+    public bool TryExecute<TResult>(
+        Func<ValueTask<TResult>> operation,
+        [NotNullWhen(true)] out Task<TResult>? completion)
+    {
+        if (operation is null)
+        {
+            throw new ArgumentNullException(nameof(operation));
+        }
+
+        if (!_capacity.Wait(0))
+        {
+            completion = null;
+            return false;
+        }
+
+        Interlocked.Increment(ref _activeExecutions);
+        try
+        {
+            completion = Task.Factory.StartNew(
+                    () => ExecuteAndReleaseAsync(operation),
+                    CancellationToken.None,
+                    TaskCreationOptions.DenyChildAttach
+                    | TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default)
+                .Unwrap();
+            return true;
+        }
+        catch
+        {
+            Release();
+            throw;
+        }
+    }
+
+    private async Task<TResult> ExecuteAndReleaseAsync<TResult>(
+        Func<ValueTask<TResult>> operation)
+    {
+        try
+        {
+            return await operation().ConfigureAwait(false);
+        }
+        finally
+        {
+            Release();
+        }
+    }
+
+    private void Release()
+    {
+        Interlocked.Decrement(ref _activeExecutions);
+        _capacity.Release();
     }
 }
 

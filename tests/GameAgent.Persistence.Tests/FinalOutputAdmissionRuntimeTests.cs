@@ -2155,35 +2155,106 @@ public sealed class FinalOutputAdmissionRuntimeTests
                 PolicyTimeout = TimeSpan.FromMilliseconds(50)
             },
             new BoundedCancellationDispatcher(1));
-        var fallback = policy.ReleaseAfterAsync(
-            TimeSpan.FromSeconds(1));
+        try
+        {
+            var elapsed = Stopwatch.StartNew();
+            var evaluation = evaluator.EvaluateAsync(
+                    PolicyRequest(),
+                    default)
+                .AsTask();
+            await policy.Started.WaitAsync(TimeSpan.FromSeconds(1));
+            var timedOut = await evaluation.WaitAsync(
+                TimeSpan.FromSeconds(1));
+            elapsed.Stop();
 
-        var timedOut = await evaluator.EvaluateAsync(
-            PolicyRequest(),
-            default);
+            Assert.False(timedOut.Accepted);
+            Assert.Equal(
+                "final_output_admission_policy_timeout",
+                timedOut.ReasonCode);
+            Assert.True(
+                elapsed.Elapsed < TimeSpan.FromSeconds(1),
+                $"Policy wall timeout took {elapsed.Elapsed}.");
+            Assert.False(policy.RanOnThreadPool);
+            Assert.False(policy.Completed.IsCompleted);
 
-        Assert.False(timedOut.Accepted);
-        Assert.Equal(
-            "final_output_admission_policy_timeout",
-            timedOut.ReasonCode);
-        Assert.False(policy.Completed.IsCompleted);
+            var capacity = await evaluator.EvaluateAsync(
+                PolicyRequest(),
+                default);
+            Assert.Equal(
+                "final_output_admission_capacity_timeout",
+                capacity.ReasonCode);
+            Assert.Equal(1, policy.CallCount);
+        }
+        finally
+        {
+            policy.Release();
+        }
 
-        var capacity = await evaluator.EvaluateAsync(
-            PolicyRequest(),
-            default);
-        Assert.Equal(
-            "final_output_admission_capacity_timeout",
-            capacity.ReasonCode);
-        Assert.Equal(1, policy.CallCount);
-
-        policy.Release();
-        await fallback;
         await policy.Completed.WaitAsync(TestWaitTimeout);
         var accepted = await evaluator.EvaluateAsync(
             PolicyRequest(),
             default);
         Assert.True(accepted.Accepted);
         Assert.Equal(2, policy.CallCount);
+    }
+
+    [Fact]
+    public async Task PolicyExecutionCapacityIsSharedAcrossEvaluators()
+    {
+        var dispatcher = new BoundedPolicyExecutionDispatcher(1);
+        var firstPolicy = new SynchronouslyBlockingPolicy();
+        var secondPolicy = new RecordingPolicy(
+            _ => FinalOutputAdmissionDecision.Accept());
+        var options = new FinalOutputAdmissionOptions
+        {
+            Enabled = true,
+            MaxConcurrentEvaluations = 1,
+            PolicyTimeout = TimeSpan.FromMilliseconds(50)
+        };
+        var first = new FinalOutputAdmissionEvaluator(
+            firstPolicy,
+            options,
+            new BoundedCancellationDispatcher(1),
+            dispatcher);
+        var second = new FinalOutputAdmissionEvaluator(
+            secondPolicy,
+            options,
+            new BoundedCancellationDispatcher(1),
+            dispatcher);
+
+        try
+        {
+            var timedOut = await first.EvaluateAsync(
+                    PolicyRequest(),
+                    default)
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.Equal(
+                "final_output_admission_policy_timeout",
+                timedOut.ReasonCode);
+            Assert.Equal(1, dispatcher.ActiveExecutions);
+
+            var rejected = await second.EvaluateAsync(
+                PolicyRequest(),
+                default);
+            Assert.Equal(
+                "final_output_admission_policy_capacity_exhausted",
+                rejected.ReasonCode);
+            Assert.Empty(secondPolicy.Requests);
+        }
+        finally
+        {
+            firstPolicy.Release();
+        }
+
+        await firstPolicy.Completed.WaitAsync(TestWaitTimeout);
+        Assert.True(
+            await WaitUntilAsync(() => dispatcher.ActiveExecutions == 0));
+        var accepted = await second.EvaluateAsync(
+            PolicyRequest(),
+            default);
+        Assert.True(accepted.Accepted);
+        Assert.Single(secondPolicy.Requests);
     }
 
     [Fact]
@@ -2991,7 +3062,10 @@ public sealed class FinalOutputAdmissionRuntimeTests
         private readonly ManualResetEventSlim _release = new(false);
         private readonly TaskCompletionSource _completed =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _calls;
+        private int _ranOnThreadPool;
 
         public string PolicyId => "synchronously-blocking-policy";
 
@@ -3001,6 +3075,11 @@ public sealed class FinalOutputAdmissionRuntimeTests
 
         public Task Completed => _completed.Task;
 
+        public Task Started => _started.Task;
+
+        public bool RanOnThreadPool =>
+            Volatile.Read(ref _ranOnThreadPool) != 0;
+
         public ValueTask<FinalOutputAdmissionDecision> EvaluateAsync(
             FinalOutputAdmissionRequest request,
             CancellationToken cancellationToken)
@@ -3009,6 +3088,12 @@ public sealed class FinalOutputAdmissionRuntimeTests
             _ = cancellationToken;
             if (Interlocked.Increment(ref _calls) == 1)
             {
+                if (Thread.CurrentThread.IsThreadPoolThread)
+                {
+                    Volatile.Write(ref _ranOnThreadPool, 1);
+                }
+
+                _started.TrySetResult();
                 _release.Wait();
                 _completed.TrySetResult();
             }
@@ -3022,11 +3107,6 @@ public sealed class FinalOutputAdmissionRuntimeTests
             _release.Set();
         }
 
-        public async Task ReleaseAfterAsync(TimeSpan delay)
-        {
-            await Task.Delay(delay);
-            Release();
-        }
     }
 
     private sealed class BlockingCancellationPolicy :

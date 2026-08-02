@@ -8,6 +8,8 @@
   with bounded custom policies and least-capability deterministic fallback.
 - Isolated stateless-completion shutdown cancellation on a dedicated bounded
   worker pool so blocking provider callbacks cannot starve or overrun shutdown.
+- Isolated synchronous final-output policy prefixes on a process-wide bounded
+  execution dispatcher so one blocked policy cannot starve wall-clock timeouts.
 - Added per-operation reasoning, sampling, prompt-cache, and ordered provider
   route controls with durable recovery.
 - Added strict tool validation, conflict-aware scheduling, skills, context, and

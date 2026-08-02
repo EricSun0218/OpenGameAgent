@@ -3197,6 +3197,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
     private async Task VerifyNodeBoundsBlockedCancellationAsync()
     {
         var tree = GetTree();
+        await WaitForConditionAsync(
+            () => GodotRequestCancellationDispatcher.ActiveCount == 0
+                && GodotRequestCancellationDispatcher.PendingCount == 0
+                && GodotRequestCancellationDispatcher.ReservationCount == 0,
+            TimeSpan.FromSeconds(10),
+            "The operation cancellation dispatcher was not quiescent before the bounded-cancellation test.");
         using var release = new ManualResetEventSlim(initialState: false);
         var runtime = new BlockingCancellationRuntime(release);
         var node = new GameAgentRuntimeNode
@@ -3255,8 +3261,10 @@ public partial class HeadlessAddonTest : global::Godot.Node
         }
 
         await WaitForConditionAsync(
-            () => GodotRequestCancellationDispatcher.ActiveCount == 0,
-            TimeSpan.FromSeconds(2),
+            () => GodotRequestCancellationDispatcher.ActiveCount == 0
+                && GodotRequestCancellationDispatcher.PendingCount == 0
+                && GodotRequestCancellationDispatcher.ReservationCount == 0,
+            TimeSpan.FromSeconds(10),
             "The operation cancellation dispatcher retained released work.");
         node.QueueFree();
         await ToSignal(
@@ -3277,8 +3285,13 @@ public partial class HeadlessAddonTest : global::Godot.Node
         BlockingCancellationRuntime? overflowRuntime = null;
         var baselineLifecycleReservations =
             GodotCancellationDispatcher.ReservationCount;
-        var baselineOperationReservations =
-            GodotRequestCancellationDispatcher.ReservationCount;
+
+        await WaitForConditionAsync(
+            () => GodotRequestCancellationDispatcher.ActiveCount == 0
+                && GodotRequestCancellationDispatcher.PendingCount == 0
+                && GodotRequestCancellationDispatcher.ReservationCount == 0,
+            TimeSpan.FromSeconds(10),
+            "The operation cancellation dispatcher was not quiescent before the capacity test.");
 
         try
         {
@@ -3411,8 +3424,7 @@ public partial class HeadlessAddonTest : global::Godot.Node
         await WaitForConditionAsync(
             () => GodotRequestCancellationDispatcher.ActiveCount == 0
                 && GodotRequestCancellationDispatcher.PendingCount == 0
-                && GodotRequestCancellationDispatcher.ReservationCount
-                    == baselineOperationReservations,
+                && GodotRequestCancellationDispatcher.ReservationCount == 0,
             TimeSpan.FromSeconds(15),
             "The operation cancellation queue or reservation did not drain.");
 
