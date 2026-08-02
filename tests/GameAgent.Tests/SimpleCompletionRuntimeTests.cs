@@ -196,6 +196,7 @@ public sealed class SimpleCompletionRuntimeTests
         release.Set();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => completion);
+        Assert.False(provider.CancellationRanOnThreadPool);
         await runtime.DisposeAsync();
     }
 
@@ -508,6 +509,8 @@ public sealed class SimpleCompletionRuntimeTests
         public TaskCompletionSource Entered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public bool CancellationRanOnThreadPool { get; private set; }
+
         public ProviderCapabilities Capabilities { get; } = new()
         {
             Streaming = true,
@@ -520,12 +523,18 @@ public sealed class SimpleCompletionRuntimeTests
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             _ = request;
-            using var registration = cancellationToken.Register(
-                () => _release.Wait());
-            Entered.TrySetResult();
-            await Task.Delay(
+            var cancellation = Task.Delay(
                 Timeout.InfiniteTimeSpan,
                 cancellationToken);
+            using var registration = cancellationToken.Register(
+                () =>
+                {
+                    CancellationRanOnThreadPool =
+                        Thread.CurrentThread.IsThreadPoolThread;
+                    _release.Wait();
+                });
+            Entered.TrySetResult();
+            await cancellation;
             yield break;
         }
     }

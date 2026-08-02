@@ -120,6 +120,11 @@ internal sealed class BoundedCancellationDispatcher
         get;
     } = new(workerClass: CancellationWorkerClass.SkillContentResolver);
 
+    public static BoundedCancellationDispatcher SimpleCompletionShared
+    {
+        get;
+    } = new(workerClass: CancellationWorkerClass.SimpleCompletion);
+
     internal int ActiveReservations =>
         Volatile.Read(ref _reservations);
 
@@ -292,7 +297,8 @@ internal enum CancellationWorkerClass
     AgentLifecycle,
     ConversationContext,
     MemoryExtension,
-    SkillContentResolver
+    SkillContentResolver,
+    SimpleCompletion
 }
 
 internal static class ProcessCancellationWorkerPool
@@ -313,6 +319,8 @@ internal static class ProcessCancellationWorkerPool
         () => new WorkerPool("memory", QueueCapacityPerClass));
     private static readonly Lazy<WorkerPool> SkillContentResolver = new(
         () => new WorkerPool("skill-content", QueueCapacityPerClass));
+    private static readonly Lazy<WorkerPool> SimpleCompletion = new(
+        () => new WorkerPool("simple-completion", QueueCapacityPerClass));
 
     internal static bool TryQueue(
         CancellationWorkerClass workerClass,
@@ -339,6 +347,7 @@ internal static class ProcessCancellationWorkerPool
             CancellationWorkerClass.MemoryExtension => MemoryExtension.Value,
             CancellationWorkerClass.SkillContentResolver =>
                 SkillContentResolver.Value,
+            CancellationWorkerClass.SimpleCompletion => SimpleCompletion.Value,
             _ => throw new ArgumentOutOfRangeException(nameof(workerClass))
         };
 

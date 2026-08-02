@@ -132,10 +132,13 @@ public sealed class SimpleCompletionRuntime :
     private readonly ProviderWorkloadAdmission _admission;
     private readonly bool _ownsAdmission;
     private readonly SimpleCompletionRuntimeOptions _options;
+    private readonly BoundedCancellationDispatcher _shutdownDispatcher;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly object _lifecycleSync = new();
     private TaskCompletionSource<bool>? _drained;
     private Task? _shutdownCancellationTask;
+    private CancellationTokenSource? _shutdownAdmissionCancellation;
+    private Task? _shutdownAdmissionTask;
     private int _active;
     private int _shutdownCancellationCompleted;
     private int _state;
@@ -156,7 +159,8 @@ public sealed class SimpleCompletionRuntime :
         ProviderAttemptRunner provider,
         IRuntimeIdGenerator ids,
         SimpleCompletionRuntimeOptions options,
-        ProviderWorkloadAdmission? admission)
+        ProviderWorkloadAdmission? admission,
+        BoundedCancellationDispatcher? shutdownDispatcher = null)
     {
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         _ids = ids ?? throw new ArgumentNullException(nameof(ids));
@@ -167,6 +171,9 @@ public sealed class SimpleCompletionRuntime :
         _admission = admission ?? new ProviderWorkloadAdmission(
             _options.MaxConcurrentProviderCalls,
             _options.MaxConcurrentBackgroundProviderCalls);
+        _shutdownDispatcher = shutdownDispatcher
+                              ?? BoundedCancellationDispatcher
+                                  .SimpleCompletionShared;
     }
 
     public async ValueTask<SimpleCompletionOutcome> CompleteAsync(
@@ -268,7 +275,30 @@ public sealed class SimpleCompletionRuntime :
                 _state = 1;
                 _drained ??= new TaskCompletionSource<bool>(
                     TaskCreationOptions.RunContinuationsAsynchronously);
-                _shutdownCancellationTask = StartShutdownCancellation();
+            }
+
+            if (_active == 0 && _shutdownCancellationTask is null)
+            {
+                Volatile.Write(ref _shutdownCancellationCompleted, 1);
+                FinishStopLocked();
+                return true;
+            }
+
+            if (_shutdownCancellationTask is null
+                && _shutdownDispatcher.TryReserve(out var reservation))
+            {
+                try
+                {
+                    _shutdownCancellationTask =
+                        CompleteShutdownCancellationAsync(
+                            reservation!.DispatchAsync(_shutdown),
+                            reservation);
+                }
+                catch
+                {
+                    reservation!.Dispose();
+                    throw;
+                }
             }
 
             cancellation = _shutdownCancellationTask
@@ -293,6 +323,45 @@ public sealed class SimpleCompletionRuntime :
     public async ValueTask DisposeAsync()
     {
         _ = await StopWithDrainResultAsync().ConfigureAwait(false);
+        Task? admission = null;
+        Task initialDrain;
+        lock (_lifecycleSync)
+        {
+            if (_state == 2)
+            {
+                return;
+            }
+
+            initialDrain = _drained!.Task;
+            if (_shutdownCancellationTask is null
+                && !initialDrain.IsCompleted)
+            {
+                _shutdownAdmissionCancellation ??=
+                    new CancellationTokenSource();
+                _shutdownAdmissionTask ??= AdmitShutdownCancellationAsync(
+                    _shutdownAdmissionCancellation.Token);
+                admission = _shutdownAdmissionTask;
+            }
+        }
+
+        if (admission is not null)
+        {
+            var admittedOrDrained = await Task.WhenAny(admission, initialDrain)
+                .ConfigureAwait(false);
+            if (ReferenceEquals(admittedOrDrained, initialDrain))
+            {
+                _shutdownAdmissionCancellation!.Cancel();
+            }
+
+            try
+            {
+                await admission.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (initialDrain.IsCompleted)
+            {
+            }
+        }
+
         Task cancellation;
         Task drain;
         lock (_lifecycleSync)
@@ -305,6 +374,7 @@ public sealed class SimpleCompletionRuntime :
         }
 
         await Task.WhenAll(cancellation, drain).ConfigureAwait(false);
+        _shutdownAdmissionCancellation?.Dispose();
     }
 
     private ActiveCall Enter(CancellationToken cancellationToken)
@@ -336,45 +406,70 @@ public sealed class SimpleCompletionRuntime :
         lock (_lifecycleSync)
         {
             _active--;
-            if (_active == 0
-                && _state == 1
-                && Volatile.Read(ref _shutdownCancellationCompleted) != 0)
+            if (_active == 0 && _state == 1)
             {
-                FinishStopLocked();
+                if (_shutdownCancellationTask is null)
+                {
+                    Volatile.Write(ref _shutdownCancellationCompleted, 1);
+                    FinishStopLocked();
+                }
+                else if (Volatile.Read(ref _shutdownCancellationCompleted) != 0)
+                {
+                    FinishStopLocked();
+                }
             }
         }
     }
 
-    private Task StartShutdownCancellation()
+    private async Task AdmitShutdownCancellationAsync(
+        CancellationToken cancellationToken)
     {
-        return Task.Run(
-            () =>
+        var reservation = await _shutdownDispatcher
+            .ReserveAsync(cancellationToken)
+            .ConfigureAwait(false);
+        lock (_lifecycleSync)
+        {
+            if (_state == 2 || _shutdownCancellationTask is not null)
             {
-                try
+                reservation.Dispose();
+                return;
+            }
+
+            try
+            {
+                _shutdownCancellationTask = CompleteShutdownCancellationAsync(
+                    reservation.DispatchAsync(_shutdown),
+                    reservation);
+            }
+            catch
+            {
+                reservation.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private async Task CompleteShutdownCancellationAsync(
+        Task dispatch,
+        BoundedCancellationDispatcher.CancellationDispatchReservation
+            reservation)
+    {
+        try
+        {
+            await dispatch.ConfigureAwait(false);
+        }
+        finally
+        {
+            reservation.Dispose();
+            lock (_lifecycleSync)
+            {
+                Volatile.Write(ref _shutdownCancellationCompleted, 1);
+                if (_active == 0 && _state == 1)
                 {
-                    _shutdown.Cancel();
+                    FinishStopLocked();
                 }
-                catch (Exception exception)
-                    when (exception is not OutOfMemoryException
-                          and not StackOverflowException)
-                {
-                    // Provider cancellation callbacks are untrusted. Active
-                    // calls still own their resources until they settle.
-                }
-                finally
-                {
-                    lock (_lifecycleSync)
-                    {
-                        Volatile.Write(
-                            ref _shutdownCancellationCompleted,
-                            1);
-                        if (_active == 0 && _state == 1)
-                        {
-                            FinishStopLocked();
-                        }
-                    }
-                }
-            });
+            }
+        }
     }
 
     private void TrackDetachedCleanup(Task cleanup)

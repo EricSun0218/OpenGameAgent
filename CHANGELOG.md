@@ -6,6 +6,8 @@
 - Added the durable streaming agent loop, controls, budgets, and recovery.
 - Added stateless completion and durable Direct, Agent, and Workflow routing
   with bounded custom policies and least-capability deterministic fallback.
+- Isolated stateless-completion shutdown cancellation on a dedicated bounded
+  worker pool so blocking provider callbacks cannot starve or overrun shutdown.
 - Added per-operation reasoning, sampling, prompt-cache, and ordered provider
   route controls with durable recovery.
 - Added strict tool validation, conflict-aware scheduling, skills, context, and

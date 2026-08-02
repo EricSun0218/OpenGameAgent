@@ -641,10 +641,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
             Assert(
                 error["request_id"].AsString() == requestId,
                 "Godot request cancellation published the wrong identity.");
-            Assert(
-                SpinWait.SpinUntil(
-                    () => !runtime.cancel_request(requestId),
-                    TimeSpan.FromSeconds(2)),
+            await WaitForConditionAsync(
+                () => !runtime.cancel_request(requestId),
+                TimeSpan.FromSeconds(2),
                 "Godot request cancellation ownership was not cleaned up.");
         }
         finally
@@ -2763,10 +2762,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
         await AssertThrowsAsync<OperationCanceledException>(
             wait,
             "Caller cancellation did not win the shutdown wait.");
-        Assert(
-            SpinWait.SpinUntil(
-                () => GodotShutdownWait.PendingTimeoutCount == baseline,
-                TimeSpan.FromSeconds(1)),
+        await WaitForConditionAsync(
+            () => GodotShutdownWait.PendingTimeoutCount == baseline,
+            TimeSpan.FromSeconds(1),
             "The losing shutdown timeout remained scheduled.");
 
         var failedRegistration = GodotShutdownWait
@@ -3256,10 +3254,9 @@ public partial class HeadlessAddonTest : global::Godot.Node
             release.Set();
         }
 
-        Assert(
-            SpinWait.SpinUntil(
-                () => GodotRequestCancellationDispatcher.ActiveCount == 0,
-                TimeSpan.FromSeconds(2)),
+        await WaitForConditionAsync(
+            () => GodotRequestCancellationDispatcher.ActiveCount == 0,
+            TimeSpan.FromSeconds(2),
             "The operation cancellation dispatcher retained released work.");
         node.QueueFree();
         await ToSignal(
@@ -3411,13 +3408,12 @@ public partial class HeadlessAddonTest : global::Godot.Node
                 global::Godot.SceneTree.SignalName.ProcessFrame);
         }
 
-        Assert(
-            SpinWait.SpinUntil(
-                () => GodotRequestCancellationDispatcher.ActiveCount == 0
-                    && GodotRequestCancellationDispatcher.PendingCount == 0
-                    && GodotRequestCancellationDispatcher.ReservationCount
-                        == baselineOperationReservations,
-                TimeSpan.FromSeconds(15)),
+        await WaitForConditionAsync(
+            () => GodotRequestCancellationDispatcher.ActiveCount == 0
+                && GodotRequestCancellationDispatcher.PendingCount == 0
+                && GodotRequestCancellationDispatcher.ReservationCount
+                    == baselineOperationReservations,
+            TimeSpan.FromSeconds(15),
             "The operation cancellation queue or reservation did not drain.");
 
         var reservations =
@@ -3468,11 +3464,10 @@ public partial class HeadlessAddonTest : global::Godot.Node
             }
         }
 
-        Assert(
-            SpinWait.SpinUntil(
-                () => GodotCancellationDispatcher.ReservationCount
-                    == baselineLifecycleReservations,
-                TimeSpan.FromSeconds(2)),
+        await WaitForConditionAsync(
+            () => GodotCancellationDispatcher.ReservationCount
+                == baselineLifecycleReservations,
+            TimeSpan.FromSeconds(2),
             "Unused lifecycle reservations were not returned.");
     }
 
@@ -3599,11 +3594,10 @@ public partial class HeadlessAddonTest : global::Godot.Node
             }
         }
 
-        Assert(
-            SpinWait.SpinUntil(
-                () => GodotCancellationDispatcher.ReservationCount
-                    == baselineReservations,
-                TimeSpan.FromSeconds(3)),
+        await WaitForConditionAsync(
+            () => GodotCancellationDispatcher.ReservationCount
+                == baselineReservations,
+            TimeSpan.FromSeconds(3),
             "The lifecycle reservation was not returned after real owner drain.");
     }
 
