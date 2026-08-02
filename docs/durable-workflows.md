@@ -69,3 +69,26 @@ ID and must reconcile an unknown result before retrying. Provider completion
 order never grants mutation order. The game remains responsible for gameplay
 legality, conflicts, settlement policy, and which workflow outputs may enter an
 authoritative world transaction.
+
+## Model-authored command plans
+
+`GeneratedPlanCompiler` exposes a stricter generated JSON surface over the
+workflow kernel. The game supplies a closed catalog of command argument,
+changing execution-input, and result schemas. Generated plans may compose
+command, bounded foreach, reduce, and bounded loop stages, while dependencies
+provide sequential or parallel execution.
+
+The generated document cannot declare executors or executable code. Unknown
+commands, properties, pointers, dependency cycles, malformed arguments, and a
+worst-case expanded execution count above
+`GeneratedPlanAdmissionOptions.MaxExpandedStageExecutions` are rejected before
+the workflow starts. A foreach or loop additionally requires a host-owned
+execution-input schema; model content cannot define that trust boundary.
+
+Register `GeneratedPlanStepExecutor` with an
+`IGeneratedPlanCommandHost`. Every invocation carries a stable `ExecutionId`.
+The host must persist its side-effect receipt under that ID and implement
+`TryGetReceiptAsync`; recovery checks the receipt before considering another
+execution. A host command may also use the durable external-attention
+coordinator to pause for a player or game signal and return its resolution on
+recovery.

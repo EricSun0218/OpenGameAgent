@@ -10,10 +10,12 @@ string pluginRoot = Path.GetFullPath(args[0]);
 string[] expectedNames =
 [
     "GameAgent.Core.dll",
+    "GameAgent.Generation.dll",
     "GameAgent.Persistence.dll",
     "GameAgent.Protocol.dll",
     "GameAgent.Providers.Anthropic.dll",
     "GameAgent.Providers.OpenAICompatible.dll",
+    "GameAgent.Providers.MediaHttp.dll",
     "GameAgent.Runtime.dll",
     "GameAgent.Workflow.dll",
     "Microsoft.Bcl.AsyncInterfaces.dll",

@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.IO;
 using System.Threading;
+using GameAgent.Generation;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -78,6 +79,53 @@ namespace GameAgent.Unity.Tests
             UnityEngine.Object.Destroy(root);
             yield return new WaitForSecondsRealtime(0.01f);
             Directory.Delete(directory, true);
+        }
+
+        [UnityTest]
+        public IEnumerator GenerationPreservesStructuredInputAndPublishesOnMainThread()
+        {
+            var root = new GameObject("GameAgentRuntimeGenerationPlayModeTest");
+            var host = root.AddComponent<UnityAgentRuntimeHost>();
+            host.ConfigureGeneration(UnityGenerationGateScenario.CreateRuntime());
+            var mainThreadId = Thread.CurrentThread.ManagedThreadId;
+            GenerationJob observed = null;
+            var observerThreadId = -1;
+            host.GenerationUpdated += job =>
+            {
+                observed = job;
+                observerThreadId = Thread.CurrentThread.ManagedThreadId;
+            };
+
+            var pending = host.SubmitGenerationAsync(
+                UnityGenerationGateScenario.CreateRequest("unity-generation"));
+            var framesRemaining = 300;
+            while ((!pending.IsCompleted || observed == null)
+                   && framesRemaining-- > 0)
+            {
+                yield return new WaitForSecondsRealtime(0.01f);
+            }
+
+            Assert.That(pending.IsCompleted, Is.True);
+            var result = pending.GetAwaiter().GetResult();
+            Assert.That(observed == null, Is.False);
+            Assert.That(observerThreadId, Is.EqualTo(mainThreadId));
+            Assert.That(result.Status, Is.EqualTo(GenerationJobStatuses.Succeeded));
+            Assert.That(
+                result.Output.Value.GetProperty("temperature").GetDouble(),
+                Is.EqualTo(3.5d));
+            Assert.That(
+                result.Output.Value.GetProperty("signals")[2]
+                    .GetProperty("kind").GetString(),
+                Is.EqualTo("month_elapsed"));
+
+            var shutdown = host.ShutdownAsync(CancellationToken.None);
+            while (!shutdown.IsCompleted)
+            {
+                yield return new WaitForSecondsRealtime(0.01f);
+            }
+            shutdown.GetAwaiter().GetResult();
+            UnityEngine.Object.Destroy(root);
+            yield return new WaitForSecondsRealtime(0.01f);
         }
     }
 }

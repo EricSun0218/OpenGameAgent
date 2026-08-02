@@ -3,13 +3,18 @@
 For architectural recipes covering conversational characters, group scenes,
 periodic NPC simulation, traditional game AI, memory, generated content, and
 multiplayer authority, read [game integration patterns](game-integration-patterns.md).
+For the exact reusable/game-owned boundary, read
+[runtime capability model](runtime-capability-model.md). Image, video, speech,
+and structured-content APIs are covered by
+[media and generated content](media-and-generated-content.md).
 
 ## Requirements
 
 - .NET SDK 8 to build and test this repository.
-- Godot 4.7 .NET for the verified engine path, or a Unity 2022.3-or-newer
-  Editor for the intended Unity package target. Unity Editor and Player gates
-  have not yet been executed for this alpha.
+- Godot 4.7 .NET for the verified primary engine path, or a Unity
+  2022.3-or-newer Editor for the Unity package target. The licensed Windows
+  verification matrix currently includes Unity 6000.5.6f1 EditMode, PlayMode,
+  Mono Player, and IL2CPP Player build-and-run gates.
 - A streaming chat-completions endpoint, or an implementation of
   `IStreamingModelProvider`.
 

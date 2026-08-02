@@ -37,11 +37,21 @@ The core owns:
 - context compilation plus a replaceable bounded context engine;
 - memory interfaces, bounded query/reranking stages, a bounded in-memory store,
   and a crash-tolerant file-backed store;
+- persistent Agent identities, graph edges, mailboxes, bounded residency, and
+  cited memory distillation;
+- game-time trigger admission, external attention, session-bound context
+  deltas, and hierarchical durable budgets;
 - tool scheduling;
 - budgets and bounded queues;
 - control commands;
 - typed lifecycle middleware and bounded child Agent supervision;
 - journaling, operation ledgers, and recovery.
+
+Optional engine-neutral modules add durable workflows, strictly admitted
+model-authored command plans, and provider-neutral media/structured-content
+jobs. Generated content reaches the game only through a host-owned
+stage/validate/commit transaction. These modules do not move game authority or
+model hosting into the runtime.
 
 The core targets `netstandard2.1` and does not reference an engine SDK.
 
@@ -504,9 +514,10 @@ still returned when that gate is not enabled.
 ## Local and remote responsibilities
 
 The runtime, journal, context compiler, scheduler, and engine host run locally.
-The model provider is replaceable and may be local or remote. A complete Agent
-loop, including workflow orchestration, game-time semantics, memory, durable
-state, recovery, and action settlement, does not require a hosted runtime.
+Model and media providers are replaceable and may be local or remote. A
+complete Agent loop, including workflow orchestration, game-time semantics,
+memory, durable state, recovery, and action settlement, does not require a
+hosted runtime or bundled model.
 
 A commercial game may put a narrow model gateway in front of a remote provider
 to protect credentials, enforce quotas, moderate requests, and meter usage.

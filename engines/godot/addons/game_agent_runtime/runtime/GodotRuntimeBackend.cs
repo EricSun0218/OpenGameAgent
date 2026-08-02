@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using GameAgent.Core;
+using GameAgent.Generation;
 using GameAgent.Protocol;
 using GameAgent.Runtime;
 
@@ -632,6 +633,16 @@ public sealed class GodotRuntimeHost
 
     public IRuntimeEventPublisher EventPublisher => _node.RuntimeEventPublisher;
 
+    public void ConfigureGeneration(GenerationRuntime runtime)
+    {
+        if (runtime is null)
+        {
+            throw new ArgumentNullException(nameof(runtime));
+        }
+
+        _node.ConfigureGenerationRuntime(runtime);
+    }
+
     // Legacy headless backend registration.
     public void Configure(IGodotRuntimeBackend backend)
     {
@@ -756,6 +767,9 @@ public sealed class GodotRuntimeHost
         SimpleCompletionRequest request,
         CancellationToken cancellationToken = default) =>
         _node.StartTypedCompletion(request, cancellationToken);
+
+    public string StartGeneration(GenerationRequest request) =>
+        _node.StartTypedGeneration(request);
 
     public string StartChildRun(
         string parentRunId,

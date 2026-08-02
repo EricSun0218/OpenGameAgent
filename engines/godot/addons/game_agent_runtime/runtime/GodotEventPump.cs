@@ -20,6 +20,8 @@ internal static class GodotEventKinds
     public const string BatchParticipantCompleted =
         "batch_participant_completed";
     public const string BatchFailed = "batch_failed";
+    public const string GenerationUpdated = "generation_updated";
+    public const string GenerationFailed = "generation_failed";
     public const string RuntimeStopped = "runtime_stopped";
     public const string RuntimeError = "runtime_error";
     public const string PumpOverflow = "pump_overflow";

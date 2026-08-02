@@ -343,6 +343,149 @@ public sealed class HeadlessAgentRuntimeTests
     }
 
     [Fact]
+    public async Task Long_horizon_world_goal_can_inspect_act_observe_and_replan()
+    {
+        var store = new InMemorySessionStore();
+        var clock = new FakeRuntimeClock();
+        var provider = new ScriptedModelProvider(
+            ModelResponse.CallTools(new ModelToolCall
+            {
+                ToolCallId = "inspect-1",
+                Name = "inspect_region",
+                Arguments = ProtocolJson.ParseElement(
+                    """{"min":[0,0,0],"max":[2,1,0]}""")
+            }),
+            ModelResponse.CallTools(new ModelToolCall
+            {
+                ToolCallId = "place-1",
+                Name = "place_cells",
+                Arguments = ProtocolJson.ParseElement(
+                    """{"material":"stone","cells":[[0,0,0],[1,0,0]]}""")
+            }),
+            ModelResponse.CallTools(new ModelToolCall
+            {
+                ToolCallId = "place-2",
+                Name = "place_cells",
+                Arguments = ProtocolJson.ParseElement(
+                    """{"material":"stone","cells":[[0,0,0],[2,0,0]]}""")
+            }),
+            ModelResponse.CallTools(new ModelToolCall
+            {
+                ToolCallId = "inspect-2",
+                Name = "inspect_region",
+                Arguments = ProtocolJson.ParseElement(
+                    """{"min":[0,0,0],"max":[2,1,0]}""")
+            }),
+            ModelResponse.Final(ProtocolJson.ParseElement(
+                """{"goal":"foundation","status":"completed","completedSteps":2,"remainingSteps":0}""")));
+        var cells = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["1,0,0"] = "protected"
+        };
+        Exception? hostError = null;
+        var host = FakeGameHost.Returning(request =>
+        {
+            try
+            {
+                JsonElement result;
+                if (request.ActionName == "inspect_region")
+                {
+                    result = ProtocolJson.ParseElement(
+                        $"{{\"cells\":{{\"0,0,0\":\"{Value("0,0,0")}\",\"1,0,0\":\"{Value("1,0,0")}\",\"2,0,0\":\"{Value("2,0,0")}\"}}}}");
+                }
+                else
+                {
+                    var placed = new List<string>();
+                    var rejected = new List<string>();
+                    foreach (var cell in request.Arguments.GetProperty("cells").EnumerateArray())
+                    {
+                        var key = string.Join(",", cell.EnumerateArray().Select(value => value.GetInt32()));
+                        if (cells.ContainsKey(key))
+                        {
+                            rejected.Add(key);
+                        }
+                        else
+                        {
+                            cells[key] = request.Arguments.GetProperty("material").GetString()!;
+                            placed.Add(key);
+                        }
+                    }
+
+                    result = JsonArrayBuilder.Object(
+                        ("placed", JsonArrayBuilder.Strings(placed)),
+                        ("rejected", JsonArrayBuilder.Strings(rejected)),
+                        ("worldRevision", JsonArrayBuilder.Number(cells.Count)));
+                }
+
+                return new ActionReceipt
+                {
+                    OperationId = request.OperationId,
+                    Revision = 1,
+                    Status = ReceiptStatuses.Succeeded,
+                    Result = result,
+                    Retryable = false,
+                    CommittedAt = clock.UtcNow,
+                    ReceivedAt = clock.UtcNow
+                };
+            }
+            catch (Exception exception)
+            {
+                hostError = exception;
+                throw;
+            }
+
+            string Value(string key) => cells.TryGetValue(key, out var value) ? value : "air";
+        });
+        var runtime = new HeadlessAgentRuntime(
+            provider,
+            host,
+            store,
+            clock,
+            new SequentialIdGenerator());
+        var request = CreateRequest();
+        request.Run.Budget.MaxTurns = 8;
+        request.Run.Budget.MaxActions = 8;
+        request.Tools = new[]
+        {
+            WorldTool("inspect_region", ToolEffects.PureRead),
+            WorldTool("place_cells", ToolEffects.WorldCommand)
+        };
+
+        var outcome = await runtime.RunAsync(request);
+
+        Assert.True(
+            outcome.Run.State == RunStates.Completed,
+            $"state={outcome.Run.State}; reason={outcome.Run.TerminalReason}; "
+            + $"pending={string.Join(',', outcome.Run.PendingOperationIds)}; "
+            + $"hostError={hostError}; "
+            + $"events={string.Join(';', store.Events.Select(item => item.Kind + ':' + item.Payload.GetRawText()))}");
+        Assert.Equal(5, provider.CallCount);
+        Assert.Equal(4, host.CallCount);
+        Assert.Equal("protected", cells["1,0,0"]);
+        Assert.Equal("stone", cells["0,0,0"]);
+        Assert.Equal("stone", cells["2,0,0"]);
+        Assert.Equal("completed", outcome.FinalOutput!.Value
+            .GetProperty("status").GetString());
+
+        static ToolDescriptor WorldTool(string name, string effect) => new()
+        {
+            Name = name,
+            Version = "1",
+            Description = "Inspect or change a bounded region owned by the game host.",
+            ParametersSchema = ProtocolJson.ParseElement("""{"type":"object"}"""),
+            ResultSchema = ProtocolJson.ParseElement("""{"type":"object"}"""),
+            Effect = effect,
+            ConflictScopes = new List<string> { "world:region" },
+            ThreadAffinity = ThreadAffinities.EngineMainThread,
+            TimeoutMs = 1_000,
+            RetryPolicy = ToolRetryPolicies.Idempotent,
+            IdempotencyPolicy = ToolIdempotencyPolicies.Required,
+            Toolset = "world_interaction",
+            Visibility = ToolVisibilities.Direct
+        };
+    }
+
+    [Fact]
     public async Task GameDecisionMetadataReachesTheHostAction()
     {
         var store = new InMemorySessionStore();

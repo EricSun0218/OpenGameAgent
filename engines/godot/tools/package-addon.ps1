@@ -305,6 +305,13 @@ try {
     }
 
     & dotnet build (
+        Join-Path $repositoryRoot "src\GameAgent.Generation\GameAgent.Generation.csproj"
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Generation build failed."
+    }
+
+    & dotnet build (
         Join-Path $repositoryRoot (
             "src\GameAgent.Providers.Anthropic\" +
             "GameAgent.Providers.Anthropic.csproj")
@@ -320,6 +327,15 @@ try {
     ) -c $Configuration
     if ($LASTEXITCODE -ne 0) {
         throw "GameAgent.Providers.OpenAICompatible build failed."
+    }
+
+    & dotnet build (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Providers.MediaHttp\" +
+            "GameAgent.Providers.MediaHttp.csproj")
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Providers.MediaHttp build failed."
     }
 
     & dotnet build (
@@ -375,6 +391,10 @@ try {
     ) -Destination $libraryTarget
     Copy-Item -LiteralPath (
         Join-Path $repositoryRoot (
+            "src\GameAgent.Generation\bin\$Configuration\netstandard2.1\GameAgent.Generation.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
             "src\GameAgent.Providers.Anthropic\bin\$Configuration\" +
             "netstandard2.1\GameAgent.Providers.Anthropic.dll")
     ) -Destination $libraryTarget
@@ -382,6 +402,11 @@ try {
         Join-Path $repositoryRoot (
             "src\GameAgent.Providers.OpenAICompatible\bin\$Configuration\" +
             "netstandard2.1\GameAgent.Providers.OpenAICompatible.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Providers.MediaHttp\bin\$Configuration\" +
+            "netstandard2.1\GameAgent.Providers.MediaHttp.dll")
     ) -Destination $libraryTarget
     Copy-Item -LiteralPath (
         Join-Path $repositoryRoot (

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>GameAgent.Generation</RootNamespace>
+    <Description>Durable generated-content jobs, artifacts, admission, and host-owned commit coordination.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+  </ItemGroup>
+</Project>

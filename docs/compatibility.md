@@ -7,7 +7,9 @@ until its real engine or toolchain gate has passed.
 | --- | --- | --- |
 | Shared libraries | .NET Standard 2.1 | Windows CI runs the repository build, test, package, and performance smoke; Linux builds and tests the complete portable solution |
 | Godot host | Godot 4.7.1 .NET on Windows desktop and headless | Real Godot executable, isolated addon package, C# build, scene startup, signals, structured context, durable run/resume/control, main-thread action dispatch, and shutdown are exercised |
-| Unity host | Unity 2022.3 LTS or newer, Mono or IL2CPP | Package source and samples compile as .NET Standard 2.1; host conformance and package assembly gates pass without an Editor |
+| Unity host | Unity 2022.3 LTS or newer, Mono or IL2CPP | Package and host-conformance gates pass; Unity 6000.5.6f1 on Windows passes 7 EditMode tests, 3 PlayMode tests, and both Mono and IL2CPP Player build, launch, and durable-marker verification |
+| Generation core | Local or remote image, video, speech, and structured-content APIs | Deterministic provider, persistence, cancellation, recovery, artifact integrity, content transaction, streaming-speech, Godot mapping, and Unity lifecycle tests |
+| Media HTTP adapter | HTTPS APIs plus explicitly enabled loopback HTTP | Redirect rejection, bounded responses, credential indirection, job polling/cancellation, host-allowlisted artifact import, and local endpoint fixtures |
 
 Linux validates the portable .NET solution; it is not a second full
 engine-release matrix. Engine release gates currently target Windows.
@@ -15,11 +17,13 @@ engine-release matrix. Engine release gates currently target Windows.
 ## Unity validation boundary
 
 The repository includes scripts for EditMode, PlayMode, Windows Mono Player, and
-Windows IL2CPP Player gates. Those gates require a licensed Unity installation
-with the matching platform modules and have not been executed for this alpha.
-The current claim therefore covers the package contract and host implementation,
-not verified Player compatibility. Mobile, WebGL, and console targets are not
-claimed.
+Windows IL2CPP Player gates. The release verification environment executed all
+four paths with licensed Unity 6000.5.6f1, the Windows IL2CPP module, Visual
+Studio Build Tools 2022, and Windows SDK 10.0.26100.0. Both Players built,
+launched headlessly, completed the two-turn durable tool loop, wrote the
+validated pass marker, and exited successfully. This is evidence for that
+Windows Unity version and toolchain, not a claim about every Unity version or
+target. Mobile, WebGL, and console targets are not claimed.
 
 Unity DTO conversion preserves the optional `decisionKey` and `batchId`
 fields used to stage simultaneous actor actions.
@@ -39,15 +43,24 @@ reporting. Each configured provider must be exercised before shipping a game. A
 provider token belongs in a server relay or a short-lived scoped credential for
 consumer builds.
 
+Generation providers are separate from chat providers. `GameAgent.Generation`
+defines image, video, speech, and structured-content job contracts;
+`GameAgent.Providers.MediaHttp` maps a common HTTP shape without guessing every
+vendor dialect. Provider-specific fields travel in bounded `Input` and
+`Options`. Artifact URLs are downloaded only through the configured store and
+its host allowlist. Local endpoints require explicit loopback enablement. See
+[media and generated content](media-and-generated-content.md).
+
 The OpenAI-compatible adapter exposes the wire differences that commonly break
 tool loops instead of guessing them from a provider name. Configuration selects
 `max_tokens` versus `max_completion_tokens`, whether reasoning effort requires
 the vendor-specific thinking toggle, optional `tool_choice`, optional
 `parallel_tool_calls`, strict function schemas, and reasoning-content replay.
 Every selection is covered by the durable route-policy digest. The default
-profile remains the repository's verified DeepSeek V4 Pro route; other
-endpoints should set every dialect option explicitly and pass a live smoke gate
-before release.
+profile remains the repository's verified DeepSeek V4 Pro route. It has passed
+the live-provider gate with streaming, two model turns, one authoritative host
+tool call, usage accounting, and clean completion. Other endpoints should set
+every dialect option explicitly and pass a live smoke gate before release.
 
 `GameAgent.Providers.Anthropic` implements the named Messages SSE flow with
 client `tool_use` and `tool_result` blocks and pins the verified `2023-06-01`

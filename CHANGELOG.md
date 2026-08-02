@@ -133,3 +133,27 @@
   dispatch, with pre-serialization structural limits and owned nested state,
   without taking validation authority away from the injected backend; ordinary
   runtime-event and application-pause subscribers are isolated too.
+- Verified the licensed Unity 6000.5.6f1 Windows matrix through EditMode,
+  PlayMode, Mono Player, and IL2CPP Player build-and-run gates, including the
+  two-turn durable tool-loop marker scenario.
+- Verified the DeepSeek V4 Pro live-provider path through streaming, one
+  authoritative host tool call, usage accounting, and clean completion without
+  persisting the local credential in repository artifacts.
+- Added persistent Agent identities, graph edges, bounded mailboxes and
+  residency, with deterministic eviction and separate execution/model capacity.
+- Added session-bound model-visible context deltas, cited memory distillation,
+  durable external attention, game-time trigger catch-up/overlap policies, and
+  idempotent hierarchical budget charges.
+- Added a closed declarative extension catalog that binds only game-owned
+  registries and never loads executable payloads.
+- Added safe model-authored command plans with ordered/parallel DAG execution,
+  bounded foreach, reduce and feedback loops, durable host receipts, and
+  external-attention recovery.
+- Added provider-neutral image, video, speech, and structured-content jobs,
+  local or remote HTTP providers, streaming speech, allowlisted content-addressed
+  artifacts, and recoverable host validation/commit transactions.
+- Added typed generation APIs and engine event surfaces for Godot and Unity.
+- Added crash-safe provider-dispatch fencing and recoverable artifact
+  materialization checkpoints, including synchronous jobs without provider IDs.
+- Hardened generated-plan foreach consumers, game-trigger coalescing, and
+  monotonic streaming-speech lifecycle validation.

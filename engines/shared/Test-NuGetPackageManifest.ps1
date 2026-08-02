@@ -23,20 +23,26 @@ if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
 
 $expectedPackageIds = @(
     'GameAgent.Core',
+    'GameAgent.Generation',
     'GameAgent.Persistence',
     'GameAgent.Protocol',
     'GameAgent.Providers.Anthropic',
+    'GameAgent.Providers.MediaHttp',
     'GameAgent.Providers.OpenAICompatible',
     'GameAgent.Runtime',
     'GameAgent.Testing',
     'GameAgent.Workflow')
 $expectedInternalDependencies = @{
     'GameAgent.Core' = @('GameAgent.Protocol')
+    'GameAgent.Generation' = @(
+        'GameAgent.Core',
+        'GameAgent.Protocol')
     'GameAgent.Persistence' = @(
         'GameAgent.Core',
         'GameAgent.Protocol')
     'GameAgent.Protocol' = @()
     'GameAgent.Providers.Anthropic' = @('GameAgent.Core')
+    'GameAgent.Providers.MediaHttp' = @('GameAgent.Generation')
     'GameAgent.Providers.OpenAICompatible' = @('GameAgent.Core')
     'GameAgent.Runtime' = @(
         'GameAgent.Core',

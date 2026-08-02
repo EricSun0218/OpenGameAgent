@@ -63,7 +63,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 5. Register game action handlers on `GodotMainThreadGameHost` and return
    authoritative `ActionReceipt` values.
 6. Use `StartRoutedRun`, `StartCompletion`, or `StartChildRun` on the typed
-   host when those execution surfaces are needed.
+   host when those execution surfaces are needed. Optionally configure a
+   `GenerationRuntime` and use the typed or GDScript generation surface.
 7. Correlate the returned request id with runtime signals from C#, or with
    signals and Variant dictionaries from GDScript.
 
@@ -76,6 +77,8 @@ See the [addon README](addons/game_agent_runtime/README.md) and
 [getting started](../../docs/getting-started.md). Routing, per-operation model
 controls, and child supervision are covered by the
 [execution guide](../../docs/how-to-route-and-supervise-agents.md).
+Media jobs are covered by the
+[generation guide](../../docs/media-and-generated-content.md).
 
 ## Verified scope
 

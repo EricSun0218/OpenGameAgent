@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json;
 using GameAgent.Core;
+using GameAgent.Generation;
 using GameAgent.Godot.Samples;
 using GameAgent.Protocol;
 using GodotArray = global::Godot.Collections.Array;
@@ -72,6 +74,7 @@ public partial class HeadlessAddonTest : global::Godot.Node
         await VerifyUnknownBackendEffectRequiresReconciliationAsync();
 
         var fixture = SampleRuntimeFactory.Configure(runtime);
+        await VerifyGenerationSurfaceAsync(runtime);
         await VerifyFacadeErrorAsync(runtime);
         VerifyGodotJsonNumberCompatibility(fixture);
         VerifyFractionalPayloadRoundTrip();
@@ -104,6 +107,56 @@ public partial class HeadlessAddonTest : global::Godot.Node
         Assert(
             fixture.Store.IsDisposed,
             "Owned durable store was not disposed during shutdown.");
+    }
+
+    private static async Task VerifyGenerationSurfaceAsync(
+        GameAgentRuntimeNode runtime)
+    {
+        var provider = new GodotGenerationProvider();
+        runtime.Typed.ConfigureGeneration(
+            new GenerationRuntime(
+                new[] { provider },
+                new InMemoryGenerationJobStore(),
+                new GodotGenerationArtifactStore()));
+        var completed = new TaskCompletionSource<GodotDictionary>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnUpdated(GodotDictionary value) => completed.TrySetResult(value);
+        runtime.GenerationUpdated += OnUpdated;
+        try
+        {
+            var requestId = runtime.start_generation(new GodotDictionary
+            {
+                ["operation_id"] = "godot-generation-1",
+                ["modality"] = GenerationModalities.StructuredContent,
+                ["input"] = new GodotDictionary
+                {
+                    ["event"] = "monthly_tick",
+                    ["month"] = 3.5
+                },
+                ["authority_id"] = "npc-1"
+            });
+            Assert(!string.IsNullOrEmpty(requestId), "Godot generation was not admitted.");
+            var result = await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(
+                string.Equals(
+                    result["request_id"].AsString(),
+                    requestId,
+                    StringComparison.Ordinal),
+                "Godot generation request identity was not preserved.");
+            Assert(
+                string.Equals(
+                    result["status"].AsString(),
+                    GenerationJobStatuses.Succeeded,
+                    StringComparison.Ordinal),
+                "Godot generation did not publish a successful job.");
+            Assert(
+                provider.CapturedInput.GetProperty("month").GetDouble() == 3.5,
+                "Godot generation lost floating-point structured input.");
+        }
+        finally
+        {
+            runtime.GenerationUpdated -= OnUpdated;
+        }
     }
 
     private static void VerifyResultingGameContextReceiptRoundTrip()
@@ -4146,6 +4199,57 @@ public partial class HeadlessAddonTest : global::Godot.Node
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private sealed class GodotGenerationProvider : IGenerationProvider
+    {
+        public string Name => "godot_generation_test";
+
+        public GenerationProviderCapabilities Capabilities { get; } = new()
+        {
+            Modalities = new[] { GenerationModalities.StructuredContent }
+        };
+
+        public JsonElement CapturedInput { get; private set; }
+
+        public ValueTask<GenerationSubmission> SubmitAsync(
+            GenerationRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CapturedInput = request.Input.Clone();
+            return new ValueTask<GenerationSubmission>(new GenerationSubmission
+            {
+                Acceptance = GenerationAcceptance.Accepted,
+                Result = new GenerationProviderResult
+                {
+                    Status = GenerationJobStatuses.Succeeded,
+                    Output = request.Input.Clone()
+                }
+            });
+        }
+
+        public ValueTask<GenerationProviderResult> GetAsync(
+            string providerJobId,
+            string modality,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<GenerationCancelResult> CancelAsync(
+            string providerJobId,
+            string modality,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class GodotGenerationArtifactStore : IGenerationArtifactStore
+    {
+        public ValueTask<GenerationArtifact> ImportAsync(
+            string operationId,
+            int ordinal,
+            GenerationArtifactSource source,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class SnapshotProbeException : Exception

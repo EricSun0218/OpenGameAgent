@@ -20,8 +20,9 @@ remain game configuration.
    `GameAgentRuntime` Autoload.
 
 The assembled addon includes Protocol, Core, Persistence, Runtime, Workflow,
-and the OpenAI-compatible and Anthropic provider adapters. Credentials come
-from an `IProviderCredentialSource`; the addon never stores them.
+Generation, and the OpenAI-compatible, Anthropic, and media HTTP provider
+adapters. Credentials come from credential-source interfaces; the addon never
+stores them.
 
 ## Compose the runtime
 
@@ -48,6 +49,20 @@ BuiltGameAgentRuntime built = new GameAgentRuntimeBuilder(gameHost)
 
 runtimeNode.Typed.ConfigureDurable(built);
 ```
+
+Media and structured-content generation is a separate optional composition:
+
+```csharp
+runtimeNode.Typed.ConfigureGeneration(generationRuntime);
+string generationRequestId = runtimeNode.Typed.StartGeneration(request);
+```
+
+GDScript can call `start_generation`, `refresh_generation`,
+`wait_generation`, and `cancel_generation`. Connect `generation_updated` and
+`generation_failed` to observe bounded main-thread results. A generation
+request accepts `operation_id`, `modality`, optional `model`, arbitrary JSON
+`input`, `options`, string `metadata`, optional `authority_id`, and optional
+`idempotency_key`.
 
 The game owns the `GameAgentRuntimeBuilder` composition root. Do not construct
 one runtime per frame or per NPC; use sessions and run identifiers to isolate
@@ -156,6 +171,8 @@ cannot exceed that 4,096-operation ownership boundary.
 | `run_completed` | `request_id`, `run`, `final_output`, `error_code`, `error_category`, `safe_error_message`, `reconciliation_required` |
 | `routed_run_completed` | Routed outcome plus `request_id` |
 | `completion_completed` | Completion outcome plus `request_id` |
+| `generation_updated` | Generation job plus `request_id`; inspect the job's actual `status` |
+| `generation_failed` | Generation error plus `request_id` and uncertainty evidence |
 | `run_failed`, `batch_failed`, `runtime_error` | Error envelope described below |
 | `batch_completed` | Multi-actor outcome plus `request_id` |
 | `batch_participant_completed` | Participant result plus `request_id` and `operation` |

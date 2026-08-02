@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using GameAgent.Core;
+using GameAgent.Generation;
 using GameAgent.Protocol;
 using GameAgent.Runtime;
 using UnityEngine;
@@ -59,6 +60,8 @@ namespace GameAgent.Unity
         private UnityTerminalObserverQueue _terminalObservers;
         private UnityRuntimeEventPublisher _eventPublisher;
         private UnityAgentRuntimeFacade _facade;
+        private GenerationRuntime _generationRuntime;
+        private CancellationTokenSource _generationLifetime;
         private UnityBoundedCancellationDispatcher.Lease
             _dispatcherShutdownLease;
         private UnityBoundedCancellationDispatcher.Lease
@@ -80,6 +83,10 @@ namespace GameAgent.Unity
         public event Action<SimpleCompletionOutcome> CompletionCompleted;
 
         public event Action<RuntimeEvent> RuntimeEventPublished;
+
+        public event Action<GenerationJob> GenerationUpdated;
+
+        public event Action<Exception> GenerationFaulted;
 
         public event Action<Exception> RunFaulted;
 
@@ -104,6 +111,11 @@ namespace GameAgent.Unity
         public bool IsConfigured
         {
             get { return _facade != null; }
+        }
+
+        public bool IsGenerationConfigured
+        {
+            get { return _generationRuntime != null; }
         }
 
         public bool IsShutdownIncomplete
@@ -272,6 +284,73 @@ namespace GameAgent.Unity
                     ownsBackend: true,
                     flushSessionStore: !ownsBuiltRuntime,
                     maxActiveRuns: Math.Max(1, maxActiveRuns)));
+        }
+
+        public void ConfigureGeneration(GenerationRuntime runtime)
+        {
+            if (runtime == null)
+            {
+                throw new ArgumentNullException(nameof(runtime));
+            }
+
+            lock (_shutdownSync)
+            {
+                ThrowIfShutdownStarted();
+                if (_generationRuntime != null)
+                {
+                    throw new InvalidOperationException(
+                        "The Unity generation runtime is already configured.");
+                }
+
+                EnsureDispatcher();
+                _generationRuntime = runtime;
+                _generationLifetime = new CancellationTokenSource();
+            }
+        }
+
+        public Task<GenerationJob> SubmitGenerationAsync(
+            GenerationRequest request,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            var snapshot = GenerationRequestSnapshotter.Snapshot(request);
+            return RunGenerationAsync(
+                (runtime, token) => runtime.SubmitAsync(snapshot, token),
+                cancellationToken);
+        }
+
+        public Task<GenerationJob> RefreshGenerationAsync(
+            string operationId,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            return RunGenerationAsync(
+                (runtime, token) => runtime.RefreshAsync(operationId, token),
+                cancellationToken);
+        }
+
+        public Task<GenerationJob> WaitForGenerationAsync(
+            string operationId,
+            TimeSpan? timeout = null,
+            TimeSpan? pollInterval = null,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            return RunGenerationAsync(
+                (runtime, token) => runtime.WaitForCompletionAsync(
+                    operationId,
+                    timeout,
+                    pollInterval,
+                    token),
+                cancellationToken);
+        }
+
+        public Task<GenerationJob> CancelGenerationAsync(
+            string operationId,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
+            return RunGenerationAsync(
+                (runtime, token) => runtime.RequestCancellationAsync(
+                    operationId,
+                    token),
+                cancellationToken);
         }
 
         public Task<HeadlessRunOutcome> RunAsync(
@@ -774,6 +853,7 @@ namespace GameAgent.Unity
             Task dispatcherDrain = null;
             Task runtimeEventDispatcherDrain = null;
             Task terminalPublisherDrain = null;
+            Task generationCancellationDrain = null;
             var dispatcherOwnerDrainCompleted = true;
             if (_terminalObservers != null)
             {
@@ -783,6 +863,22 @@ namespace GameAgent.Unity
             if (_facade != null)
             {
                 _facade.RequestShutdown();
+            }
+
+            var generationLifetime = _generationLifetime;
+            if (generationLifetime != null)
+            {
+                generationCancellationDrain = Task.Run(
+                    () =>
+                    {
+                        try
+                        {
+                            generationLifetime.Cancel();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                        }
+                    });
             }
 
             var admissionTasks =
@@ -876,6 +972,11 @@ namespace GameAgent.Unity
                     drains.Add(runtimeEventDispatcherDrain);
                 }
 
+                if (generationCancellationDrain != null)
+                {
+                    drains.Add(generationCancellationDrain);
+                }
+
                 if (drains.Count != 0)
                 {
                     var drain = Task.WhenAll(drains);
@@ -958,6 +1059,28 @@ namespace GameAgent.Unity
                         && _runtimeEventDispatcher.IsShutdown)
                     {
                         _runtimeEventDispatcher.Dispose();
+                    }
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+
+                try
+                {
+                    if (generationLifetime != null
+                        && generationCancellationDrain != null
+                        && generationCancellationDrain.IsCompleted
+                        && terminalPublisherDrain != null
+                        && terminalPublisherDrain.IsCompleted
+                        && ReferenceEquals(
+                            Interlocked.CompareExchange(
+                                ref _generationLifetime,
+                                null,
+                                generationLifetime),
+                            generationLifetime))
+                    {
+                        generationLifetime.Dispose();
                     }
                 }
                 catch (Exception exception)
@@ -1180,6 +1303,86 @@ namespace GameAgent.Unity
                         cancellationSignal.Task)
                     .ConfigureAwait(false);
                 await completed.ConfigureAwait(false);
+            }
+        }
+
+        private Task<GenerationJob> RunGenerationAsync(
+            Func<GenerationRuntime, CancellationToken, ValueTask<GenerationJob>> operation,
+            CancellationToken cancellationToken)
+        {
+            if (operation == null)
+            {
+                throw new ArgumentNullException(nameof(operation));
+            }
+
+            GenerationRuntime runtime;
+            CancellationTokenSource linked;
+            lock (_shutdownSync)
+            {
+                ThrowIfShutdownStarted();
+                runtime = _generationRuntime
+                          ?? throw new InvalidOperationException(
+                              "Configure generation before starting generation work.");
+                linked = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _generationLifetime.Token);
+            }
+
+            UnityTerminalObserverQueue.Reservation terminal = null;
+            try
+            {
+                terminal = ReserveTerminalObserver();
+                var task = operation(runtime, linked.Token).AsTask();
+                _ = PublishGenerationResultAsync(task, terminal, linked);
+                return task;
+            }
+            catch
+            {
+                linked.Dispose();
+                if (terminal != null)
+                {
+                    terminal.Dispose();
+                }
+                throw;
+            }
+        }
+
+        private async Task PublishGenerationResultAsync(
+            Task<GenerationJob> operation,
+            UnityTerminalObserverQueue.Reservation terminal,
+            CancellationTokenSource linked)
+        {
+            try
+            {
+                var job = await operation.ConfigureAwait(false);
+                PostObserver(
+                    terminal,
+                    () =>
+                    {
+                        var handler = GenerationUpdated;
+                        if (handler != null)
+                        {
+                            InvokeObserversIsolated(handler, job);
+                        }
+                    });
+            }
+            catch (Exception exception)
+            {
+                PostObserver(
+                    terminal,
+                    () =>
+                    {
+                        var handler = GenerationFaulted;
+                        if (handler != null)
+                        {
+                            InvokeObserversIsolated(handler, exception);
+                        }
+                    });
+            }
+            finally
+            {
+                linked.Dispose();
+                terminal.Dispose();
             }
         }
 

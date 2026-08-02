@@ -140,9 +140,11 @@ New-Item -ItemType Directory -Path $pluginsPath -Force | Out-Null
 $dependencyAssemblies = @(
     "GameAgent.Protocol.dll",
     "GameAgent.Core.dll",
+    "GameAgent.Generation.dll",
     "GameAgent.Persistence.dll",
     "GameAgent.Providers.Anthropic.dll",
     "GameAgent.Providers.OpenAICompatible.dll",
+    "GameAgent.Providers.MediaHttp.dll",
     "Microsoft.Bcl.AsyncInterfaces.dll",
     "System.Buffers.dll",
     "System.Memory.dll",
@@ -200,9 +202,11 @@ if ($IncludeSymbols) {
     foreach ($symbol in @(
             "GameAgent.Protocol.pdb",
             "GameAgent.Core.pdb",
+            "GameAgent.Generation.pdb",
             "GameAgent.Persistence.pdb",
             "GameAgent.Providers.Anthropic.pdb",
             "GameAgent.Providers.OpenAICompatible.pdb",
+            "GameAgent.Providers.MediaHttp.pdb",
             "GameAgent.Runtime.pdb",
             "GameAgent.Workflow.pdb")) {
         $source = Join-Path $smokeOutput $symbol

@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using GameAgent.Core;
+using GameAgent.Generation;
 using GameAgent.Protocol;
 using Godot;
 using GodotArray = global::Godot.Collections.Array;
@@ -476,6 +477,12 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     public delegate void BatchFailedEventHandler(GodotDictionary error);
 
     [Signal]
+    public delegate void GenerationUpdatedEventHandler(GodotDictionary result);
+
+    [Signal]
+    public delegate void GenerationFailedEventHandler(GodotDictionary error);
+
+    [Signal]
     public delegate void BatchStartedEventHandler(GodotDictionary manifest);
 
     [Signal]
@@ -506,6 +513,7 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
     private IGodotDurableRuntimeBackend? _durableBackend;
     private IGodotRoutedExecutionBackend? _routedBackend;
     private IGodotChildAgentBackend? _childBackend;
+    private GenerationRuntime? _generationRuntime;
     private MultiActorDecisionCoordinator? _multiActorCoordinator;
     private SemaphoreSlim? _actorBatchSlots;
     private GodotCancellationDispatcher.Reservation?
@@ -929,6 +937,90 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         }
     }
 
+    public string start_generation(GodotDictionary request)
+    {
+        try
+        {
+            return StartMappedGeneration(
+                () => GodotGenerationVariantMapper.ToGenerationRequest(request));
+        }
+        catch (FacadeRequestMappingException exception)
+        {
+            PublishFacadeError(
+                "invalid_generation_request",
+                exception.InnerException?.Message ?? exception.Message);
+            return string.Empty;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or InvalidOperationException
+                or JsonException)
+        {
+            PublishFacadeError("invalid_generation_request", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string refresh_generation(string operationId)
+    {
+        try
+        {
+            return StartGenerationOperation(
+                (runtime, token) => runtime.RefreshAsync(operationId, token));
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException)
+        {
+            PublishFacadeError("generation_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string wait_generation(
+        string operationId,
+        double timeoutSeconds = 300)
+    {
+        try
+        {
+            if (double.IsNaN(timeoutSeconds)
+                || double.IsInfinity(timeoutSeconds)
+                || timeoutSeconds <= 0
+                || timeoutSeconds > 86_400)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeoutSeconds));
+            }
+
+            return StartGenerationOperation(
+                (runtime, token) => runtime.WaitForCompletionAsync(
+                    operationId,
+                    TimeSpan.FromSeconds(timeoutSeconds),
+                    cancellationToken: token));
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException)
+        {
+            PublishFacadeError("generation_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
+    public string cancel_generation(string operationId)
+    {
+        try
+        {
+            return StartGenerationOperation(
+                (runtime, token) => runtime.RequestCancellationAsync(
+                    operationId,
+                    token));
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or InvalidOperationException)
+        {
+            PublishFacadeError("generation_unavailable", exception.Message);
+            return string.Empty;
+        }
+    }
+
     public string start_child_agent_run(
         string parentRunId,
         GodotDictionary run,
@@ -1221,6 +1313,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                 Volatile.Read(ref _multiActorCoordinator) is not null,
             ["child_agents_configured"] =
                 Volatile.Read(ref _childBackend) is not null,
+            ["generation_configured"] =
+                Volatile.Read(ref _generationRuntime) is not null,
             ["guarded_participant_resume"] =
                 Volatile.Read(ref _guardedParticipantResumeSupported) != 0,
             ["max_actor_batch_size"] = MaxActorBatchSize,
@@ -1256,6 +1350,27 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             }
 
             _backend = backend;
+        }
+    }
+
+    internal void ConfigureGenerationRuntime(GenerationRuntime runtime)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        lock (_lifecycleGate)
+        {
+            if (_stopTask is not null || Volatile.Read(ref _exitStarted) != 0)
+            {
+                throw new InvalidOperationException(
+                    "The Godot runtime host is stopping.");
+            }
+
+            if (_generationRuntime is not null)
+            {
+                throw new InvalidOperationException(
+                    "The generation runtime is already configured.");
+            }
+
+            _generationRuntime = runtime;
         }
     }
 
@@ -1345,6 +1460,64 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         Volatile.Write(
             ref _guardedParticipantResumeSupported,
             runtime is IGuardedDurableAgentRuntime ? 1 : 0);
+    }
+
+    internal string StartTypedGeneration(GenerationRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var snapshot = GenerationRequestSnapshotter.Snapshot(request);
+        return StartGenerationOperation(
+            (runtime, token) => runtime.SubmitAsync(snapshot, token));
+    }
+
+    private string StartMappedGeneration(Func<GenerationRequest> requestFactory)
+    {
+        ArgumentNullException.ThrowIfNull(requestFactory);
+        GenerationRequest snapshot;
+        try
+        {
+            snapshot = GenerationRequestSnapshotter.Snapshot(
+                requestFactory()
+                ?? throw new InvalidDataException(
+                    "The generation request mapper returned null."));
+        }
+        catch (Exception exception) when (
+            exception is not OutOfMemoryException
+                and not StackOverflowException)
+        {
+            throw new FacadeRequestMappingException(exception);
+        }
+
+        return StartGenerationOperation(
+            (runtime, token) => runtime.SubmitAsync(snapshot, token));
+    }
+
+    private string StartGenerationOperation(
+        Func<GenerationRuntime, CancellationToken, ValueTask<GenerationJob>> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        GenerationRuntime runtime;
+        RunAdmission admission;
+        lock (_lifecycleGate)
+        {
+            EnsureCanStartRun();
+            runtime = Volatile.Read(ref _generationRuntime)
+                      ?? throw new InvalidOperationException(
+                          "Configure generation before starting generation work.");
+            admission = ReserveActiveRunLocked(
+                callerCancellation: default,
+                supportsRequestCancellation: true,
+                operationLabel: "generation request");
+        }
+
+        StartAdmittedOperation(
+            admission,
+            () => ExecuteGenerationAsync(
+                runtime,
+                admission.RequestId,
+                operation,
+                admission.Token));
+        return admission.RequestId;
     }
 
     internal string StartTypedRun(HeadlessRunRequest request)
@@ -2689,6 +2862,52 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
         internal Exception? Failure { get; }
     }
 
+    private async Task ExecuteGenerationAsync(
+        GenerationRuntime runtime,
+        string requestId,
+        Func<GenerationRuntime, CancellationToken, ValueTask<GenerationJob>> operation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var job = await operation(runtime, cancellationToken)
+                .ConfigureAwait(false);
+            await EventPump.PublishCriticalAsync(
+                    new GodotEventMessage
+                    {
+                        Kind = GodotEventKinds.GenerationUpdated,
+                        RequestId = requestId,
+                        Json = GenerationJson.SerializeJob(job),
+                        ReconciliationRequired =
+                            job.Status is GenerationJobStatuses.Unknown
+                                or GenerationJobStatuses.Materializing
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is not OutOfMemoryException
+                and not StackOverflowException)
+        {
+            var generation = exception as GenerationOperationException;
+            await EventPump.PublishCriticalAsync(
+                    new GodotEventMessage
+                    {
+                        Kind = GodotEventKinds.GenerationFailed,
+                        RequestId = requestId,
+                        Code = generation?.ReasonCode ?? "generation_failed",
+                        Category = "generation",
+                        Message = exception is OperationCanceledException
+                            ? "Generation observation was cancelled locally."
+                            : exception.Message,
+                        ReconciliationRequired = generation?.OutcomeUncertain ?? false,
+                        Phase = "generation"
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+    }
+
     private async Task ExecuteRunAsync(
         IGodotRuntimeBackend backend,
         string requestId,
@@ -3863,7 +4082,8 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
                             GodotEventKinds.RunCompleted
                             or GodotEventKinds.RoutedRunCompleted
                             or GodotEventKinds.BatchCompleted
-                            or GodotEventKinds.BatchParticipantCompleted,
+                            or GodotEventKinds.BatchParticipantCompleted
+                            or GodotEventKinds.GenerationUpdated,
                         Phase = "godot_variant_output"
                     }));
         }
@@ -3946,6 +4166,21 @@ public partial class GameAgentRuntimeNode : global::Godot.Node
             case GodotEventKinds.BatchFailed:
                 EmitSignal(
                     SignalName.BatchFailed,
+                    ToErrorDictionary(message));
+                break;
+            case GodotEventKinds.GenerationUpdated:
+                {
+                    var job = GodotProtocolVariantMapper.ParseDictionary(
+                        message.Json!);
+                    job["request_id"] = message.RequestId ?? string.Empty;
+                    job["reconciliation_required"] =
+                        message.ReconciliationRequired;
+                    EmitSignal(SignalName.GenerationUpdated, job);
+                    break;
+                }
+            case GodotEventKinds.GenerationFailed:
+                EmitSignal(
+                    SignalName.GenerationFailed,
                     ToErrorDictionary(message));
                 break;
             case GodotEventKinds.RuntimeStopped:

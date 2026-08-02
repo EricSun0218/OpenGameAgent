@@ -137,9 +137,11 @@ $required = @(
     'Samples~/StructuredToolLoop/GameAgent.Unity.StructuredToolLoopSample.asmdef',
     'Runtime/Plugins/GameAgent.Protocol.dll',
     'Runtime/Plugins/GameAgent.Core.dll',
+    'Runtime/Plugins/GameAgent.Generation.dll',
     'Runtime/Plugins/GameAgent.Persistence.dll',
     'Runtime/Plugins/GameAgent.Providers.Anthropic.dll',
     'Runtime/Plugins/GameAgent.Providers.OpenAICompatible.dll',
+    'Runtime/Plugins/GameAgent.Providers.MediaHttp.dll',
     'Runtime/Plugins/GameAgent.Runtime.dll',
     'Runtime/Plugins/GameAgent.Workflow.dll',
     'Runtime/Plugins/System.Text.Json.dll',
@@ -209,10 +211,12 @@ $plugins = Join-Path $artifact.FullName (
     'Runtime' + [IO.Path]::DirectorySeparatorChar + 'Plugins')
 $expectedPluginNames = @(
     'GameAgent.Core.dll',
+    'GameAgent.Generation.dll',
     'GameAgent.Persistence.dll',
     'GameAgent.Protocol.dll',
     'GameAgent.Providers.Anthropic.dll',
     'GameAgent.Providers.OpenAICompatible.dll',
+    'GameAgent.Providers.MediaHttp.dll',
     'GameAgent.Runtime.dll',
     'GameAgent.Workflow.dll',
     'Microsoft.Bcl.AsyncInterfaces.dll',
@@ -275,10 +279,12 @@ if ([string]::Join("`n", $actualPluginPaths) -cne
 
 $expectedSymbolNames = @(
     'GameAgent.Core.pdb',
+    'GameAgent.Generation.pdb',
     'GameAgent.Persistence.pdb',
     'GameAgent.Protocol.pdb',
     'GameAgent.Providers.Anthropic.pdb',
     'GameAgent.Providers.OpenAICompatible.pdb',
+    'GameAgent.Providers.MediaHttp.pdb',
     'GameAgent.Runtime.pdb',
     'GameAgent.Workflow.pdb')
 $expectedSymbolPaths = @()

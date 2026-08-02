@@ -26,9 +26,9 @@ Then install this folder through Package Manager:
 engines/unity/artifacts/com.gameagent.runtime.unity
 ```
 
-The artifact includes the shared runtime, optional durable Workflow module,
-and OpenAI-compatible and Anthropic streaming adapters. It contains no
-credentials or game-specific tools.
+The artifact includes the shared runtime, optional durable Workflow and
+Generation modules, OpenAI-compatible and Anthropic streaming adapters, and a
+media HTTP adapter. It contains no models, credentials, or game-specific tools.
 
 ## Integrate
 
@@ -50,6 +50,13 @@ Import the **Structured Tool Loop** sample from Package Manager for an offline,
 deterministic example. It sends structured JSON context, receives a streamed
 tool call, executes a journaled Unity-main-thread action, and produces final
 structured output without network access.
+
+For media or structured-content APIs, compose a `GenerationRuntime`, call
+`host.ConfigureGeneration(runtime)`, then use `SubmitGenerationAsync`,
+`RefreshGenerationAsync`, `WaitForGenerationAsync`, or
+`CancelGenerationAsync`. `GenerationUpdated` and `GenerationFaulted` are posted
+through the bounded Unity event path. The shared runtime accepts local or
+remote providers and bundles no generation model.
 
 ## Action authority
 
@@ -114,8 +121,9 @@ through `IProviderCredentialSource` and does not persist them.
 
 The repository provides managed compile, package-layout, artifact-load,
 lifecycle, and conformance gates. `Invoke-UnityEditorGate.ps1` adds real
-Editor/Player validation when a licensed Editor is available. That Editor gate
-has not been executed for this alpha.
+Editor/Player validation when a licensed Editor is available. Licensed Unity
+6000.5.6f1 on Windows passes the EditMode, PlayMode, Mono Player, and IL2CPP
+Player paths; both Players complete the durable tool-loop marker gate.
 
 See [Documentation~/index.md](Documentation~/index.md) for the architecture and
 integration checklist.

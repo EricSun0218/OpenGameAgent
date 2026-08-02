@@ -40,6 +40,9 @@ With a `BuiltUnityAgentRuntimeBackend`, the host exposes:
 - `RunRoutedAsync` for durable Direct/Agent/Workflow selection;
 - `CompleteAsync` for stateless single-provider-turn work;
 - `RunChildAsync` and `CancelChildren` for bounded delegation.
+- optional `SubmitGenerationAsync`, `RefreshGenerationAsync`,
+  `WaitForGenerationAsync`, and `CancelGenerationAsync` after
+  `ConfigureGeneration`.
 
 `ModelInferenceOptions` and `ProviderRoutePreference` remain shared core DTOs,
 so reasoning, sampling, prompt-cache, and ordered route requests behave the
@@ -52,6 +55,12 @@ parent id alone cannot reconstruct ancestry that is no longer resident.
 
 The **Structured Tool Loop** sample is the smallest runnable composition and
 uses a deterministic provider, so it is safe to run without a network key.
+
+Generation is provider-neutral and supports image, video, speech, and
+structured-content APIs without bundling a model. Jobs preserve operation
+identity, polling/cancellation state, and local artifact metadata. Subscribe to
+`GenerationUpdated` and `GenerationFaulted`; inspect the job status rather than
+treating an accepted asynchronous request as already materialized content.
 
 ## Threading
 
@@ -141,5 +150,7 @@ recovery.
 
 The package ships gates for managed compilation, artifact contents, assembly
 loading, host lifecycle, and protocol conformance. A licensed Unity Editor is
-required for the provided Mono/IL2CPP build-and-run gate. This alpha does not
-claim that Editor gate as executed in the repository verification environment.
+required for the provided Mono/IL2CPP build-and-run gate. The release
+verification environment executed the EditMode, PlayMode, Mono Player, and
+IL2CPP Player paths with Unity 6000.5.6f1 on Windows. Both Players completed the
+durable tool-loop marker scenario and exited successfully.

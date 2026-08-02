@@ -118,9 +118,11 @@ try {
         'addons/game_agent_runtime/lib/netstandard2.1/'
     $expectedLibraryEntries = @(
         'GameAgent.Core.dll',
+        'GameAgent.Generation.dll',
         'GameAgent.Persistence.dll',
         'GameAgent.Protocol.dll',
         'GameAgent.Providers.Anthropic.dll',
+        'GameAgent.Providers.MediaHttp.dll',
         'GameAgent.Providers.OpenAICompatible.dll',
         'GameAgent.Runtime.dll',
         'GameAgent.Workflow.dll'

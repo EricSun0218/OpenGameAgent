@@ -12,12 +12,20 @@
       <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Persistence.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="GameAgent.Generation">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Generation.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <Reference Include="GameAgent.Providers.Anthropic">
       <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.Anthropic.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="GameAgent.Providers.OpenAICompatible">
       <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.OpenAICompatible.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Providers.MediaHttp">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.MediaHttp.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="GameAgent.Runtime">

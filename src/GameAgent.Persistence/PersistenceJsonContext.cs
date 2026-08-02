@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using GameAgent.Core;
 using GameAgent.Protocol;
 
 namespace GameAgent.Persistence;
@@ -16,6 +17,12 @@ namespace GameAgent.Persistence;
 [JsonSerializable(typeof(PersistedMemoryExpectation))]
 [JsonSerializable(typeof(PersistedMemoryRecord))]
 [JsonSerializable(typeof(GroupInteractionFrameRecord))]
+[JsonSerializable(typeof(ModelContextBaselineFileState))]
+[JsonSerializable(typeof(ExternalAttentionFileState))]
+[JsonSerializable(typeof(GameTriggerFileState))]
+[JsonSerializable(typeof(MemoryDistillationFileState))]
+[JsonSerializable(typeof(HierarchicalBudgetState))]
+[JsonSerializable(typeof(PersistentAgentGraphState))]
 internal sealed partial class PersistenceJsonContext : JsonSerializerContext
 {
 }

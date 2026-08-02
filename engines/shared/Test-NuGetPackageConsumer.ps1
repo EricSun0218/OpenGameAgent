@@ -79,6 +79,22 @@ Invoke-Dotnet -Arguments @(
     'add',
     $projectPath,
     'package',
+    'GameAgent.Generation',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Providers.MediaHttp',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
     'GameAgent.Providers.Anthropic',
     '--version',
     $Version,
@@ -94,9 +110,11 @@ Invoke-Dotnet -Arguments @(
 
 $consumerSource = @'
 using GameAgent.Core;
+using GameAgent.Generation;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
 using GameAgent.Providers.Anthropic;
+using GameAgent.Providers.MediaHttp;
 using GameAgent.Providers.OpenAICompatible;
 using GameAgent.Runtime;
 using GameAgent.Testing;
@@ -105,9 +123,11 @@ using GameAgent.Workflow;
 Type[] shippedTypes =
 [
     typeof(AgentRun),
+    typeof(GenerationRuntime),
     typeof(HeadlessAgentRuntimeLimits),
     typeof(FileJournalOptions),
     typeof(AnthropicProviderOptions),
+    typeof(MediaHttpProviderOptions),
     typeof(OpenAiCompatibleProviderOptions),
     typeof(ProviderRequestPreparationChanges),
     typeof(ConsumerRequestAdapter),
@@ -194,9 +214,11 @@ $restoredPackages = @(
         -Filter 'gameagent.*')
 $expectedPackageIds = @(
     'gameagent.core',
+    'gameagent.generation',
     'gameagent.persistence',
     'gameagent.protocol',
     'gameagent.providers.anthropic',
+    'gameagent.providers.mediahttp',
     'gameagent.providers.openaicompatible',
     'gameagent.runtime',
     'gameagent.testing',

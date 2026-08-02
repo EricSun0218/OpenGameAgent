@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using GameAgent.Generation;
 using NUnit.Framework;
 using UnityEngine;
 
@@ -53,6 +54,36 @@ namespace GameAgent.Unity.Tests
                     .GetResult();
                 UnityEngine.Object.DestroyImmediate(root);
                 Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void GenerationTypedApiPreservesFloatingPointStructuredInput()
+        {
+            var root = new GameObject("GameAgentRuntimeGenerationEditModeTest");
+            var host = root.AddComponent<UnityAgentRuntimeHost>();
+            try
+            {
+                host.ConfigureGeneration(UnityGenerationGateScenario.CreateRuntime());
+                var pending = host.SubmitGenerationAsync(
+                    UnityGenerationGateScenario.CreateRequest(
+                        "unity-generation-edit"));
+                PumpUntilCompleted(host.Dispatcher, pending);
+                var result = pending.GetAwaiter().GetResult();
+
+                Assert.That(
+                    result.Status,
+                    Is.EqualTo(GenerationJobStatuses.Succeeded));
+                Assert.That(
+                    result.Output.Value.GetProperty("temperature").GetDouble(),
+                    Is.EqualTo(3.5d));
+            }
+            finally
+            {
+                host.ShutdownAsync(CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                UnityEngine.Object.DestroyImmediate(root);
             }
         }
 
