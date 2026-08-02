@@ -881,6 +881,9 @@ public sealed class ExecutionRoutingTests
             DurableRunRequest request,
             CancellationToken cancellationToken = default)
         {
+            var cancellation = Task.Delay(
+                Timeout.InfiniteTimeSpan,
+                cancellationToken);
             using var registration = cancellationToken.Register(
                 () =>
                 {
@@ -888,7 +891,7 @@ public sealed class ExecutionRoutingTests
                     _release.Wait();
                 });
             Started.TrySetResult();
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            await cancellation;
             throw new InvalidOperationException("The run did not cancel.");
         }
 

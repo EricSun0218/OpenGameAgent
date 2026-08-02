@@ -34,7 +34,7 @@ public sealed class FileGeneratedContentTransactionStore
 {
     private readonly string _root;
     private readonly FileGeneratedContentTransactionStoreOptions _options;
-    private readonly FileStream _writerLease;
+    private readonly GenerationStoreWriterLease _writerLease;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private int _disposed;
 
@@ -55,14 +55,8 @@ public sealed class FileGeneratedContentTransactionStore
         Directory.CreateDirectory(_root);
         try
         {
-            _writerLease = new FileStream(
-                Path.Combine(_root, ".writer.lock"),
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.Read,
-                1,
-                FileOptions.WriteThrough);
-            _writerLease.Lock(0, 1);
+            _writerLease = GenerationStoreWriterLease.Acquire(
+                Path.Combine(_root, ".writer.lock"));
         }
         catch (IOException exception)
         {
@@ -236,14 +230,6 @@ public sealed class FileGeneratedContentTransactionStore
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
-        }
-
-        try
-        {
-            _writerLease.Unlock(0, 1);
-        }
-        catch (IOException)
-        {
         }
 
         _writerLease.Dispose();

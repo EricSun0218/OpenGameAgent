@@ -101,6 +101,25 @@ public sealed class GenerationPersistenceTests
     }
 
     [Fact]
+    public void Content_store_enforces_single_writer_lease()
+    {
+        var root = TempDirectory();
+        try
+        {
+            using var first = new FileGeneratedContentTransactionStore(root);
+            var exception = Assert.Throws<GenerationOperationException>(
+                () => new FileGeneratedContentTransactionStore(root));
+            Assert.Equal(
+                "content_transaction_store_writer_active",
+                exception.ReasonCode);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Durable_stores_reject_revision_gaps()
     {
         var jobRoot = TempDirectory();

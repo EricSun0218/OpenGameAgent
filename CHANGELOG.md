@@ -155,5 +155,8 @@
 - Added typed generation APIs and engine event surfaces for Godot and Unity.
 - Added crash-safe provider-dispatch fencing and recoverable artifact
   materialization checkpoints, including synchronous jobs without provider IDs.
+- Added cross-platform single-writer leases for durable generation and content
+  transaction stores, combining process-local ownership with operating-system
+  byte locks.
 - Hardened generated-plan foreach consumers, game-trigger coalescing, and
   monotonic streaming-speech lifecycle validation.
