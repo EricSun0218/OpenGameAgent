@@ -915,6 +915,8 @@ public sealed class ProviderAttemptRunner
     private readonly ProviderStreamLimits _streamLimits;
     private readonly ProviderRouteHealthRegistry _routeHealth;
     private readonly BoundedCancellationDispatcher _cancellationDispatcher;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly object _routePlanOwner = new();
     private readonly ConcurrentDictionary<string, int> _quarantinedProviders =
         new(StringComparer.Ordinal);
@@ -1019,6 +1021,8 @@ public sealed class ProviderAttemptRunner
             clock ?? new SystemRuntimeClock());
         _cancellationDispatcher =
             BoundedCancellationDispatcher.Shared;
+        _callbackExecutionDispatcher =
+            BoundedCallbackExecutionDispatcher.ProviderShared;
     }
 
     internal ProviderAttemptRunner(
@@ -1035,7 +1039,8 @@ public sealed class ProviderAttemptRunner
             ids,
             streamLimits,
             eventWaitDelay,
-            BoundedCancellationDispatcher.Shared)
+            BoundedCancellationDispatcher.Shared,
+            BoundedCallbackExecutionDispatcher.ProviderShared)
     {
     }
 
@@ -1047,13 +1052,38 @@ public sealed class ProviderAttemptRunner
         ProviderStreamLimits? streamLimits,
         IRuntimeDelay eventWaitDelay,
         BoundedCancellationDispatcher cancellationDispatcher)
+        : this(
+            providers,
+            policy,
+            delay,
+            ids,
+            streamLimits,
+            eventWaitDelay,
+            cancellationDispatcher,
+            BoundedCallbackExecutionDispatcher.ProviderShared)
+    {
+    }
+
+    internal ProviderAttemptRunner(
+        IReadOnlyList<IStreamingModelProvider> providers,
+        ProviderRetryPolicy policy,
+        IRuntimeDelay delay,
+        IRuntimeIdGenerator ids,
+        ProviderStreamLimits? streamLimits,
+        IRuntimeDelay eventWaitDelay,
+        BoundedCancellationDispatcher cancellationDispatcher,
+        BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
         : this(providers, policy, delay, ids, streamLimits)
     {
         _eventWaitDelay = eventWaitDelay
             ?? throw new ArgumentNullException(nameof(eventWaitDelay));
         _cancellationDispatcher = cancellationDispatcher
-                                  ?? throw new ArgumentNullException(
-                                      nameof(cancellationDispatcher));
+                                   ?? throw new ArgumentNullException(
+                                       nameof(cancellationDispatcher));
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? throw new ArgumentNullException(
+                                           nameof(
+                                               callbackExecutionDispatcher));
     }
 
     public string PrimaryProviderId => _providerIds[0];
@@ -1559,6 +1589,7 @@ public sealed class ProviderAttemptRunner
                         preparedAdapter = new PreparedStreamProviderAdapter(
                             provider,
                             preparedStream,
+                            _callbackExecutionDispatcher,
                             candidate =>
                                 DisposePreparedBeforeDispatchAsync(
                                     candidate,
@@ -1888,7 +1919,7 @@ public sealed class ProviderAttemptRunner
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            startOperation = Task.Run(
+            startOperation = StartProviderCallback(
                 () =>
                 {
                     var stream = provider.StreamAsync(
@@ -1896,11 +1927,14 @@ public sealed class ProviderAttemptRunner
                                      attemptCancellation.Token)
                                  ?? throw new InvalidOperationException(
                                      "The provider returned a null stream.");
-                    return stream.GetAsyncEnumerator(
-                               attemptCancellation.Token)
-                           ?? throw new InvalidOperationException(
-                               "The provider returned a null stream enumerator.");
-                });
+                    var candidate = stream.GetAsyncEnumerator(
+                                        attemptCancellation.Token)
+                                    ?? throw new InvalidOperationException(
+                                        "The provider returned a null stream enumerator.");
+                    return new ValueTask<
+                        IAsyncEnumerator<ModelStreamEvent>>(candidate);
+                },
+                usageKnownToBeZero: true);
             var startTimeout = _policy.StreamStartTimeout
                                < _policy.TotalTimeout
                 ? _policy.StreamStartTimeout
@@ -2108,7 +2142,9 @@ public sealed class ProviderAttemptRunner
                     try
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        moveNext = enumerator!.MoveNextAsync().AsTask();
+                        moveNext = StartProviderCallback(
+                            () => enumerator!.MoveNextAsync(),
+                            usageKnownToBeZero: false);
                     }
                     catch
                     {
@@ -2273,7 +2309,66 @@ public sealed class ProviderAttemptRunner
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
-                var item = enumerator!.Current;
+                var currentRemaining = _policy.TotalTimeout - elapsed.Elapsed;
+                if (currentRemaining <= TimeSpan.Zero)
+                {
+                    throw new ProviderException(
+                        "provider_total_timeout",
+                        "network",
+                        "The provider exceeded the total turn timeout.",
+                        true);
+                }
+
+                var currentWait = currentRemaining < _policy.IdleTimeout
+                    ? currentRemaining
+                    : _policy.IdleTimeout;
+                var currentStartedAt = elapsed.Elapsed;
+                var currentOperation = StartProviderCallback(
+                    () => new ValueTask<ModelStreamEvent?>(
+                        enumerator!.Current),
+                    usageKnownToBeZero: false);
+                using var currentSignals = new OperationDeadlineSignals(
+                    currentWait,
+                    cancellationToken);
+                var currentCompleted = await Task.WhenAny(
+                        currentOperation,
+                        currentSignals.Timeout,
+                        currentSignals.Cancellation)
+                    .ConfigureAwait(false);
+                var currentCompletedAt = elapsed.Elapsed;
+                var currentWithinDeadline =
+                    ReferenceEquals(currentCompleted, currentOperation)
+                    && currentCompletedAt < _policy.TotalTimeout
+                    && currentCompletedAt - currentStartedAt < currentWait;
+                if (!currentWithinDeadline)
+                {
+                    fence.Invalidate();
+                    var cancellationCleanup = CancelDetachedAsync(
+                        attemptCancellation,
+                        attemptCancellationReservation!);
+                    var cleanup = CompleteAndDisposeDetachedAsync(
+                        currentOperation,
+                        enumerator,
+                        attemptCancellation,
+                        cancellationCleanup,
+                        attemptCancellationReservation!);
+                    attemptCancellationReservation = null;
+                    cleanupHandled = true;
+                    var observedCleanup = RegisterDetachedCleanup(
+                        providerId,
+                        cleanup);
+                    NotifyDetachedCleanup(onDetachedCleanup, observedCleanup);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new ProviderException(
+                        elapsed.Elapsed >= _policy.TotalTimeout
+                            ? "provider_total_timeout"
+                            : "provider_event_materialization_timeout",
+                        "provider",
+                        "The provider did not materialize its current event in time.",
+                        false);
+                }
+
+                var item = await currentOperation.ConfigureAwait(false);
                 if (item is null)
                 {
                     throw new ProviderException(
@@ -2945,20 +3040,15 @@ public sealed class ProviderAttemptRunner
         Task<ProviderPreparedRequest> operation;
         try
         {
-            operation = Task.Run(
-                async () =>
-                {
-                    var candidate = await adapter
-                        .PrepareRequestAsync(
-                            context,
-                            preparationCancellation.Token)
-                        .ConfigureAwait(false);
-                    preparationCancellation.Token
-                        .ThrowIfCancellationRequested();
-                    return validator(
-                        candidate,
-                        preparationCancellation.Token);
-                });
+            var providerOperation = StartProviderCallback(
+                () => adapter.PrepareRequestAsync(
+                    context,
+                    preparationCancellation.Token),
+                usageKnownToBeZero: true);
+            operation = ValidatePreparedRequestCallbackAsync(
+                providerOperation,
+                preparationCancellation.Token,
+                validator);
         }
         catch
         {
@@ -3007,6 +3097,20 @@ public sealed class ProviderAttemptRunner
             usageKnownToBeZero: true);
     }
 
+    private static async Task<ProviderPreparedRequest>
+        ValidatePreparedRequestCallbackAsync(
+            Task<ProviderPreparedRequest> providerOperation,
+            CancellationToken cancellationToken,
+            Func<
+                ProviderPreparedRequest,
+                CancellationToken,
+                ProviderPreparedRequest> validator)
+    {
+        var candidate = await providerOperation.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return validator(candidate, cancellationToken);
+    }
+
     private async ValueTask<PreparedProviderStream>
         PrepareStreamWithDeadlineAsync(
             IPreparedStreamingModelProvider provider,
@@ -3042,53 +3146,16 @@ public sealed class ProviderAttemptRunner
         Task<PreparedProviderStream> operation;
         try
         {
-            operation = Task.Run(
-                async () =>
-                {
-                    PreparedProviderStream? candidate = null;
-                    try
-                    {
-                        candidate = await provider
-                            .PrepareStreamAsync(
-                                context,
-                                preparationCancellation.Token)
-                            .ConfigureAwait(false);
-                        preparationCancellation.Token
-                            .ThrowIfCancellationRequested();
-                        if (candidate is null)
-                        {
-                            throw new ProviderException(
-                                "provider_prepared_stream_invalid",
-                                "provider",
-                                "The provider returned an invalid prepared stream.",
-                                false,
-                                usageKnownToBeZero: true);
-                        }
-
-                        candidate.Evidence.ValidateForRoute(
-                            routeIdentity,
-                            requireAvailable: true);
-                        var result = candidate;
-                        candidate = null;
-                        return result;
-                    }
-                    finally
-                    {
-                        if (candidate is not null)
-                        {
-                            try
-                            {
-                                await candidate.DisposeAsync()
-                                    .ConfigureAwait(false);
-                            }
-                            catch (Exception exception)
-                            {
-                                MarkCleanupFailed(providerId);
-                                throw PreparedStreamCleanupFailure(exception);
-                            }
-                        }
-                    }
-                });
+            var providerOperation = StartProviderCallback(
+                () => provider.PrepareStreamAsync(
+                    context,
+                    preparationCancellation.Token),
+                usageKnownToBeZero: true);
+            operation = ValidatePreparedStreamCallbackAsync(
+                providerOperation,
+                routeIdentity,
+                providerId,
+                preparationCancellation.Token);
         }
         catch
         {
@@ -3121,7 +3188,8 @@ public sealed class ProviderAttemptRunner
                     {
                         try
                         {
-                            await prepared.DisposeAsync()
+                            await RunProviderCleanupCallbackAsync(
+                                    () => prepared.DisposeAsync())
                                 .ConfigureAwait(false);
                         }
                         catch (Exception exception)
@@ -3159,6 +3227,54 @@ public sealed class ProviderAttemptRunner
             usageKnownToBeZero: true);
     }
 
+    private async Task<PreparedProviderStream>
+        ValidatePreparedStreamCallbackAsync(
+            Task<PreparedProviderStream> providerOperation,
+            ProviderRouteIdentity routeIdentity,
+            string providerId,
+            CancellationToken cancellationToken)
+    {
+        PreparedProviderStream? candidate = null;
+        try
+        {
+            candidate = await providerOperation.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (candidate is null)
+            {
+                throw new ProviderException(
+                    "provider_prepared_stream_invalid",
+                    "provider",
+                    "The provider returned an invalid prepared stream.",
+                    false,
+                    usageKnownToBeZero: true);
+            }
+
+            candidate.Evidence.ValidateForRoute(
+                routeIdentity,
+                requireAvailable: true);
+            var result = candidate;
+            candidate = null;
+            return result;
+        }
+        finally
+        {
+            if (candidate is not null)
+            {
+                try
+                {
+                    await RunProviderCleanupCallbackAsync(
+                            () => candidate.DisposeAsync())
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    MarkCleanupFailed(providerId);
+                    throw PreparedStreamCleanupFailure(exception);
+                }
+            }
+        }
+    }
+
     private async ValueTask DisposePreparedBeforeDispatchAsync(
         PreparedProviderStream prepared,
         string providerId,
@@ -3167,7 +3283,8 @@ public sealed class ProviderAttemptRunner
         Task cleanup;
         try
         {
-            cleanup = prepared.DisposeAsync().AsTask();
+            cleanup = RunProviderCleanupCallbackAsync(
+                () => prepared.DisposeAsync());
         }
         catch (Exception exception)
         {
@@ -3288,7 +3405,7 @@ public sealed class ProviderAttemptRunner
         }
     }
 
-    private static async Task CompleteDetachedPreparedStreamAsync(
+    private async Task CompleteDetachedPreparedStreamAsync(
         Task<PreparedProviderStream> operation,
         CancellationTokenSource cancellation,
         Task<bool> cancellationDispatch,
@@ -3328,7 +3445,9 @@ public sealed class ProviderAttemptRunner
             {
                 try
                 {
-                    await prepared.DisposeAsync().ConfigureAwait(false);
+                    await RunProviderCleanupCallbackAsync(
+                            () => prepared.DisposeAsync())
+                        .ConfigureAwait(false);
                 }
                 catch (Exception exception)
                 {
@@ -3355,7 +3474,7 @@ public sealed class ProviderAttemptRunner
         }
     }
 
-    private static async Task CompleteDetachedStreamStartAsync(
+    private async Task CompleteDetachedStreamStartAsync(
         Task<IAsyncEnumerator<ModelStreamEvent>> operation,
         CancellationTokenSource cancellation,
         Task<bool> cancellationDispatch,
@@ -3387,7 +3506,9 @@ public sealed class ProviderAttemptRunner
             {
                 try
                 {
-                    await enumerator.DisposeAsync().ConfigureAwait(false);
+                    await RunProviderCleanupCallbackAsync(
+                            () => enumerator.DisposeAsync())
+                        .ConfigureAwait(false);
                 }
                 catch (Exception exception)
                 {
@@ -4358,7 +4479,7 @@ public sealed class ProviderAttemptRunner
         }
     }
 
-    private static async Task DisposeAttemptAsync(
+    private async Task DisposeAttemptAsync(
         IAsyncEnumerator<ModelStreamEvent> enumerator,
         CancellationTokenSource attemptCancellation,
         Task cancellationCleanup,
@@ -4368,7 +4489,9 @@ public sealed class ProviderAttemptRunner
         try
         {
             await cancellationCleanup.ConfigureAwait(false);
-            await enumerator.DisposeAsync().ConfigureAwait(false);
+            await RunProviderCleanupCallbackAsync(
+                    () => enumerator.DisposeAsync())
+                .ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -4392,8 +4515,8 @@ public sealed class ProviderAttemptRunner
         }
     }
 
-    private static async Task CompleteAndDisposeDetachedAsync(
-        Task<bool> moveNext,
+    private async Task CompleteAndDisposeDetachedAsync(
+        Task providerOperation,
         IAsyncEnumerator<ModelStreamEvent> enumerator,
         CancellationTokenSource attemptCancellation,
         Task cancellationCleanup,
@@ -4402,7 +4525,7 @@ public sealed class ProviderAttemptRunner
     {
         try
         {
-            await moveNext.ConfigureAwait(false);
+            await providerOperation.ConfigureAwait(false);
         }
         catch
         {
@@ -4505,6 +4628,8 @@ public sealed class ProviderAttemptRunner
     {
         private readonly IStreamingModelProvider _provider;
         private readonly PreparedProviderStream _prepared;
+        private readonly BoundedCallbackExecutionDispatcher
+            _callbackExecutionDispatcher;
         private readonly Func<PreparedProviderStream, ValueTask>
             _disposeIfUnclaimed;
         private int _ownership;
@@ -4512,10 +4637,15 @@ public sealed class ProviderAttemptRunner
         public PreparedStreamProviderAdapter(
             IStreamingModelProvider provider,
             PreparedProviderStream prepared,
+            BoundedCallbackExecutionDispatcher callbackExecutionDispatcher,
             Func<PreparedProviderStream, ValueTask> disposeIfUnclaimed)
         {
             _provider = provider;
             _prepared = prepared;
+            _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                           ?? throw new ArgumentNullException(
+                                               nameof(
+                                                   callbackExecutionDispatcher));
             _disposeIfUnclaimed = disposeIfUnclaimed
                                   ?? throw new ArgumentNullException(
                                       nameof(disposeIfUnclaimed));
@@ -4545,7 +4675,8 @@ public sealed class ProviderAttemptRunner
 
             return new OwnedPreparedEnumerable(
                 _prepared,
-                cancellationToken);
+                cancellationToken,
+                _callbackExecutionDispatcher);
         }
 
         public async ValueTask DisposeIfUnclaimedAsync()
@@ -4567,14 +4698,18 @@ public sealed class ProviderAttemptRunner
         {
             private readonly PreparedProviderStream _prepared;
             private readonly CancellationToken _streamCancellation;
+            private readonly BoundedCallbackExecutionDispatcher
+                _callbackExecutionDispatcher;
             private int _claimed;
 
             public OwnedPreparedEnumerable(
                 PreparedProviderStream prepared,
-                CancellationToken streamCancellation)
+                CancellationToken streamCancellation,
+                BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
             {
                 _prepared = prepared;
                 _streamCancellation = streamCancellation;
+                _callbackExecutionDispatcher = callbackExecutionDispatcher;
             }
 
             public IAsyncEnumerator<ModelStreamEvent> GetAsyncEnumerator(
@@ -4594,7 +4729,8 @@ public sealed class ProviderAttemptRunner
                     _prepared,
                     cancellationToken.CanBeCanceled
                         ? cancellationToken
-                        : _streamCancellation);
+                        : _streamCancellation,
+                    _callbackExecutionDispatcher);
             }
         }
 
@@ -4603,15 +4739,19 @@ public sealed class ProviderAttemptRunner
         {
             private readonly PreparedProviderStream _prepared;
             private readonly CancellationToken _cancellationToken;
+            private readonly BoundedCallbackExecutionDispatcher
+                _callbackExecutionDispatcher;
             private IAsyncEnumerator<ModelStreamEvent>? _inner;
             private int _disposed;
 
             public OwnedPreparedEnumerator(
                 PreparedProviderStream prepared,
-                CancellationToken cancellationToken)
+                CancellationToken cancellationToken,
+                BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
             {
                 _prepared = prepared;
                 _cancellationToken = cancellationToken;
+                _callbackExecutionDispatcher = callbackExecutionDispatcher;
             }
 
             public ModelStreamEvent Current =>
@@ -4636,7 +4776,10 @@ public sealed class ProviderAttemptRunner
                 {
                     try
                     {
-                        await _inner.DisposeAsync().ConfigureAwait(false);
+                        await RunProviderCleanupCallbackAsync(
+                                _callbackExecutionDispatcher,
+                                () => _inner.DisposeAsync())
+                            .ConfigureAwait(false);
                     }
                     catch (Exception exception)
                     {
@@ -4646,7 +4789,10 @@ public sealed class ProviderAttemptRunner
 
                 try
                 {
-                    await _prepared.DisposeAsync().ConfigureAwait(false);
+                    await RunProviderCleanupCallbackAsync(
+                            _callbackExecutionDispatcher,
+                            () => _prepared.DisposeAsync())
+                        .ConfigureAwait(false);
                 }
                 catch (Exception exception)
                 {
@@ -4675,25 +4821,37 @@ public sealed class ProviderAttemptRunner
                 {
                     if (_inner is null)
                     {
-                        var stream =
-                            _prepared.StreamAsync(_cancellationToken)
-                            ?? throw new ProviderException(
-                                "provider_prepared_stream_invalid",
-                                "provider",
-                                "The provider returned an invalid prepared stream.",
-                                false,
-                                usageKnownToBeZero: true);
-                        _inner = stream.GetAsyncEnumerator(
-                            _cancellationToken)
-                            ?? throw new ProviderException(
-                                "provider_prepared_stream_invalid",
-                                "provider",
-                                "The provider returned an invalid prepared stream.",
-                                false,
-                                usageKnownToBeZero: true);
+                        _inner = await StartProviderCallback(
+                                _callbackExecutionDispatcher,
+                                () =>
+                                {
+                                    var stream = _prepared.StreamAsync(
+                                                     _cancellationToken)
+                                                 ?? throw new ProviderException(
+                                                     "provider_prepared_stream_invalid",
+                                                     "provider",
+                                                     "The provider returned an invalid prepared stream.",
+                                                     false,
+                                                     usageKnownToBeZero: true);
+                                    var inner = stream.GetAsyncEnumerator(
+                                                    _cancellationToken)
+                                                ?? throw new ProviderException(
+                                                    "provider_prepared_stream_invalid",
+                                                    "provider",
+                                                    "The provider returned an invalid prepared stream.",
+                                                    false,
+                                                    usageKnownToBeZero: true);
+                                    return new ValueTask<IAsyncEnumerator<
+                                        ModelStreamEvent>>(inner);
+                                },
+                                usageKnownToBeZero: true)
+                            .ConfigureAwait(false);
                     }
 
-                    return await _inner.MoveNextAsync()
+                    return await StartProviderCallback(
+                            _callbackExecutionDispatcher,
+                            () => _inner.MoveNextAsync(),
+                            usageKnownToBeZero: false)
                         .ConfigureAwait(false);
                 }
                 catch
@@ -4703,6 +4861,80 @@ public sealed class ProviderAttemptRunner
                 }
             }
         }
+    }
+
+    private Task<TResult> StartProviderCallback<TResult>(
+        Func<ValueTask<TResult>> callback,
+        bool usageKnownToBeZero)
+    {
+        return StartProviderCallback(
+            _callbackExecutionDispatcher,
+            callback,
+            usageKnownToBeZero);
+    }
+
+    private Task StartProviderCallback(
+        Func<ValueTask> callback,
+        bool usageKnownToBeZero)
+    {
+        return StartProviderCallback(
+            _callbackExecutionDispatcher,
+            callback,
+            usageKnownToBeZero);
+    }
+
+    private Task RunProviderCleanupCallbackAsync(
+        Func<ValueTask> callback)
+    {
+        return RunProviderCleanupCallbackAsync(
+            _callbackExecutionDispatcher,
+            callback);
+    }
+
+    private static Task<TResult> StartProviderCallback<TResult>(
+        BoundedCallbackExecutionDispatcher dispatcher,
+        Func<ValueTask<TResult>> callback,
+        bool usageKnownToBeZero)
+    {
+        if (!dispatcher.TryExecute(callback, out var operation))
+        {
+            throw ProviderExecutionCapacityExceeded(usageKnownToBeZero);
+        }
+
+        return operation;
+    }
+
+    private static Task StartProviderCallback(
+        BoundedCallbackExecutionDispatcher dispatcher,
+        Func<ValueTask> callback,
+        bool usageKnownToBeZero)
+    {
+        if (!dispatcher.TryExecute(callback, out var operation))
+        {
+            throw ProviderExecutionCapacityExceeded(usageKnownToBeZero);
+        }
+
+        return operation;
+    }
+
+    private static async Task RunProviderCleanupCallbackAsync(
+        BoundedCallbackExecutionDispatcher dispatcher,
+        Func<ValueTask> callback)
+    {
+        _ = callback ?? throw new ArgumentNullException(nameof(callback));
+        await dispatcher.ExecuteWhenAvailableAsync(callback)
+            .ConfigureAwait(false);
+    }
+
+    private static ProviderException ProviderExecutionCapacityExceeded(
+        bool usageKnownToBeZero)
+    {
+        return new ProviderException(
+            "provider_execution_capacity_exhausted",
+            "capacity",
+            "Provider callback execution capacity is exhausted.",
+            false,
+            usageKnownToBeZero: usageKnownToBeZero);
     }
 
     private static ProviderException LimitExceeded(string code, string message)

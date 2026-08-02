@@ -1161,10 +1161,18 @@ public sealed partial class ConversationContextManager :
         try
         {
             var compactionToken = cancellation.Token;
-            operation = Task.Run(
-                async () => await _compactor
-                    .CompactAsync(request, compactionToken)
-                    .ConfigureAwait(false));
+            if (!BoundedCallbackExecutionDispatcher
+                    .ConversationContextShared.TryExecute(
+                        () => _compactor.CompactAsync(
+                            request,
+                            compactionToken),
+                        out var acceptedOperation))
+            {
+                throw new TimeoutException(
+                    "Conversation compaction execution capacity was exhausted.");
+            }
+
+            operation = acceptedOperation;
         }
         catch
         {

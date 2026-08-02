@@ -371,7 +371,7 @@ public sealed class WorkflowAgentStepExecutorTests
                 .AsTask();
 
             var outcomes = await Task.WhenAll(first, second)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TimeSpan.FromSeconds(5));
 
             Assert.All(
                 outcomes,

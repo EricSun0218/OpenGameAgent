@@ -5,6 +5,141 @@ namespace GameAgent.Tests;
 public sealed class BoundedConversationContextEngineTests
 {
     [Fact]
+    public async Task CallbackCapacityFailureReleasesWrapperAdmission()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var contextDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var engine = new DelegateContextEngine(
+            (messages, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return new ValueTask<ConversationContextView>(View(messages));
+            });
+        var wrapper = new BoundedConversationContextEngine(
+            engine,
+            SummaryOptions(),
+            contextDispatcher);
+        var messages = Messages();
+        var entered = NewSignal();
+        using var release = new ManualResetEventSlim(false);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await Assert.ThrowsAsync<TimeoutException>(
+                () => wrapper.PrepareAsync(
+                        "capacity-run",
+                        "capacity-turn",
+                        messages,
+                        messages.Select(message => message.MessageId).ToArray())
+                    .AsTask());
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await wrapper.PrepareAsync(
+            "capacity-run-recovered",
+            "capacity-turn-recovered",
+            messages,
+            messages.Select(message => message.MessageId).ToArray());
+        Assert.Equal(messages.Length, recovered.Messages.Count);
+        Assert.True(await wrapper.StopAsync());
+        Assert.True(wrapper.CleanupCompleted);
+    }
+
+    [Fact]
+    public async Task CheckpointAndStopCapacityFailuresAreRetryable()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var contextDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var engine = new DelegateContextEngine(
+            (messages, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return new ValueTask<ConversationContextView>(View(messages));
+            });
+        var wrapper = new BoundedConversationContextEngine(
+            engine,
+            SummaryOptions(),
+            contextDispatcher);
+
+        using var checkpointRelease = new ManualResetEventSlim(false);
+        var checkpointEntered = NewSignal();
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    checkpointEntered.TrySetResult(true);
+                    checkpointRelease.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var checkpointBlocker));
+        try
+        {
+            await checkpointEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Throws<TimeoutException>(
+                () => wrapper.RegisterCheckpoint(Json("{\"step\":1}")));
+            Assert.Equal(0, engine.CheckpointCount);
+        }
+        finally
+        {
+            checkpointRelease.Set();
+            await checkpointBlocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        wrapper.RegisterCheckpoint(Json("{\"step\":2}"));
+        Assert.Equal(1, engine.CheckpointCount);
+
+        using var stopRelease = new ManualResetEventSlim(false);
+        var stopEntered = NewSignal();
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    stopEntered.TrySetResult(true);
+                    stopRelease.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var stopBlocker));
+        try
+        {
+            await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(await wrapper.StopAsync());
+            Assert.Equal(0, engine.StopCount);
+        }
+        finally
+        {
+            stopRelease.Set();
+            await stopBlocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        Assert.True(await wrapper.StopAsync());
+        Assert.Equal(1, engine.StopCount);
+        Assert.True(wrapper.CleanupCompleted);
+    }
+
+    [Fact]
     public async Task IgnoredPreparationCancellationIsTimedOutAndDrained()
     {
         var entered = NewSignal();
@@ -553,6 +688,8 @@ public sealed class BoundedConversationContextEngineTests
             CancellationToken,
             ValueTask<ConversationContextView>> _prepare;
         private readonly Func<ValueTask<bool>> _stop;
+        private int _checkpointCount;
+        private int _stopCount;
 
         public DelegateContextEngine(
             Func<
@@ -571,6 +708,10 @@ public sealed class BoundedConversationContextEngineTests
 
         public bool CleanupCompleted { get; private set; }
 
+        public int CheckpointCount => Volatile.Read(ref _checkpointCount);
+
+        public int StopCount => Volatile.Read(ref _stopCount);
+
         public ValueTask<ConversationContextView> PrepareAsync(
             string runId,
             string turnId,
@@ -587,10 +728,12 @@ public sealed class BoundedConversationContextEngineTests
         public void RegisterCheckpoint(System.Text.Json.JsonElement checkpoint)
         {
             _ = checkpoint;
+            Interlocked.Increment(ref _checkpointCount);
         }
 
         public async ValueTask<bool> StopAsync()
         {
+            Interlocked.Increment(ref _stopCount);
             var stopped = await _stop();
             CleanupCompleted = stopped;
             return stopped;

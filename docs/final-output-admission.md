@@ -110,7 +110,8 @@ Every evaluation has bounded queueing, concurrency, JSON bytes, depth, nodes,
 feedback bytes, and wall-clock time. The policy is run away from the caller's
 thread so a synchronous prefix cannot extend the wall timeout. Cancellation
 callbacks also use a bounded dispatcher and never run inline on the runtime
-thread.
+thread. A custom `ValueTask` source is re-admitted to the same isolated prefix
+boundary before its extension-controlled result is consumed.
 
 Policy execution capacity is process-wide as well as runtime-local. If all
 execution leases are held by unsettled policies, a new evaluation fails closed

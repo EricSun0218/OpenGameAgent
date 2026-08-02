@@ -254,7 +254,9 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly BoundedCancellationDispatcher _shutdownDispatcher;
     private readonly Func<Task>? _detachedProviderCleanupCheckpoint;
-    private readonly TaskScheduler _processingTaskScheduler;
+    private readonly TaskScheduler? _processingTaskScheduler;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly object _prefetchAdmission = new();
     private readonly ConcurrentDictionary<
         string,
@@ -293,7 +295,9 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             detachedProviderCleanupCheckpoint: null,
             queryTransformers,
             resultRerankers,
-            processingTaskScheduler: null)
+            processingTaskScheduler: null,
+            callbackExecutionDispatcher:
+            BoundedCallbackExecutionDispatcher.MemoryShared)
     {
     }
 
@@ -305,7 +309,8 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         Func<Task>? detachedProviderCleanupCheckpoint = null,
         IEnumerable<IMemoryQueryTransformer>? queryTransformers = null,
         IEnumerable<IMemoryResultReranker>? resultRerankers = null,
-        TaskScheduler? processingTaskScheduler = null)
+        TaskScheduler? processingTaskScheduler = null,
+        BoundedCallbackExecutionDispatcher? callbackExecutionDispatcher = null)
     {
         _options = (options ?? new MemoryLifecycleOptions()).Snapshot();
         _shutdownDispatcher = shutdownDispatcher
@@ -313,8 +318,10 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
                                   nameof(shutdownDispatcher));
         _detachedProviderCleanupCheckpoint =
             detachedProviderCleanupCheckpoint;
-        _processingTaskScheduler = processingTaskScheduler
-                                   ?? TaskScheduler.Default;
+        _processingTaskScheduler = processingTaskScheduler;
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? BoundedCallbackExecutionDispatcher
+                                           .MemoryShared;
         if (providers is null)
         {
             throw new ArgumentNullException(nameof(providers));
@@ -566,10 +573,16 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             try
             {
                 var providerToken = providerCancellation.Token;
-                operation = Task.Run(
-                    async () => await provider
-                        .SearchAsync(query, providerToken)
-                        .ConfigureAwait(false));
+                if (!_callbackExecutionDispatcher.TryExecute(
+                        () => provider.SearchAsync(query, providerToken),
+                        out var acceptedOperation))
+                {
+                    return ProviderRecallReport.Failure(
+                        index,
+                        providerId);
+                }
+
+                operation = acceptedOperation;
             }
             catch
             {
@@ -1072,12 +1085,9 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             {
                 var acceptedReservation = cancellationReservation!;
                 _shutdownCancellationTask =
-                    acceptedReservation.DispatchAsync(_shutdown);
-                _ = _shutdownCancellationTask.ContinueWith(
-                    _ => acceptedReservation.Dispose(),
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
+                    DispatchShutdownAndReleaseAsync(
+                        acceptedReservation,
+                        _shutdown);
             }
 
             var elapsed = System.Diagnostics.Stopwatch.StartNew();
@@ -1116,6 +1126,22 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
         finally
         {
             _stopGate.Release();
+        }
+    }
+
+    private static async Task DispatchShutdownAndReleaseAsync(
+        BoundedCancellationDispatcher.CancellationDispatchReservation
+            reservation,
+        CancellationTokenSource shutdown)
+    {
+        try
+        {
+            await reservation.DispatchAsync(shutdown)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            reservation.Dispose();
         }
     }
 
@@ -1189,9 +1215,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var stageInput = current;
             var candidate = await RunProcessingStageAsync(
-                    token => transformer
-                        .TransformAsync(stageInput, token)
-                        .AsTask(),
+                    token => transformer.TransformAsync(stageInput, token),
                     stageInput,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -1217,9 +1241,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var stageInput = current;
             var candidate = await RunProcessingStageAsync(
-                    token => reranker
-                        .RerankAsync(query, stageInput, token)
-                        .AsTask(),
+                    token => reranker.RerankAsync(query, stageInput, token),
                     stageInput,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -1244,7 +1266,7 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
     }
 
     private async Task<T> RunProcessingStageAsync<T>(
-        Func<CancellationToken, Task<T>> operationFactory,
+        Func<CancellationToken, ValueTask<T>> operationFactory,
         T fallback,
         CancellationToken cancellationToken)
     {
@@ -1268,12 +1290,26 @@ public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
             try
             {
                 var stageToken = stageCancellation.Token;
-                operation = Task.Factory.StartNew(
-                        () => operationFactory(stageToken),
-                        CancellationToken.None,
-                        TaskCreationOptions.DenyChildAttach,
-                        _processingTaskScheduler)
-                    .Unwrap();
+                if (_processingTaskScheduler is not null)
+                {
+                    operation = Task.Factory.StartNew(
+                            () => operationFactory(stageToken).AsTask(),
+                            CancellationToken.None,
+                            TaskCreationOptions.DenyChildAttach,
+                            _processingTaskScheduler)
+                        .Unwrap();
+                }
+                else
+                {
+                    if (!_callbackExecutionDispatcher.TryExecute(
+                            () => operationFactory(stageToken),
+                            out var acceptedOperation))
+                    {
+                        return fallback;
+                    }
+
+                    operation = acceptedOperation;
+                }
             }
             catch
             {

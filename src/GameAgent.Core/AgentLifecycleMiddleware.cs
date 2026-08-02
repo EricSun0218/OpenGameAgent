@@ -491,6 +491,8 @@ public sealed class AgentLifecyclePipeline : IDisposable
         _registrations;
     private readonly AgentLifecyclePipelineOptions _options;
     private readonly SemaphoreSlim _slots;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, Task> _detached = new();
     private readonly object _lifecycleSync = new();
@@ -504,8 +506,23 @@ public sealed class AgentLifecyclePipeline : IDisposable
     public AgentLifecyclePipeline(
         IEnumerable<AgentLifecycleMiddlewareRegistration>? registrations,
         AgentLifecyclePipelineOptions? options = null)
+        : this(
+            registrations,
+            options,
+            BoundedCallbackExecutionDispatcher.AgentLifecycleShared)
+    {
+    }
+
+    internal AgentLifecyclePipeline(
+        IEnumerable<AgentLifecycleMiddlewareRegistration>? registrations,
+        AgentLifecyclePipelineOptions? options,
+        BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
     {
         _options = (options ?? new AgentLifecyclePipelineOptions()).Snapshot();
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? throw new ArgumentNullException(
+                                           nameof(
+                                               callbackExecutionDispatcher));
         var snapshot = new List<RegisteredMiddleware>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var registration in registrations
@@ -662,21 +679,8 @@ public sealed class AgentLifecyclePipeline : IDisposable
 
     private Task BeginDrainLocked()
     {
-        var cancellation = Task.Run(
-            () =>
-            {
-                try
-                {
-                    _shutdown.Cancel();
-                }
-                catch (Exception exception)
-                    when (exception is not OutOfMemoryException
-                          and not StackOverflowException)
-                {
-                    // Extension cancellation callbacks are untrusted. The
-                    // drain below still protects resource lifetime.
-                }
-            });
+        var cancellation = BoundedCancellationDispatcher.AgentLifecycleShared
+            .DispatchWhenAvailableAsync(_shutdown);
         var idle = _activeInvocations == 0 && _detached.IsEmpty
             ? Task.CompletedTask
             : (_idle ??= new TaskCompletionSource<bool>(
@@ -786,14 +790,16 @@ public sealed class AgentLifecyclePipeline : IDisposable
             _shutdown.Token.ThrowIfCancellationRequested();
         }
 
-        Task<AgentLifecycleDecision> operation;
+        Task<AgentLifecycleDecision>? operation;
+        bool executionAccepted;
         try
         {
             var middlewareToken = cancellation.Token;
-            operation = Task.Run(
-                async () => await registration.Middleware
-                    .HandleAsync(lifecycleEvent, middlewareToken)
-                    .ConfigureAwait(false));
+            executionAccepted = _callbackExecutionDispatcher.TryExecute(
+                    () => registration.Middleware.HandleAsync(
+                        lifecycleEvent,
+                        middlewareToken),
+                    out operation);
         }
         catch (Exception exception)
         {
@@ -807,20 +813,33 @@ public sealed class AgentLifecyclePipeline : IDisposable
                 : AgentLifecycleDecision.Continue;
         }
 
+        if (!executionAccepted)
+        {
+            await cancellation.DisposeAsync().ConfigureAwait(false);
+            _slots.Release();
+            return registration.Required
+                ? throw new AgentLifecycleMiddlewareException(
+                    registration.MiddlewareId,
+                    "middleware_execution_capacity_exhausted")
+                : AgentLifecycleDecision.Continue;
+        }
+
+        var admittedOperation = operation!;
+
         using var signals = new OperationDeadlineSignals(
             operationTimeout,
             cancellationToken);
         using var shutdownRegistration = _shutdown.Token.Register(
             () => cancellation.TryCancel());
         var completed = await Task.WhenAny(
-                operation,
+                admittedOperation,
                 signals.Timeout,
                 signals.Cancellation)
             .ConfigureAwait(false);
-        if (!ReferenceEquals(completed, operation))
+        if (!ReferenceEquals(completed, admittedOperation))
         {
             _ = cancellation.TryCancel();
-            TrackDetached(operation, cancellation);
+            TrackDetached(admittedOperation, cancellation);
             cancellationToken.ThrowIfCancellationRequested();
             return registration.Required
                 ? throw new AgentLifecycleMiddlewareException(
@@ -835,7 +854,7 @@ public sealed class AgentLifecyclePipeline : IDisposable
         _slots.Release();
         try
         {
-            return await operation.ConfigureAwait(false)
+            return await admittedOperation.ConfigureAwait(false)
                    ?? throw new InvalidOperationException(
                        "Lifecycle middleware returned null.");
         }

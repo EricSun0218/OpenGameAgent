@@ -142,11 +142,82 @@ public sealed class HybridMemoryTests
                 .AsTask()
                 .WaitAsync(TimeSpan.FromSeconds(2)));
         await provider.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(provider.RanOnThreadPool);
 
         await store.UpsertAsync(Record("second", "banana", "agent"))
             .AsTask()
             .WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SynchronousEmbeddingPrefixesHaveProcessWideCapacity()
+    {
+        var processLimiter = new BoundedCallbackProcessLimiter(1);
+        var blockedDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter);
+        var healthyDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter);
+        var blockedProvider = new NonCooperativeSynchronousEmbeddingProvider();
+        var blocked = new VectorMemoryStore(
+            blockedProvider,
+            "blocked-vector-memory",
+            2,
+            new VectorMemoryStoreOptions(
+                maxConcurrentEmbeddings: 1,
+                embeddingTimeout: TimeSpan.FromMilliseconds(25)),
+            blockedDispatcher);
+        var healthyProvider = new KeywordEmbeddingProvider();
+        var healthy = new VectorMemoryStore(
+            healthyProvider,
+            "healthy-vector-memory",
+            2,
+            new VectorMemoryStoreOptions(
+                maxConcurrentEmbeddings: 1,
+                embeddingTimeout: TimeSpan.FromSeconds(1)),
+            healthyDispatcher);
+
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(
+                () => blocked.UpsertAsync(
+                        Record("blocked", "apple", "agent"))
+                    .AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(1)));
+            Assert.Equal(1, blockedDispatcher.ActivePrefixes);
+            Assert.Equal(1, processLimiter.Active);
+            Assert.False(blockedProvider.RanOnThreadPool);
+
+            var capacity = await Assert.ThrowsAsync<
+                RuntimeContentLimitException>(
+                () => healthy.UpsertAsync(
+                        Record("healthy", "banana", "agent"))
+                    .AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(1)));
+            Assert.Contains(
+                "capacity is exhausted",
+                capacity.Message,
+                StringComparison.Ordinal);
+            Assert.Equal(
+                "memory_embedding_execution_capacity_exhausted",
+                capacity.LimitCode);
+        }
+        finally
+        {
+            blockedProvider.Release();
+        }
+
+        await blockedProvider.Completed.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => blockedDispatcher.ActivePrefixes == 0
+                      && processLimiter.Active == 0,
+                TimeSpan.FromSeconds(2)));
+        await healthy.UpsertAsync(Record("healthy", "banana", "agent"))
+            .AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(2));
     }
 
     [Fact]
@@ -424,6 +495,7 @@ public sealed class HybridMemoryTests
         : IMemoryEmbeddingProvider
     {
         private int _callCount;
+        private int _ranOnThreadPool;
 
         public string ProviderId => "sync-blocking-embedding";
 
@@ -435,6 +507,9 @@ public sealed class HybridMemoryTests
 
         public int CallCount => Volatile.Read(ref _callCount);
 
+        public bool RanOnThreadPool =>
+            Volatile.Read(ref _ranOnThreadPool) != 0;
+
         public TaskCompletionSource<bool> Cancelled { get; } = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -445,6 +520,11 @@ public sealed class HybridMemoryTests
             _ = value;
             if (Interlocked.Increment(ref _callCount) == 1)
             {
+                if (Thread.CurrentThread.IsThreadPoolThread)
+                {
+                    Volatile.Write(ref _ranOnThreadPool, 1);
+                }
+
                 using var registration = cancellationToken.Register(
                     () => Cancelled.TrySetResult(true));
                 cancellationToken.WaitHandle.WaitOne();
@@ -453,6 +533,50 @@ public sealed class HybridMemoryTests
 
             return new ValueTask<ReadOnlyMemory<float>>(
                 new float[] { 1, 0 });
+        }
+    }
+
+    private sealed class NonCooperativeSynchronousEmbeddingProvider
+        : IMemoryEmbeddingProvider
+    {
+        private readonly ManualResetEventSlim _release = new(false);
+        private readonly TaskCompletionSource _completed = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _ranOnThreadPool;
+
+        public string ProviderId => "non-cooperative-sync-embedding";
+
+        public string ModelId => "non-cooperative-sync-test";
+
+        public string Version => "1";
+
+        public int Dimensions => 2;
+
+        public bool RanOnThreadPool =>
+            Volatile.Read(ref _ranOnThreadPool) != 0;
+
+        public Task Completed => _completed.Task;
+
+        public ValueTask<ReadOnlyMemory<float>> EmbedAsync(
+            JsonElement value,
+            CancellationToken cancellationToken)
+        {
+            _ = value;
+            _ = cancellationToken;
+            if (Thread.CurrentThread.IsThreadPoolThread)
+            {
+                Volatile.Write(ref _ranOnThreadPool, 1);
+            }
+
+            _release.Wait();
+            _completed.TrySetResult();
+            return new ValueTask<ReadOnlyMemory<float>>(
+                new float[] { 1, 0 });
+        }
+
+        public void Release()
+        {
+            _release.Set();
         }
     }
 

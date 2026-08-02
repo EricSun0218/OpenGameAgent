@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Threading.Tasks.Sources;
 using GameAgent.Core;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
@@ -2118,28 +2119,51 @@ public sealed class FinalOutputAdmissionRuntimeTests
             {
                 Enabled = true,
                 MaxConcurrentEvaluations = 1,
-                PolicyTimeout = TimeSpan.FromMilliseconds(50)
+                PolicyTimeout = TimeSpan.FromMilliseconds(500)
             },
             new BoundedCancellationDispatcher(1));
         var request = PolicyRequest();
-        using var cancellation = new CancellationTokenSource(
-            TimeSpan.FromMilliseconds(20));
+        using var cancellation = new CancellationTokenSource();
+        Task<FinalOutputAdmissionDecision>? cancelled = null;
+        try
+        {
+            cancelled = evaluator.EvaluateAsync(
+                    request,
+                    cancellation.Token)
+                .AsTask();
+            await policy.Started.WaitAsync(TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => evaluator.EvaluateAsync(request, cancellation.Token)
-                .AsTask());
-        var capacity = await evaluator.EvaluateAsync(request, default);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => cancelled);
+            var capacity = await evaluator.EvaluateAsync(request, default);
 
-        Assert.False(capacity.Accepted);
-        Assert.Equal(
-            "final_output_admission_capacity_timeout",
-            capacity.ReasonCode);
-        Assert.Equal(1, policy.CallCount);
+            Assert.False(capacity.Accepted);
+            Assert.Equal(
+                "final_output_admission_capacity_timeout",
+                capacity.ReasonCode);
+            Assert.Equal(1, policy.CallCount);
 
-        policy.Release();
-        var accepted = await evaluator.EvaluateAsync(request, default);
-        Assert.True(accepted.Accepted);
-        Assert.Equal(2, policy.CallCount);
+            policy.Release();
+            var accepted = await evaluator.EvaluateAsync(request, default);
+            Assert.True(accepted.Accepted);
+            Assert.Equal(2, policy.CallCount);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            policy.Release();
+            if (cancelled is not null)
+            {
+                try
+                {
+                    await cancelled.WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch (Exception) when (cancelled.IsCompleted)
+                {
+                }
+            }
+        }
     }
 
     [Fact]
@@ -2255,6 +2279,65 @@ public sealed class FinalOutputAdmissionRuntimeTests
             default);
         Assert.True(accepted.Accepted);
         Assert.Single(secondPolicy.Requests);
+    }
+
+    [Fact]
+    public async Task PolicyValueTaskResultIsReisolatedAndBounded()
+    {
+        var dispatcher = new BoundedPolicyExecutionDispatcher(1);
+        var policy = new BlockingResultPolicy();
+        var evaluator = new FinalOutputAdmissionEvaluator(
+            policy,
+            new FinalOutputAdmissionOptions
+            {
+                Enabled = true,
+                MaxConcurrentEvaluations = 1,
+                PolicyTimeout = TimeSpan.FromMilliseconds(50)
+            },
+            new BoundedCancellationDispatcher(1),
+            dispatcher);
+        var evaluation = evaluator.EvaluateAsync(
+                PolicyRequest(),
+                default)
+            .AsTask();
+        Task? completionTrigger = null;
+
+        try
+        {
+            await policy.RegistrationEntered.WaitAsync(
+                TimeSpan.FromSeconds(1));
+            completionTrigger = Task.Factory.StartNew(
+                policy.Complete,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            await policy.ResultEntered.WaitAsync(
+                TimeSpan.FromSeconds(1));
+            var timedOut = await evaluation.WaitAsync(
+                TimeSpan.FromSeconds(1));
+            Assert.False(timedOut.Accepted);
+            Assert.Equal(
+                "final_output_admission_policy_timeout",
+                timedOut.ReasonCode);
+            Assert.False(policy.ResultRanOnThreadPool);
+            Assert.Equal(1, dispatcher.ActiveExecutions);
+        }
+        finally
+        {
+            policy.ReleaseResult();
+            if (completionTrigger is not null)
+            {
+                await completionTrigger.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        Assert.True(
+            await WaitUntilAsync(() => dispatcher.ActiveExecutions == 0));
+        var accepted = await evaluator.EvaluateAsync(
+            PolicyRequest(),
+            default);
+        Assert.True(accepted.Accepted);
+        Assert.Equal(2, policy.CallCount);
     }
 
     [Fact]
@@ -3029,6 +3112,8 @@ public sealed class FinalOutputAdmissionRuntimeTests
         private readonly TaskCompletionSource<
             FinalOutputAdmissionDecision> _first =
                 new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _calls;
 
         public string PolicyId => "hanging-policy";
@@ -3037,6 +3122,8 @@ public sealed class FinalOutputAdmissionRuntimeTests
 
         public int CallCount => Volatile.Read(ref _calls);
 
+        public Task Started => _started.Task;
+
         public ValueTask<FinalOutputAdmissionDecision> EvaluateAsync(
             FinalOutputAdmissionRequest request,
             CancellationToken cancellationToken)
@@ -3044,6 +3131,11 @@ public sealed class FinalOutputAdmissionRuntimeTests
             _ = request;
             _ = cancellationToken;
             var call = Interlocked.Increment(ref _calls);
+            if (call == 1)
+            {
+                _started.TrySetResult();
+            }
+
             return call == 1
                 ? new ValueTask<FinalOutputAdmissionDecision>(_first.Task)
                 : new ValueTask<FinalOutputAdmissionDecision>(
@@ -3107,6 +3199,93 @@ public sealed class FinalOutputAdmissionRuntimeTests
             _release.Set();
         }
 
+    }
+
+    private sealed class BlockingResultPolicy :
+        IFinalOutputAdmissionPolicy,
+        IValueTaskSource<FinalOutputAdmissionDecision>
+    {
+        private readonly ManualResetEventSlim _resultRelease = new(false);
+        private readonly TaskCompletionSource _registrationEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _resultEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private Action<object?>? _continuation;
+        private object? _continuationState;
+        private int _calls;
+        private int _completed;
+        private int _resultRanOnThreadPool;
+
+        public string PolicyId => "blocking-result-policy";
+
+        public string Version => "1";
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public Task RegistrationEntered => _registrationEntered.Task;
+
+        public Task ResultEntered => _resultEntered.Task;
+
+        public bool ResultRanOnThreadPool =>
+            Volatile.Read(ref _resultRanOnThreadPool) != 0;
+
+        public ValueTask<FinalOutputAdmissionDecision> EvaluateAsync(
+            FinalOutputAdmissionRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            return Interlocked.Increment(ref _calls) == 1
+                ? new ValueTask<FinalOutputAdmissionDecision>(this, token: 0)
+                : new ValueTask<FinalOutputAdmissionDecision>(
+                    FinalOutputAdmissionDecision.Accept());
+        }
+
+        public ValueTaskSourceStatus GetStatus(short token)
+        {
+            _ = token;
+            return Volatile.Read(ref _completed) == 0
+                ? ValueTaskSourceStatus.Pending
+                : ValueTaskSourceStatus.Succeeded;
+        }
+
+        public void OnCompleted(
+            Action<object?> continuation,
+            object? state,
+            short token,
+            ValueTaskSourceOnCompletedFlags flags)
+        {
+            _ = token;
+            _ = flags;
+            _continuation = continuation;
+            _continuationState = state;
+            _registrationEntered.TrySetResult();
+        }
+
+        public FinalOutputAdmissionDecision GetResult(short token)
+        {
+            _ = token;
+            Volatile.Write(
+                ref _resultRanOnThreadPool,
+                Thread.CurrentThread.IsThreadPoolThread ? 1 : 0);
+            _resultEntered.TrySetResult();
+            _resultRelease.Wait();
+            return FinalOutputAdmissionDecision.Accept();
+        }
+
+        public void Complete()
+        {
+            Volatile.Write(ref _completed, 1);
+            (_continuation
+             ?? throw new InvalidOperationException(
+                 "No policy continuation was registered."))(
+                _continuationState);
+        }
+
+        public void ReleaseResult()
+        {
+            _resultRelease.Set();
+        }
     }
 
     private sealed class BlockingCancellationPolicy :

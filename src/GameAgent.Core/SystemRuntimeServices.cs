@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks.Sources;
 
 namespace GameAgent.Core;
 
@@ -151,6 +153,36 @@ internal sealed class BoundedCancellationDispatcher
         return new CancellationDispatchReservation(this);
     }
 
+    public async Task DispatchWhenAvailableAsync(
+        CancellationTokenSource cancellation)
+    {
+        if (cancellation is null)
+        {
+            throw new ArgumentNullException(nameof(cancellation));
+        }
+
+        while (true)
+        {
+            var reservation = await ReserveAsync().ConfigureAwait(false);
+            try
+            {
+                if (!reservation.TryDispatch(
+                        cancellation,
+                        out var dispatch))
+                {
+                    continue;
+                }
+
+                await dispatch.ConfigureAwait(false);
+                return;
+            }
+            finally
+            {
+                reservation.Dispose();
+            }
+        }
+    }
+
     private void Release()
     {
         Interlocked.Decrement(ref _reservations);
@@ -292,9 +324,12 @@ internal sealed class BoundedCancellationDispatcher
 
 internal sealed class BoundedPolicyExecutionDispatcher
 {
-    internal const int DefaultCapacity = 64;
+    internal const int DefaultCapacity =
+        IsolatedCallbackExecutionDefaults.Capacity;
 
     private readonly SemaphoreSlim _capacity;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private int _activeExecutions;
 
     public BoundedPolicyExecutionDispatcher(
@@ -306,6 +341,8 @@ internal sealed class BoundedPolicyExecutionDispatcher
         }
 
         _capacity = new SemaphoreSlim(capacity, capacity);
+        _callbackExecutionDispatcher =
+            new BoundedCallbackExecutionDispatcher(capacity);
     }
 
     public static BoundedPolicyExecutionDispatcher Shared { get; } = new();
@@ -331,13 +368,16 @@ internal sealed class BoundedPolicyExecutionDispatcher
         Interlocked.Increment(ref _activeExecutions);
         try
         {
-            completion = Task.Factory.StartNew(
-                    () => ExecuteAndReleaseAsync(operation),
-                    CancellationToken.None,
-                    TaskCreationOptions.DenyChildAttach
-                    | TaskCreationOptions.LongRunning,
-                    TaskScheduler.Default)
-                .Unwrap();
+            if (!_callbackExecutionDispatcher.TryExecute(
+                    operation,
+                    out var callbackCompletion))
+            {
+                Release();
+                completion = null;
+                return false;
+            }
+
+            completion = AwaitAndReleaseAsync(callbackCompletion);
             return true;
         }
         catch
@@ -347,12 +387,12 @@ internal sealed class BoundedPolicyExecutionDispatcher
         }
     }
 
-    private async Task<TResult> ExecuteAndReleaseAsync<TResult>(
-        Func<ValueTask<TResult>> operation)
+    private async Task<TResult> AwaitAndReleaseAsync<TResult>(
+        Task<TResult> operation)
     {
         try
         {
-            return await operation().ConfigureAwait(false);
+            return await operation.ConfigureAwait(false);
         }
         finally
         {
@@ -364,6 +404,802 @@ internal sealed class BoundedPolicyExecutionDispatcher
     {
         Interlocked.Decrement(ref _activeExecutions);
         _capacity.Release();
+    }
+}
+
+internal sealed class BoundedCallbackExecutionDispatcher
+{
+    internal const int DefaultCapacity =
+        IsolatedCallbackExecutionDefaults.Capacity;
+    internal const int ProcessCapacity = DefaultCapacity;
+    internal const int PendingCapacity = 256;
+
+    private static readonly BoundedCallbackProcessLimiter ProcessLimiter =
+        new(ProcessCapacity);
+    private static readonly BoundedCallbackProcessLimiter PendingLimiter =
+        new(PendingCapacity);
+
+    private readonly SemaphoreSlim _slots;
+    private readonly BoundedCallbackProcessLimiter _processLimiter;
+    private readonly BoundedCallbackProcessLimiter _pendingLimiter;
+    [ThreadStatic]
+    private static BoundedCallbackExecutionDispatcher? _current;
+    private int _activePrefixes;
+
+    public BoundedCallbackExecutionDispatcher(
+        int capacity = DefaultCapacity)
+        : this(capacity, ProcessLimiter, PendingLimiter)
+    {
+    }
+
+    internal BoundedCallbackExecutionDispatcher(
+        int capacity,
+        BoundedCallbackProcessLimiter processLimiter)
+        : this(capacity, processLimiter, PendingLimiter)
+    {
+    }
+
+    internal BoundedCallbackExecutionDispatcher(
+        int capacity,
+        BoundedCallbackProcessLimiter processLimiter,
+        BoundedCallbackProcessLimiter pendingLimiter)
+    {
+        if (capacity < 1 || capacity > ProcessCapacity)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        }
+
+        _processLimiter = processLimiter
+                          ?? throw new ArgumentNullException(
+                              nameof(processLimiter));
+        _pendingLimiter = pendingLimiter
+                          ?? throw new ArgumentNullException(
+                              nameof(pendingLimiter));
+        _slots = new SemaphoreSlim(capacity, capacity);
+    }
+
+    public static BoundedCallbackExecutionDispatcher AgentLifecycleShared
+    {
+        get;
+    } = new();
+
+    public static BoundedCallbackExecutionDispatcher ConversationContextShared
+    {
+        get;
+    } = new();
+
+    public static BoundedCallbackExecutionDispatcher ExecutionPolicyShared
+    {
+        get;
+    } = new();
+
+    public static BoundedCallbackExecutionDispatcher MemoryShared { get; } =
+        new();
+
+    public static BoundedCallbackExecutionDispatcher SkillResolverShared
+    {
+        get;
+    } = new();
+
+    public static BoundedCallbackExecutionDispatcher MultiActorLifecycleShared
+    {
+        get;
+    } = new();
+
+    public static BoundedCallbackExecutionDispatcher ProviderShared { get; } =
+        new();
+
+    internal int ActivePrefixes => Volatile.Read(ref _activePrefixes);
+
+    public bool TryExecute<TResult>(
+        Func<ValueTask<TResult>> operation,
+        [NotNullWhen(true)] out Task<TResult>? completion)
+    {
+        if (operation is null)
+        {
+            throw new ArgumentNullException(nameof(operation));
+        }
+
+        if (!TryReservePending(out var pendingReservation))
+        {
+            completion = null;
+            return false;
+        }
+
+        if (ReferenceEquals(_current, this))
+        {
+            completion = BeginPrefix(operation, pendingReservation);
+            return true;
+        }
+
+        if (!_slots.Wait(0))
+        {
+            pendingReservation.Dispose();
+            completion = null;
+            return false;
+        }
+
+        if (!_processLimiter.TryEnter())
+        {
+            _slots.Release();
+            pendingReservation.Dispose();
+            completion = null;
+            return false;
+        }
+
+        Interlocked.Increment(ref _activePrefixes);
+        try
+        {
+            completion = IsolatedCallbackTaskStarter.Start(
+                () => BeginOwnedPrefix(operation, pendingReservation));
+            return true;
+        }
+        catch
+        {
+            ReleasePrefix();
+            pendingReservation.Dispose();
+            throw;
+        }
+    }
+
+    public bool TryExecute(
+        Func<ValueTask> operation,
+        [NotNullWhen(true)] out Task? completion)
+    {
+        if (operation is null)
+        {
+            throw new ArgumentNullException(nameof(operation));
+        }
+
+        if (!TryExecute(
+                () => NonGenericValueTaskAdapter.ToBoolean(operation()),
+                out var typedCompletion))
+        {
+            completion = null;
+            return false;
+        }
+
+        completion = typedCompletion;
+        return true;
+    }
+
+    public async Task<TResult> ExecuteWhenAvailableAsync<TResult>(
+        Func<ValueTask<TResult>> operation)
+    {
+        if (operation is null)
+        {
+            throw new ArgumentNullException(nameof(operation));
+        }
+
+        if (!TryReservePending(out var pendingReservation))
+        {
+            throw new InvalidOperationException(
+                "Callback pending-execution capacity is exhausted.");
+        }
+
+        if (ReferenceEquals(_current, this))
+        {
+            return await BeginPrefix(operation, pendingReservation)
+                .ConfigureAwait(false);
+        }
+
+        var localSlotHeld = false;
+        try
+        {
+            await _slots.WaitAsync().ConfigureAwait(false);
+            localSlotHeld = true;
+            await _processLimiter.EnterAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            if (localSlotHeld)
+            {
+                _slots.Release();
+            }
+
+            pendingReservation.Dispose();
+            throw;
+        }
+
+        Interlocked.Increment(ref _activePrefixes);
+        Task<TResult> completion;
+        try
+        {
+            completion = IsolatedCallbackTaskStarter.Start(
+                () => BeginOwnedPrefix(operation, pendingReservation));
+        }
+        catch
+        {
+            ReleasePrefix();
+            pendingReservation.Dispose();
+            throw;
+        }
+
+        return await completion.ConfigureAwait(false);
+    }
+
+    public Task ExecuteWhenAvailableAsync(Func<ValueTask> operation)
+    {
+        if (operation is null)
+        {
+            throw new ArgumentNullException(nameof(operation));
+        }
+
+        return ExecuteWhenAvailableAsync(
+            () => NonGenericValueTaskAdapter.ToBoolean(operation()));
+    }
+
+    private Task<TResult> BeginOwnedPrefix<TResult>(
+        Func<ValueTask<TResult>> operation,
+        CallbackPendingReservation pendingReservation)
+    {
+        var previous = _current;
+        _current = this;
+        try
+        {
+            return BeginPrefix(operation, pendingReservation);
+        }
+        finally
+        {
+            _current = previous;
+            ReleasePrefix();
+        }
+    }
+
+    private Task<TResult> BeginPrefix<TResult>(
+        Func<ValueTask<TResult>> operation,
+        CallbackPendingReservation pendingReservation)
+    {
+        ConfiguredValueTaskAwaitable<TResult>.ConfiguredValueTaskAwaiter awaiter;
+        try
+        {
+            awaiter = operation().ConfigureAwait(false).GetAwaiter();
+        }
+        catch
+        {
+            pendingReservation.Dispose();
+            throw;
+        }
+
+        bool isCompleted;
+        try
+        {
+            isCompleted = awaiter.IsCompleted;
+        }
+        catch
+        {
+            pendingReservation.Dispose();
+            throw;
+        }
+
+        if (isCompleted)
+        {
+            try
+            {
+                return Task.FromResult(awaiter.GetResult());
+            }
+            finally
+            {
+                pendingReservation.Dispose();
+            }
+        }
+
+        // Match ordinary await semantics: a custom status check can make
+        // synchronous ExecutionContext changes that belong to the suspended
+        // callback and must therefore be visible to its eventual GetResult.
+        var callbackContext = ExecutionContext.Capture();
+
+        var completion = new TaskCompletionSource<TResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        // 0 = registering, 1 = registered, 2 = continuation owns the
+        // reservation, 3 = registration failed and late signals are ignored.
+        var registrationState = 0;
+        try
+        {
+            awaiter.UnsafeOnCompleted(
+                () =>
+                {
+                    while (true)
+                    {
+                        var observed = Volatile.Read(
+                            ref registrationState);
+                        if (observed is 2 or 3)
+                        {
+                            return;
+                        }
+
+                        if (Interlocked.CompareExchange(
+                                ref registrationState,
+                                2,
+                                observed) == observed)
+                        {
+                            _ = CompleteAwaiterWhenAvailableAsync(
+                                awaiter,
+                                completion,
+                                pendingReservation,
+                                callbackContext);
+                            return;
+                        }
+                    }
+                });
+            _ = Interlocked.CompareExchange(
+                ref registrationState,
+                1,
+                comparand: 0);
+            return completion.Task;
+        }
+        catch
+        {
+            if (Interlocked.CompareExchange(
+                    ref registrationState,
+                    3,
+                    comparand: 0) == 0)
+            {
+                pendingReservation.Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    private async Task CompleteAwaiterWhenAvailableAsync<TResult>(
+        ConfiguredValueTaskAwaitable<TResult>.ConfiguredValueTaskAwaiter awaiter,
+        TaskCompletionSource<TResult> completion,
+        CallbackPendingReservation pendingReservation,
+        ExecutionContext? callbackContext)
+    {
+        var localSlotHeld = false;
+        var prefixHeld = false;
+        try
+        {
+            await _slots.WaitAsync().ConfigureAwait(false);
+            localSlotHeld = true;
+            await _processLimiter.EnterAsync().ConfigureAwait(false);
+            Interlocked.Increment(ref _activePrefixes);
+            prefixHeld = true;
+            var result = await IsolatedCallbackTaskStarter.Start(
+                    () => GetResultWithinPrefix(awaiter),
+                    callbackContext)
+                .ConfigureAwait(false);
+            completion.TrySetResult(result);
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+        finally
+        {
+            pendingReservation.Dispose();
+            if (prefixHeld)
+            {
+                ReleasePrefix();
+            }
+            else if (localSlotHeld)
+            {
+                _slots.Release();
+            }
+        }
+    }
+
+    private bool TryReservePending(
+        out CallbackPendingReservation reservation)
+    {
+        if (!_pendingLimiter.TryEnter())
+        {
+            reservation = null!;
+            return false;
+        }
+
+        reservation = new CallbackPendingReservation(_pendingLimiter);
+        return true;
+    }
+
+    private Task<TResult> GetResultWithinPrefix<TResult>(
+        ConfiguredValueTaskAwaitable<TResult>.ConfiguredValueTaskAwaiter awaiter)
+    {
+        var previous = _current;
+        _current = this;
+        try
+        {
+            return Task.FromResult(awaiter.GetResult());
+        }
+        finally
+        {
+            _current = previous;
+        }
+    }
+
+    private void ReleasePrefix()
+    {
+        Interlocked.Decrement(ref _activePrefixes);
+        _processLimiter.Exit();
+        _slots.Release();
+    }
+
+    private sealed class CallbackPendingReservation : IDisposable
+    {
+        private readonly BoundedCallbackProcessLimiter _limiter;
+        private int _released;
+
+        public CallbackPendingReservation(
+            BoundedCallbackProcessLimiter limiter)
+        {
+            _limiter = limiter;
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                _limiter.Exit();
+            }
+        }
+    }
+
+    private static class NonGenericValueTaskAdapter
+    {
+        public static ValueTask<bool> ToBoolean(ValueTask operation)
+        {
+            var awaiter = operation.ConfigureAwait(false).GetAwaiter();
+            if (awaiter.IsCompleted)
+            {
+                awaiter.GetResult();
+                return new ValueTask<bool>(true);
+            }
+
+            return new ValueTask<bool>(
+                new Source(awaiter),
+                token: 0);
+        }
+
+        private sealed class Source : IValueTaskSource<bool>
+        {
+            private readonly ConfiguredValueTaskAwaitable
+                .ConfiguredValueTaskAwaiter _awaiter;
+
+            public Source(
+                ConfiguredValueTaskAwaitable.ConfiguredValueTaskAwaiter awaiter)
+            {
+                _awaiter = awaiter;
+            }
+
+            public ValueTaskSourceStatus GetStatus(short token)
+            {
+                _ = token;
+                return _awaiter.IsCompleted
+                    ? ValueTaskSourceStatus.Succeeded
+                    : ValueTaskSourceStatus.Pending;
+            }
+
+            public void OnCompleted(
+                Action<object?> continuation,
+                object? state,
+                short token,
+                ValueTaskSourceOnCompletedFlags flags)
+            {
+                _ = token;
+                _ = flags;
+                _awaiter.UnsafeOnCompleted(() => continuation(state));
+            }
+
+            public bool GetResult(short token)
+            {
+                _ = token;
+                _awaiter.GetResult();
+                return true;
+            }
+        }
+    }
+}
+
+internal static class IsolatedCallbackExecutionDefaults
+{
+    internal const int Capacity = 64;
+}
+
+internal static class IsolatedCallbackTaskStarter
+{
+    private static readonly DedicatedCallbackWorkerPool WorkerPool =
+        new(IsolatedCallbackExecutionDefaults.Capacity);
+
+    public static Task<TResult> Start<TResult>(
+        Func<Task<TResult>> operation)
+    {
+        return Start(operation, ExecutionContext.Capture());
+    }
+
+    internal static Task<TResult> Start<TResult>(
+        Func<Task<TResult>> operation,
+        ExecutionContext? executionContext)
+    {
+        if (operation is null)
+        {
+            throw new ArgumentNullException(nameof(operation));
+        }
+
+        return WorkerPool.Start(operation, executionContext);
+    }
+
+    internal sealed class DedicatedCallbackWorkerPool
+    {
+        private readonly ConcurrentQueue<IWorkItem> _tasks = new();
+        private readonly SemaphoreSlim _availableTasks = new(0);
+        private readonly object _workerGate = new();
+        private readonly TaskCompletionSource<bool> _stopped = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly int _capacity;
+        private int _pendingWorkItems;
+        private int _stopping;
+        private int _workerCount;
+        private int _workerSequence;
+
+        public DedicatedCallbackWorkerPool(int capacity)
+        {
+            if (capacity < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(capacity));
+            }
+
+            _capacity = capacity;
+        }
+
+        public Task<TResult> Start<TResult>(
+            Func<Task<TResult>> operation,
+            ExecutionContext? executionContext)
+        {
+            var completion = new TaskCompletionSource<TResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var workItem = new WorkItem<TResult>(
+                operation,
+                completion,
+                executionContext);
+            lock (_workerGate)
+            {
+                if (_stopping != 0)
+                {
+                    throw new ObjectDisposedException(
+                        nameof(DedicatedCallbackWorkerPool));
+                }
+
+                if (_workerCount < _capacity
+                    && _workerCount < _pendingWorkItems + 1)
+                {
+                    StartWorker();
+                }
+
+                _tasks.Enqueue(workItem);
+                _pendingWorkItems++;
+                _availableTasks.Release();
+            }
+
+            return completion.Task;
+        }
+
+        internal Task StopAsync()
+        {
+            lock (_workerGate)
+            {
+                if (_stopping == 0)
+                {
+                    _stopping = 1;
+                    if (_workerCount == 0)
+                    {
+                        _stopped.TrySetResult(true);
+                    }
+                    else
+                    {
+                        for (var index = 0; index < _workerCount; index++)
+                        {
+                            _tasks.Enqueue(StopWorkItem.Instance);
+                        }
+
+                        _availableTasks.Release(_workerCount);
+                    }
+                }
+
+                return _stopped.Task;
+            }
+        }
+
+        private void StartWorker()
+        {
+            var sequence = ++_workerSequence;
+            var worker = new Thread(WorkerLoop)
+            {
+                IsBackground = true,
+                Name = "game-agent-callback-" + sequence
+            };
+            _workerCount++;
+            try
+            {
+                if (ExecutionContext.IsFlowSuppressed())
+                {
+                    worker.Start();
+                }
+                else
+                {
+                    using (ExecutionContext.SuppressFlow())
+                    {
+                        worker.Start();
+                    }
+                }
+            }
+            catch
+            {
+                _workerCount--;
+                throw;
+            }
+        }
+
+        private void WorkerLoop()
+        {
+            var cleanExecutionContext = ExecutionContext.Capture()
+                                        ?? throw new InvalidOperationException(
+                                            "The callback worker could not capture a clean execution context.");
+            while (true)
+            {
+                _availableTasks.Wait();
+                if (!_tasks.TryDequeue(out var task))
+                {
+                    continue;
+                }
+
+                if (ReferenceEquals(task, StopWorkItem.Instance))
+                {
+                    lock (_workerGate)
+                    {
+                        _workerCount--;
+                        if (_workerCount == 0)
+                        {
+                            _stopped.TrySetResult(true);
+                        }
+                    }
+
+                    return;
+                }
+
+                try
+                {
+                    task.Execute(cleanExecutionContext);
+                }
+                finally
+                {
+                    lock (_workerGate)
+                    {
+                        _pendingWorkItems--;
+                    }
+                }
+            }
+        }
+
+        private interface IWorkItem
+        {
+            void Execute(ExecutionContext cleanExecutionContext);
+        }
+
+        private sealed class StopWorkItem : IWorkItem
+        {
+            public static readonly StopWorkItem Instance = new();
+
+            private StopWorkItem()
+            {
+            }
+
+            public void Execute(ExecutionContext cleanExecutionContext)
+            {
+                _ = cleanExecutionContext;
+                throw new InvalidOperationException(
+                    "A callback worker stop item cannot be executed.");
+            }
+        }
+
+        private sealed class WorkItem<TResult> : IWorkItem
+        {
+            private readonly Func<Task<TResult>> _operation;
+            private readonly TaskCompletionSource<TResult> _completion;
+            private readonly ExecutionContext? _executionContext;
+
+            public WorkItem(
+                Func<Task<TResult>> operation,
+                TaskCompletionSource<TResult> completion,
+                ExecutionContext? executionContext)
+            {
+                _operation = operation;
+                _completion = completion;
+                _executionContext = executionContext;
+            }
+
+            public void Execute(ExecutionContext cleanExecutionContext)
+            {
+                ExecutionContext.Run(
+                    (_executionContext ?? cleanExecutionContext).CreateCopy(),
+                    static state => ((WorkItem<TResult>)state!).ExecuteCore(),
+                    this);
+            }
+
+            private void ExecuteCore()
+            {
+                var previousSynchronizationContext =
+                    SynchronizationContext.Current;
+                SynchronizationContext.SetSynchronizationContext(null);
+                try
+                {
+                    var operation = _operation()
+                                    ?? throw new InvalidOperationException(
+                                        "The isolated callback operation returned a null task.");
+                    _ = CompleteAsync(operation, _completion);
+                }
+                catch (Exception exception)
+                {
+                    _completion.TrySetException(exception);
+                }
+                finally
+                {
+                    SynchronizationContext.SetSynchronizationContext(
+                        previousSynchronizationContext);
+                }
+            }
+
+            private static async Task CompleteAsync(
+                Task<TResult> operation,
+                TaskCompletionSource<TResult> completion)
+            {
+                try
+                {
+                    completion.TrySetResult(
+                        await operation.ConfigureAwait(false));
+                }
+                catch (OperationCanceledException exception)
+                {
+                    completion.TrySetCanceled(exception.CancellationToken);
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            }
+        }
+    }
+}
+
+internal sealed class BoundedCallbackProcessLimiter
+{
+    private readonly SemaphoreSlim _slots;
+    private int _active;
+
+    public BoundedCallbackProcessLimiter(int capacity)
+    {
+        if (capacity < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        }
+
+        _slots = new SemaphoreSlim(capacity, capacity);
+    }
+
+    internal int Active => Volatile.Read(ref _active);
+
+    public bool TryEnter()
+    {
+        if (!_slots.Wait(0))
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _active);
+        return true;
+    }
+
+    public async ValueTask EnterAsync()
+    {
+        await _slots.WaitAsync().ConfigureAwait(false);
+        Interlocked.Increment(ref _active);
+    }
+
+    public void Exit()
+    {
+        Interlocked.Decrement(ref _active);
+        _slots.Release();
     }
 }
 

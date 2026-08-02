@@ -45,7 +45,7 @@ be local or remote; no generation model is included in the package.
 
 Current evidence covers managed compilation, package structure, artifact
 loading, lifecycle tests, and host conformance. Licensed Unity 6000.5.6f1 on
-Windows also passes 6 EditMode tests, 2 PlayMode tests, and the Mono and IL2CPP
+Windows also passes 7 EditMode tests, 3 PlayMode tests, and the Mono and IL2CPP
 Player gates. Each Player is built, launched headlessly, required to complete
 the durable tool-loop scenario and validated marker, and then required to exit
 successfully.

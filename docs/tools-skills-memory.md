@@ -580,6 +580,16 @@ every returned float, and ranks normalized cosine similarity. It supports
 atomic and idempotent atomic batches, so it can be the runtime write store.
 Nothing creates or downloads an embedding model automatically.
 
+Embedding, memory-provider, query-transformer, and reranker synchronous
+prefixes start outside the ordinary .NET worker pool. They share a bounded
+process execution lane, while their asynchronous suffixes continue under the
+configured store or lifecycle concurrency slot. A synchronously blocked local
+model or SDK callback therefore cannot delay the embedding/provider deadline.
+If no prefix capacity remains, vector embedding fails before dispatch with
+`memory_embedding_execution_capacity_exhausted`, and
+hybrid recall treats that provider as unavailable rather than queuing work that
+could run after the query has already fallen back.
+
 An embedding provider declares a stable provider ID, model ID, version, and
 dimension count. The store captures that identity at construction and checks
 it before and after every embedding call. A hot-swapped model or changed

@@ -1647,6 +1647,8 @@ internal sealed class SkillContentRuntime
     private readonly SkillRuntimeLimits _limits;
     private readonly JsonValueLimits _itemLimits;
     private readonly BoundedCancellationDispatcher _cancellationDispatcher;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly object _sync = new();
     private readonly HashSet<ResolverCall> _calls = new();
     private TaskCompletionSource<bool>? _drained;
@@ -1655,13 +1657,17 @@ internal sealed class SkillContentRuntime
     public SkillContentRuntime(
         ISkillContentResolver? resolver,
         SkillRuntimeLimits limits,
-        BoundedCancellationDispatcher? cancellationDispatcher = null)
+        BoundedCancellationDispatcher? cancellationDispatcher = null,
+        BoundedCallbackExecutionDispatcher? callbackExecutionDispatcher = null)
     {
         _resolver = resolver;
         _limits = limits ?? throw new ArgumentNullException(nameof(limits));
         _cancellationDispatcher = cancellationDispatcher
                                   ?? BoundedCancellationDispatcher
-                                      .SkillContentResolverShared;
+                                       .SkillContentResolverShared;
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? BoundedCallbackExecutionDispatcher
+                                           .SkillResolverShared;
         _itemLimits = new JsonValueLimits(
             limits.MaxResolvedItemUtf8Bytes,
             limits.MaxJsonDepth,
@@ -2008,11 +2014,16 @@ internal sealed class SkillContentRuntime
             }
 
             var cancellation = new CancellationTokenSource();
-            var task = Task.Run(
-                async () => await _resolver!.ResolveAsync(
+            if (!_callbackExecutionDispatcher.TryExecute(
+                        () => _resolver!.ResolveAsync(
                         request,
-                        cancellation.Token)
-                    .ConfigureAwait(false));
+                        cancellation.Token),
+                        out var task))
+            {
+                cancellation.Dispose();
+                return null;
+            }
+
             call = new ResolverCall(task, cancellation);
             _calls.Add(call);
         }

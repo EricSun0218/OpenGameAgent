@@ -1414,6 +1414,77 @@ public sealed class DynamicSkillRuntimeTests
         }
     }
 
+    [Fact]
+    public async Task ResolverCallbackCapacityFailsWithStableReasonAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var resolverDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var registry = new SkillCatalogRegistry();
+        registry.Replace(
+            new[]
+            {
+                Skill(
+                    "callback-capacity",
+                    "Tests callback admission.",
+                    "CALLBACK_CAPACITY_MARKER",
+                    contextProviders: new[] { "root" })
+            });
+        var skill = Assert.Single(registry.Current.Skills);
+        var resolver = new RecordingResolver(
+            _ => new SkillContentResolution(Json("{\"ok\":true}")));
+        var runtime = new SkillContentRuntime(
+            resolver,
+            new SkillRuntimeLimits(),
+            new BoundedCancellationDispatcher(),
+            resolverDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var error = await Assert.ThrowsAsync<SkillContentResolutionException>(
+                () => runtime.ResolveAsync(
+                        Run(),
+                        "callback-capacity-turn",
+                        new[] { skill },
+                        CancellationToken.None)
+                    .AsTask());
+            Assert.Equal(
+                SkillRuntimeReasonCodes.ResolverCapacityExceeded,
+                error.ReasonCode);
+            Assert.Empty(resolver.Requests);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await runtime.ResolveAsync(
+            Run(),
+            "callback-capacity-recovered",
+            new[] { skill },
+            CancellationToken.None);
+        Assert.Single(recovered.Items);
+        Assert.Single(resolver.Requests);
+        Assert.True(await runtime.StopAsync());
+    }
+
     private static SkillCatalogEntry AssertSkill(
         RuntimeRig rig,
         string id)

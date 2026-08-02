@@ -1089,6 +1089,64 @@ public sealed class MultiActorCoordinationTests
     }
 
     [Fact]
+    public async Task LifecycleCallbackCapacityIsUncertainAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var lifecycleDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var lifecycle = new RecordingLifecycle();
+        var coordinator = new MultiActorDecisionCoordinator(
+            new RecordingRuntime(delayMs: 0),
+            options: null,
+            lifecycle: lifecycle,
+            callbackExecutionDispatcher: lifecycleDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var error = await Assert.ThrowsAsync<
+                MultiActorBatchAbortUncertainException>(
+                () => coordinator.RunAsync(
+                        new MultiActorDecisionBatch(
+                            "lifecycle-capacity",
+                            Coordinate(),
+                            new[] { Request(1) }))
+                    .AsTask());
+            Assert.Equal("lifecycle-capacity", error.BatchId);
+            Assert.Equal("batch_start_uncertain", error.ReasonCode);
+            Assert.Equal(0, lifecycle.StartedCount);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await coordinator.RunAsync(
+            new MultiActorDecisionBatch(
+                "lifecycle-capacity-recovered",
+                Coordinate(),
+                new[] { Request(2) }));
+        Assert.True(Assert.Single(recovered.Results).Succeeded);
+        Assert.Equal("lifecycle-capacity-recovered", lifecycle.Manifest!.BatchId);
+    }
+
+    [Fact]
     public async Task LifecycleStartFailureAbortsTheUncertainStagingBatch()
     {
         var lifecycle = new FailingStartLifecycle();
@@ -1171,6 +1229,100 @@ public sealed class MultiActorCoordinationTests
             async () => await pending);
         Assert.Equal("tick-12", lifecycle.AbortedBatchId);
         Assert.Equal("cancelled", lifecycle.AbortReasonCode);
+    }
+
+    [Fact]
+    public async Task AbortCallbackCapacityFailureIsUncertainAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var lifecycleDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var runtime = new AbortCapacityRuntime(blockerDispatcher);
+        var lifecycle = new RecordingLifecycle();
+        var coordinator = new MultiActorDecisionCoordinator(
+            runtime,
+            options: null,
+            lifecycle: lifecycle,
+            callbackExecutionDispatcher: lifecycleDispatcher);
+        using var firstCancellation = new CancellationTokenSource();
+        using var secondCancellation = new CancellationTokenSource();
+        Task? first = null;
+        Task? second = null;
+        try
+        {
+            first = coordinator.RunAsync(
+                    new MultiActorDecisionBatch(
+                        "abort-capacity",
+                        Coordinate(),
+                        new[] { Request(1) }),
+                    firstCancellation.Token)
+                .AsTask();
+            await runtime.FirstEntered.WaitAsync(TimeSpan.FromSeconds(2));
+            firstCancellation.Cancel();
+
+            var aggregate = await Assert.ThrowsAsync<AggregateException>(
+                () => first.WaitAsync(TimeSpan.FromSeconds(2)));
+            var uncertain = Assert.Single(
+                aggregate.InnerExceptions,
+                item => item is MultiActorBatchAbortUncertainException);
+            Assert.Equal(
+                "abort-capacity",
+                ((MultiActorBatchAbortUncertainException)uncertain).BatchId);
+            Assert.Equal(
+                "cancelled",
+                ((MultiActorBatchAbortUncertainException)uncertain).ReasonCode);
+            Assert.Null(lifecycle.AbortedBatchId);
+
+            runtime.ReleaseBlocker();
+            await runtime.StartedBlocker!.WaitAsync(TimeSpan.FromSeconds(2));
+
+            second = coordinator.RunAsync(
+                    new MultiActorDecisionBatch(
+                        "abort-capacity-recovered",
+                        Coordinate(),
+                        new[] { Request(2) }),
+                    secondCancellation.Token)
+                .AsTask();
+            await runtime.SecondEntered.WaitAsync(TimeSpan.FromSeconds(2));
+            secondCancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => second.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal(
+                "abort-capacity-recovered",
+                lifecycle.AbortedBatchId);
+            Assert.Equal("cancelled", lifecycle.AbortReasonCode);
+        }
+        finally
+        {
+            firstCancellation.Cancel();
+            secondCancellation.Cancel();
+            runtime.ReleaseBlocker();
+            if (runtime.StartedBlocker is { } blocker)
+            {
+                await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+
+            foreach (var pending in new[] { first, second })
+            {
+                if (pending is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await pending.WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch (Exception) when (pending.IsCompleted)
+                {
+                }
+            }
+        }
     }
 
     [Fact]
@@ -2686,6 +2838,87 @@ public sealed class MultiActorCoordinationTests
             _run.State = RunStates.Completed;
             return new ValueTask<DurableRunOutcome>(
                 new DurableRunOutcome { Run = _run });
+        }
+    }
+
+    private sealed class AbortCapacityRuntime : IDurableAgentRuntime
+    {
+        private readonly BoundedCallbackExecutionDispatcher
+            _blockerDispatcher;
+        private readonly ManualResetEventSlim _releaseBlocker = new();
+        private readonly TaskCompletionSource<bool> _firstEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _secondEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private Task<int>? _blocker;
+        private int _calls;
+
+        public AbortCapacityRuntime(
+            BoundedCallbackExecutionDispatcher blockerDispatcher)
+        {
+            _blockerDispatcher = blockerDispatcher;
+        }
+
+        public RuntimeControlPlane Controls { get; } = new();
+
+        public Task FirstEntered => _firstEntered.Task;
+
+        public Task SecondEntered => _secondEntered.Task;
+
+        public Task? StartedBlocker => _blocker;
+
+        public async ValueTask<DurableRunOutcome> RunAsync(
+            DurableRunRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            _ = request;
+            var call = Interlocked.Increment(ref _calls);
+            if (call == 1)
+            {
+                var blockerEntered = new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!_blockerDispatcher.TryExecute(
+                        () =>
+                        {
+                            blockerEntered.TrySetResult(true);
+                            _releaseBlocker.Wait();
+                            return new ValueTask<int>(1);
+                        },
+                        out _blocker))
+                {
+                    throw new InvalidOperationException(
+                        "The capacity blocker was not admitted.");
+                }
+
+                await blockerEntered.Task.ConfigureAwait(false);
+                _firstEntered.TrySetResult(true);
+            }
+            else
+            {
+                _secondEntered.TrySetResult(true);
+            }
+
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                .ConfigureAwait(false);
+            throw new InvalidOperationException("unreachable");
+        }
+
+        public ValueTask<DurableRunOutcome> ResumeAsync(
+            string runId,
+            DurableRunContinuation? continuation = null,
+            IGameOperationReconciler? reconciler = null,
+            CancellationToken cancellationToken = default)
+        {
+            _ = runId;
+            _ = continuation;
+            _ = reconciler;
+            _ = cancellationToken;
+            throw new NotSupportedException();
+        }
+
+        public void ReleaseBlocker()
+        {
+            _releaseBlocker.Set();
         }
     }
 

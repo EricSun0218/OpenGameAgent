@@ -1002,6 +1002,7 @@ public sealed class HeadlessAgentRuntimeTests
                 {
                     var request = CreateRequest();
                     request.Run.RunId = $"headless-admitted-{index}";
+                    request.Run.Budget.MaxDurationMs = 60_000;
                     return runtime.RunAsync(request).AsTask();
                 })
             .ToArray();
@@ -1029,7 +1030,7 @@ public sealed class HeadlessAgentRuntimeTests
 
         store.Release();
         var outcomes = await Task.WhenAll(admitted)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(TimeSpan.FromSeconds(30));
         Assert.All(
             outcomes,
             outcome => Assert.Equal(RunStates.Completed, outcome.Run.State));

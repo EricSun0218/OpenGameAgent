@@ -176,6 +176,176 @@ public sealed class MemoryLifecycleTests
     }
 
     [Fact]
+    public async Task ProviderCallbackCapacityIsPartialAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var memoryDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var provider = new DeterministicMemoryStore("callback-provider");
+        await provider.UpsertAsync(
+            Record("capacity", "castle", Provenance("world", 1, true)),
+            CancellationToken.None);
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { provider },
+            writeStore: null,
+            options: null,
+            shutdownDispatcher: new BoundedCancellationDispatcher(),
+            detachedProviderCleanupCheckpoint: null,
+            queryTransformers: null,
+            resultRerankers: null,
+            processingTaskScheduler: null,
+            callbackExecutionDispatcher: memoryDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var unavailable = await lifecycle.RecallAsync(
+                Query("castle", worldId: "world", requireCommitted: true));
+            Assert.True(unavailable.IsPartial);
+            Assert.Equal(
+                new[] { "callback-provider" },
+                unavailable.FailedProviderIds);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await lifecycle.RecallAsync(
+            Query("castle", worldId: "world", requireCommitted: true));
+        Assert.False(recovered.IsPartial);
+        Assert.Equal("capacity", Assert.Single(recovered.Results).Record.MemoryId);
+    }
+
+    [Fact]
+    public async Task QueryTransformerCapacityFallsBackAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var memoryDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var transformer = new CountingQueryTransformer();
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            Array.Empty<IMemoryProvider>(),
+            writeStore: null,
+            options: null,
+            shutdownDispatcher: new BoundedCancellationDispatcher(),
+            detachedProviderCleanupCheckpoint: null,
+            queryTransformers: new[] { transformer },
+            resultRerankers: null,
+            processingTaskScheduler: null,
+            callbackExecutionDispatcher: memoryDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            _ = await lifecycle.RecallAsync(Query("original"));
+            Assert.Equal(0, transformer.CallCount);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        _ = await lifecycle.RecallAsync(Query("original"));
+        Assert.Equal(1, transformer.CallCount);
+    }
+
+    [Fact]
+    public async Task ResultRerankerCapacityFallsBackAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var memoryDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var provider = new CapacityArmingMemoryProvider(
+            blockerDispatcher,
+            new[]
+            {
+                new MemorySearchResult(
+                    Record(
+                        "first",
+                        "original",
+                        Provenance("world", 1, true)),
+                    score: 100),
+                new MemorySearchResult(
+                    Record(
+                        "second",
+                        "original",
+                        Provenance("world", 1, true)),
+                    score: 50)
+            });
+        var reranker = new CountingReverseReranker();
+        await using var lifecycle = new RuntimeMemoryLifecycle(
+            new IMemoryProvider[] { provider },
+            writeStore: null,
+            options: null,
+            shutdownDispatcher: new BoundedCancellationDispatcher(),
+            detachedProviderCleanupCheckpoint: null,
+            queryTransformers: null,
+            resultRerankers: new[] { reranker },
+            processingTaskScheduler: null,
+            callbackExecutionDispatcher: memoryDispatcher);
+
+        try
+        {
+            var fallback = await lifecycle.RecallAsync(Query("original"));
+            Assert.Equal(0, reranker.CallCount);
+            Assert.Equal(
+                new[] { "first", "second" },
+                fallback.Results.Select(item => item.Record.MemoryId));
+        }
+        finally
+        {
+            provider.Release();
+            if (provider.StartedBlocker is { } blocker)
+            {
+                await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        var recovered = await lifecycle.RecallAsync(Query("original"));
+        Assert.Equal(1, reranker.CallCount);
+        Assert.Equal(
+            new[] { "second", "first" },
+            recovered.Results.Select(item => item.Record.MemoryId));
+    }
+
+    [Fact]
     public async Task LifecycleFailClosesPerspectiveForUnfilteredProviders()
     {
         var now = DateTimeOffset.UnixEpoch.AddHours(1);
@@ -1116,7 +1286,7 @@ public sealed class MemoryLifecycleTests
             writeStore: null,
             options: new MemoryLifecycleOptions
             {
-                ProcessingStageTimeout = TimeSpan.FromMilliseconds(25),
+                ProcessingStageTimeout = TimeSpan.FromMilliseconds(500),
                 ShutdownTimeout = TimeSpan.FromSeconds(2)
             },
             shutdownDispatcher: new BoundedCancellationDispatcher(),
@@ -1329,6 +1499,30 @@ public sealed class MemoryLifecycleTests
         }
     }
 
+    private sealed class CountingQueryTransformer : IMemoryQueryTransformer
+    {
+        private int _callCount;
+
+        public string TransformerId => "counting-query";
+
+        public string Version => "1";
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public ValueTask<MemoryQuery> TransformAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _callCount);
+            return new ValueTask<MemoryQuery>(
+                CopyQuery(
+                    query,
+                    ProtocolJson.ParseElement("""{"text":"rewritten"}"""),
+                    query.WorldId));
+        }
+    }
+
     private sealed class WorldBroadeningTransformer :
         IMemoryQueryTransformer
     {
@@ -1467,6 +1661,124 @@ public sealed class MemoryLifecycleTests
                 .ToArray();
             return new ValueTask<IReadOnlyList<MemorySearchResult>>(
                 candidates.Reverse().ToArray());
+        }
+    }
+
+    private sealed class CountingReverseReranker : IMemoryResultReranker
+    {
+        private int _callCount;
+
+        public string RerankerId => "counting-reverse";
+
+        public string Version => "1";
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> RerankAsync(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> candidates,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _callCount);
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(
+                candidates.Reverse().ToArray());
+        }
+    }
+
+    private sealed class CapacityArmingMemoryProvider : IMemoryProvider
+    {
+        private readonly CapacityArmingResults _results;
+
+        public CapacityArmingMemoryProvider(
+            BoundedCallbackExecutionDispatcher blockerDispatcher,
+            IReadOnlyList<MemorySearchResult> results)
+        {
+            _results = new CapacityArmingResults(
+                blockerDispatcher,
+                results);
+        }
+
+        public string ProviderId => "capacity-arming";
+
+        public Task? StartedBlocker => _results.StartedBlocker;
+
+        public ValueTask<IReadOnlyList<MemorySearchResult>> SearchAsync(
+            MemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            _ = query;
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<IReadOnlyList<MemorySearchResult>>(_results);
+        }
+
+        public void Release()
+        {
+            _results.Release();
+        }
+    }
+
+    private sealed class CapacityArmingResults
+        : IReadOnlyList<MemorySearchResult>
+    {
+        private readonly BoundedCallbackExecutionDispatcher
+            _blockerDispatcher;
+        private readonly IReadOnlyList<MemorySearchResult> _results;
+        private readonly ManualResetEventSlim _release = new();
+        private readonly TaskCompletionSource<bool> _entered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private Task<int>? _blocker;
+        private int _armed;
+
+        public CapacityArmingResults(
+            BoundedCallbackExecutionDispatcher blockerDispatcher,
+            IReadOnlyList<MemorySearchResult> results)
+        {
+            _blockerDispatcher = blockerDispatcher;
+            _results = results;
+        }
+
+        public int Count
+        {
+            get
+            {
+                if (Interlocked.Exchange(ref _armed, 1) == 0)
+                {
+                    if (!_blockerDispatcher.TryExecute(
+                            () =>
+                            {
+                                _entered.TrySetResult(true);
+                                _release.Wait();
+                                return new ValueTask<int>(1);
+                            },
+                            out _blocker))
+                    {
+                        throw new InvalidOperationException(
+                            "The capacity blocker was not admitted.");
+                    }
+
+                    _entered.Task.GetAwaiter().GetResult();
+                }
+
+                return _results.Count;
+            }
+        }
+
+        public Task? StartedBlocker => _blocker;
+
+        public MemorySearchResult this[int index] => _results[index];
+
+        public IEnumerator<MemorySearchResult> GetEnumerator() =>
+            _results.GetEnumerator();
+
+        System.Collections.IEnumerator
+            System.Collections.IEnumerable.GetEnumerator() =>
+            GetEnumerator();
+
+        public void Release()
+        {
+            _release.Set();
         }
     }
 

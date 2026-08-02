@@ -117,6 +117,32 @@ worker class or lane is full, later cancellation attempts fail safely while the
 owning operation remains detached and bounded by its normal shutdown policy.
 This isolates resource growth but does not attempt to terminate uncooperative
 application code.
+Root lifecycle shutdown is stricter: if its cancellation lane is temporarily
+full, shutdown remains pending and dispatches cancellation when capacity
+returns. It never reports an unissued root cancellation as completed.
+
+Starting an application callback has a separate process-wide boundary. The
+synchronous prefix of provider streaming/preparation, memory search/embedding,
+routing policy, context, middleware, skill-resolution, multi-actor lifecycle,
+and final-output admission policy callbacks run outside the ordinary .NET
+worker pool. At most 64
+such prefixes can be active across the process. At most 256 accepted callbacks
+may remain outstanding while awaiting asynchronous completion or required
+cleanup admission, and each callback domain also has bounded admission. The
+prefixes run on a lazily grown, reusable dedicated worker pool rather than
+creating an operating-system thread for every streamed event. The
+initial prefix lease includes callback invocation and asynchronous-wait
+registration. A custom `ValueTask` source is also re-admitted before its
+extension-controlled completion result is read. The normal per-runtime slot
+remains held until the asynchronous operation settles, but ordinary
+asynchronous waiting does not retain a prefix thread or active-prefix lease.
+A synchronously blocked extension therefore cannot delay wall-clock timeout
+continuations or evade the bound through a custom awaitable. Saturation fails
+or falls back through the owning subsystem's existing capacity/error contract
+instead of creating an unbounded thread or queue. An already accepted callback
+may still settle or clean up after its caller times out, but it remains inside
+the 256-callback outstanding bound. Exhausting that budget is an explicit
+capacity failure; it cannot create another waiter.
 
 `DurableAgentRuntime.StopAsync` is intentionally bounded. It reports whether
 active runs and detached work drained within their configured windows, while

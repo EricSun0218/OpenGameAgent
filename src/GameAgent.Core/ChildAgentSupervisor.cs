@@ -538,21 +538,8 @@ public sealed class ChildAgentSupervisor : IAsyncDisposable
     private static async Task CancelIsolatedAsync(
         CancellationTokenSource cancellation)
     {
-        await Task.Run(
-                () =>
-                {
-                    try
-                    {
-                        cancellation.Cancel();
-                    }
-                    catch (Exception exception)
-                        when (exception is not OutOfMemoryException
-                              and not StackOverflowException)
-                    {
-                        // Cancellation callbacks belong to host/provider
-                        // extensions and cannot be allowed to block callers.
-                    }
-                })
+        await BoundedCancellationDispatcher.AgentLifecycleShared
+            .DispatchWhenAvailableAsync(cancellation)
             .ConfigureAwait(false);
     }
 

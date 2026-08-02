@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using GameAgent.Core;
@@ -1050,10 +1051,14 @@ public sealed class ConversationContextTests
 
         compactor.Release();
         await compactor.AllSettled.WaitAsync(TimeSpan.FromSeconds(1));
-        Assert.True(
-            SpinWait.SpinUntil(
-                () => manager.CleanupCompleted,
-                TimeSpan.FromSeconds(1)));
+        var cleanupDeadline = Stopwatch.StartNew();
+        while (!manager.CleanupCompleted
+               && cleanupDeadline.Elapsed < TimeSpan.FromSeconds(2))
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.True(manager.CleanupCompleted);
         Assert.Equal(0, manager.DetachedCompactionCount);
         Assert.True(await manager.StopAsync());
     }

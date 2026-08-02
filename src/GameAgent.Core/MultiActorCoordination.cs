@@ -702,6 +702,8 @@ public sealed class MultiActorDecisionCoordinator
     private readonly SemaphoreSlim _participantRunSlots;
     private readonly SemaphoreSlim _participantResumeSlots;
     private readonly SemaphoreSlim _activeBatchSlots;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly object _preparationIdentity = new();
     private readonly ConcurrentDictionary<string, byte>
         _activeBatchOperations;
@@ -713,6 +715,19 @@ public sealed class MultiActorDecisionCoordinator
         IDurableAgentRuntime runtime,
         MultiActorCoordinatorOptions? options = null,
         IMultiActorDecisionLifecycle? lifecycle = null)
+        : this(
+            runtime,
+            options,
+            lifecycle,
+            BoundedCallbackExecutionDispatcher.MultiActorLifecycleShared)
+    {
+    }
+
+    internal MultiActorDecisionCoordinator(
+        IDurableAgentRuntime runtime,
+        MultiActorCoordinatorOptions? options,
+        IMultiActorDecisionLifecycle? lifecycle,
+        BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _activeBatchOperations = SharedActiveBatchOperations.GetValue(
@@ -721,6 +736,10 @@ public sealed class MultiActorDecisionCoordinator
                 StringComparer.Ordinal));
         _options = options ?? new MultiActorCoordinatorOptions();
         _lifecycle = lifecycle;
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? throw new ArgumentNullException(
+                                           nameof(
+                                               callbackExecutionDispatcher));
         _lifecycleNotificationSlots = new SemaphoreSlim(
             _options.MaxDetachedLifecycleNotifications,
             _options.MaxDetachedLifecycleNotifications);
@@ -1537,9 +1556,17 @@ public sealed class MultiActorDecisionCoordinator
         Task operation;
         try
         {
-            operation = Task.Run(
-                async () => await notification(deadline.Token)
-                    .ConfigureAwait(false));
+            if (!_callbackExecutionDispatcher.TryExecute(
+                        () => notification(deadline.Token),
+                        out var lifecycleOperation))
+            {
+                throw new MultiActorBatchAbortUncertainException(
+                    batchId,
+                    reasonCode,
+                    "Lifecycle callback execution capacity is exhausted; host reconciliation is required.");
+            }
+
+            operation = lifecycleOperation;
         }
         catch
         {
@@ -2296,13 +2323,20 @@ public sealed class MultiActorDecisionCoordinator
         Task notification;
         try
         {
-            notification = Task.Run(
-                async () => await _lifecycle
-                    .BatchAbortedAsync(
-                        batchId,
-                        reasonCode,
-                        cancellation.Token)
-                    .ConfigureAwait(false));
+            if (!_callbackExecutionDispatcher.TryExecute(
+                        () => _lifecycle.BatchAbortedAsync(
+                            batchId,
+                            reasonCode,
+                            cancellation.Token),
+                        out var abortOperation))
+            {
+                throw new MultiActorBatchAbortUncertainException(
+                    batchId,
+                    reasonCode,
+                    "Abort callback execution capacity is exhausted; host reconciliation is required.");
+            }
+
+            notification = abortOperation;
         }
         catch
         {

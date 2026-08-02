@@ -4,6 +4,86 @@ namespace GameAgent.Tests;
 
 public sealed class AgentLifecycleMiddlewareFailureTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CallbackCapacityPreservesRequiredAndOptionalSemantics(
+        bool required)
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var pipelineDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var middleware = new ContinuingMiddleware();
+        using var pipeline = new AgentLifecyclePipeline(
+            new[]
+            {
+                new AgentLifecycleMiddlewareRegistration(
+                    middleware,
+                    required)
+            },
+            new AgentLifecyclePipelineOptions
+            {
+                MaxConcurrentCalls = 1,
+                MiddlewareTimeout = TimeSpan.FromSeconds(1),
+                ShutdownTimeout = TimeSpan.FromSeconds(1)
+            },
+            pipelineDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (required)
+            {
+                var error = await Assert.ThrowsAsync<
+                    AgentLifecycleMiddlewareException>(
+                    () => pipeline.InvokeAsync(
+                            Event("callback-capacity-required"),
+                            allowRejection: true,
+                            CancellationToken.None)
+                        .AsTask());
+                Assert.Equal(
+                    "middleware_execution_capacity_exhausted",
+                    error.ReasonCode);
+            }
+            else
+            {
+                await pipeline.InvokeAsync(
+                    Event("callback-capacity-optional"),
+                    allowRejection: true,
+                    CancellationToken.None);
+            }
+
+            Assert.Equal(0, middleware.CallCount);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        await pipeline.InvokeAsync(
+            Event("callback-capacity-recovered"),
+            allowRejection: true,
+            CancellationToken.None);
+        Assert.Equal(1, middleware.CallCount);
+        Assert.True(await pipeline.StopAsync());
+    }
+
     [Fact]
     public async Task RequiredTimeoutFailsClosedWithStableReason()
     {
@@ -59,7 +139,9 @@ public sealed class AgentLifecycleMiddlewareFailureTests
     {
         using var pipeline = Pipeline(
             new FailingMiddleware(returnNull),
-            required: true);
+            required: true,
+            middlewareTimeout: TimeSpan.FromSeconds(2),
+            shutdownTimeout: TimeSpan.FromSeconds(2));
 
         var error = await Assert.ThrowsAsync<AgentLifecycleMiddlewareException>(
             () => pipeline.InvokeAsync(
@@ -170,7 +252,9 @@ public sealed class AgentLifecycleMiddlewareFailureTests
 
     private static AgentLifecyclePipeline Pipeline(
         IAgentLifecycleMiddleware middleware,
-        bool required) =>
+        bool required,
+        TimeSpan? middlewareTimeout = null,
+        TimeSpan? shutdownTimeout = null) =>
         new(
             new[]
             {
@@ -181,8 +265,10 @@ public sealed class AgentLifecycleMiddlewareFailureTests
             new AgentLifecyclePipelineOptions
             {
                 MaxConcurrentCalls = 1,
-                MiddlewareTimeout = TimeSpan.FromMilliseconds(25),
-                ShutdownTimeout = TimeSpan.FromMilliseconds(25)
+                MiddlewareTimeout = middlewareTimeout
+                                    ?? TimeSpan.FromMilliseconds(25),
+                ShutdownTimeout = shutdownTimeout
+                                  ?? TimeSpan.FromMilliseconds(25)
             });
 
     private static RunStartingLifecycleEvent Event(string runId) =>
@@ -230,6 +316,28 @@ public sealed class AgentLifecycleMiddlewareFailureTests
             Entered.TrySetResult(true);
             await Release.Task;
             return AgentLifecycleDecision.Continue;
+        }
+    }
+
+    private sealed class ContinuingMiddleware : IAgentLifecycleMiddleware
+    {
+        private int _callCount;
+
+        public string MiddlewareId => "continuing";
+
+        public string Version => "1";
+
+        public int CallCount => Volatile.Read(ref _callCount);
+
+        public ValueTask<AgentLifecycleDecision> HandleAsync(
+            AgentLifecycleEvent lifecycleEvent,
+            CancellationToken cancellationToken)
+        {
+            _ = lifecycleEvent;
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _callCount);
+            return new ValueTask<AgentLifecycleDecision>(
+                AgentLifecycleDecision.Continue);
         }
     }
 

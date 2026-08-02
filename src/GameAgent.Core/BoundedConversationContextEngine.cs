@@ -16,6 +16,8 @@ internal sealed class BoundedConversationContextEngine :
     private readonly IConversationContextEngine _inner;
     private readonly ConversationContextOptions _options;
     private readonly SemaphoreSlim _slots;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, Task> _detached = new();
     private readonly object _lifecycleSync = new();
@@ -30,11 +32,15 @@ internal sealed class BoundedConversationContextEngine :
 
     public BoundedConversationContextEngine(
         IConversationContextEngine inner,
-        ConversationContextOptions options)
+        ConversationContextOptions options,
+        BoundedCallbackExecutionDispatcher? callbackExecutionDispatcher = null)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _options = (options ?? throw new ArgumentNullException(nameof(options)))
             .Snapshot();
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? BoundedCallbackExecutionDispatcher
+                                           .ConversationContextShared;
         try
         {
             _engineId = RuntimeGuard.RequiredUtf8(
@@ -121,14 +127,20 @@ internal sealed class BoundedConversationContextEngine :
             try
             {
                 var contextToken = cancellation.Token;
-                operation = Task.Run(
-                    async () => await _inner.PrepareAsync(
+                if (!_callbackExecutionDispatcher.TryExecute(
+                            () => _inner.PrepareAsync(
                             runId,
                             turnId,
                             input,
                             stableIds,
-                            contextToken)
-                        .ConfigureAwait(false));
+                            contextToken),
+                            out var acceptedOperation))
+                {
+                    throw new TimeoutException(
+                        "Conversation context execution capacity was exhausted.");
+                }
+
+                operation = acceptedOperation;
             }
             catch
             {
@@ -197,8 +209,19 @@ internal sealed class BoundedConversationContextEngine :
             Task operation;
             try
             {
-                operation = Task.Run(
-                    () => _inner.RegisterCheckpoint(snapshot));
+                if (!_callbackExecutionDispatcher.TryExecute(
+                            () =>
+                            {
+                                _inner.RegisterCheckpoint(snapshot);
+                                return new ValueTask<bool>(true);
+                            },
+                            out var checkpointOperation))
+                {
+                    throw new TimeoutException(
+                        "Conversation context execution capacity was exhausted.");
+                }
+
+                operation = checkpointOperation;
             }
             catch
             {
@@ -268,20 +291,9 @@ internal sealed class BoundedConversationContextEngine :
 
     private async Task<bool> CompleteCleanupAttemptAsync()
     {
-        var cancellation = Task.Run(
-            () =>
-            {
-                try
-                {
-                    _shutdown.Cancel();
-                }
-                catch (Exception exception)
-                    when (exception is not OutOfMemoryException
-                          and not StackOverflowException)
-                {
-                    // Extension cancellation callbacks cannot own shutdown.
-                }
-            });
+        var cancellation = BoundedCancellationDispatcher
+            .ConversationContextShared
+            .DispatchWhenAvailableAsync(_shutdown);
         Task idle;
         lock (_lifecycleSync)
         {
@@ -310,10 +322,14 @@ internal sealed class BoundedConversationContextEngine :
     {
         try
         {
-            return await Task.Run(
-                    async () => await _inner.StopAsync()
-                        .ConfigureAwait(false))
-                .ConfigureAwait(false);
+            if (!_callbackExecutionDispatcher.TryExecute(
+                        () => _inner.StopAsync(),
+                        out var stop))
+            {
+                return false;
+            }
+
+            return await stop.ConfigureAwait(false);
         }
         catch (Exception exception)
             when (exception is not OutOfMemoryException

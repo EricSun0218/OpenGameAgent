@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks.Sources;
 using GameAgent.Core;
 using GameAgent.Protocol;
 using GameAgent.Testing;
@@ -270,6 +271,129 @@ public sealed class ProviderAttemptRunnerTests
     }
 
     [Fact]
+    public async Task RequestPreparationValueTaskResultIsReisolated()
+    {
+        var provider = new BlockingResultPreparationProvider();
+        var runner = new ProviderAttemptRunner(
+            new IStreamingModelProvider[] { provider },
+            new ProviderRetryPolicy
+            {
+                MaxAttemptsPerProvider = 1,
+                InitialDelay = TimeSpan.Zero,
+                MaxDelay = TimeSpan.Zero,
+                RequestPreparationTimeout = TimeSpan.FromMilliseconds(25),
+                CleanupTimeout = TimeSpan.FromMilliseconds(25)
+            },
+            new ImmediateDelay(),
+            new SequentialIdGenerator());
+        var detached = new List<Task>();
+        var run = runner.RunAsync(
+                "run-preparation-result",
+                "run-attempt-preparation-result",
+                "turn-preparation-result",
+                Array.Empty<NormalizedMessage>(),
+                Array.Empty<ToolDescriptor>(),
+                new AttemptFence(),
+                null,
+                CancellationToken.None,
+                onDetachedCleanup: detached.Add)
+            .AsTask();
+        Task? completionTrigger = null;
+
+        try
+        {
+            await provider.RegistrationEntered.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            completionTrigger = Task.Factory.StartNew(
+                provider.Complete,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            await provider.ResultEntered.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            var error = await Assert.ThrowsAsync<ProviderException>(
+                () => run.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("provider_request_preparation_timeout", error.Code);
+            Assert.False(provider.ResultRanOnThreadPool);
+            Assert.False(Assert.Single(detached).IsCompleted);
+            Assert.Equal(0, provider.StreamCalls);
+        }
+        finally
+        {
+            provider.ReleaseResult();
+            if (completionTrigger is not null)
+            {
+                await completionTrigger.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        await Assert.Single(detached).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, provider.ResultCount);
+    }
+
+    [Fact]
+    public async Task WirePreparationValueTaskResultIsReisolated()
+    {
+        var provider = new BlockingResultPreparedProvider();
+        var runner = new ProviderAttemptRunner(
+            new IStreamingModelProvider[] { provider },
+            new ProviderRetryPolicy
+            {
+                MaxAttemptsPerProvider = 1,
+                InitialDelay = TimeSpan.Zero,
+                MaxDelay = TimeSpan.Zero,
+                RequestPreparationTimeout = TimeSpan.FromMilliseconds(25),
+                CleanupTimeout = TimeSpan.FromMilliseconds(25)
+            },
+            new ImmediateDelay(),
+            new SequentialIdGenerator());
+        var detached = new List<Task>();
+        var run = runner.RunAsync(
+                "run-wire-result",
+                "run-attempt-wire-result",
+                "turn-wire-result",
+                Array.Empty<NormalizedMessage>(),
+                Array.Empty<ToolDescriptor>(),
+                new AttemptFence(),
+                null,
+                CancellationToken.None,
+                onDetachedCleanup: detached.Add)
+            .AsTask();
+        Task? completionTrigger = null;
+
+        try
+        {
+            await provider.RegistrationEntered.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            completionTrigger = Task.Factory.StartNew(
+                provider.Complete,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            await provider.ResultEntered.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            var error = await Assert.ThrowsAsync<ProviderException>(
+                () => run.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Equal("provider_wire_preparation_timeout", error.Code);
+            Assert.False(provider.ResultRanOnThreadPool);
+            Assert.False(Assert.Single(detached).IsCompleted);
+            Assert.Equal(0, provider.DisposeCount);
+        }
+        finally
+        {
+            provider.ReleaseResult();
+            if (completionTrigger is not null)
+            {
+                await completionTrigger.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        await Assert.Single(detached).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, provider.ResultCount);
+        Assert.Equal(1, provider.DisposeCount);
+    }
+
+    [Fact]
     public async Task LatePreparedStreamCleanupFailureKeepsProviderQuarantined()
     {
         var provider = new LateFaultingPreparedStreamProvider();
@@ -399,6 +523,289 @@ public sealed class ProviderAttemptRunnerTests
         }
 
         await Assert.Single(detached).WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BlockingCurrentGetterIsBoundedAndCleanupRunsOnce(
+        bool prepared)
+    {
+        IBlockingCurrentProvider controlled = prepared
+            ? new BlockingCurrentPreparedProvider()
+            : new BlockingCurrentDirectProvider();
+        var runner = new ProviderAttemptRunner(
+            new IStreamingModelProvider[] { controlled },
+            new ProviderRetryPolicy
+            {
+                MaxAttemptsPerProvider = 1,
+                InitialDelay = TimeSpan.Zero,
+                MaxDelay = TimeSpan.Zero,
+                IdleTimeout = TimeSpan.FromMilliseconds(25),
+                TotalTimeout = TimeSpan.FromSeconds(2),
+                CleanupTimeout = TimeSpan.FromMilliseconds(25)
+            },
+            new ImmediateDelay(),
+            new SequentialIdGenerator());
+        var detached = new List<Task>();
+        var expectedDisposeStages = prepared ? 2 : 1;
+
+        try
+        {
+            var error = await Assert.ThrowsAsync<ProviderException>(
+                () => runner.RunAsync(
+                        "run-current",
+                        "run-attempt-current",
+                        "turn-current",
+                        Array.Empty<NormalizedMessage>(),
+                        Array.Empty<ToolDescriptor>(),
+                        new AttemptFence(),
+                        null,
+                        CancellationToken.None,
+                        onDetachedCleanup: detached.Add)
+                    .AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(2)));
+
+            Assert.Equal(
+                "provider_event_materialization_timeout",
+                error.Code);
+            await controlled.CurrentEntered.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert.False(controlled.CurrentRanOnThreadPool);
+            Assert.False(Assert.Single(detached).IsCompleted);
+            Assert.Equal(0, controlled.DisposeCount);
+
+            controlled.ReleaseCurrent();
+            for (var stage = 0; stage < expectedDisposeStages; stage++)
+            {
+                await controlled.DisposeResultEntered(stage).WaitAsync(
+                    TimeSpan.FromSeconds(2));
+                Assert.False(
+                    controlled.DisposeResultRanOnThreadPool(stage));
+                Assert.False(Assert.Single(detached).IsCompleted);
+                controlled.ReleaseDisposeResult(stage);
+            }
+        }
+        finally
+        {
+            controlled.ReleaseCurrent();
+            for (var stage = 0; stage < expectedDisposeStages; stage++)
+            {
+                controlled.ReleaseDisposeResult(stage);
+            }
+        }
+
+        await Assert.Single(detached).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(prepared ? 2 : 1, controlled.DisposeCount);
+        Assert.Equal(
+            expectedDisposeStages,
+            controlled.DisposeResultCount);
+        if (controlled is BlockingCurrentPreparedProvider preparedProvider)
+        {
+            Assert.Equal(1, preparedProvider.InnerDisposeCount);
+            Assert.Equal(1, preparedProvider.PreparedDisposeCount);
+        }
+    }
+
+    [Fact]
+    public async Task StreamStartupCapacityFailureIsKnownZeroAndRecovers()
+    {
+        var processLimiter = new BoundedCallbackProcessLimiter(1);
+        var callbackDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter);
+        var provider = new TestStreamingProvider(
+            "callback-capacity",
+            request => Events(
+                new ModelStreamEvent
+                {
+                    StreamAttemptId = request.StreamAttemptId,
+                    Ordinal = 0,
+                    Kind = ModelStreamEventKinds.TextDelta,
+                    TextDelta = "ok"
+                },
+                Usage(request, 1, 0, 1, "0"),
+                new ModelStreamEvent
+                {
+                    StreamAttemptId = request.StreamAttemptId,
+                    Ordinal = 2,
+                    Kind = ModelStreamEventKinds.Completed,
+                    FinishReason = "stop"
+                }));
+        var runner = new ProviderAttemptRunner(
+            new IStreamingModelProvider[] { provider },
+            new ProviderRetryPolicy
+            {
+                MaxAttemptsPerProvider = 1,
+                InitialDelay = TimeSpan.Zero,
+                MaxDelay = TimeSpan.Zero
+            },
+            new ImmediateDelay(),
+            new SequentialIdGenerator(),
+            streamLimits: null,
+            eventWaitDelay: new SystemRuntimeDelay(),
+            cancellationDispatcher: new BoundedCancellationDispatcher(),
+            callbackExecutionDispatcher: callbackDispatcher);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var detached = new List<Task>();
+        using var release = new ManualResetEventSlim(false);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var error = await Assert.ThrowsAsync<ProviderException>(
+                () => Run(runner, detached.Add));
+            Assert.Equal(
+                "provider_execution_capacity_exhausted",
+                error.Code);
+            Assert.True(error.UsageKnownToBeZero);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.WhenAll(detached).WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await Run(runner);
+        Assert.Equal("ok", recovered.Text);
+    }
+
+    [Fact]
+    public async Task PreparedStreamAdmissionCapacityIsKnownZeroAndRecovers()
+    {
+        var processLimiter = new BoundedCallbackProcessLimiter(1);
+        var callbackDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter);
+        var provider = new SuccessfulPreparedProvider();
+        var runner = CreateRunner(provider, callbackDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var error = await Assert.ThrowsAsync<ProviderException>(
+                () => Run(runner));
+            Assert.Equal(
+                "provider_execution_capacity_exhausted",
+                error.Code);
+            Assert.True(error.UsageKnownToBeZero);
+            Assert.Equal(0, provider.PrepareCalls);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await Run(runner);
+        Assert.Equal(provider.ProviderId, recovered.ProviderId);
+        Assert.Equal(1, provider.PrepareCalls);
+        Assert.Equal(1, provider.DisposeCount);
+    }
+
+    [Fact]
+    public async Task PostStartMoveNextCapacityIsUnknownAndCleanupWaits()
+    {
+        var processLimiter = new BoundedCallbackProcessLimiter(1);
+        var pendingLimiter = new BoundedCallbackProcessLimiter(2);
+        var callbackDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter,
+            pendingLimiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            processLimiter,
+            pendingLimiter);
+        var provider = new CapacityMoveNextProvider();
+        var runner = CreateRunner(provider, callbackDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var blockerEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<int>? blocker = null;
+
+        var run = runner.RunAsync(
+                "run-move-next-capacity",
+                "run-attempt-move-next-capacity",
+                "turn-move-next-capacity",
+                Array.Empty<NormalizedMessage>(),
+                Array.Empty<ToolDescriptor>(),
+                new AttemptFence(),
+                item =>
+                {
+                    if (string.Equals(
+                            item.Kind,
+                            ModelStreamEventKinds.Usage,
+                            StringComparison.Ordinal))
+                    {
+                        Assert.True(
+                            blockerDispatcher.TryExecute(
+                                () =>
+                                {
+                                    blockerEntered.TrySetResult(true);
+                                    release.Wait();
+                                    return new ValueTask<int>(1);
+                                },
+                                out blocker));
+                    }
+
+                    return default;
+                },
+                CancellationToken.None)
+            .AsTask();
+
+        try
+        {
+            await blockerEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => pendingLimiter.Active == 2,
+                    TimeSpan.FromSeconds(2)));
+            Assert.False(run.IsCompleted);
+            Assert.Equal(0, provider.DisposeCount);
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        await blocker!.WaitAsync(TimeSpan.FromSeconds(2));
+        var error = await Assert.ThrowsAsync<ProviderException>(
+            () => run.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal("provider_execution_capacity_exhausted", error.Code);
+        Assert.False(error.UsageKnownToBeZero);
+        Assert.Equal(1, provider.DisposeCount);
+
+        var recovered = await Run(runner);
+        Assert.Equal(provider.ProviderId, recovered.ProviderId);
+        Assert.Equal(2, provider.DisposeCount);
+        Assert.Equal(0, pendingLimiter.Active);
     }
 
     [Fact]
@@ -3177,6 +3584,28 @@ public sealed class ProviderAttemptRunnerTests
             streamLimits);
     }
 
+    private static ProviderAttemptRunner CreateRunner(
+        IStreamingModelProvider provider,
+        BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
+    {
+        return new ProviderAttemptRunner(
+            new[] { provider },
+            new ProviderRetryPolicy
+            {
+                MaxAttemptsPerProvider = 1,
+                InitialDelay = TimeSpan.Zero,
+                MaxDelay = TimeSpan.Zero,
+                IdleTimeout = TimeSpan.FromSeconds(2),
+                TotalTimeout = TimeSpan.FromSeconds(5)
+            },
+            new ImmediateDelay(),
+            new SequentialIdGenerator(),
+            streamLimits: null,
+            eventWaitDelay: new SystemRuntimeDelay(),
+            cancellationDispatcher: new BoundedCancellationDispatcher(),
+            callbackExecutionDispatcher: callbackExecutionDispatcher);
+    }
+
     private static ProviderAttemptRunner CreateResilientRunner(
         IReadOnlyList<IStreamingModelProvider> providers,
         IRuntimeClock clock,
@@ -3317,7 +3746,8 @@ public sealed class ProviderAttemptRunnerTests
     }
 
     private static Task<ProviderAttemptResult> Run(
-        ProviderAttemptRunner runner)
+        ProviderAttemptRunner runner,
+        Action<Task>? onDetachedCleanup = null)
     {
         return runner.RunAsync(
                 "run-1",
@@ -3327,7 +3757,8 @@ public sealed class ProviderAttemptRunnerTests
                 Array.Empty<ToolDescriptor>(),
                 new AttemptFence(),
                 null,
-                CancellationToken.None)
+                CancellationToken.None,
+                onDetachedCleanup: onDetachedCleanup)
             .AsTask();
     }
 
@@ -3945,6 +4376,259 @@ public sealed class ProviderAttemptRunnerTests
         }
     }
 
+    private sealed class BlockingResultPreparationProvider :
+        IStreamingModelProvider,
+        IProviderRouteMetadataSource,
+        IProviderRequestAdapter
+    {
+        private readonly TaskCompletionSource _registrationEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _resultEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ManualResetEventSlim _resultRelease = new();
+        private ControlledValueTaskSource<ProviderPreparedRequest>? _source;
+        private int _streamCalls;
+
+        public string ProviderId => "blocking-result-preparation";
+
+        public ProviderRouteMetadata RouteMetadata { get; } =
+            new("blocking-result-model", "test.streaming.v1");
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public Task RegistrationEntered => _registrationEntered.Task;
+
+        public Task ResultEntered => _resultEntered.Task;
+
+        public bool ResultRanOnThreadPool =>
+            _source?.ResultRanOnThreadPool ?? true;
+
+        public int ResultCount => _source?.ResultCount ?? 0;
+
+        public int StreamCalls => Volatile.Read(ref _streamCalls);
+
+        public ValueTask<ProviderPreparedRequest> PrepareRequestAsync(
+            ProviderRequestPreparationContext context,
+            CancellationToken cancellationToken)
+        {
+            var candidate = new ProviderRequestSanitizer()
+                .PrepareRequestAsync(context, cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+            _source = new ControlledValueTaskSource<ProviderPreparedRequest>(
+                candidate,
+                _registrationEntered,
+                _resultEntered,
+                _resultRelease);
+            return new ValueTask<ProviderPreparedRequest>(_source, token: 0);
+        }
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            Interlocked.Increment(ref _streamCalls);
+            return Events();
+        }
+
+        public void Complete()
+        {
+            (_source
+             ?? throw new InvalidOperationException(
+                 "The preparation source was not created."))
+                .Complete();
+        }
+
+        public void ReleaseResult()
+        {
+            _resultRelease.Set();
+        }
+    }
+
+    private sealed class BlockingResultPreparedProvider
+        : IStreamingModelProvider,
+          IPreparedStreamingModelProvider,
+          IProviderRouteMetadataSource
+    {
+        private readonly TaskCompletionSource _registrationEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _resultEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ManualResetEventSlim _resultRelease = new();
+        private ControlledValueTaskSource<PreparedProviderStream>? _source;
+        private ResultPreparedStream? _prepared;
+
+        public string ProviderId => "blocking-result-prepared";
+
+        public ProviderRouteMetadata RouteMetadata { get; } = new(
+            "blocking-result-prepared-model",
+            new ProviderDialectContract(
+                "test.blocking-result.sse.v1",
+                ProviderRequestFamily.Custom,
+                "test.blocking-result.request.v1",
+                ProviderStreamFraming.ServerSentEvents,
+                "test.blocking-result.sse.v1",
+                "test.blocking-result.tools.v1",
+                "test.blocking-result.usage.v1",
+                "test.blocking-result.reasoning.v1",
+                "application/json",
+                "test.blocking-result.state.v1"),
+            "test-route-policy.v1",
+            new string('d', 64));
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public Task RegistrationEntered => _registrationEntered.Task;
+
+        public Task ResultEntered => _resultEntered.Task;
+
+        public bool ResultRanOnThreadPool =>
+            _source?.ResultRanOnThreadPool ?? true;
+
+        public int ResultCount => _source?.ResultCount ?? 0;
+
+        public int DisposeCount => _prepared?.DisposeCount ?? 0;
+
+        public ValueTask<PreparedProviderStream> PrepareStreamAsync(
+            ProviderStreamPreparationContext context,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _prepared = new ResultPreparedStream(
+                ProviderWireRequestEvidence.CreateAvailable(
+                    new byte[] { 1 },
+                    "application/json",
+                    context.RouteIdentity));
+            _source = new ControlledValueTaskSource<PreparedProviderStream>(
+                _prepared,
+                _registrationEntered,
+                _resultEntered,
+                _resultRelease);
+            return new ValueTask<PreparedProviderStream>(_source, token: 0);
+        }
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            throw new InvalidOperationException(
+                "The prepared provider must not use direct dispatch.");
+        }
+
+        public void Complete()
+        {
+            (_source
+             ?? throw new InvalidOperationException(
+                 "The wire-preparation source was not created."))
+                .Complete();
+        }
+
+        public void ReleaseResult()
+        {
+            _resultRelease.Set();
+        }
+
+        private sealed class ResultPreparedStream : PreparedProviderStream
+        {
+            private int _disposeCount;
+
+            public ResultPreparedStream(ProviderWireRequestEvidence evidence)
+                : base(evidence)
+            {
+            }
+
+            public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+            public override IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+                CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Events();
+            }
+
+            public override ValueTask DisposeAsync()
+            {
+                Interlocked.Increment(ref _disposeCount);
+                return default;
+            }
+        }
+    }
+
+    private sealed class ControlledValueTaskSource<T> : IValueTaskSource<T>
+    {
+        private readonly T _result;
+        private readonly TaskCompletionSource _registrationEntered;
+        private readonly TaskCompletionSource _resultEntered;
+        private readonly ManualResetEventSlim _resultRelease;
+        private Action<object?>? _continuation;
+        private object? _state;
+        private int _completed;
+        private int _resultCount;
+        private int _resultRanOnThreadPool;
+
+        public ControlledValueTaskSource(
+            T result,
+            TaskCompletionSource registrationEntered,
+            TaskCompletionSource resultEntered,
+            ManualResetEventSlim resultRelease)
+        {
+            _result = result;
+            _registrationEntered = registrationEntered;
+            _resultEntered = resultEntered;
+            _resultRelease = resultRelease;
+        }
+
+        public int ResultCount => Volatile.Read(ref _resultCount);
+
+        public bool ResultRanOnThreadPool =>
+            Volatile.Read(ref _resultRanOnThreadPool) != 0;
+
+        public ValueTaskSourceStatus GetStatus(short token)
+        {
+            _ = token;
+            return Volatile.Read(ref _completed) == 0
+                ? ValueTaskSourceStatus.Pending
+                : ValueTaskSourceStatus.Succeeded;
+        }
+
+        public void OnCompleted(
+            Action<object?> continuation,
+            object? state,
+            short token,
+            ValueTaskSourceOnCompletedFlags flags)
+        {
+            _ = token;
+            _ = flags;
+            _continuation = continuation;
+            _state = state;
+            _registrationEntered.TrySetResult();
+        }
+
+        public T GetResult(short token)
+        {
+            _ = token;
+            Interlocked.Increment(ref _resultCount);
+            Volatile.Write(
+                ref _resultRanOnThreadPool,
+                Thread.CurrentThread.IsThreadPoolThread ? 1 : 0);
+            _resultEntered.TrySetResult();
+            _resultRelease.Wait();
+            return _result;
+        }
+
+        public void Complete()
+        {
+            Volatile.Write(ref _completed, 1);
+            (_continuation
+             ?? throw new InvalidOperationException(
+                 "No continuation was registered."))(_state);
+        }
+    }
+
     private sealed class BlockingStreamStartProvider
         : IStreamingModelProvider,
           IProviderRouteMetadataSource
@@ -3989,6 +4673,594 @@ public sealed class ProviderAttemptRunnerTests
         public void Release()
         {
             _release.Set();
+        }
+    }
+
+    private interface IBlockingCurrentProvider : IStreamingModelProvider
+    {
+        Task CurrentEntered { get; }
+
+        bool CurrentRanOnThreadPool { get; }
+
+        int DisposeCount { get; }
+
+        int DisposeResultCount { get; }
+
+        Task DisposeResultEntered(int stage);
+
+        bool DisposeResultRanOnThreadPool(int stage);
+
+        void ReleaseCurrent();
+
+        void ReleaseDisposeResult(int stage);
+    }
+
+    private sealed class BlockingCurrentDirectProvider
+        : IBlockingCurrentProvider,
+          IProviderRouteMetadataSource
+    {
+        private readonly TaskCompletionSource _currentEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ManualResetEventSlim _releaseCurrent = new();
+        private readonly BlockingDisposeController _dispose = new(1);
+        private BlockingCurrentEnumerable? _stream;
+
+        public string ProviderId => "blocking-current-direct";
+
+        public ProviderRouteMetadata RouteMetadata { get; } =
+            new("blocking-current-model", "test.streaming.v1");
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public Task CurrentEntered => _currentEntered.Task;
+
+        public bool CurrentRanOnThreadPool =>
+            _stream?.CurrentRanOnThreadPool ?? true;
+
+        public int DisposeCount => _stream?.DisposeCount ?? 0;
+
+        public int DisposeResultCount => _dispose.ResultCount;
+
+        public Task DisposeResultEntered(int stage) =>
+            _dispose.ResultEntered(stage);
+
+        public bool DisposeResultRanOnThreadPool(int stage) =>
+            _dispose.ResultRanOnThreadPool(stage);
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            _stream = new BlockingCurrentEnumerable(
+                request.StreamAttemptId,
+                _currentEntered,
+                _releaseCurrent,
+                _dispose);
+            return _stream;
+        }
+
+        public void ReleaseCurrent()
+        {
+            _releaseCurrent.Set();
+        }
+
+        public void ReleaseDisposeResult(int stage)
+        {
+            _dispose.Release(stage);
+        }
+    }
+
+    private sealed class BlockingCurrentPreparedProvider
+        : IBlockingCurrentProvider,
+          IPreparedStreamingModelProvider,
+          IProviderRouteMetadataSource
+    {
+        private readonly TaskCompletionSource _currentEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ManualResetEventSlim _releaseCurrent = new();
+        private readonly BlockingDisposeController _dispose = new(2);
+        private BlockingCurrentPreparedStream? _prepared;
+
+        public string ProviderId => "blocking-current-prepared";
+
+        public ProviderRouteMetadata RouteMetadata { get; } = new(
+            "blocking-current-prepared-model",
+            new ProviderDialectContract(
+                "test.blocking-current.sse.v1",
+                ProviderRequestFamily.Custom,
+                "test.blocking-current.request.v1",
+                ProviderStreamFraming.ServerSentEvents,
+                "test.blocking-current.sse.v1",
+                "test.blocking-current.tools.v1",
+                "test.blocking-current.usage.v1",
+                "test.blocking-current.reasoning.v1",
+                "application/json",
+                "test.blocking-current.state.v1"),
+            "test-route-policy.v1",
+            new string('b', 64));
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public Task CurrentEntered => _currentEntered.Task;
+
+        public bool CurrentRanOnThreadPool =>
+            _prepared?.CurrentRanOnThreadPool ?? true;
+
+        public int DisposeCount => _prepared?.DisposeCount ?? 0;
+
+        public int InnerDisposeCount =>
+            _prepared?.InnerDisposeCount ?? 0;
+
+        public int PreparedDisposeCount =>
+            _prepared?.PreparedDisposeCount ?? 0;
+
+        public int DisposeResultCount => _dispose.ResultCount;
+
+        public Task DisposeResultEntered(int stage) =>
+            _dispose.ResultEntered(stage);
+
+        public bool DisposeResultRanOnThreadPool(int stage) =>
+            _dispose.ResultRanOnThreadPool(stage);
+
+        public ValueTask<PreparedProviderStream> PrepareStreamAsync(
+            ProviderStreamPreparationContext context,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _prepared = new BlockingCurrentPreparedStream(
+                ProviderWireRequestEvidence.CreateAvailable(
+                    new byte[] { 1 },
+                    "application/json",
+                    context.RouteIdentity),
+                context.Request.StreamAttemptId,
+                _currentEntered,
+                _releaseCurrent,
+                _dispose);
+            return new ValueTask<PreparedProviderStream>(_prepared);
+        }
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            throw new InvalidOperationException(
+                "The prepared provider must not use direct dispatch.");
+        }
+
+        public void ReleaseCurrent()
+        {
+            _releaseCurrent.Set();
+        }
+
+        public void ReleaseDisposeResult(int stage)
+        {
+            _dispose.Release(stage);
+        }
+    }
+
+    private sealed class BlockingCurrentPreparedStream
+        : PreparedProviderStream
+    {
+        private readonly BlockingCurrentEnumerable _stream;
+        private readonly BlockingDisposeController _dispose;
+        private int _disposeCount;
+
+        public BlockingCurrentPreparedStream(
+            ProviderWireRequestEvidence evidence,
+            string streamAttemptId,
+            TaskCompletionSource currentEntered,
+            ManualResetEventSlim releaseCurrent,
+            BlockingDisposeController dispose)
+            : base(evidence)
+        {
+            _dispose = dispose;
+            _stream = new BlockingCurrentEnumerable(
+                streamAttemptId,
+                currentEntered,
+                releaseCurrent,
+                dispose);
+        }
+
+        public bool CurrentRanOnThreadPool =>
+            _stream.CurrentRanOnThreadPool;
+
+        public int DisposeCount =>
+            Volatile.Read(ref _disposeCount) + _stream.DisposeCount;
+
+        public int InnerDisposeCount => _stream.DisposeCount;
+
+        public int PreparedDisposeCount =>
+            Volatile.Read(ref _disposeCount);
+
+        public override IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            return _stream;
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref _disposeCount);
+            return _dispose.CreateValueTask();
+        }
+    }
+
+    private sealed class BlockingCurrentEnumerable
+        : IAsyncEnumerable<ModelStreamEvent>,
+          IAsyncEnumerator<ModelStreamEvent>
+    {
+        private readonly string _streamAttemptId;
+        private readonly TaskCompletionSource _currentEntered;
+        private readonly ManualResetEventSlim _releaseCurrent;
+        private readonly BlockingDisposeController _dispose;
+        private int _disposeCount;
+        private int _moved;
+        private int _currentRanOnThreadPool = 1;
+
+        public BlockingCurrentEnumerable(
+            string streamAttemptId,
+            TaskCompletionSource currentEntered,
+            ManualResetEventSlim releaseCurrent,
+            BlockingDisposeController dispose)
+        {
+            _streamAttemptId = streamAttemptId;
+            _currentEntered = currentEntered;
+            _releaseCurrent = releaseCurrent;
+            _dispose = dispose;
+        }
+
+        public bool CurrentRanOnThreadPool =>
+            Volatile.Read(ref _currentRanOnThreadPool) != 0;
+
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        public ModelStreamEvent Current
+        {
+            get
+            {
+                Volatile.Write(
+                    ref _currentRanOnThreadPool,
+                    Thread.CurrentThread.IsThreadPoolThread ? 1 : 0);
+                _currentEntered.TrySetResult();
+                _releaseCurrent.Wait();
+                return new ModelStreamEvent
+                {
+                    StreamAttemptId = _streamAttemptId,
+                    Ordinal = 0,
+                    Kind = ModelStreamEventKinds.TextDelta,
+                    TextDelta = "late"
+                };
+            }
+        }
+
+        public IAsyncEnumerator<ModelStreamEvent> GetAsyncEnumerator(
+            CancellationToken cancellationToken = default)
+        {
+            _ = cancellationToken;
+            return this;
+        }
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            return new ValueTask<bool>(
+                Interlocked.Exchange(ref _moved, 1) == 0);
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref _disposeCount);
+            return _dispose.CreateValueTask();
+        }
+    }
+
+    private sealed class BlockingDisposeController
+    {
+        private readonly TaskCompletionSource[] _resultEntered;
+        private readonly ManualResetEventSlim[] _resultRelease;
+        private readonly int[] _ranOnThreadPool;
+        private int _created;
+        private int _resultCount;
+
+        public BlockingDisposeController(int stageCount)
+        {
+            _resultEntered = Enumerable.Range(0, stageCount)
+                .Select(
+                    _ => new TaskCompletionSource(
+                        TaskCreationOptions.RunContinuationsAsynchronously))
+                .ToArray();
+            _resultRelease = Enumerable.Range(0, stageCount)
+                .Select(_ => new ManualResetEventSlim(false))
+                .ToArray();
+            _ranOnThreadPool = Enumerable.Repeat(1, stageCount).ToArray();
+        }
+
+        public int ResultCount => Volatile.Read(ref _resultCount);
+
+        public Task ResultEntered(int stage) => _resultEntered[stage].Task;
+
+        public bool ResultRanOnThreadPool(int stage) =>
+            Volatile.Read(ref _ranOnThreadPool[stage]) != 0;
+
+        public ValueTask CreateValueTask()
+        {
+            var stage = Interlocked.Increment(ref _created) - 1;
+            if ((uint)stage >= (uint)_resultEntered.Length)
+            {
+                throw new InvalidOperationException(
+                    "DisposeAsync was called more than expected.");
+            }
+
+            return new ValueTask(new Source(this, stage), token: 0);
+        }
+
+        public void Release(int stage)
+        {
+            _resultRelease[stage].Set();
+        }
+
+        private void CompleteResult(int stage)
+        {
+            Volatile.Write(
+                ref _ranOnThreadPool[stage],
+                Thread.CurrentThread.IsThreadPoolThread ? 1 : 0);
+            Interlocked.Increment(ref _resultCount);
+            _resultEntered[stage].TrySetResult();
+            _resultRelease[stage].Wait();
+        }
+
+        private sealed class Source : IValueTaskSource
+        {
+            private readonly BlockingDisposeController _owner;
+            private readonly int _stage;
+            private int _resultRead;
+
+            public Source(BlockingDisposeController owner, int stage)
+            {
+                _owner = owner;
+                _stage = stage;
+            }
+
+            public ValueTaskSourceStatus GetStatus(short token)
+            {
+                _ = token;
+                return ValueTaskSourceStatus.Succeeded;
+            }
+
+            public void OnCompleted(
+                Action<object?> continuation,
+                object? state,
+                short token,
+                ValueTaskSourceOnCompletedFlags flags)
+            {
+                _ = continuation;
+                _ = state;
+                _ = token;
+                _ = flags;
+                throw new InvalidOperationException(
+                    "A completed dispose source must not register a continuation.");
+            }
+
+            public void GetResult(short token)
+            {
+                _ = token;
+                if (Interlocked.Exchange(ref _resultRead, 1) != 0)
+                {
+                    throw new InvalidOperationException(
+                        "DisposeAsync result was consumed more than once.");
+                }
+
+                _owner.CompleteResult(_stage);
+            }
+        }
+    }
+
+    private sealed class SuccessfulPreparedProvider
+        : IStreamingModelProvider,
+          IPreparedStreamingModelProvider,
+          IProviderRouteMetadataSource
+    {
+        private SuccessfulPreparedStream? _prepared;
+        private int _prepareCalls;
+
+        public string ProviderId => "successful-prepared";
+
+        public ProviderRouteMetadata RouteMetadata { get; } = new(
+            "successful-prepared-model",
+            new ProviderDialectContract(
+                "test.successful-prepared.sse.v1",
+                ProviderRequestFamily.Custom,
+                "test.successful-prepared.request.v1",
+                ProviderStreamFraming.ServerSentEvents,
+                "test.successful-prepared.sse.v1",
+                "test.successful-prepared.tools.v1",
+                "test.successful-prepared.usage.v1",
+                "test.successful-prepared.reasoning.v1",
+                "application/json",
+                "test.successful-prepared.state.v1"),
+            "test-route-policy.v1",
+            new string('c', 64));
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public int PrepareCalls => Volatile.Read(ref _prepareCalls);
+
+        public int DisposeCount => _prepared?.DisposeCount ?? 0;
+
+        public ValueTask<PreparedProviderStream> PrepareStreamAsync(
+            ProviderStreamPreparationContext context,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _prepareCalls);
+            _prepared = new SuccessfulPreparedStream(
+                ProviderWireRequestEvidence.CreateAvailable(
+                    new byte[] { 1 },
+                    "application/json",
+                    context.RouteIdentity),
+                context.Request.StreamAttemptId);
+            return new ValueTask<PreparedProviderStream>(_prepared);
+        }
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+            throw new InvalidOperationException(
+                "The prepared provider must not use direct dispatch.");
+        }
+
+        private sealed class SuccessfulPreparedStream
+            : PreparedProviderStream
+        {
+            private readonly string _streamAttemptId;
+            private int _disposeCount;
+
+            public SuccessfulPreparedStream(
+                ProviderWireRequestEvidence evidence,
+                string streamAttemptId)
+                : base(evidence)
+            {
+                _streamAttemptId = streamAttemptId;
+            }
+
+            public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+            public override IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+                CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Events(
+                    new ModelStreamEvent
+                    {
+                        StreamAttemptId = _streamAttemptId,
+                        Ordinal = 0,
+                        Kind = ModelStreamEventKinds.TextDelta,
+                        TextDelta = "ok"
+                    },
+                    new ModelStreamEvent
+                    {
+                        StreamAttemptId = _streamAttemptId,
+                        Ordinal = 1,
+                        Kind = ModelStreamEventKinds.Usage,
+                        Usage = new ProviderUsage
+                        {
+                            InputTokens = 0,
+                            OutputTokens = 0,
+                            CostUsd = "0"
+                        }
+                    },
+                    new ModelStreamEvent
+                    {
+                        StreamAttemptId = _streamAttemptId,
+                        Ordinal = 2,
+                        Kind = ModelStreamEventKinds.Completed,
+                        FinishReason = "stop"
+                    });
+            }
+
+            public override ValueTask DisposeAsync()
+            {
+                Interlocked.Increment(ref _disposeCount);
+                return default;
+            }
+        }
+    }
+
+    private sealed class CapacityMoveNextProvider
+        : IStreamingModelProvider,
+          IProviderRouteMetadataSource
+    {
+        private int _disposeCount;
+
+        public string ProviderId => "capacity-move-next";
+
+        public ProviderRouteMetadata RouteMetadata { get; } =
+            new("capacity-move-next-model", "test.streaming.v1");
+
+        public ProviderCapabilities Capabilities { get; } = new();
+
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            StreamingModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            return new Enumerator(this, request.StreamAttemptId);
+        }
+
+        private sealed class Enumerator
+            : IAsyncEnumerable<ModelStreamEvent>,
+              IAsyncEnumerator<ModelStreamEvent>
+        {
+            private readonly CapacityMoveNextProvider _owner;
+            private readonly string _streamAttemptId;
+            private int _index;
+
+            public Enumerator(
+                CapacityMoveNextProvider owner,
+                string streamAttemptId)
+            {
+                _owner = owner;
+                _streamAttemptId = streamAttemptId;
+            }
+
+            public ModelStreamEvent Current => _index switch
+            {
+                1 => new ModelStreamEvent
+                {
+                    StreamAttemptId = _streamAttemptId,
+                    Ordinal = 0,
+                    Kind = ModelStreamEventKinds.TextDelta,
+                    TextDelta = "ok"
+                },
+                2 => new ModelStreamEvent
+                {
+                    StreamAttemptId = _streamAttemptId,
+                    Ordinal = 1,
+                    Kind = ModelStreamEventKinds.Usage,
+                    Usage = new ProviderUsage
+                    {
+                        InputTokens = 0,
+                        OutputTokens = 0,
+                        CostUsd = "0"
+                    }
+                },
+                3 => new ModelStreamEvent
+                {
+                    StreamAttemptId = _streamAttemptId,
+                    Ordinal = 2,
+                    Kind = ModelStreamEventKinds.Completed,
+                    FinishReason = "stop"
+                },
+                _ => throw new InvalidOperationException(
+                    "The stream has no current event.")
+            };
+
+            public IAsyncEnumerator<ModelStreamEvent> GetAsyncEnumerator(
+                CancellationToken cancellationToken = default)
+            {
+                _ = cancellationToken;
+                return this;
+            }
+
+            public ValueTask<bool> MoveNextAsync()
+            {
+                return new ValueTask<bool>(
+                    Interlocked.Increment(ref _index) <= 3);
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Interlocked.Increment(ref _owner._disposeCount);
+                return default;
+            }
         }
     }
 

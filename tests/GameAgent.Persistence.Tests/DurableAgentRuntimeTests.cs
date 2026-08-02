@@ -1072,9 +1072,11 @@ public sealed class DurableAgentRuntimeTests
     {
         var directory = TempDirectory();
         var provider = new BlockingCancellationProvider();
+        FileSessionStore? store = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
-            await using var store = new FileSessionStore(
+            store = new FileSessionStore(
                 Path.Combine(directory, "runtime.journal"));
             var clock = new Clock();
             var ids = new Ids();
@@ -1091,7 +1093,7 @@ public sealed class DurableAgentRuntimeTests
                     default);
             }
 
-            await using var runtime = CreateRuntime(
+            runtime = CreateRuntime(
                 store,
                 provider,
                 new Host(
@@ -1117,7 +1119,10 @@ public sealed class DurableAgentRuntimeTests
         finally
         {
             provider.Release.TrySetResult();
-            Directory.Delete(directory, recursive: true);
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -3748,16 +3753,18 @@ public sealed class DurableAgentRuntimeTests
     public async Task ProviderCompletionRacingSteerClosesTheDiscardedDispatch()
     {
         var directory = TempDirectory();
+        var provider = new CompletionSteerRaceProvider();
+        FileSessionStore? store = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
             var path = Path.Combine(directory, "runtime.journal");
-            await using var store = new FileSessionStore(path);
+            store = new FileSessionStore(path);
             var clock = new Clock();
             var ids = new Ids();
-            var provider = new CompletionSteerRaceProvider();
             var host = new Host(
                 _ => throw new InvalidOperationException("No tool expected."));
-            await using var runtime = CreateRuntime(
+            runtime = CreateRuntime(
                 store,
                 provider,
                 host,
@@ -3841,7 +3848,11 @@ public sealed class DurableAgentRuntimeTests
         }
         finally
         {
-            Directory.Delete(directory, recursive: true);
+            provider.ReleaseFirstCompletion.TrySetResult();
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -4354,13 +4365,16 @@ public sealed class DurableAgentRuntimeTests
     public async Task CancellationCannotEraseObservedProviderUsage()
     {
         var directory = TempDirectory();
+        FileSessionStore? store = null;
+        BudgetAppendInterceptStore? intercept = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
-            await using var store = new FileSessionStore(
+            store = new FileSessionStore(
                 Path.Combine(directory, "runtime.journal"));
-            var intercept = new BudgetAppendInterceptStore(store);
+            intercept = new BudgetAppendInterceptStore(store);
             var clock = new Clock();
-            await using var runtime = CreateRuntime(
+            runtime = CreateRuntime(
                 intercept,
                 intercept,
                 new QueueStreamingProvider(
@@ -4406,7 +4420,11 @@ public sealed class DurableAgentRuntimeTests
         }
         finally
         {
-            Directory.Delete(directory, recursive: true);
+            intercept?.ReleaseProviderUsageAppend.TrySetResult();
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -6320,13 +6338,15 @@ public sealed class DurableAgentRuntimeTests
     {
         var directory = TempDirectory();
         var delay = new BlockingCancellationDelay();
+        FileSessionStore? store = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
-            await using var store = new FileSessionStore(
+            store = new FileSessionStore(
                 Path.Combine(directory, "runtime.journal"));
             var clock = new Clock();
             var provider = new KnownZeroRetryProvider();
-            await using var runtime = CreateRuntimeCore(
+            runtime = CreateRuntimeCore(
                 store,
                 store,
                 provider,
@@ -6367,7 +6387,10 @@ public sealed class DurableAgentRuntimeTests
         finally
         {
             delay.Release.TrySetResult();
-            Directory.Delete(directory, recursive: true);
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -6376,12 +6399,14 @@ public sealed class DurableAgentRuntimeTests
     {
         var directory = TempDirectory();
         var provider = new BlockingCancellationProvider();
+        FileSessionStore? store = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
-            await using var store = new FileSessionStore(
+            store = new FileSessionStore(
                 Path.Combine(directory, "runtime.journal"));
             var clock = new Clock();
-            await using var runtime = CreateRuntime(
+            runtime = CreateRuntime(
                 store,
                 provider,
                 new Host(
@@ -6412,7 +6437,10 @@ public sealed class DurableAgentRuntimeTests
         finally
         {
             provider.Release.TrySetResult();
-            Directory.Delete(directory, recursive: true);
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -6421,12 +6449,14 @@ public sealed class DurableAgentRuntimeTests
     {
         var directory = TempDirectory();
         var provider = new BlockingCancellationProvider();
+        FileSessionStore? store = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
-            await using var store = new FileSessionStore(
+            store = new FileSessionStore(
                 Path.Combine(directory, "runtime.journal"));
             var clock = new Clock();
-            await using var runtime = CreateRuntime(
+            runtime = CreateRuntime(
                 store,
                 provider,
                 new Host(
@@ -6459,7 +6489,10 @@ public sealed class DurableAgentRuntimeTests
         finally
         {
             provider.Release.TrySetResult();
-            Directory.Delete(directory, recursive: true);
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -6752,9 +6785,11 @@ public sealed class DurableAgentRuntimeTests
         var directory = TempDirectory();
         var first = new BlockingRequestPreparationProvider("blocking-first");
         var second = new BlockingRequestPreparationProvider("blocking-second");
+        FileSessionStore? store = null;
+        DurableAgentRuntime? runtime = null;
         try
         {
-            await using var store = new FileSessionStore(
+            store = new FileSessionStore(
                 Path.Combine(directory, "runtime.journal"));
             var clock = new Clock();
             var ids = new Ids();
@@ -6765,13 +6800,13 @@ public sealed class DurableAgentRuntimeTests
                 {
                     MaxAttemptsPerProvider = 1,
                     RequestPreparationTimeout =
-                        TimeSpan.FromMilliseconds(25),
+                        TimeSpan.FromMilliseconds(500),
                     IdleTimeout = TimeSpan.FromSeconds(1),
-                    TotalTimeout = TimeSpan.FromSeconds(2)
+                    TotalTimeout = TimeSpan.FromSeconds(5)
                 },
                 new SystemRuntimeDelay(),
                 ids);
-            await using var runtime = new DurableAgentRuntime(
+            runtime = new DurableAgentRuntime(
                 runner,
                 new Host(
                     _ => throw new InvalidOperationException(
@@ -6814,7 +6849,10 @@ public sealed class DurableAgentRuntimeTests
         {
             first.Release();
             second.Release();
-            Directory.Delete(directory, recursive: true);
+            await DisposeRuntimeStoreAndDeleteAsync(
+                runtime,
+                store,
+                directory);
         }
     }
 
@@ -7384,6 +7422,37 @@ public sealed class DurableAgentRuntimeTests
         }
 
         return predicate();
+    }
+
+    private static async Task DisposeRuntimeStoreAndDeleteAsync(
+        DurableAgentRuntime? runtime,
+        FileSessionStore? store,
+        string directory)
+    {
+        try
+        {
+            if (runtime is not null)
+            {
+                await runtime.DisposeAsync();
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (store is not null)
+                {
+                    await store.DisposeAsync();
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+            }
+        }
     }
 
     private sealed class MisreportedInfiniteReadOnlyList<T>

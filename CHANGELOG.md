@@ -10,6 +10,14 @@
   worker pool so blocking provider callbacks cannot starve or overrun shutdown.
 - Isolated synchronous final-output policy prefixes on a process-wide bounded
   execution dispatcher so one blocked policy cannot starve wall-clock timeouts.
+- Isolated synchronous prefixes from provider stream start/advance/current
+  event/disposal and request preparation, plus memory, routing, context,
+  middleware, skill-resolution, and multi-actor lifecycle callbacks behind a
+  process-wide bounded dispatcher instead of the ordinary .NET worker pool.
+- Reused a lazily grown bounded set of dedicated callback workers across
+  streamed events instead of creating one operating-system thread per prefix.
+- Bounded accepted asynchronous callback completions and cleanup admissions
+  process-wide so active-prefix isolation cannot hide an unbounded waiter set.
 - Added per-operation reasoning, sampling, prompt-cache, and ordered provider
   route controls with durable recovery.
 - Added strict tool validation, conflict-aware scheduling, skills, context, and

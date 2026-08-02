@@ -196,6 +196,70 @@ public sealed class ExecutionRoutingTests
     }
 
     [Fact]
+    public async Task PolicyCallbackCapacityFallsBackAndRecovers()
+    {
+        var limiter = new BoundedCallbackProcessLimiter(1);
+        var policyDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var blockerDispatcher = new BoundedCallbackExecutionDispatcher(
+            1,
+            limiter);
+        var agent = new RecordingAgentRuntime();
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy: null,
+            options: null,
+            shutdownDispatcher: new BoundedCancellationDispatcher(),
+            policyCancellationDispatcher:
+            new BoundedCancellationDispatcher(),
+            callbackExecutionDispatcher: policyDispatcher);
+        using var release = new ManualResetEventSlim(false);
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(
+            blockerDispatcher.TryExecute(
+                () =>
+                {
+                    entered.TrySetResult(true);
+                    release.Wait();
+                    return new ValueTask<int>(1);
+                },
+                out var blocker));
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var fallback = await router.RunAsync(
+                new RoutedExecutionRequest
+                {
+                    Route = new ExecutionRouteRequest(),
+                    Run = RunRequest("route-policy-capacity")
+                });
+            Assert.Equal(
+                ExecutionRouteReasonCodes.PolicyErrorFallback,
+                fallback.Decision.ReasonCode);
+        }
+        finally
+        {
+            release.Set();
+            await blocker.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+
+        var recovered = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequest("route-policy-capacity-recovered")
+            });
+        Assert.NotEqual(
+            ExecutionRouteReasonCodes.PolicyErrorFallback,
+            recovered.Decision.ReasonCode);
+        Assert.Equal(2, agent.CallCount);
+        await router.DisposeAsync();
+    }
+
+    [Fact]
     public async Task InvalidPolicyResultFallsBackToDirectForCapabilityFreeRequest()
     {
         var agent = new RecordingAgentRuntime();

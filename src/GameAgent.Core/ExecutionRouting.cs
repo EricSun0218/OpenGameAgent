@@ -261,6 +261,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
     private readonly BoundedCancellationDispatcher _shutdownDispatcher;
     private readonly BoundedCancellationDispatcher
         _policyCancellationDispatcher;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
     private readonly object _lifecycleSync = new();
     private readonly string _policyId;
     private readonly string _policyVersion;
@@ -284,7 +286,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             policy,
             options,
             BoundedCancellationDispatcher.LifecycleShared,
-            BoundedCancellationDispatcher.ExecutionPolicyShared)
+            BoundedCancellationDispatcher.ExecutionPolicyShared,
+            BoundedCallbackExecutionDispatcher.ExecutionPolicyShared)
     {
     }
 
@@ -300,7 +303,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             policy,
             options,
             shutdownDispatcher,
-            BoundedCancellationDispatcher.ExecutionPolicyShared)
+            BoundedCancellationDispatcher.ExecutionPolicyShared,
+            BoundedCallbackExecutionDispatcher.ExecutionPolicyShared)
     {
     }
 
@@ -311,6 +315,25 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
         ExecutionRouterOptions? options,
         BoundedCancellationDispatcher shutdownDispatcher,
         BoundedCancellationDispatcher policyCancellationDispatcher)
+        : this(
+            agent,
+            workflow,
+            policy,
+            options,
+            shutdownDispatcher,
+            policyCancellationDispatcher,
+            BoundedCallbackExecutionDispatcher.ExecutionPolicyShared)
+    {
+    }
+
+    internal RoutedExecutionRuntime(
+        IDurableAgentRuntime agent,
+        IRoutedWorkflowRuntime? workflow,
+        IExecutionRoutePolicy? policy,
+        ExecutionRouterOptions? options,
+        BoundedCancellationDispatcher shutdownDispatcher,
+        BoundedCancellationDispatcher policyCancellationDispatcher,
+        BoundedCallbackExecutionDispatcher callbackExecutionDispatcher)
     {
         _agent = agent ?? throw new ArgumentNullException(nameof(agent));
         _workflow = workflow;
@@ -321,7 +344,11 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
                                    nameof(shutdownDispatcher));
         _policyCancellationDispatcher = policyCancellationDispatcher
                                         ?? throw new ArgumentNullException(
-                                            nameof(policyCancellationDispatcher));
+                                             nameof(policyCancellationDispatcher));
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? throw new ArgumentNullException(
+                                           nameof(
+                                               callbackExecutionDispatcher));
         try
         {
             _policyId = RuntimeGuard.RequiredUtf8(
@@ -476,10 +503,23 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             var policyToken = policyCancellation.Token;
             EnterNestedOperation();
             nestedEntered = true;
-            evaluation = Task.Run(
-                async () => await _policy
-                    .SelectAsync(policyRequest, policyToken)
-                    .ConfigureAwait(false));
+            if (!_callbackExecutionDispatcher.TryExecute(
+                        () => _policy.SelectAsync(
+                            policyRequest,
+                            policyToken),
+                        out var acceptedEvaluation))
+            {
+                ExitOperation();
+                nestedEntered = false;
+                await policyCancellation.DisposeAsync()
+                    .ConfigureAwait(false);
+                _policySlots.Release();
+                return Fallback(
+                    ExecutionRouteReasonCodes.PolicyErrorFallback,
+                    validationRequest);
+            }
+
+            evaluation = acceptedEvaluation;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

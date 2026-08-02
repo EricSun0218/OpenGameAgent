@@ -106,8 +106,26 @@ durable recovery and carries the recovered `AgentId`, `WorldId`, explicit
 `SessionId`, and validated `GameContext`; required admission middleware
 therefore sees the same identity boundary as a new run before ownership,
 provider, reconciler, or host work.
+The synchronous prefix of each middleware callback starts outside the ordinary
+.NET worker pool under the shared process callback bound. A required callback
+that cannot obtain this execution capacity fails closed with
+`middleware_execution_capacity_exhausted`; an optional callback is skipped.
 Middleware must not be used as the game's final rule authority: tool handlers
 still validate current state and return the authoritative `ActionReceipt`.
+
+## Provider callback execution
+
+Provider stream construction, iterator construction, each stream-advance call,
+the current-event getter, request/wire preparation, and provider-owned stream
+disposal use the same bounded prefix isolation. Capacity failure before
+dispatch is reported as
+`provider_execution_capacity_exhausted` with known-zero usage; after streaming
+has begun, usage remains uncertain and follows normal reconciliation rules.
+Once admitted to the bounded outstanding-callback budget, provider-owned
+disposal waits for transient active-prefix saturation and remains covered by
+the normal cleanup timeout and detached-cleanup quarantine. If that process-wide
+outstanding budget is itself exhausted, cleanup fails explicitly and the
+provider remains quarantined instead of adding an unbounded waiter.
 
 ## Conversation context
 

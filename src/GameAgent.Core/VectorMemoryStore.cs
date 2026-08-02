@@ -129,6 +129,8 @@ public sealed class VectorMemoryStore :
     private readonly string _embeddingModelId;
     private readonly string _embeddingVersion;
     private readonly SemaphoreSlim _embeddingSlots;
+    private readonly BoundedCallbackExecutionDispatcher
+        _embeddingExecutionDispatcher;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private Dictionary<string, IndexedMemory> _records =
         new(StringComparer.Ordinal);
@@ -140,10 +142,29 @@ public sealed class VectorMemoryStore :
         string providerId = "vector-memory",
         int capacity = 10_000,
         VectorMemoryStoreOptions? options = null)
+        : this(
+            embeddingProvider,
+            providerId,
+            capacity,
+            options,
+            BoundedCallbackExecutionDispatcher.MemoryShared)
+    {
+    }
+
+    internal VectorMemoryStore(
+        IMemoryEmbeddingProvider embeddingProvider,
+        string providerId,
+        int capacity,
+        VectorMemoryStoreOptions? options,
+        BoundedCallbackExecutionDispatcher embeddingExecutionDispatcher)
     {
         _embeddingProvider = embeddingProvider
                              ?? throw new ArgumentNullException(
                                  nameof(embeddingProvider));
+        _embeddingExecutionDispatcher = embeddingExecutionDispatcher
+                                        ?? throw new ArgumentNullException(
+                                            nameof(
+                                                embeddingExecutionDispatcher));
         ProviderId = RuntimeGuard.RequiredUtf8(
             providerId,
             128,
@@ -585,10 +606,19 @@ public sealed class VectorMemoryStore :
             {
                 var providerToken = cancellation.Token;
                 var input = value.Clone();
-                operation = Task.Run(
-                    async () => await _embeddingProvider
-                        .EmbedAsync(input, providerToken)
-                        .ConfigureAwait(false));
+                if (!_embeddingExecutionDispatcher.TryExecute(
+                        () => _embeddingProvider.EmbedAsync(
+                            input,
+                            providerToken),
+                        out var acceptedOperation))
+                {
+                    throw new RuntimeContentLimitException(
+                        nameof(value),
+                        "memory_embedding_execution_capacity_exhausted",
+                        "Memory embedding execution capacity is exhausted.");
+                }
+
+                operation = acceptedOperation;
             }
             catch (OperationCanceledException)
                 when (!cancellationToken.IsCancellationRequested)
