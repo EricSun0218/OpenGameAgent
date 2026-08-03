@@ -6805,7 +6805,13 @@ public sealed class DurableAgentRuntimeTests
                     TotalTimeout = TimeSpan.FromSeconds(5)
                 },
                 new SystemRuntimeDelay(),
-                ids);
+                ids,
+                streamLimits: null,
+                new SystemRuntimeDelay(),
+                new BoundedCancellationDispatcher(),
+                new BoundedCallbackExecutionDispatcher(
+                    4,
+                    new BoundedCallbackProcessLimiter(4)));
             runtime = new DurableAgentRuntime(
                 runner,
                 new Host(
@@ -6840,7 +6846,14 @@ public sealed class DurableAgentRuntimeTests
                     new DurableRunRequest { Run = Run(clock.UtcNow) })
                 .AsTask();
             var completed = await next.WaitAsync(TestWaitTimeout);
-            Assert.Equal(RunStates.Completed, completed.Run.State);
+            Assert.True(
+                string.Equals(
+                    RunStates.Completed,
+                    completed.Run.State,
+                    StringComparison.Ordinal),
+                $"Expected a completed run but received "
+                + $"'{completed.Run.State}': "
+                + $"{completed.Run.TerminalReason ?? "no terminal reason"}.");
 
             first.Release();
             await first.Settled.WaitAsync(TestWaitTimeout);
@@ -7960,16 +7973,17 @@ public sealed class DurableAgentRuntimeTests
 
         public Task Settled => _settled.Task;
 
-        public ValueTask<ProviderPreparedRequest> PrepareRequestAsync(
+        public async ValueTask<ProviderPreparedRequest> PrepareRequestAsync(
             ProviderRequestPreparationContext context,
             CancellationToken cancellationToken)
         {
             _ = cancellationToken;
             _entered.TrySetResult();
-            _release.Task.GetAwaiter().GetResult();
+            await _release.Task.ConfigureAwait(false);
             _settled.TrySetResult();
-            return new ProviderRequestSanitizer()
-                .PrepareRequestAsync(context, CancellationToken.None);
+            return await new ProviderRequestSanitizer()
+                .PrepareRequestAsync(context, CancellationToken.None)
+                .ConfigureAwait(false);
         }
 
         public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(

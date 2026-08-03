@@ -6,6 +6,9 @@ namespace GameAgent.Tests;
 
 public sealed class HybridMemoryTests
 {
+    private static readonly TimeSpan TestWaitTimeout =
+        TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task VectorStoreRanksSemanticMatchesAndHonorsFilters()
     {
@@ -131,22 +134,30 @@ public sealed class HybridMemoryTests
         var provider = new SynchronouslyBlockingEmbeddingProvider();
         var store = new VectorMemoryStore(
             provider,
-            capacity: 2,
-            options: new VectorMemoryStoreOptions(
+            "isolated-sync-vector-memory",
+            2,
+            new VectorMemoryStoreOptions(
                 maxConcurrentEmbeddings: 1,
-                embeddingTimeout: TimeSpan.FromMilliseconds(25)));
+                embeddingTimeout: TimeSpan.FromMilliseconds(25)),
+            new BoundedCallbackExecutionDispatcher(
+                1,
+                new BoundedCallbackProcessLimiter(1)));
 
-        await Assert.ThrowsAsync<TimeoutException>(
-            () => store.UpsertAsync(
-                    Record("first", "apple", "agent"))
-                .AsTask()
-                .WaitAsync(TimeSpan.FromSeconds(2)));
-        await provider.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var first = store.UpsertAsync(
+                Record("first", "apple", "agent"))
+            .AsTask();
+        await provider.Entered.Task.WaitAsync(TestWaitTimeout);
+        var timeout = await Assert.ThrowsAsync<TimeoutException>(
+            () => first.WaitAsync(TestWaitTimeout));
+        Assert.Equal(
+            "Memory embedding exceeded its configured timeout.",
+            timeout.Message);
+        await provider.Cancelled.Task.WaitAsync(TestWaitTimeout);
         Assert.False(provider.RanOnThreadPool);
 
         await store.UpsertAsync(Record("second", "banana", "agent"))
             .AsTask()
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWaitTimeout);
         Assert.Equal(2, provider.CallCount);
     }
 
@@ -513,6 +524,9 @@ public sealed class HybridMemoryTests
         public TaskCompletionSource<bool> Cancelled { get; } = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public TaskCompletionSource<bool> Entered { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
         public ValueTask<ReadOnlyMemory<float>> EmbedAsync(
             JsonElement value,
             CancellationToken cancellationToken)
@@ -520,6 +534,7 @@ public sealed class HybridMemoryTests
             _ = value;
             if (Interlocked.Increment(ref _callCount) == 1)
             {
+                Entered.TrySetResult(true);
                 if (Thread.CurrentThread.IsThreadPoolThread)
                 {
                     Volatile.Write(ref _ranOnThreadPool, 1);
