@@ -1,13 +1,13 @@
 # Game Agent Runtime
 
-An in-engine Agent Runtime for AI-native games.
+An embeddable or server-hosted Agent Runtime for AI-native games.
 
 Game Agent Runtime accepts typed game context, runs a streaming model/tool
 loop, dispatches actions through the game engine, and records enough evidence
 to recover without blindly repeating side effects. Inputs may be text, JSON,
 numbers, game events, or references to game-owned resources.
 
-> Status: `0.1.0-alpha.1`. Public APIs and the wire protocol may change before
+> Status: `0.2.0-alpha.1`. Public APIs and the wire protocol may change before
 > `1.0`.
 
 ## Product boundary
@@ -62,6 +62,10 @@ an assistant, or a group decision without forcing games into one data model.
   streaming speech, and host-validated content transactions; no model is
   bundled.
 - A shared `netstandard2.1` core plus Godot and Unity integration boundaries.
+- Optional engine/server placement with an authenticated WebSocket action
+  bridge, SQLite/PostgreSQL journals, tenant admission, and standard telemetry.
+- Deterministic living-world level-of-detail scheduling and offline gameplay
+  evaluation for large NPC populations.
 
 ## Architecture
 
@@ -96,10 +100,10 @@ Read [architecture](docs/architecture.md), [protocol](docs/protocol.md), and
 The engine SDK is only an adapter. Agent behavior, persistence semantics, and
 provider logic remain in the shared runtime.
 
-All reusable Agent behavior is designed to run in-process with the game. A
-remote model endpoint or credential gateway changes only model transport; it
-does not become the owner of workflows, memory, game rules, saves, or action
-settlement.
+Reusable Agent behavior can run in-process with the game or in a .NET game
+service. A remote model endpoint alone changes only model transport. A hosted
+runtime may own workflows, memory, and its journal, while game rules, saves,
+and authoritative action settlement remain game-owned.
 
 ## Start here
 
@@ -120,6 +124,9 @@ Then follow:
 - [Route work and supervise child Agents](docs/how-to-route-and-supervise-agents.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
 - [Living-world integration](docs/living-world-integration.md)
+- [Living-world scheduling](docs/living-world-scheduling.md)
+- [Deployment and remote hosting](docs/deployment-and-remote-hosting.md)
+- [Evaluation and observability](docs/evaluation-and-observability.md)
 - [Runtime capability model](docs/runtime-capability-model.md)
 - [Media and generated content](docs/media-and-generated-content.md)
 - [Durable workflows](docs/durable-workflows.md)

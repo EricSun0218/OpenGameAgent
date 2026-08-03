@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-alpha.1
+
+- Add optional server hosting, authenticated remote game-host transport, bounded tenant admission, replay, rate limits, kill switches, and failure isolation.
+- Add SQLite and PostgreSQL durable-store adapters with atomic batches, compare-and-swap revisions, operation reconciliation, and restart/concurrency tests.
+- Add deterministic living-world scheduling, gameplay-quality evaluation, OpenTelemetry export, soak/fault tests, and clean-room integration benchmarks.
+- Ship living-world and remote-client support in the Godot and Unity developer packages.
+
 ## 0.1.0-alpha.1
 
 - Added the versioned typed game-agent protocol.

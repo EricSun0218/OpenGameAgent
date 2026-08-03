@@ -1,7 +1,7 @@
 param(
     [string]$Archive = (
         Join-Path (Split-Path -Parent $PSScriptRoot) (
-            "artifacts\game-agent-runtime-godot-0.1.0-alpha.1.zip")),
+            "artifacts\game-agent-runtime-godot-0.2.0-alpha.1.zip")),
     [string]$Godot = "godot",
     [string]$ExpectedVersion
 )
@@ -125,6 +125,8 @@ try {
         'GameAgent.Providers.MediaHttp.dll',
         'GameAgent.Providers.OpenAICompatible.dll',
         'GameAgent.Runtime.dll',
+        'GameAgent.Remote.Client.dll',
+        'GameAgent.Simulation.dll',
         'GameAgent.Workflow.dll'
     ) | ForEach-Object { $libraryPrefix + $_ }
     $actualLibraryEntries = @(

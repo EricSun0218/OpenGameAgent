@@ -1,6 +1,6 @@
 {
   "name": "com.gameagent.runtime.unity",
-  "version": "0.1.0-alpha.1",
+  "version": "0.2.0-alpha.1",
   "displayName": "Game Agent Runtime for Unity",
   "description": "First-class Unity host for the engine-agnostic Game Agent Runtime. Provides lifecycle, main-thread dispatch, structured DTO bridges, cancellation, and durable shutdown without duplicating the agent core.",
   "unity": "2022.3",
@@ -20,6 +20,11 @@
       "displayName": "Structured Tool Loop",
       "description": "A durable JSON context drives a streamed tool call, a journaled Unity main-thread action, and a final structured response.",
       "path": "Samples~/StructuredToolLoop"
+    },
+    {
+      "displayName": "Living World Patterns",
+      "description": "Dialogue, game-calendar triggers, multi-NPC admission, and multi-step construction without a model key.",
+      "path": "Samples~/LivingWorldPatterns"
     }
   ]
 }

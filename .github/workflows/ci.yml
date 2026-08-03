@@ -18,7 +18,7 @@ concurrency:
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
-  RELEASE_VERSION: "0.1.0-alpha.1"
+  RELEASE_VERSION: "0.2.0-alpha.1"
 
 jobs:
   privacy-scanner:
@@ -84,11 +84,29 @@ jobs:
           dotnet run
           --project tests/GameAgent.PerformanceSmoke/GameAgent.PerformanceSmoke.csproj
           -c Release --no-build
+      - name: Runtime soak and fault smoke
+        run: >-
+          dotnet run
+          --project tests/GameAgent.SoakSmoke/GameAgent.SoakSmoke.csproj
+          -c Release --no-build -- --seconds 3
 
   linux-portability:
     name: Linux runtime portability
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: runtime_test_only
+          POSTGRES_DB: game_agent_test
+        options: >-
+          --health-cmd "pg_isready -U postgres -d game_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
     steps:
       - name: Check out
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -105,6 +123,9 @@ jobs:
           dotnet build GameAgentRuntime.sln -c Release
           --no-restore -warnaserror
       - name: Test portable runtime
+        env:
+          GAME_AGENT_POSTGRES_TEST: >-
+            Host=127.0.0.1;Port=5432;Username=postgres;Password=runtime_test_only;Database=game_agent_test;Pooling=false
         run: >-
           dotnet test GameAgentRuntime.sln -c Release
           --no-build --no-restore -m:1
@@ -163,6 +184,9 @@ jobs:
             -PackagePath ./artifacts/nuget `
             -Version $env:RELEASE_VERSION `
             -WorkingPath (Join-Path $env:RUNNER_TEMP 'package-consumer')
+      - name: Verify clean-room engine consumption
+        shell: pwsh
+        run: ./tools/Invoke-CleanRoomIntegrationBenchmark.ps1 -Engine all
       - name: Scan release artifacts
         shell: pwsh
         run: ./engines/shared/Test-ReleaseArtifactPrivacy.ps1 -Path ./artifacts/nuget

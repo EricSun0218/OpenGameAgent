@@ -154,6 +154,8 @@ $dependencyAssemblies = @(
     "System.Text.Json.dll",
     "System.Threading.Tasks.Extensions.dll",
     "GameAgent.Runtime.dll",
+    "GameAgent.Remote.Client.dll",
+    "GameAgent.Simulation.dll",
     "GameAgent.Workflow.dll"
 )
 
@@ -208,6 +210,8 @@ if ($IncludeSymbols) {
             "GameAgent.Providers.OpenAICompatible.pdb",
             "GameAgent.Providers.MediaHttp.pdb",
             "GameAgent.Runtime.pdb",
+            "GameAgent.Remote.Client.pdb",
+            "GameAgent.Simulation.pdb",
             "GameAgent.Workflow.pdb")) {
         $source = Join-Path $smokeOutput $symbol
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {

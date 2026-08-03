@@ -5,4 +5,5 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("GameAgent.Persistence")]
 [assembly: InternalsVisibleTo("GameAgent.Providers.OpenAICompatible")]
 [assembly: InternalsVisibleTo("GameAgent.Runtime")]
+[assembly: InternalsVisibleTo("GameAgent.Storage.Relational")]
 [assembly: InternalsVisibleTo("GameAgent.Godot")]

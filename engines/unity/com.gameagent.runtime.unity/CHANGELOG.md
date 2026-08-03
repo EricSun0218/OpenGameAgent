@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.0-alpha.1] - 2026-08-03
+
+- Add the living-world scheduling assembly and a deterministic dialogue, calendar-trigger, multi-NPC, and construction sample.
+- Add the remote game-host client for connecting an engine-owned action boundary to a server-hosted runtime.
+
 ## [0.1.0-alpha.1] - 2026-07-28
 
 - Added routed Direct/Agent/Workflow execution, stateless completion, and

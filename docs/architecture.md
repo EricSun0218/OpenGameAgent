@@ -539,15 +539,18 @@ still returned when that gate is not enabled.
 
 ## Local and remote responsibilities
 
-The runtime, journal, context compiler, scheduler, and engine host run locally.
-Model and media providers are replaceable and may be local or remote. A
-complete Agent loop, including workflow orchestration, game-time semantics,
-memory, durable state, recovery, and action settlement, does not require a
-hosted runtime or bundled model.
+The runtime, journal, context compiler, and scheduler can run in the game
+process, an authoritative game server, or a separate .NET service. The engine
+or game server remains the action authority. When it is in another process,
+the remote action bridge returns authoritative receipts and treats a lost
+connection after dispatch as an unknown outcome. Model and media providers are
+replaceable and may also be local or remote. A complete Agent loop does not
+require a bundled model or a framework-owned cloud.
 
 A commercial game may put a narrow model gateway in front of a remote provider
 to protect credentials, enforce quotas, moderate requests, and meter usage.
-That gateway is transport infrastructure: it does not own the Agent loop or
-move game rules, state, workflow decisions, saves, or authoritative action
-settlement out of the game. Custom remote stores and telemetry sinks are
-possible extension choices, not dependencies or the default architecture.
+That gateway is transport infrastructure. If the Agent Runtime itself is
+hosted, it may own Agent-loop orchestration, memory, and its journal, but it
+still does not own game rules, saves, or authoritative action settlement.
+Remote stores and telemetry remain optional adapters rather than core
+dependencies.

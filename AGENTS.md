@@ -2,8 +2,8 @@
 
 ## Objective
 
-This repository builds an engine-embedded Agent Runtime for games. Keep the
-shared runtime independent of game engines and game-specific rules.
+This repository builds an embeddable or server-hosted Agent Runtime for games.
+Keep the shared runtime independent of game engines and game-specific rules.
 
 The repository is deliberately not a world editor, content-package format,
 generic game host, or end-user application. Do not add a fixed character,
@@ -17,6 +17,12 @@ inventory, combat, event, or save schema to the shared runtime.
 - `src/GameAgent.Persistence`: crash-tolerant local stores.
 - `src/GameAgent.Runtime`: supported composition root.
 - `src/GameAgent.Workflow`: optional durable deterministic orchestration.
+- `src/GameAgent.Simulation`: optional deterministic living-world admission.
+- `src/GameAgent.Evaluation`: offline gameplay-quality evidence scoring.
+- `src/GameAgent.Hosting`: .NET server lifecycle and remote action bridge.
+- `src/GameAgent.Remote.Client`: engine-compatible remote action connector.
+- `src/GameAgent.Storage.*`: optional .NET 8 relational durable stores.
+- `src/GameAgent.Observability.OpenTelemetry`: optional .NET 8 export bridge.
 - `src/GameAgent.Providers.*`: provider transports only.
 - `engines/godot`: primary engine adapter.
 - `engines/unity`: Unity lifecycle and UPM adapter.

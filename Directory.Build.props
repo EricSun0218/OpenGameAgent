@@ -7,7 +7,7 @@
     <Deterministic>true</Deterministic>
     <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
     <DebugType Condition="'$(Configuration)' == 'Release'">embedded</DebugType>
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.2.0</VersionPrefix>
     <VersionSuffix>alpha.1</VersionSuffix>
     <Authors>Eric Sun</Authors>
     <Company>Eric Sun</Company>

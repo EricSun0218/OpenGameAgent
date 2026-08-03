@@ -63,6 +63,62 @@ Invoke-Dotnet -Arguments @(
     'add',
     $projectPath,
     'package',
+    'GameAgent.Hosting',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Observability.OpenTelemetry',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Remote.Client',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Simulation',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Evaluation',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Storage.Sqlite',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
+    'GameAgent.Storage.Postgres',
+    '--version',
+    $Version,
+    '--no-restore')
+Invoke-Dotnet -Arguments @(
+    'add',
+    $projectPath,
+    'package',
     'GameAgent.Runtime',
     '--version',
     $Version,
@@ -110,28 +166,44 @@ Invoke-Dotnet -Arguments @(
 
 $consumerSource = @'
 using GameAgent.Core;
+using GameAgent.Evaluation;
 using GameAgent.Generation;
+using GameAgent.Hosting;
+using GameAgent.Observability.OpenTelemetry;
 using GameAgent.Persistence;
 using GameAgent.Protocol;
 using GameAgent.Providers.Anthropic;
 using GameAgent.Providers.MediaHttp;
 using GameAgent.Providers.OpenAICompatible;
+using GameAgent.Remote.Client;
 using GameAgent.Runtime;
+using GameAgent.Simulation;
+using GameAgent.Storage.Postgres;
+using GameAgent.Storage.Relational;
+using GameAgent.Storage.Sqlite;
 using GameAgent.Testing;
 using GameAgent.Workflow;
 
 Type[] shippedTypes =
 [
     typeof(AgentRun),
+    typeof(GameAgentEvaluator),
     typeof(GenerationRuntime),
+    typeof(RemoteActionBroker),
+    typeof(OpenTelemetryRuntimeMetricsSink),
     typeof(HeadlessAgentRuntimeLimits),
     typeof(FileJournalOptions),
     typeof(AnthropicProviderOptions),
     typeof(MediaHttpProviderOptions),
     typeof(OpenAiCompatibleProviderOptions),
+    typeof(RemoteGameHostClient),
     typeof(ProviderRequestPreparationChanges),
     typeof(ConsumerRequestAdapter),
     typeof(GameAgentRuntimeBuilder),
+    typeof(LivingWorldPolicy),
+    typeof(PostgresSessionStore),
+    typeof(RelationalSessionStore),
+    typeof(SqliteSessionStore),
     typeof(FakeRuntimeClock),
     typeof(WorkflowCompiler)
 ];
@@ -214,13 +286,21 @@ $restoredPackages = @(
         -Filter 'gameagent.*')
 $expectedPackageIds = @(
     'gameagent.core',
+    'gameagent.evaluation',
     'gameagent.generation',
+    'gameagent.hosting',
+    'gameagent.observability.opentelemetry',
     'gameagent.persistence',
     'gameagent.protocol',
     'gameagent.providers.anthropic',
     'gameagent.providers.mediahttp',
     'gameagent.providers.openaicompatible',
+    'gameagent.remote.client',
     'gameagent.runtime',
+    'gameagent.simulation',
+    'gameagent.storage.postgres',
+    'gameagent.storage.relational',
+    'gameagent.storage.sqlite',
     'gameagent.testing',
     'gameagent.workflow'
 )

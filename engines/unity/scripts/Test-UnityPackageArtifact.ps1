@@ -135,6 +135,7 @@ $required = @(
     'Tests/Runtime/GameAgent.Unity.PlayModeTests.asmdef',
     'Tests/Editor/GameAgent.Unity.EditorTests.asmdef',
     'Samples~/StructuredToolLoop/GameAgent.Unity.StructuredToolLoopSample.asmdef',
+    'Samples~/LivingWorldPatterns/GameAgent.Unity.LivingWorldPatternsSample.asmdef',
     'Runtime/Plugins/GameAgent.Protocol.dll',
     'Runtime/Plugins/GameAgent.Core.dll',
     'Runtime/Plugins/GameAgent.Generation.dll',
@@ -143,10 +144,13 @@ $required = @(
     'Runtime/Plugins/GameAgent.Providers.OpenAICompatible.dll',
     'Runtime/Plugins/GameAgent.Providers.MediaHttp.dll',
     'Runtime/Plugins/GameAgent.Runtime.dll',
+    'Runtime/Plugins/GameAgent.Remote.Client.dll',
+    'Runtime/Plugins/GameAgent.Simulation.dll',
     'Runtime/Plugins/GameAgent.Workflow.dll',
     'Runtime/Plugins/System.Text.Json.dll',
     'Tests/Runtime/UnityDurableGateScenario.cs',
     'Samples~/StructuredToolLoop/StructuredToolLoopSample.cs',
+    'Samples~/LivingWorldPatterns/LivingWorldPatternsSample.cs',
     'Documentation~/index.md',
     'SHA256SUMS')
 foreach ($relativePath in $required) {
@@ -218,6 +222,8 @@ $expectedPluginNames = @(
     'GameAgent.Providers.OpenAICompatible.dll',
     'GameAgent.Providers.MediaHttp.dll',
     'GameAgent.Runtime.dll',
+    'GameAgent.Remote.Client.dll',
+    'GameAgent.Simulation.dll',
     'GameAgent.Workflow.dll',
     'Microsoft.Bcl.AsyncInterfaces.dll',
     'System.Buffers.dll',
@@ -231,7 +237,8 @@ $assemblyDefinitionPaths = @(
     'Runtime/GameAgent.Unity.asmdef',
     'Tests/Runtime/GameAgent.Unity.PlayModeTests.asmdef',
     'Tests/Editor/GameAgent.Unity.EditorTests.asmdef',
-    'Samples~/StructuredToolLoop/GameAgent.Unity.StructuredToolLoopSample.asmdef')
+    'Samples~/StructuredToolLoop/GameAgent.Unity.StructuredToolLoopSample.asmdef',
+    'Samples~/LivingWorldPatterns/GameAgent.Unity.LivingWorldPatternsSample.asmdef')
 foreach ($relativePath in $assemblyDefinitionPaths) {
     $nativePath = $relativePath.Replace(
         '/',
@@ -286,6 +293,8 @@ $expectedSymbolNames = @(
     'GameAgent.Providers.OpenAICompatible.pdb',
     'GameAgent.Providers.MediaHttp.pdb',
     'GameAgent.Runtime.pdb',
+    'GameAgent.Remote.Client.pdb',
+    'GameAgent.Simulation.pdb',
     'GameAgent.Workflow.pdb')
 $expectedSymbolPaths = @()
 if ($ExpectSymbols) {

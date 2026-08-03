@@ -13,6 +13,8 @@
     <ProjectReference Include="..\..\src\GameAgent.Providers.Anthropic\GameAgent.Providers.Anthropic.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Providers.MediaHttp\GameAgent.Providers.MediaHttp.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Runtime\GameAgent.Runtime.csproj" />
+    <ProjectReference Include="..\..\src\GameAgent.Remote.Client\GameAgent.Remote.Client.csproj" />
+    <ProjectReference Include="..\..\src\GameAgent.Simulation\GameAgent.Simulation.csproj" />
     <ProjectReference Include="..\..\src\GameAgent.Workflow\GameAgent.Workflow.csproj" />
   </ItemGroup>
 </Project>

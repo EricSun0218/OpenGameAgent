@@ -1,6 +1,6 @@
 param(
     [string]$Configuration = "Release",
-    [string]$Version = "0.1.0-alpha.1"
+    [string]$Version = "0.2.0-alpha.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -347,6 +347,22 @@ try {
 
     & dotnet build (
         Join-Path $repositoryRoot (
+            "src\GameAgent.Remote.Client\GameAgent.Remote.Client.csproj")
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Remote.Client build failed."
+    }
+
+    & dotnet build (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Simulation\GameAgent.Simulation.csproj")
+    ) -c $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "GameAgent.Simulation build failed."
+    }
+
+    & dotnet build (
+        Join-Path $repositoryRoot (
             "src\GameAgent.Workflow\GameAgent.Workflow.csproj")
     ) -c $Configuration
     if ($LASTEXITCODE -ne 0) {
@@ -411,6 +427,14 @@ try {
     Copy-Item -LiteralPath (
         Join-Path $repositoryRoot (
             "src\GameAgent.Runtime\bin\$Configuration\netstandard2.1\GameAgent.Runtime.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Remote.Client\bin\$Configuration\netstandard2.1\GameAgent.Remote.Client.dll")
+    ) -Destination $libraryTarget
+    Copy-Item -LiteralPath (
+        Join-Path $repositoryRoot (
+            "src\GameAgent.Simulation\bin\$Configuration\netstandard2.1\GameAgent.Simulation.dll")
     ) -Destination $libraryTarget
     Copy-Item -LiteralPath (
         Join-Path $repositoryRoot (

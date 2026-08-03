@@ -23,20 +23,34 @@ if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
 
 $expectedPackageIds = @(
     'GameAgent.Core',
+    'GameAgent.Evaluation',
     'GameAgent.Generation',
+    'GameAgent.Hosting',
+    'GameAgent.Observability.OpenTelemetry',
     'GameAgent.Persistence',
     'GameAgent.Protocol',
     'GameAgent.Providers.Anthropic',
     'GameAgent.Providers.MediaHttp',
     'GameAgent.Providers.OpenAICompatible',
+    'GameAgent.Remote.Client',
     'GameAgent.Runtime',
+    'GameAgent.Simulation',
+    'GameAgent.Storage.Postgres',
+    'GameAgent.Storage.Relational',
+    'GameAgent.Storage.Sqlite',
     'GameAgent.Testing',
     'GameAgent.Workflow')
 $expectedInternalDependencies = @{
     'GameAgent.Core' = @('GameAgent.Protocol')
+    'GameAgent.Evaluation' = @('GameAgent.Protocol')
     'GameAgent.Generation' = @(
         'GameAgent.Core',
         'GameAgent.Protocol')
+    'GameAgent.Hosting' = @(
+        'GameAgent.Core',
+        'GameAgent.Protocol',
+        'GameAgent.Runtime')
+    'GameAgent.Observability.OpenTelemetry' = @('GameAgent.Core')
     'GameAgent.Persistence' = @(
         'GameAgent.Core',
         'GameAgent.Protocol')
@@ -44,15 +58,33 @@ $expectedInternalDependencies = @{
     'GameAgent.Providers.Anthropic' = @('GameAgent.Core')
     'GameAgent.Providers.MediaHttp' = @('GameAgent.Generation')
     'GameAgent.Providers.OpenAICompatible' = @('GameAgent.Core')
+    'GameAgent.Remote.Client' = @(
+        'GameAgent.Core',
+        'GameAgent.Protocol')
     'GameAgent.Runtime' = @(
         'GameAgent.Core',
         'GameAgent.Persistence',
         'GameAgent.Protocol',
         'GameAgent.Providers.OpenAICompatible')
+    'GameAgent.Simulation' = @(
+        'GameAgent.Core',
+        'GameAgent.Protocol')
+    'GameAgent.Storage.Postgres' = @('GameAgent.Storage.Relational')
+    'GameAgent.Storage.Relational' = @(
+        'GameAgent.Core',
+        'GameAgent.Protocol')
+    'GameAgent.Storage.Sqlite' = @('GameAgent.Storage.Relational')
     'GameAgent.Testing' = @(
         'GameAgent.Core',
         'GameAgent.Protocol')
     'GameAgent.Workflow' = @('GameAgent.Core')
+}
+$targetFrameworks = @{
+    'GameAgent.Hosting' = 'net8.0'
+    'GameAgent.Observability.OpenTelemetry' = 'net8.0'
+    'GameAgent.Storage.Postgres' = 'net8.0'
+    'GameAgent.Storage.Relational' = 'net8.0'
+    'GameAgent.Storage.Sqlite' = 'net8.0'
 }
 $packageRoot = [IO.Path]::GetFullPath(
     (Resolve-Path -LiteralPath $Path))
@@ -79,11 +111,17 @@ foreach ($expectedId in $expectedPackageIds) {
 
     $archive = [IO.Compression.ZipFile]::OpenRead($matches[0].FullName)
     try {
+        $targetFramework = if ($targetFrameworks.ContainsKey($expectedId)) {
+            $targetFrameworks[$expectedId]
+        }
+        else {
+            'netstandard2.1'
+        }
         $expectedEntries = @(
             '[Content_Types].xml',
             '_rels/.rels',
             "$expectedId.nuspec",
-            "lib/netstandard2.1/$expectedId.dll",
+            "lib/$targetFramework/$expectedId.dll",
             'package/services/metadata/core-properties/core.psmdcp',
             'README.md')
         $actualEntries = @(

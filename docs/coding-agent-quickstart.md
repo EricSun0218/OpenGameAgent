@@ -73,6 +73,10 @@ Recommended order:
 6. Add memory only after the basic run and recovery path pass.
 7. Add multi-actor batches only after one actor is correct.
 
+The engine packages also include a model-free `LivingWorldPatterns` sample.
+It covers direct dialogue admission, a game-calendar trigger, bounded multi-NPC
+work, dormant aggregation, and a fixed four-stage construction workflow.
+
 This order makes provider variability the last new variable rather than the
 first.
 
@@ -123,6 +127,13 @@ Run the machine-readable fast gate during iteration:
 Before release, run the applicable engine profile and inspect the JSON report.
 The report schema is stable enough for a coding agent to locate the first
 failed check without parsing localized console output.
+
+Run the public-artifact clean-room benchmark after changing packages or
+quickstart documentation:
+
+```powershell
+./tools/Invoke-CleanRoomIntegrationBenchmark.ps1 -Engine all
+```
 
 ## Completion criteria
 

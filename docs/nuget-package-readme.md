@@ -4,7 +4,7 @@ This package is one module of the Game Agent Runtime .NET SDK. For a complete
 in-engine runtime, start with:
 
 ```shell
-dotnet add package GameAgent.Runtime --version 0.1.0-alpha.1
+dotnet add package GameAgent.Runtime --version 0.2.0-alpha.1
 ```
 
 Choose a narrower package only when you are building a custom composition:
@@ -13,12 +13,19 @@ Choose a narrower package only when you are building a custom composition:
 | --- | --- |
 | `GameAgent.Runtime` | Recommended composition entry point |
 | `GameAgent.Core` | Agent loop, tools, skills, context, control, and scheduling |
+| `GameAgent.Evaluation` | Deterministic gameplay-quality evidence scoring |
 | `GameAgent.Persistence` | Crash-tolerant journal, operation ledger, and local memory store |
 | `GameAgent.Protocol` | Versioned host and wire contracts |
 | `GameAgent.Providers.OpenAICompatible` | Streaming chat-completions provider adapter |
 | `GameAgent.Providers.Anthropic` | Native Anthropic Messages streaming provider adapter |
+| `GameAgent.Remote.Client` | Godot/Unity-compatible remote action connector |
+| `GameAgent.Simulation` | Deterministic living-world activation and admission |
 | `GameAgent.Workflow` | Optional bounded, durable workflow composition |
 | `GameAgent.Testing` | Deterministic test doubles and contract helpers |
+| `GameAgent.Hosting` | .NET 8 lifecycle, tenant admission, and remote action bridge |
+| `GameAgent.Storage.Sqlite` | .NET 8 relational journal for one local process |
+| `GameAgent.Storage.Postgres` | .NET 8 relational journal for multi-instance services |
+| `GameAgent.Observability.OpenTelemetry` | .NET 8 metrics and tracing export |
 
 All pre-1.0 modules use exact lockstep dependencies. Upgrade their versions
 together and rerun your engine integration tests.

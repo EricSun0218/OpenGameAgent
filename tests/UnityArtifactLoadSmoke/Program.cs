@@ -17,6 +17,8 @@ string[] expectedNames =
     "GameAgent.Providers.OpenAICompatible.dll",
     "GameAgent.Providers.MediaHttp.dll",
     "GameAgent.Runtime.dll",
+    "GameAgent.Remote.Client.dll",
+    "GameAgent.Simulation.dll",
     "GameAgent.Workflow.dll",
     "Microsoft.Bcl.AsyncInterfaces.dll",
     "System.Buffers.dll",

@@ -86,3 +86,19 @@ if ($script:LastGodotOutput -notmatch "GODOT_SAMPLE_PASS") {
     throw "Godot basic sample exited without the GODOT_SAMPLE_PASS marker."
 }
 Assert-NoGodotLeakWarning
+
+$livingWorldSampleExitCode = Invoke-Godot @(
+    "--headless",
+    "--path",
+    $projectRoot,
+    "--scene",
+    "res://samples/living_world/LivingWorldPatternsSample.tscn",
+    "--quit-after",
+    "10")
+if ($livingWorldSampleExitCode -ne 0) {
+    throw "Godot living-world sample smoke failed with exit code $livingWorldSampleExitCode."
+}
+if ($script:LastGodotOutput -notmatch "GODOT_LIVING_WORLD_SAMPLE_PASS") {
+    throw "Godot living-world sample exited without the GODOT_LIVING_WORLD_SAMPLE_PASS marker."
+}
+Assert-NoGodotLeakWarning

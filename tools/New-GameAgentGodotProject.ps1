@@ -193,6 +193,8 @@ if ($ProjectName -notmatch '^[\p{L}][\p{L}\p{N} ._-]{0,63}$') {
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $templateRoot = Join-Path $repositoryRoot "templates\godot-agent-starter"
 $sampleRoot = Join-Path $repositoryRoot "engines\godot\samples\basic"
+$livingWorldSampleRoot = Join-Path $repositoryRoot `
+    "engines\godot\samples\living_world"
 $packageScript = Join-Path $repositoryRoot `
     "engines\godot\tools\package-addon.ps1"
 $resolvedDestination = [IO.Path]::GetFullPath($Destination)
@@ -260,6 +262,9 @@ try {
     Copy-RegularTree `
         -Source $sampleRoot `
         -Target (Join-Path $stageRoot "samples\basic")
+    Copy-RegularTree `
+        -Source $livingWorldSampleRoot `
+        -Target (Join-Path $stageRoot "samples\living_world")
 
     $projectTemplate = [IO.File]::ReadAllText(
         (Join-Path $templateRoot "project.godot.template"))

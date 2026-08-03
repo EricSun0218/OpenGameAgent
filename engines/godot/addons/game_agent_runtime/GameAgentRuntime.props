@@ -32,6 +32,14 @@
       <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Runtime.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="GameAgent.Remote.Client">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Remote.Client.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Simulation">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Simulation.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <Reference Include="GameAgent.Workflow">
       <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Workflow.dll</HintPath>
       <Private>true</Private>
