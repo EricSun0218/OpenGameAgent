@@ -11,6 +11,8 @@ concurrency:
   group: trusted-release-gate-${{ github.event.workflow_run.id }}
   cancel-in-progress: true
 
+permissions: {}
+
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
@@ -218,7 +220,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Restore portable runtime
-        run: dotnet restore GameAgentRuntime.sln
+        run: dotnet restore GameAgentRuntime.sln --locked-mode
       - name: Build portable runtime
         run: >-
           dotnet build GameAgentRuntime.sln -c Release
