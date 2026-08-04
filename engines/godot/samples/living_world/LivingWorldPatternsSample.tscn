@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://samples/living_world/LivingWorldPatternsSample.cs" id="1_sample"]
+
+[node name="LivingWorldPatternsSample" type="Node"]
+script = ExtResource("1_sample")

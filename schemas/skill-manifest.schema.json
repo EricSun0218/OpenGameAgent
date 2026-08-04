@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/skill-manifest.schema.json",
+  "title": "SkillManifest",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "skillId",
+    "version",
+    "digest",
+    "description",
+    "promptFragments",
+    "requiredToolRefs",
+    "optionalToolRefs",
+    "contextProviderRefs",
+    "resourceRefs",
+    "capabilityRequirements",
+    "trust",
+    "activationPolicy"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "skillId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "promptFragments": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192
+      }
+    },
+    "requiredToolRefs": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "optionalToolRefs": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "contextProviderRefs": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "uniqueItems": true
+    },
+    "resourceRefs": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "common.schema.json#/$defs/resourceRef"
+      },
+      "uniqueItems": true
+    },
+    "capabilityRequirements": {
+      "type": "object",
+      "maxProperties": 2048
+    },
+    "trust": {
+      "enum": [
+        "builtin",
+        "trusted",
+        "untrusted"
+      ]
+    },
+    "activationPolicy": {
+      "type": "object",
+      "maxProperties": 2048
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,22 @@
+config_version=5
+
+[application]
+
+config/name="OpenGameAgent Package Consumer Smoke"
+run/main_scene="res://Smoke.tscn"
+
+[autoload]
+
+GameAgentRuntime="*res://addons/game_agent_runtime/runtime/GameAgentRuntimeNode.tscn"
+
+[dotnet]
+
+project/assembly_name="PackageConsumer"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/game_agent_runtime/plugin.cfg")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"

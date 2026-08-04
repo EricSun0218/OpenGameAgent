@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/action-receipt.schema.json",
+  "title": "ActionReceipt",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "operationId",
+    "revision",
+    "status",
+    "retryable",
+    "receivedAt"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "operationId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "rejected",
+        "failed",
+        "unknown"
+      ]
+    },
+    "result": {},
+    "stateDiff": {},
+    "authoritativeObservations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "observation-envelope.schema.json"
+      },
+      "default": []
+    },
+    "errorCode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "committedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "receivedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

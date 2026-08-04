@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0": {
+      "System.Text.Json": {
+        "type": "Transitive",
+        "resolved": "8.0.6",
+        "contentHash": "BvSpVBsVN9b+Y+wONbvJOHd1HjXQf33+XiC28ZMOwRsYb42mz3Q8YHnpTSwpwJLqYCMqM+0UUVC3V+pi25XfkQ=="
+      },
+      "gameagent.core": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.persistence": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "gameagent.testing": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      }
+    }
+  }
+}

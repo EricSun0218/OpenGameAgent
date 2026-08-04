@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/observation-envelope.schema.json",
+  "title": "ObservationEnvelope",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "observationId",
+    "worldId",
+    "source",
+    "kind",
+    "contentType",
+    "observedAt",
+    "trust",
+    "visibility"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "observationId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "worldId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "sessionId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "kind": {
+      "enum": [
+        "event",
+        "snapshot",
+        "patch",
+        "document",
+        "metric",
+        "relation",
+        "resource_ref",
+        "custom"
+      ]
+    },
+    "subjectIds": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "contentType": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "schemaRef": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "contentSchemaVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "payload": {},
+    "resourceRef": {
+      "$ref": "common.schema.json#/$defs/resourceRef"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ttlMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stateVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "trust": {
+      "enum": [
+        "authoritative",
+        "trusted",
+        "untrusted"
+      ]
+    },
+    "visibility": {
+      "type": "object",
+      "required": [
+        "scope"
+      ],
+      "properties": {
+        "scope": {
+          "enum": [
+            "world",
+            "group",
+            "agent",
+            "private"
+          ]
+        },
+        "audienceIds": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": -1000,
+      "maximum": 1000,
+      "default": 0
+    },
+    "cacheKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "payload"
+      ],
+      "not": {
+        "required": [
+          "resourceRef"
+        ]
+      }
+    },
+    {
+      "required": [
+        "resourceRef"
+      ],
+      "not": {
+        "required": [
+          "payload"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

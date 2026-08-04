@@ -1,0 +1,34 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "name": "gather_food",
+  "version": "1",
+  "description": "Ask the game to gather a visible food resource.",
+  "parametersSchema": {
+    "type": "object",
+    "required": [
+      "resource"
+    ],
+    "properties": {
+      "resource": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "resultSchema": {
+    "type": "object"
+  },
+  "effect": "world_command",
+  "conflictScopes": [
+    "agent:{agentId}",
+    "resource:{resource}"
+  ],
+  "threadAffinity": "engine_main_thread",
+  "timeoutMs": 1000,
+  "retryPolicy": "idempotent",
+  "idempotencyPolicy": "required",
+  "toolset": "survival",
+  "visibility": "direct",
+  "extensions": {}
+}

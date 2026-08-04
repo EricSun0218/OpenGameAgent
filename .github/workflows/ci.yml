@@ -1,0 +1,265 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+  RELEASE_VERSION: "0.2.0-alpha.1"
+
+jobs:
+  privacy-scanner:
+    name: Release privacy scanner self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify release version metadata
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseVersionConsistency.ps1
+      - name: Test release version gate
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseVersionConsistencySelfTest.ps1
+      - name: Test trusted release workflow contract
+        shell: pwsh
+        run: ./engines/shared/Test-TrustedWorkflowContract.ps1 -SelfTest
+      - name: Test release privacy scanner
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactPrivacySelfTest.ps1
+      - name: Test release artifact protection
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactProtectionSelfTest.ps1
+      - name: Test deterministic directory archives
+        shell: pwsh
+        run: ./engines/shared/Write-DeterministicDirectoryArchiveSelfTest.ps1
+      - name: Test exact tracked-source scanner
+        shell: pwsh
+        run: ./engines/shared/Test-TrackedSourcePrivacySelfTest.ps1
+      - name: Scan exact tracked source
+        shell: pwsh
+        run: |
+          $revision = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw 'The checked-out revision could not be resolved.'
+          }
+          ./engines/shared/Test-TrackedSourcePrivacy.ps1 `
+            -Repository . `
+            -Revision $revision
+
+  dotnet:
+    name: Windows .NET
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
+      - name: Test
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
+      - name: Runtime performance smoke
+        run: >-
+          dotnet run
+          --project tests/GameAgent.PerformanceSmoke/GameAgent.PerformanceSmoke.csproj
+          -c Release --no-build
+      - name: Runtime soak and fault smoke
+        run: >-
+          dotnet run
+          --project tests/GameAgent.SoakSmoke/GameAgent.SoakSmoke.csproj
+          -c Release --no-build -- --seconds 3
+
+  linux-portability:
+    name: Linux runtime portability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: runtime_test_only
+          POSTGRES_DB: game_agent_test
+        options: >-
+          --health-cmd "pg_isready -U postgres -d game_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore portable runtime
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build portable runtime
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
+      - name: Test portable runtime
+        env:
+          GAME_AGENT_POSTGRES_TEST: >-
+            Host=127.0.0.1;Port=5432;Username=postgres;Password=runtime_test_only;Database=game_agent_test;Pooling=false
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
+
+  quality:
+    name: Quality and packages
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: privacy-scanner
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Verify formatting
+        run: dotnet format GameAgentRuntime.sln --verify-no-changes --no-restore
+      - name: Audit dependencies
+        shell: pwsh
+        run: ./engines/shared/Test-NuGetDependencyHealth.ps1
+      - name: Test deterministic directory archives
+        shell: pwsh
+        run: ./engines/shared/Write-DeterministicDirectoryArchiveSelfTest.ps1
+      - name: Build packages
+        run: |
+          dotnet pack GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget-raw
+          dotnet pack GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget-repro-raw
+      - name: Normalize packages reproducibly
+        shell: pwsh
+        run: |
+          ./engines/shared/Write-DeterministicNuGetPackages.ps1 `
+            -SourcePath ./artifacts/nuget-raw `
+            -DestinationPath ./artifacts/nuget
+          ./engines/shared/Write-DeterministicNuGetPackages.ps1 `
+            -SourcePath ./artifacts/nuget-repro-raw `
+            -DestinationPath ./artifacts/nuget-repro
+          ./engines/shared/Test-NuGetPackageReproducibility.ps1 `
+            -FirstPath ./artifacts/nuget `
+            -SecondPath ./artifacts/nuget-repro
+      - name: Verify package manifests
+        shell: pwsh
+        run: |
+          $revision = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw 'The package source revision could not be resolved.'
+          }
+          ./engines/shared/Test-NuGetPackageManifest.ps1 `
+            -Path ./artifacts/nuget `
+            -ExpectedVersion $env:RELEASE_VERSION `
+            -ExpectedCommit $revision
+      - name: Verify package consumption
+        shell: pwsh
+        run: |
+          ./engines/shared/Test-NuGetPackageConsumer.ps1 `
+            -PackagePath ./artifacts/nuget `
+            -Version $env:RELEASE_VERSION `
+            -WorkingPath (Join-Path $env:RUNNER_TEMP 'package-consumer')
+      - name: Verify clean-room engine consumption
+        shell: pwsh
+        run: ./tools/Invoke-CleanRoomIntegrationBenchmark.ps1 -Engine all
+      - name: Scan release artifacts
+        shell: pwsh
+        run: ./engines/shared/Test-ReleaseArtifactPrivacy.ps1 -Path ./artifacts/nuget
+
+  unity:
+    name: Unity package contract
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: privacy-scanner
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify package
+        shell: pwsh
+        run: ./engines/unity/scripts/Test-UnityPackage.ps1
+
+  godot:
+    name: Godot .NET package
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: privacy-scanner
+    env:
+      GODOT_VERSION: 4.7.1
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Godot .NET
+        shell: pwsh
+        run: |
+          $godot = ./engines/godot/tools/Install-PinnedGodot.ps1 `
+            -Version $env:GODOT_VERSION `
+            -InstallPath (Join-Path $env:RUNNER_TEMP 'godot')
+          "GODOT_BIN=$godot" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test addon and sample
+        shell: pwsh
+        run: ./engines/godot/tests/run-godot-tests.ps1 -Godot $env:GODOT_BIN
+      - name: Build addon archive
+        shell: pwsh
+        run: >-
+          ./engines/godot/tools/package-addon.ps1
+          -Version $env:RELEASE_VERSION
+      - name: Test isolated package
+        shell: pwsh
+        run: |
+          $archive = "./engines/godot/artifacts/OpenGameAgent-godot-$env:RELEASE_VERSION.zip"
+          ./engines/godot/tests/verify-packaged-addon.ps1 `
+            -Archive $archive `
+            -Godot $env:GODOT_BIN `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./engines/godot/tests/Test-PackagedAddonArtifactSelfTest.ps1 `
+            -Archive $archive

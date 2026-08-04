@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>GameAgent.Testing</RootNamespace>
+    <Description>Deterministic test doubles and contract helpers for OpenGameAgent hosts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+  </ItemGroup>
+</Project>

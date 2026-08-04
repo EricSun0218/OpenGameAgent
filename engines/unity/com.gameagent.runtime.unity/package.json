@@ -1,0 +1,34 @@
+{
+  "name": "com.gameagent.runtime.unity",
+  "version": "0.2.0-alpha.1",
+  "displayName": "OpenGameAgent for Unity",
+  "description": "Durable in-process AI agent runtime for Unity, with tool calling, memory, workflows, multi-NPC simulation, main-thread dispatch, cancellation, and recovery.",
+  "unity": "2022.3",
+  "keywords": [
+    "ai",
+    "agent",
+    "agent-runtime",
+    "game-ai",
+    "gameplay",
+    "llm",
+    "multi-agent",
+    "npc-ai",
+    "runtime"
+  ],
+  "author": {
+    "name": "Eric Sun",
+    "url": "https://github.com/EricSun0218/OpenGameAgent"
+  },
+  "samples": [
+    {
+      "displayName": "Structured Tool Loop",
+      "description": "A durable JSON context drives a streamed tool call, a journaled Unity main-thread action, and a final structured response.",
+      "path": "Samples~/StructuredToolLoop"
+    },
+    {
+      "displayName": "Living World Patterns",
+      "description": "Dialogue, game-calendar triggers, multi-NPC admission, and multi-step construction without a model key.",
+      "path": "Samples~/LivingWorldPatterns"
+    }
+  ]
+}

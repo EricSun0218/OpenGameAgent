@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Description>Provider-neutral relational durable journal for GameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+  </ItemGroup>
+</Project>

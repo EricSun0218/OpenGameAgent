@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/common.schema.json",
+  "title": "Game Agent Protocol Common Definitions",
+  "$defs": {
+    "protocolVersion": {
+      "const": "0.2"
+    },
+    "schemaVersion": {
+      "const": "0.2"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 64,
+      "additionalProperties": true
+    },
+    "resourceRef": {
+      "type": "object",
+      "required": [
+        "uri",
+        "mediaType"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "format": "uri-reference"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

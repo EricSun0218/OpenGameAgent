@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0": {
+      "Godot.SourceGenerators": {
+        "type": "Direct",
+        "requested": "[4.7.1, )",
+        "resolved": "4.7.1",
+        "contentHash": "XNYxnzQtZw/3ebPgpVC5eKMH5z3mx/MFNAb9rNeb/SmyMus+u4GPbwMN1ZsmXf0j4a9L/Uj55PbZIHLk96EFyQ=="
+      },
+      "GodotSharp": {
+        "type": "Direct",
+        "requested": "[4.7.1, )",
+        "resolved": "4.7.1",
+        "contentHash": "OCTPz0MtENY0J1e9Sw4VB9qxS0DK9xpEQLAIMRzCtnVKiJvHZUAAnJ9mU4ewW5+88V4beewp3dl8OE813Qw73g=="
+      },
+      "GodotSharpEditor": {
+        "type": "Direct",
+        "requested": "[4.7.1, )",
+        "resolved": "4.7.1",
+        "contentHash": "MAX9wPgjX9BM+EOMxuF++mWKdvO2y0ZiEAfv6D68HGseQc8mX//yc7QrJizXSJ4ii1nh3krXZSyIJ77nmjOgYA==",
+        "dependencies": {
+          "GodotSharp": "4.7.1"
+        }
+      },
+      "System.Text.Json": {
+        "type": "Transitive",
+        "resolved": "8.0.6",
+        "contentHash": "BvSpVBsVN9b+Y+wONbvJOHd1HjXQf33+XiC28ZMOwRsYb42mz3Q8YHnpTSwpwJLqYCMqM+0UUVC3V+pi25XfkQ=="
+      },
+      "gameagent.core": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.generation": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.persistence": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "gameagent.providers.anthropic": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.providers.mediahttp": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Generation": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.providers.native": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.providers.openaicompatible": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.remote.client": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.runtime": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Persistence": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )",
+          "GameAgent.Providers.Native": "[0.2.0-alpha.1, )",
+          "GameAgent.Providers.OpenAICompatible": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.simulation": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )",
+          "GameAgent.Protocol": "[0.2.0-alpha.1, )"
+        }
+      },
+      "gameagent.workflow": {
+        "type": "Project",
+        "dependencies": {
+          "GameAgent.Core": "[0.2.0-alpha.1, )"
+        }
+      }
+    }
+  }
+}

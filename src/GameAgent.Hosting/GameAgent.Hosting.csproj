@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Description>Server hosting and remote action bridge for GameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+    <ProjectReference Include="..\GameAgent.Runtime\GameAgent.Runtime.csproj" />
+  </ItemGroup>
+</Project>

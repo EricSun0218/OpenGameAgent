@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>GameAgent.Unity.Tests</RootNamespace>
+    <!-- These tests deliberately own and synchronously pump a fake Unity
+         main thread. Tasks are only unwrapped after IsCompleted is true. -->
+    <NoWarn>$(NoWarn);xUnit1031</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\UnityCompileSmoke\UnityCompileSmoke.csproj" />
+    <ProjectReference Include="..\..\src\GameAgent.Protocol\GameAgent.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\GameAgent.Core\GameAgent.Core.csproj" />
+    <ProjectReference Include="..\..\src\GameAgent.Testing\GameAgent.Testing.csproj" />
+  </ItemGroup>
+</Project>

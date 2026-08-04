@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>GameAgent.Workflow</RootNamespace>
+    <Description>Deterministic, bounded workflow composition for local OpenGameAgent runtimes.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+  </ItemGroup>
+</Project>

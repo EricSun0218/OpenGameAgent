@@ -1,0 +1,9 @@
+<Project Sdk="Godot.NET.Sdk/4.7.1">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>PackageConsumer</RootNamespace>
+    <AssemblyName>PackageConsumer</AssemblyName>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <Import Project="addons/game_agent_runtime/GameAgentRuntime.props" />
+</Project>

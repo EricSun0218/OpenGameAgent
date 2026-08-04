@@ -1,0 +1,37 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "observationId": "obs-world-0001",
+  "worldId": "world-demo",
+  "sessionId": "session-demo",
+  "source": "game.world",
+  "kind": "snapshot",
+  "subjectIds": [
+    "agent-demo",
+    "location-forest"
+  ],
+  "contentType": "application/json",
+  "schemaRef": "game://schemas/world-snapshot/1",
+  "contentSchemaVersion": "1",
+  "payload": {
+    "location": "forest",
+    "hunger": 70,
+    "visibleResources": [
+      {
+        "kind": "berries",
+        "amount": 3
+      }
+    ]
+  },
+  "observedAt": "2026-07-28T00:00:00Z",
+  "stateVersion": "world-rev-42",
+  "trust": "authoritative",
+  "visibility": {
+    "scope": "agent",
+    "audienceIds": [
+      "agent-demo"
+    ]
+  },
+  "priority": 100,
+  "extensions": {}
+}

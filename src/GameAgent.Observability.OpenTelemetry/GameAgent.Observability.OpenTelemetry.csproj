@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Description>OpenTelemetry metrics and tracing bridge for GameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
+    <ProjectReference Include="..\GameAgent.Core\GameAgent.Core.csproj" />
+  </ItemGroup>
+</Project>

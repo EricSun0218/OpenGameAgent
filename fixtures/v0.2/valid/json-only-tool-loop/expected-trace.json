@@ -1,0 +1,16 @@
+{
+  "eventKinds": [
+    "run.started",
+    "turn.started",
+    "tool.started",
+    "action.requested",
+    "action.received",
+    "tool.completed",
+    "turn.completed",
+    "turn.started",
+    "assistant.completed",
+    "turn.completed",
+    "run.completed"
+  ],
+  "terminalState": "completed"
+}

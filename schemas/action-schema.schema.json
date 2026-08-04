@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/action-schema.schema.json",
+  "title": "ActionSchema Compatibility Alias",
+  "description": "Deprecated v0.2 alias. New integrations use ToolDescriptor with effect=world_command.",
+  "$ref": "tool-descriptor.schema.json"
+}

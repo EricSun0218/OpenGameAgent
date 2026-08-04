@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/tool-descriptor.schema.json",
+  "title": "ToolDescriptor",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "name",
+    "version",
+    "description",
+    "parametersSchema",
+    "effect",
+    "conflictScopes",
+    "threadAffinity",
+    "timeoutMs",
+    "retryPolicy",
+    "idempotencyPolicy",
+    "toolset",
+    "visibility"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "name": {
+      "$ref": "common.schema.json#/$defs/name"
+    },
+    "version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "parametersSchema": {
+      "type": "object"
+    },
+    "resultSchema": {
+      "type": "object"
+    },
+    "effect": {
+      "enum": [
+        "pure_read",
+        "agent_local_write",
+        "world_command",
+        "external_write"
+      ]
+    },
+    "conflictScopes": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "threadAffinity": {
+      "enum": [
+        "any_thread",
+        "engine_main_thread",
+        "host_managed"
+      ]
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400000
+    },
+    "retryPolicy": {
+      "enum": [
+        "never",
+        "safe_read",
+        "idempotent"
+      ]
+    },
+    "idempotencyPolicy": {
+      "enum": [
+        "required",
+        "best_effort",
+        "none"
+      ]
+    },
+    "toolset": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "visibility": {
+      "enum": [
+        "direct",
+        "deferred",
+        "internal"
+      ]
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "effect": {
+            "enum": [
+              "world_command",
+              "external_write"
+            ]
+          }
+        },
+        "required": [
+          "effect"
+        ]
+      },
+      "then": {
+        "properties": {
+          "idempotencyPolicy": {
+            "not": {
+              "const": "none"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

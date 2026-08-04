@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/context-budget-report.schema.json",
+  "title": "ContextBudgetReport",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "runId",
+    "turnId",
+    "inputCount",
+    "selectedIds",
+    "deferredIds",
+    "pruned",
+    "externalized",
+    "estimatedTokens",
+    "budgetLimit",
+    "reasonCodes"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "turnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "inputCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "selectedIds": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      },
+      "uniqueItems": true
+    },
+    "deferredIds": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "common.schema.json#/$defs/id"
+      },
+      "uniqueItems": true
+    },
+    "pruned": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "category",
+          "reasonCode"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          "category": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "reasonCode": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "externalized": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "common.schema.json#/$defs/resourceRef"
+      },
+      "uniqueItems": true
+    },
+    "estimatedTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "actualTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "budgetLimit": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reasonCodes": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  },
+  "additionalProperties": false
+}

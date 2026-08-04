@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/capability-manifest.schema.json",
+  "title": "CapabilityManifest",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "protocolRange",
+    "runtimeVersion",
+    "engine",
+    "engineVersion",
+    "adapterVersion",
+    "platform",
+    "backend",
+    "contentTypes",
+    "codecs",
+    "transports",
+    "maxMessageBytes",
+    "maxBatchSize",
+    "streaming",
+    "persistenceLevel",
+    "toolEffects",
+    "threadAffinities",
+    "receiptReconciliation",
+    "providerCapabilities"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "protocolRange": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "runtimeVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "engine": {
+      "enum": [
+        "headless",
+        "godot",
+        "unity"
+      ]
+    },
+    "engineVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "adapterVersion": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "backend": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "contentTypes": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "uniqueItems": true
+    },
+    "codecs": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "uniqueItems": true
+    },
+    "transports": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "uniqueItems": true
+    },
+    "maxMessageBytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "maxBatchSize": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "streaming": {
+      "type": "boolean"
+    },
+    "persistenceLevel": {
+      "enum": [
+        "none",
+        "memory",
+        "durable"
+      ]
+    },
+    "toolEffects": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "enum": [
+          "pure_read",
+          "agent_local_write",
+          "world_command",
+          "external_write"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "threadAffinities": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "enum": [
+          "any_thread",
+          "engine_main_thread",
+          "host_managed"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "receiptReconciliation": {
+      "type": "boolean"
+    },
+    "providerCapabilities": {
+      "type": "object",
+      "maxProperties": 2048
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions",
+      "maxProperties": 64,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,1993 @@
+using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
+using System.Text;
+
+namespace GameAgent.Core;
+
+public static class MemoryRankingModes
+{
+    public const string RawScore = "raw_score";
+
+    public const string ReciprocalRankFusion = "reciprocal_rank_fusion";
+
+    internal static bool IsKnown(string value) =>
+        string.Equals(value, RawScore, StringComparison.Ordinal)
+        || string.Equals(
+            value,
+            ReciprocalRankFusion,
+            StringComparison.Ordinal);
+}
+
+public sealed class MemoryLifecycleOptions
+{
+    public int MaxProviders { get; set; } = 16;
+
+    public int MaxConcurrentPrefetches { get; set; } = 4;
+
+    public int MaxPrefetchEntries { get; set; } = 128;
+
+    public int MaxResultsPerProvider { get; set; } = 1_024;
+
+    public int MaxRetainedCandidates { get; set; } = 4_096;
+
+    public int MaxConcurrentProviderCalls { get; set; } = 8;
+
+    public TimeSpan ProviderTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Controls how candidates from different providers are combined. Raw
+    /// scores preserve the original behavior. Reciprocal-rank fusion is the
+    /// recommended mode when lexical and semantic providers use incomparable
+    /// score scales.
+    /// </summary>
+    public string RankingMode { get; set; } = MemoryRankingModes.RawScore;
+
+    public int RankFusionConstant { get; set; } = 60;
+
+    public int RankFusionScoreScale { get; set; } = 1_000_000;
+
+    public int MaxQueryTransformers { get; set; } = 4;
+
+    public int MaxResultRerankers { get; set; } = 4;
+
+    public TimeSpan ProcessingStageTimeout { get; set; } =
+        TimeSpan.FromSeconds(2);
+
+    internal MemoryLifecycleOptions Snapshot()
+    {
+        if (MaxProviders is < 1 or > 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxProviders));
+        }
+
+        if (MaxConcurrentPrefetches is < 1 or > 64)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxConcurrentPrefetches));
+        }
+
+        if (MaxPrefetchEntries is < 1 or > 4_096)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxPrefetchEntries));
+        }
+
+        if (MaxResultsPerProvider is < 1 or > 65_536)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxResultsPerProvider));
+        }
+
+        if (MaxRetainedCandidates is < 128 or > 65_536)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxRetainedCandidates));
+        }
+
+        if (MaxConcurrentProviderCalls is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxConcurrentProviderCalls));
+        }
+
+        if (ProviderTimeout < TimeSpan.FromMilliseconds(1)
+            || ProviderTimeout > TimeSpan.FromMinutes(5))
+        {
+            throw new ArgumentOutOfRangeException(nameof(ProviderTimeout));
+        }
+
+        if (ShutdownTimeout <= TimeSpan.Zero
+            || ShutdownTimeout > TimeSpan.FromMinutes(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(ShutdownTimeout));
+        }
+
+        if (!MemoryRankingModes.IsKnown(RankingMode))
+        {
+            throw new ArgumentException(
+                "The memory ranking mode is unsupported.",
+                nameof(RankingMode));
+        }
+
+        if (RankFusionConstant is < 1 or > 10_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(RankFusionConstant));
+        }
+
+        if (RankFusionScoreScale is < 1 or > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(RankFusionScoreScale));
+        }
+
+        if (MaxQueryTransformers is < 0 or > 16)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxQueryTransformers));
+        }
+
+        if (MaxResultRerankers is < 0 or > 16)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(MaxResultRerankers));
+        }
+
+        if (ProcessingStageTimeout < TimeSpan.FromMilliseconds(1)
+            || ProcessingStageTimeout > TimeSpan.FromMinutes(1))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ProcessingStageTimeout));
+        }
+
+        return new MemoryLifecycleOptions
+        {
+            MaxProviders = MaxProviders,
+            MaxConcurrentPrefetches = MaxConcurrentPrefetches,
+            MaxPrefetchEntries = MaxPrefetchEntries,
+            MaxResultsPerProvider = MaxResultsPerProvider,
+            MaxRetainedCandidates = MaxRetainedCandidates,
+            MaxConcurrentProviderCalls = MaxConcurrentProviderCalls,
+            ProviderTimeout = ProviderTimeout,
+            ShutdownTimeout = ShutdownTimeout,
+            RankingMode = RankingMode,
+            RankFusionConstant = RankFusionConstant,
+            RankFusionScoreScale = RankFusionScoreScale,
+            MaxQueryTransformers = MaxQueryTransformers,
+            MaxResultRerankers = MaxResultRerankers,
+            ProcessingStageTimeout = ProcessingStageTimeout
+        };
+    }
+}
+
+public sealed class MemoryRecallReport
+{
+    internal MemoryRecallReport(
+        IReadOnlyList<MemorySearchResult> results,
+        IReadOnlyList<string> failedProviderIds,
+        IReadOnlyList<MemoryRecallCandidateEvidence> candidateEvidence,
+        string rankingMode)
+    {
+        Results = results;
+        FailedProviderIds = failedProviderIds;
+        CandidateEvidence = candidateEvidence;
+        RankingMode = rankingMode;
+    }
+
+    public IReadOnlyList<MemorySearchResult> Results { get; }
+
+    public IReadOnlyList<string> FailedProviderIds { get; }
+
+    /// <summary>
+    /// Bounded, content-free evidence aligned with <see cref="Results"/>.
+    /// It explains which provider ranks contributed without copying memory
+    /// payloads into diagnostics.
+    /// </summary>
+    public IReadOnlyList<MemoryRecallCandidateEvidence> CandidateEvidence
+    {
+        get;
+    }
+
+    public string RankingMode { get; }
+
+    public bool IsPartial => FailedProviderIds.Count > 0;
+}
+
+public sealed class MemoryRecallCandidateEvidence
+{
+    internal MemoryRecallCandidateEvidence(
+        string memoryId,
+        int finalScore,
+        IReadOnlyList<MemoryRecallProviderEvidence> providers)
+    {
+        MemoryId = memoryId;
+        FinalScore = finalScore;
+        Providers = providers;
+    }
+
+    public string MemoryId { get; }
+
+    public int FinalScore { get; }
+
+    public IReadOnlyList<MemoryRecallProviderEvidence> Providers { get; }
+}
+
+public sealed class MemoryRecallProviderEvidence
+{
+    internal MemoryRecallProviderEvidence(
+        string providerId,
+        int rank,
+        int rawScore)
+    {
+        ProviderId = providerId;
+        Rank = rank;
+        RawScore = rawScore;
+    }
+
+    public string ProviderId { get; }
+
+    public int Rank { get; }
+
+    public int RawScore { get; }
+}
+
+/// <summary>
+/// Coordinates bounded recall, prefetch, committed writes, and shutdown.
+/// Memory remains derived and untrusted; it cannot prove a host action.
+/// </summary>
+public sealed class RuntimeMemoryLifecycle : IAsyncDisposable
+{
+    private readonly IReadOnlyList<IMemoryProvider> _providers;
+    private readonly IReadOnlyList<string> _providerIds;
+    private readonly IMemoryStore? _writeStore;
+    private readonly IReadOnlyList<IMemoryQueryTransformer>
+        _queryTransformers;
+    private readonly IReadOnlyList<IMemoryResultReranker> _resultRerankers;
+    private readonly MemoryLifecycleOptions _options;
+    private readonly SemaphoreSlim _prefetchSlots;
+    private readonly SemaphoreSlim _providerSlots;
+    private readonly SemaphoreSlim _stopGate = new(1, 1);
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly object _cleanupSync = new();
+    private readonly TaskCompletionSource<bool> _resourceCleanupCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly BoundedCancellationDispatcher _shutdownDispatcher;
+    private readonly Func<Task>? _detachedProviderCleanupCheckpoint;
+    private readonly TaskScheduler? _processingTaskScheduler;
+    private readonly BoundedCallbackExecutionDispatcher
+        _callbackExecutionDispatcher;
+    private readonly object _prefetchAdmission = new();
+    private readonly ConcurrentDictionary<
+        string,
+        Lazy<Task<MemoryRecallReport>>>
+        _prefetches = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<long, Task> _detachedProviderCalls =
+        new();
+    private long _nextDetachedProviderCallId;
+    private int _closed;
+    private int _activeOperations;
+    private int _resourcesDisposed;
+    private TaskCompletionSource<bool>? _idleCompletion;
+    private Task? _shutdownCancellationTask;
+    private Task? _resourceCleanupTask;
+
+    public bool? DetachedProviderCallsDrainedOnDispose { get; private set; }
+
+    /// <summary>
+    /// Reports whether every active operation and detached provider call has
+    /// settled and the lifecycle's internal resources have been released.
+    /// </summary>
+    public bool ShutdownResourceCleanupCompleted =>
+        _resourceCleanupCompletion.Task.IsCompletedSuccessfully;
+
+    public RuntimeMemoryLifecycle(
+        IEnumerable<IMemoryProvider> providers,
+        IMemoryStore? writeStore = null,
+        MemoryLifecycleOptions? options = null,
+        IEnumerable<IMemoryQueryTransformer>? queryTransformers = null,
+        IEnumerable<IMemoryResultReranker>? resultRerankers = null)
+        : this(
+            providers,
+            writeStore,
+            options,
+            BoundedCancellationDispatcher.LifecycleShared,
+            detachedProviderCleanupCheckpoint: null,
+            queryTransformers,
+            resultRerankers,
+            processingTaskScheduler: null,
+            callbackExecutionDispatcher:
+            BoundedCallbackExecutionDispatcher.MemoryShared)
+    {
+    }
+
+    internal RuntimeMemoryLifecycle(
+        IEnumerable<IMemoryProvider> providers,
+        IMemoryStore? writeStore,
+        MemoryLifecycleOptions? options,
+        BoundedCancellationDispatcher shutdownDispatcher,
+        Func<Task>? detachedProviderCleanupCheckpoint = null,
+        IEnumerable<IMemoryQueryTransformer>? queryTransformers = null,
+        IEnumerable<IMemoryResultReranker>? resultRerankers = null,
+        TaskScheduler? processingTaskScheduler = null,
+        BoundedCallbackExecutionDispatcher? callbackExecutionDispatcher = null)
+    {
+        _options = (options ?? new MemoryLifecycleOptions()).Snapshot();
+        _shutdownDispatcher = shutdownDispatcher
+                              ?? throw new ArgumentNullException(
+                                  nameof(shutdownDispatcher));
+        _detachedProviderCleanupCheckpoint =
+            detachedProviderCleanupCheckpoint;
+        _processingTaskScheduler = processingTaskScheduler;
+        _callbackExecutionDispatcher = callbackExecutionDispatcher
+                                       ?? BoundedCallbackExecutionDispatcher
+                                           .MemoryShared;
+        if (providers is null)
+        {
+            throw new ArgumentNullException(nameof(providers));
+        }
+
+        var materialized = new List<IMemoryProvider>();
+        foreach (var provider in providers)
+        {
+            if (provider is null
+                || materialized.Count >= _options.MaxProviders)
+            {
+                throw new ArgumentException(
+                    "The memory provider list is invalid.",
+                    nameof(providers));
+            }
+
+            materialized.Add(provider);
+        }
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var providerIds = new List<string>(materialized.Count);
+        foreach (var provider in materialized)
+        {
+            var id = RuntimeGuard.RequiredUtf8(
+                provider.ProviderId,
+                128,
+                nameof(providers));
+            if (!ids.Add(id))
+            {
+                throw new ArgumentException(
+                    "Memory provider ids must be unique.",
+                    nameof(providers));
+            }
+
+            providerIds.Add(id);
+        }
+
+        _providers = new ReadOnlyCollection<IMemoryProvider>(materialized);
+        _providerIds = new ReadOnlyCollection<string>(providerIds);
+        _writeStore = writeStore;
+        _queryTransformers = SnapshotStages(
+            queryTransformers,
+            _options.MaxQueryTransformers,
+            item => (item.TransformerId, item.Version),
+            nameof(queryTransformers));
+        _resultRerankers = SnapshotStages(
+            resultRerankers,
+            _options.MaxResultRerankers,
+            item => (item.RerankerId, item.Version),
+            nameof(resultRerankers));
+        _prefetchSlots = new SemaphoreSlim(
+            _options.MaxConcurrentPrefetches,
+            _options.MaxConcurrentPrefetches);
+        _providerSlots = new SemaphoreSlim(
+            _options.MaxConcurrentProviderCalls,
+            _options.MaxConcurrentProviderCalls);
+    }
+
+    public async ValueTask<MemoryRecallReport> RecallAsync(
+        MemoryQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        var shutdownToken = EnterOperation();
+        try
+        {
+            if (query is null)
+            {
+                throw new ArgumentNullException(nameof(query));
+            }
+
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                shutdownToken);
+            return await RecallCoreAsync(query, linked.Token)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            ExitOperation();
+        }
+    }
+
+    private async Task<MemoryRecallReport> RecallCoreAsync(
+        MemoryQuery query,
+        CancellationToken cancellationToken)
+    {
+        query = await ApplyQueryTransformersAsync(query, cancellationToken)
+            .ConfigureAwait(false);
+        var failures = new List<string>();
+        var recalls = _providers
+            .Select(
+                (provider, index) => RecallProviderAsync(
+                    provider,
+                    _providerIds[index],
+                    index,
+                    query,
+                    cancellationToken))
+            .ToArray();
+        var providerReports = await Task.WhenAll(recalls)
+            .ConfigureAwait(false);
+        var orderedReports = providerReports
+            .OrderBy(item => item.Index)
+            .ToArray();
+        foreach (var report in orderedReports)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (report.Failed)
+            {
+                failures.Add(report.ProviderId);
+            }
+        }
+
+        var successfulReports = orderedReports
+            .Where(item => !item.Failed)
+            .ToArray();
+        IEnumerable<MemorySearchResult> ranked;
+        if (string.Equals(
+                _options.RankingMode,
+                MemoryRankingModes.ReciprocalRankFusion,
+                StringComparison.Ordinal))
+        {
+            var fused = new RankFusionCandidateAccumulator(
+                _options.MaxRetainedCandidates,
+                _options.RankFusionConstant,
+                _options.RankFusionScoreScale);
+            var maximumRank = successfulReports.Length == 0
+                ? 0
+                : successfulReports.Max(item => item.Results.Count);
+            // Consume providers rank-by-rank. This keeps the bounded set fair
+            // when one provider returns a much longer list and lets shared
+            // high-ranked identities accumulate before lower-ranked tails.
+            for (var rank = 0; rank < maximumRank; rank++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var report in successfulReports)
+                {
+                    if (rank < report.Results.Count)
+                    {
+                        fused.Add(report.Results[rank], rank + 1);
+                    }
+                }
+            }
+
+            ranked = fused.Ranked;
+        }
+        else
+        {
+            var results = new BoundedCandidateSet(
+                _options.MaxRetainedCandidates);
+            foreach (var report in successfulReports)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var result in report.Results)
+                {
+                    results.Add(result);
+                }
+            }
+
+            ranked = results.Ranked;
+        }
+
+        var reranked = await ApplyResultRerankersAsync(
+                query,
+                ranked.ToArray(),
+                cancellationToken)
+            .ConfigureAwait(false);
+        var selected = Select(reranked, query);
+        var candidateEvidence = BuildCandidateEvidence(
+            selected,
+            successfulReports,
+            cancellationToken);
+        failures.Sort(StringComparer.Ordinal);
+        return new MemoryRecallReport(
+            new ReadOnlyCollection<MemorySearchResult>(selected),
+            new ReadOnlyCollection<string>(failures),
+            candidateEvidence,
+            _options.RankingMode);
+    }
+
+    private static IReadOnlyList<MemoryRecallCandidateEvidence>
+        BuildCandidateEvidence(
+            IReadOnlyList<MemorySearchResult> selected,
+            IReadOnlyList<ProviderRecallReport> providerReports,
+            CancellationToken cancellationToken)
+    {
+        var contributions = selected.ToDictionary(
+            item => item.Record.MemoryId,
+            _ => new List<MemoryRecallProviderEvidence>(),
+            StringComparer.Ordinal);
+        foreach (var report in providerReports)
+        {
+            for (var rank = 0; rank < report.Results.Count; rank++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var result = report.Results[rank];
+                if (contributions.TryGetValue(
+                        result.Record.MemoryId,
+                        out var providers))
+                {
+                    providers.Add(new MemoryRecallProviderEvidence(
+                        report.ProviderId,
+                        rank + 1,
+                        result.Score));
+                }
+            }
+        }
+
+        var evidence = selected
+            .Select(item => new MemoryRecallCandidateEvidence(
+                item.Record.MemoryId,
+                item.Score,
+                new ReadOnlyCollection<MemoryRecallProviderEvidence>(
+                    contributions[item.Record.MemoryId])))
+            .ToArray();
+        return new ReadOnlyCollection<MemoryRecallCandidateEvidence>(
+            evidence);
+    }
+
+    private async Task<ProviderRecallReport> RecallProviderAsync(
+        IMemoryProvider provider,
+        string providerId,
+        int index,
+        MemoryQuery query,
+        CancellationToken cancellationToken)
+    {
+        var enteredSlot = false;
+        IsolatedCancellationLease? providerCancellation = null;
+        try
+        {
+            enteredSlot = await _providerSlots.WaitAsync(
+                    _options.ProviderTimeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!enteredSlot)
+            {
+                return ProviderRecallReport.Failure(
+                    index,
+                    providerId);
+            }
+
+            providerCancellation = IsolatedCancellationLease.Create(
+                BoundedCancellationDispatcher.MemoryExtensionShared);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            Task<IReadOnlyList<MemorySearchResult>> operation;
+            try
+            {
+                var providerToken = providerCancellation.Token;
+                if (!_callbackExecutionDispatcher.TryExecute(
+                        () => provider.SearchAsync(query, providerToken),
+                        out var acceptedOperation))
+                {
+                    return ProviderRecallReport.Failure(
+                        index,
+                        providerId);
+                }
+
+                operation = acceptedOperation;
+            }
+            catch
+            {
+                throw;
+            }
+
+            using var signals = new OperationDeadlineSignals(
+                _options.ProviderTimeout,
+                cancellationToken);
+            var completed = await Task.WhenAny(
+                    operation,
+                    signals.Timeout,
+                    signals.Cancellation)
+                .ConfigureAwait(false);
+            if (!ReferenceEquals(completed, operation))
+            {
+                _ = providerCancellation.TryCancel();
+                TrackDetachedProviderCall(operation, providerCancellation);
+                providerCancellation = null;
+                enteredSlot = false;
+                cancellationToken.ThrowIfCancellationRequested();
+                return ProviderRecallReport.Failure(
+                    index,
+                    providerId);
+            }
+
+            await providerCancellation.DisposeAsync().ConfigureAwait(false);
+            providerCancellation = null;
+            cancellationToken.ThrowIfCancellationRequested();
+            var recalled = await operation.ConfigureAwait(false);
+            if (recalled is null)
+            {
+                throw new InvalidOperationException(
+                    "A memory provider returned null.");
+            }
+
+            var recalledSnapshot = SnapshotProviderResults(
+                recalled,
+                _options.MaxResultsPerProvider);
+
+            var providerResults = new BoundedCandidateSet(
+                Math.Min(
+                    _options.MaxResultsPerProvider,
+                    _options.MaxRetainedCandidates));
+            for (var resultIndex = 0;
+                 resultIndex < recalledSnapshot.Length;
+                 resultIndex++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var result = recalledSnapshot[resultIndex];
+                if (MemoryQueryFilter.Matches(result.Record, query)
+                    && Encoding.UTF8.GetByteCount(
+                        result.Record.Content.GetRawText())
+                    <= query.MaxUtf8Bytes)
+                {
+                    providerResults.Add(result);
+                }
+            }
+
+            return ProviderRecallReport.Success(
+                index,
+                providerId,
+                providerResults.Ranked.ToArray());
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException
+                  and not StackOverflowException)
+        {
+            return ProviderRecallReport.Failure(index, providerId);
+        }
+        finally
+        {
+            if (providerCancellation is not null)
+            {
+                await providerCancellation.DisposeAsync().ConfigureAwait(false);
+            }
+            if (enteredSlot)
+            {
+                _providerSlots.Release();
+            }
+        }
+    }
+
+    private void TrackDetachedProviderCall(
+        Task operation,
+        IsolatedCancellationLease cancellation)
+    {
+        long id;
+        TaskCompletionSource<bool> start;
+        Task cleanup;
+        do
+        {
+            id = Interlocked.Increment(ref _nextDetachedProviderCallId);
+            start = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            cleanup = CompleteDetachedProviderCallAsync(
+                id,
+                operation,
+                cancellation,
+                start.Task);
+        }
+        while (!_detachedProviderCalls.TryAdd(id, cleanup));
+
+        start.TrySetResult(true);
+        _ = cleanup.ContinueWith(
+            ObserveCompletion,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private async Task CompleteDetachedProviderCallAsync(
+        long id,
+        Task operation,
+        IsolatedCancellationLease cancellation,
+        Task start)
+    {
+        await start.ConfigureAwait(false);
+        try
+        {
+            try
+            {
+                await operation.ConfigureAwait(false);
+            }
+            catch
+            {
+                ObserveCompletion(operation);
+            }
+
+            if (_detachedProviderCleanupCheckpoint is not null)
+            {
+                await _detachedProviderCleanupCheckpoint()
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            try
+            {
+                cancellation.DisposeDetached();
+                _providerSlots.Release();
+            }
+            finally
+            {
+                _detachedProviderCalls.TryRemove(id, out _);
+            }
+        }
+    }
+
+    public void Prefetch(string key, MemoryQuery query)
+    {
+        RuntimeGuard.RequiredUtf8(key, 256, nameof(key));
+        if (query is null)
+        {
+            throw new ArgumentNullException(nameof(query));
+        }
+
+        Lazy<Task<MemoryRecallReport>> prefetch;
+        var created = false;
+        lock (_prefetchAdmission)
+        {
+            ThrowIfClosedLocked();
+            if (_prefetches.Count >= _options.MaxPrefetchEntries
+                && !_prefetches.ContainsKey(key))
+            {
+                throw new RuntimeContentLimitException(
+                    nameof(key),
+                    "memory_prefetch_capacity_exceeded",
+                    "The memory prefetch cache is full.");
+            }
+
+            if (!_prefetches.TryGetValue(key, out prefetch!))
+            {
+                _activeOperations++;
+                var shutdownToken = _shutdown.Token;
+                prefetch = new Lazy<Task<MemoryRecallReport>>(
+                    () => Task.Run(
+                        () => PrefetchCoreAsync(query, shutdownToken)),
+                    LazyThreadSafetyMode.ExecutionAndPublication);
+                _prefetches[key] = prefetch;
+                created = true;
+            }
+        }
+
+        if (created)
+        {
+            _ = prefetch.Value.ContinueWith(
+                ObserveCompletion,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+    }
+
+    public async ValueTask<MemoryRecallReport?> TakePrefetchedAsync(
+        string key,
+        CancellationToken cancellationToken = default)
+    {
+        RuntimeGuard.RequiredUtf8(key, 256, nameof(key));
+        Lazy<Task<MemoryRecallReport>>? prefetch;
+        lock (_prefetchAdmission)
+        {
+            ThrowIfClosedLocked();
+            if (!_prefetches.TryRemove(key, out prefetch))
+            {
+                return null;
+            }
+        }
+
+        return await WaitWithCancellationAsync(
+                prefetch.Value,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async ValueTask CommitAsync(
+        MemoryRecord record,
+        CancellationToken cancellationToken = default)
+    {
+        var shutdownToken = EnterOperation();
+        try
+        {
+            if (record is null)
+            {
+                throw new ArgumentNullException(nameof(record));
+            }
+
+            if (record.Provenance is null || !record.Provenance.Committed)
+            {
+                throw new InvalidOperationException(
+                    "Runtime-managed memory writes require committed provenance.");
+            }
+
+            if (_writeStore is null)
+            {
+                throw new InvalidOperationException(
+                    "No memory write store is configured.");
+            }
+
+            using var linked =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    shutdownToken);
+            await _writeStore
+                .UpsertAsync(record, linked.Token)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            ExitOperation();
+        }
+    }
+
+    public async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        CommitAtomicBatchAsync(
+            IReadOnlyList<MemoryMutation> mutations,
+            CancellationToken cancellationToken = default)
+    {
+        var shutdownToken = EnterOperation();
+        try
+        {
+            using var linked =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    shutdownToken);
+            var snapshot = MemoryBatchValidator.Snapshot(
+                mutations,
+                linked.Token);
+            foreach (var mutation in snapshot)
+            {
+                linked.Token.ThrowIfCancellationRequested();
+                if (mutation.Kind == MemoryMutationKind.Upsert
+                    && (mutation.Record?.Provenance is null
+                        || !mutation.Record.Provenance.Committed))
+                {
+                    throw new InvalidOperationException(
+                        "Runtime-managed memory writes require committed "
+                        + "provenance.");
+                }
+            }
+
+            if (_writeStore is null)
+            {
+                throw new InvalidOperationException(
+                    "No memory write store is configured.");
+            }
+
+            if (_writeStore is not IAtomicMemoryBatchStore batchStore)
+            {
+                throw new MemoryBatchNotSupportedException();
+            }
+
+            var rawResults = await batchStore.ApplyAtomicBatchAsync(
+                    snapshot,
+                    linked.Token)
+                .ConfigureAwait(false);
+            return SnapshotBatchResults(rawResults, snapshot);
+        }
+        finally
+        {
+            ExitOperation();
+        }
+    }
+
+    public async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        CommitIdempotentAtomicBatchAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            CancellationToken cancellationToken = default)
+    {
+        var shutdownToken = EnterOperation();
+        try
+        {
+            using var linked =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    shutdownToken);
+            var snapshot = MemoryBatchValidator.Snapshot(
+                mutations,
+                linked.Token);
+            foreach (var mutation in snapshot)
+            {
+                linked.Token.ThrowIfCancellationRequested();
+                if (mutation.Kind == MemoryMutationKind.Upsert
+                    && (mutation.Record?.Provenance is null
+                        || !mutation.Record.Provenance.Committed))
+                {
+                    throw new InvalidOperationException(
+                        "Runtime-managed memory writes require committed "
+                        + "provenance.");
+                }
+            }
+
+            if (_writeStore is null)
+            {
+                throw new InvalidOperationException(
+                    "No memory write store is configured.");
+            }
+
+            if (_writeStore is not IRuntimeAuthoritativeMemoryBatchStore
+                batchStore)
+            {
+                throw new MemoryRuntimeMutationContractNotSupportedException();
+            }
+
+            if (batchStore.RuntimeMutationContractVersion
+                != RuntimeMemoryMutationContract.CurrentVersion)
+            {
+                throw new MemoryRuntimeMutationContractNotSupportedException(
+                    batchStore.RuntimeMutationContractVersion);
+            }
+
+            var rawResults =
+                await batchStore.ApplyIdempotentAtomicBatchAsync(
+                        commitId,
+                        snapshot,
+                        linked.Token)
+                    .ConfigureAwait(false);
+            return SnapshotBatchResults(rawResults, snapshot);
+        }
+        finally
+        {
+            ExitOperation();
+        }
+    }
+
+    internal async ValueTask<IReadOnlyList<MemoryMutationResult>>
+        ReplayLegacyIdempotentAtomicBatchAsync(
+            string commitId,
+            IReadOnlyList<MemoryMutation> mutations,
+            CancellationToken cancellationToken = default)
+    {
+        var shutdownToken = EnterOperation();
+        try
+        {
+            using var linked =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    shutdownToken);
+            var snapshot = MemoryBatchValidator.Snapshot(
+                mutations,
+                linked.Token);
+            foreach (var mutation in snapshot)
+            {
+                linked.Token.ThrowIfCancellationRequested();
+                MemoryMutationAdmission.EnsureCanReplayLegacy(mutation);
+                if (mutation.Kind == MemoryMutationKind.Upsert
+                    && (mutation.Record?.Provenance is null
+                        || !mutation.Record.Provenance.Committed))
+                {
+                    throw new InvalidOperationException(
+                        "Runtime-managed memory writes require committed "
+                        + "provenance.");
+                }
+            }
+
+            if (_writeStore is not ILegacyRuntimeMemoryBatchReplayStore
+                replayStore)
+            {
+                throw new MemoryLegacyReplayNotSupportedException();
+            }
+
+            var rawResults =
+                await replayStore.ApplyLegacyIdempotentAtomicBatchAsync(
+                        commitId,
+                        snapshot,
+                        linked.Token)
+                    .ConfigureAwait(false);
+            return SnapshotBatchResults(rawResults, snapshot);
+        }
+        finally
+        {
+            ExitOperation();
+        }
+    }
+
+    private static IReadOnlyList<MemoryMutationResult> SnapshotBatchResults(
+        IReadOnlyList<MemoryMutationResult>? results,
+        IReadOnlyList<MemoryMutation> mutations)
+    {
+        if (results is null)
+        {
+            throw new InvalidDataException(
+                "The memory batch store returned no mutation results.");
+        }
+
+        var count = results.Count;
+        if (count != mutations.Count)
+        {
+            throw new InvalidDataException(
+                "The memory batch store returned a different result count "
+                + "than the submitted mutation count.");
+        }
+
+        var snapshot = new MemoryMutationResult[count];
+        for (var index = 0; index < count; index++)
+        {
+            var result = results[index]
+                         ?? throw new InvalidDataException(
+                             $"Memory batch result {index} is null.");
+            var mutation = mutations[index];
+            if (result.Kind != mutation.Kind
+                || !string.Equals(
+                    result.MemoryId,
+                    mutation.MemoryId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Memory batch result {index} does not match its "
+                    + "submitted mutation.");
+            }
+
+            snapshot[index] = new MemoryMutationResult(
+                result.Kind,
+                result.MemoryId,
+                result.Changed);
+        }
+
+        return new ReadOnlyCollection<MemoryMutationResult>(snapshot);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stopGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            BoundedCancellationDispatcher.CancellationDispatchReservation?
+                cancellationReservation = null;
+            if (_shutdownCancellationTask is null
+                && !_shutdownDispatcher.TryReserve(
+                    out cancellationReservation))
+            {
+                DetachedProviderCallsDrainedOnDispose = false;
+                throw new InvalidOperationException(
+                    "Memory shutdown cancellation capacity is exhausted.");
+            }
+
+            Task idle;
+            lock (_prefetchAdmission)
+            {
+                if (_closed == 0)
+                {
+                    _closed = 1;
+                    _prefetches.Clear();
+                }
+
+                idle = _activeOperations == 0
+                    ? Task.CompletedTask
+                    : (_idleCompletion ??= new TaskCompletionSource<bool>(
+                            TaskCreationOptions.RunContinuationsAsynchronously))
+                        .Task;
+            }
+
+            if (_shutdownCancellationTask is null)
+            {
+                var acceptedReservation = cancellationReservation!;
+                _shutdownCancellationTask =
+                    DispatchShutdownAndReleaseAsync(
+                        acceptedReservation,
+                        _shutdown);
+            }
+
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var cancellation = _shutdownCancellationTask
+                               ?? Task.CompletedTask;
+            var operationsIdle = Task.WhenAll(idle, cancellation);
+            var timeout = Task.Delay(_options.ShutdownTimeout);
+            var completed = await Task.WhenAny(operationsIdle, timeout)
+                .ConfigureAwait(false);
+            if (!ReferenceEquals(completed, operationsIdle))
+            {
+                DetachedProviderCallsDrainedOnDispose = false;
+                EnsureResourceCleanup(operationsIdle);
+                return;
+            }
+
+            ObserveCompletion(operationsIdle);
+            var detached = _detachedProviderCalls.Values.ToArray();
+            var drain = Task.WhenAll(detached);
+            var remaining = _options.ShutdownTimeout - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero
+                || !ReferenceEquals(
+                    await Task.WhenAny(drain, Task.Delay(remaining))
+                        .ConfigureAwait(false),
+                    drain))
+            {
+                DetachedProviderCallsDrainedOnDispose = false;
+                EnsureResourceCleanup(Task.CompletedTask);
+                return;
+            }
+
+            ObserveCompletion(drain);
+            DetachedProviderCallsDrainedOnDispose = true;
+            CleanupResources();
+        }
+        finally
+        {
+            _stopGate.Release();
+        }
+    }
+
+    private static async Task DispatchShutdownAndReleaseAsync(
+        BoundedCancellationDispatcher.CancellationDispatchReservation
+            reservation,
+        CancellationTokenSource shutdown)
+    {
+        try
+        {
+            await reservation.DispatchAsync(shutdown)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            reservation.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Initiates bounded disposal and then waits for the actual operation and
+    /// detached-provider drain. Caller cancellation stops only this wait; it
+    /// does not cancel the shared cleanup.
+    /// </summary>
+    public async ValueTask WaitForShutdownDrainAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var boundedDispose = DisposeAsync().AsTask();
+        ObserveBackground(boundedDispose);
+        await WaitWithCancellationAsync(
+                boundedDispose,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await WaitWithCancellationAsync(
+                _resourceCleanupCompletion.Task,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<MemoryRecallReport> PrefetchCoreAsync(
+        MemoryQuery query,
+        CancellationToken shutdownToken)
+    {
+        var enteredSlot = false;
+        try
+        {
+            await _prefetchSlots.WaitAsync(shutdownToken)
+                .ConfigureAwait(false);
+            enteredSlot = true;
+            try
+            {
+                return await RecallCoreAsync(query, shutdownToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+                when (shutdownToken.IsCancellationRequested)
+            {
+                return new MemoryRecallReport(
+                    Array.Empty<MemorySearchResult>(),
+                    new ReadOnlyCollection<string>(
+                        _providers
+                            .Select((_, index) => _providerIds[index])
+                            .OrderBy(id => id, StringComparer.Ordinal)
+                            .ToArray()),
+                    Array.Empty<MemoryRecallCandidateEvidence>(),
+                    _options.RankingMode);
+            }
+        }
+        finally
+        {
+            if (enteredSlot)
+            {
+                _prefetchSlots.Release();
+            }
+
+            ExitOperation();
+        }
+    }
+
+    private async Task<MemoryQuery> ApplyQueryTransformersAsync(
+        MemoryQuery original,
+        CancellationToken cancellationToken)
+    {
+        var current = original;
+        foreach (var transformer in _queryTransformers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var stageInput = current;
+            var candidate = await RunProcessingStageAsync(
+                    token => transformer.TransformAsync(stageInput, token),
+                    stageInput,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (MemoryQuerySecurityEnvelopeMatches(original, candidate))
+            {
+                current = candidate;
+            }
+        }
+
+        return current;
+    }
+
+    private async Task<IReadOnlyList<MemorySearchResult>>
+        ApplyResultRerankersAsync(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> source,
+            CancellationToken cancellationToken)
+    {
+        IReadOnlyList<MemorySearchResult> current =
+            new ReadOnlyCollection<MemorySearchResult>(source.ToArray());
+        foreach (var reranker in _resultRerankers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var stageInput = current;
+            var candidate = await RunProcessingStageAsync(
+                    token => reranker.RerankAsync(query, stageInput, token),
+                    stageInput,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            try
+            {
+                current = ValidateRerankedResults(
+                    query,
+                    stageInput,
+                    candidate);
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                // A custom reranker owns its returned collection. Treat hostile
+                // or unstable Count/index access as an invalid result and keep
+                // the last runtime-owned snapshot.
+            }
+        }
+
+        return current;
+    }
+
+    private async Task<T> RunProcessingStageAsync<T>(
+        Func<CancellationToken, ValueTask<T>> operationFactory,
+        T fallback,
+        CancellationToken cancellationToken)
+    {
+        var entered = await _providerSlots.WaitAsync(
+                _options.ProcessingStageTimeout,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!entered)
+        {
+            return fallback;
+        }
+
+        IsolatedCancellationLease? stageCancellation =
+            IsolatedCancellationLease.Create(
+                BoundedCancellationDispatcher.MemoryExtensionShared);
+        var transferred = false;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Task<T> operation;
+            try
+            {
+                var stageToken = stageCancellation.Token;
+                if (_processingTaskScheduler is not null)
+                {
+                    operation = Task.Factory.StartNew(
+                            () => operationFactory(stageToken).AsTask(),
+                            CancellationToken.None,
+                            TaskCreationOptions.DenyChildAttach,
+                            _processingTaskScheduler)
+                        .Unwrap();
+                }
+                else
+                {
+                    if (!_callbackExecutionDispatcher.TryExecute(
+                            () => operationFactory(stageToken),
+                            out var acceptedOperation))
+                    {
+                        return fallback;
+                    }
+
+                    operation = acceptedOperation;
+                }
+            }
+            catch
+            {
+                return fallback;
+            }
+
+            using var signals = new OperationDeadlineSignals(
+                _options.ProcessingStageTimeout,
+                cancellationToken);
+            var completed = await Task.WhenAny(
+                    operation,
+                    signals.Timeout,
+                    signals.Cancellation)
+                .ConfigureAwait(false);
+            if (!ReferenceEquals(completed, operation))
+            {
+                _ = stageCancellation.TryCancel();
+                TrackDetachedProviderCall(operation, stageCancellation);
+                stageCancellation = null;
+                transferred = true;
+                cancellationToken.ThrowIfCancellationRequested();
+                return fallback;
+            }
+
+            await stageCancellation.DisposeAsync().ConfigureAwait(false);
+            stageCancellation = null;
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return await operation.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                return fallback;
+            }
+        }
+        finally
+        {
+            if (stageCancellation is not null)
+            {
+                await stageCancellation.DisposeAsync().ConfigureAwait(false);
+            }
+            if (!transferred)
+            {
+                _providerSlots.Release();
+            }
+        }
+    }
+
+    private static IReadOnlyList<MemorySearchResult>
+        ValidateRerankedResults(
+            MemoryQuery query,
+            IReadOnlyList<MemorySearchResult> input,
+            IReadOnlyList<MemorySearchResult>? output)
+    {
+        if (output is null || output.Count != input.Count)
+        {
+            return input;
+        }
+
+        var admitted = input.ToDictionary(
+            item => item.Record.MemoryId,
+            item => item.Record,
+            StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var snapshot = new MemorySearchResult[output.Count];
+        for (var index = 0; index < output.Count; index++)
+        {
+            var item = output[index];
+            if (item is null
+                || !admitted.TryGetValue(
+                    item.Record.MemoryId,
+                    out var original)
+                || !ReferenceEquals(item.Record, original)
+                || !seen.Add(item.Record.MemoryId)
+                || !MemoryQueryFilter.Matches(item.Record, query))
+            {
+                return input;
+            }
+
+            snapshot[index] = new MemorySearchResult(
+                item.Record,
+                item.Score);
+        }
+
+        return new ReadOnlyCollection<MemorySearchResult>(snapshot);
+    }
+
+    private static bool MemoryQuerySecurityEnvelopeMatches(
+        MemoryQuery original,
+        MemoryQuery candidate)
+    {
+        if (candidate is null)
+        {
+            return false;
+        }
+
+        return string.Equals(
+                   original.Scope,
+                   candidate.Scope,
+                   StringComparison.Ordinal)
+               && original.RequiredTags.SequenceEqual(
+                   candidate.RequiredTags,
+                   StringComparer.Ordinal)
+               && original.MaxResults == candidate.MaxResults
+               && original.MaxUtf8Bytes == candidate.MaxUtf8Bytes
+               && original.Now == candidate.Now
+               && string.Equals(
+                   original.WorldId,
+                   candidate.WorldId,
+                   StringComparison.Ordinal)
+               && string.Equals(
+                   original.SessionId,
+                   candidate.SessionId,
+                   StringComparison.Ordinal)
+               && original.MaximumSaveRevision
+               == candidate.MaximumSaveRevision
+               && original.RequireCommittedProvenance
+               == candidate.RequireCommittedProvenance
+               && string.Equals(
+                   original.TimelineId,
+                   candidate.TimelineId,
+                   StringComparison.Ordinal)
+               && original.TimelineEpoch == candidate.TimelineEpoch
+               && original.EnforceTimelineEpoch
+               == candidate.EnforceTimelineEpoch
+               && SameEntity(original.Observer, candidate.Observer)
+               && SameGameTime(original.GameTime, candidate.GameTime)
+               && original.IncludeAllPerspectives
+               == candidate.IncludeAllPerspectives;
+    }
+
+    private static bool SameEntity(
+        GameEntityIdentity? left,
+        GameEntityIdentity? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : left.IsSameIncarnation(right);
+
+    private static bool SameGameTime(
+        GameTimePoint? left,
+        GameTimePoint? right) =>
+        left is null || right is null
+            ? left is null && right is null
+            : string.Equals(
+                  left.ClockId,
+                  right.ClockId,
+                  StringComparison.Ordinal)
+              && string.Equals(
+                  left.TimelineId,
+                  right.TimelineId,
+                  StringComparison.Ordinal)
+              && left.Epoch == right.Epoch
+              && left.Tick == right.Tick;
+
+    private static IReadOnlyList<T> SnapshotStages<T>(
+        IEnumerable<T>? source,
+        int maximumCount,
+        Func<T, (string Id, string Version)> identity,
+        string parameterName)
+        where T : class
+    {
+        var result = new List<T>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in source ?? Array.Empty<T>())
+        {
+            if (item is null || result.Count >= maximumCount)
+            {
+                throw new ArgumentException(
+                    "The memory processing stage list is invalid.",
+                    parameterName);
+            }
+
+            var declared = identity(item);
+            var id = RuntimeGuard.RequiredUtf8(
+                declared.Id,
+                128,
+                parameterName);
+            _ = RuntimeGuard.RequiredUtf8(
+                declared.Version,
+                64,
+                parameterName);
+            if (!ids.Add(id))
+            {
+                throw new ArgumentException(
+                    "Memory processing stage ids must be unique.",
+                    parameterName);
+            }
+
+            result.Add(item);
+        }
+
+        return new ReadOnlyCollection<T>(result);
+    }
+
+    private static List<MemorySearchResult> Select(
+        IEnumerable<MemorySearchResult> results,
+        MemoryQuery query)
+    {
+        var selected = new List<MemorySearchResult>();
+        var bytes = 0;
+        foreach (var result in results)
+        {
+            var size = Encoding.UTF8.GetByteCount(
+                result.Record.Content.GetRawText());
+            if (selected.Count >= query.MaxResults)
+            {
+                break;
+            }
+
+            if (checked(bytes + size) > query.MaxUtf8Bytes)
+            {
+                continue;
+            }
+
+            selected.Add(result);
+            bytes += size;
+        }
+
+        return selected;
+    }
+
+    private static MemorySearchResult[] SnapshotProviderResults(
+        IReadOnlyList<MemorySearchResult> recalled,
+        int maximumCount)
+    {
+        int count;
+        try
+        {
+            count = recalled.Count;
+        }
+        catch (Exception exception)
+            when (exception is not OutOfMemoryException)
+        {
+            throw new InvalidDataException(
+                "A memory provider returned an unreadable candidate count.",
+                exception);
+        }
+
+        if (count < 0)
+        {
+            throw new InvalidDataException(
+                "A memory provider returned a negative candidate count.");
+        }
+
+        if (count > maximumCount)
+        {
+            throw new RuntimeContentLimitException(
+                nameof(recalled),
+                "memory_provider_result_count_exceeded",
+                "A memory provider returned too many candidates.");
+        }
+
+        var snapshots = new MemorySearchResult[count];
+        for (var index = 0; index < count; index++)
+        {
+            MemorySearchResult? result;
+            try
+            {
+                result = recalled[index];
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException)
+            {
+                throw new InvalidDataException(
+                    "A memory provider result collection did not match "
+                    + "its declared count.",
+                    exception);
+            }
+
+            if (result?.Record is null)
+            {
+                throw new InvalidDataException(
+                    "A memory provider returned an invalid candidate.");
+            }
+
+            var record = result.Record;
+            var recordSnapshot = new MemoryRecord(
+                record.MemoryId,
+                record.Scope,
+                record.Content,
+                record.Tags,
+                record.Importance,
+                record.CreatedAt,
+                record.UpdatedAt,
+                record.ExpiresAt,
+                record.Provenance,
+                record.GameTimeWindow);
+            snapshots[index] = new MemorySearchResult(
+                recordSnapshot,
+                result.Score);
+        }
+
+        return snapshots;
+    }
+
+    private sealed class BoundedCandidateSet
+    {
+        private readonly int _capacity;
+        private readonly Dictionary<string, MemorySearchResult> _byId =
+            new(StringComparer.Ordinal);
+        private readonly SortedSet<MemorySearchResult> _ranked =
+            new(MemorySearchResultComparer.Instance);
+
+        public BoundedCandidateSet(int capacity)
+        {
+            _capacity = capacity;
+        }
+
+        public IEnumerable<MemorySearchResult> Ranked => _ranked;
+
+        public void Add(MemorySearchResult candidate)
+        {
+            var memoryId = candidate.Record.MemoryId;
+            if (_byId.TryGetValue(memoryId, out var current))
+            {
+                if (MemorySearchResultComparer.Instance.Compare(
+                        candidate,
+                        current) >= 0)
+                {
+                    return;
+                }
+
+                _ranked.Remove(current);
+                _byId.Remove(memoryId);
+            }
+
+            if (_ranked.Count >= _capacity)
+            {
+                var worst = _ranked.Max!;
+                if (MemorySearchResultComparer.Instance.Compare(
+                        candidate,
+                        worst) >= 0)
+                {
+                    return;
+                }
+
+                _ranked.Remove(worst);
+                _byId.Remove(worst.Record.MemoryId);
+            }
+
+            _ranked.Add(candidate);
+            _byId.Add(memoryId, candidate);
+        }
+    }
+
+    private sealed class RankFusionCandidateAccumulator
+    {
+        private readonly int _capacity;
+        private readonly int _rankConstant;
+        private readonly int _scoreScale;
+        private readonly Dictionary<string, FusedCandidate> _byId =
+            new(StringComparer.Ordinal);
+
+        public RankFusionCandidateAccumulator(
+            int capacity,
+            int rankConstant,
+            int scoreScale)
+        {
+            _capacity = capacity;
+            _rankConstant = rankConstant;
+            _scoreScale = scoreScale;
+        }
+
+        public IEnumerable<MemorySearchResult> Ranked
+        {
+            get
+            {
+                var ranked = new BoundedCandidateSet(_capacity);
+                foreach (var candidate in _byId.Values)
+                {
+                    ranked.Add(new MemorySearchResult(
+                        candidate.Record,
+                        checked((int)Math.Min(
+                            int.MaxValue,
+                            candidate.Score))));
+                }
+
+                return ranked.Ranked;
+            }
+        }
+
+        public void Add(MemorySearchResult candidate, int rank)
+        {
+            var contribution = Math.Max(
+                1,
+                _scoreScale / checked(_rankConstant + rank));
+            var memoryId = candidate.Record.MemoryId;
+            if (_byId.TryGetValue(memoryId, out var current))
+            {
+                current.Score = Math.Min(
+                    int.MaxValue,
+                    checked(current.Score + contribution));
+                return;
+            }
+
+            // Provider reports are already bounded before fusion. Retain each
+            // admitted identity until all provider ranks have contributed;
+            // pruning on the first contribution can incorrectly discard a
+            // lower-ranked identity shared by several providers.
+            _byId.Add(
+                memoryId,
+                new FusedCandidate(candidate.Record, contribution));
+        }
+
+        private sealed class FusedCandidate
+        {
+            public FusedCandidate(MemoryRecord record, long score)
+            {
+                Record = record;
+                Score = score;
+            }
+
+            public MemoryRecord Record { get; }
+
+            public long Score { get; set; }
+        }
+    }
+
+    private sealed class MemorySearchResultComparer
+        : IComparer<MemorySearchResult>
+    {
+        public static MemorySearchResultComparer Instance { get; } = new();
+
+        public int Compare(MemorySearchResult? left, MemorySearchResult? right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return 0;
+            }
+
+            if (left is null)
+            {
+                return 1;
+            }
+
+            if (right is null)
+            {
+                return -1;
+            }
+
+            var score = right.Score.CompareTo(left.Score);
+            if (score != 0)
+            {
+                return score;
+            }
+
+            var updated = right.Record.UpdatedAt.CompareTo(
+                left.Record.UpdatedAt);
+            return updated != 0
+                ? updated
+                : StringComparer.Ordinal.Compare(
+                    left.Record.MemoryId,
+                    right.Record.MemoryId);
+        }
+    }
+
+    private static async Task<T> WaitWithCancellationAsync<T>(
+        Task<T> task,
+        CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled)
+        {
+            return await task.ConfigureAwait(false);
+        }
+
+        var cancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            state => ((TaskCompletionSource<bool>)state!).TrySetResult(true),
+            cancelled);
+        if (task != await Task.WhenAny(task, cancelled.Task)
+                .ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return await task.ConfigureAwait(false);
+    }
+
+    private static async Task WaitWithCancellationAsync(
+        Task task,
+        CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled)
+        {
+            await task.ConfigureAwait(false);
+            return;
+        }
+
+        var cancelled = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            state => ((TaskCompletionSource<bool>)state!).TrySetResult(true),
+            cancelled);
+        if (task != await Task.WhenAny(task, cancelled.Task)
+                .ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        await task.ConfigureAwait(false);
+    }
+
+    private CancellationToken EnterOperation()
+    {
+        lock (_prefetchAdmission)
+        {
+            ThrowIfClosedLocked();
+            _activeOperations++;
+            return _shutdown.Token;
+        }
+    }
+
+    private void ExitOperation()
+    {
+        TaskCompletionSource<bool>? idle = null;
+        lock (_prefetchAdmission)
+        {
+            _activeOperations--;
+            if (_activeOperations < 0)
+            {
+                throw new InvalidOperationException(
+                    "The memory operation count became invalid.");
+            }
+
+            if (_closed != 0 && _activeOperations == 0)
+            {
+                idle = _idleCompletion;
+            }
+        }
+
+        idle?.TrySetResult(true);
+    }
+
+    private void ThrowIfClosedLocked()
+    {
+        if (_closed != 0)
+        {
+            throw new ObjectDisposedException(nameof(RuntimeMemoryLifecycle));
+        }
+    }
+
+    private void CleanupResources()
+    {
+        if (Interlocked.Exchange(ref _resourcesDisposed, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            _prefetchSlots.Dispose();
+            _providerSlots.Dispose();
+            _shutdown.Dispose();
+            _resourceCleanupCompletion.TrySetResult(true);
+        }
+        catch (Exception exception)
+        {
+            _resourceCleanupCompletion.TrySetException(exception);
+            throw;
+        }
+    }
+
+    private async Task CleanupAfterOperationsAsync(Task operationsIdle)
+    {
+        try
+        {
+            await operationsIdle.ConfigureAwait(false);
+        }
+        catch
+        {
+            ObserveCompletion(operationsIdle);
+        }
+
+        var detached = _detachedProviderCalls.Values.ToArray();
+        var drain = Task.WhenAll(detached);
+        try
+        {
+            await drain.ConfigureAwait(false);
+        }
+        catch
+        {
+            ObserveCompletion(drain);
+        }
+
+        CleanupResources();
+    }
+
+    private void EnsureResourceCleanup(Task operationsIdle)
+    {
+        Task cleanup;
+        var created = false;
+        lock (_cleanupSync)
+        {
+            if (_resourceCleanupTask is null)
+            {
+                _resourceCleanupTask =
+                    CleanupAfterOperationsAsync(operationsIdle);
+                created = true;
+            }
+
+            cleanup = _resourceCleanupTask;
+        }
+
+        if (created)
+        {
+            ObserveBackground(cleanup);
+        }
+    }
+
+    private static void ObserveCompletion(Task task)
+    {
+        if (task.IsFaulted)
+        {
+            _ = task.Exception;
+        }
+    }
+
+    private static void ObserveBackground(Task task)
+    {
+        _ = task.ContinueWith(
+            ObserveCompletion,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private sealed class ProviderRecallReport
+    {
+        private ProviderRecallReport(
+            int index,
+            string providerId,
+            bool failed,
+            IReadOnlyList<MemorySearchResult> results)
+        {
+            Index = index;
+            ProviderId = providerId;
+            Failed = failed;
+            Results = results;
+        }
+
+        public int Index { get; }
+
+        public string ProviderId { get; }
+
+        public bool Failed { get; }
+
+        public IReadOnlyList<MemorySearchResult> Results { get; }
+
+        public static ProviderRecallReport Failure(
+            int index,
+            string providerId)
+        {
+            return new ProviderRecallReport(
+                index,
+                providerId,
+                failed: true,
+                Array.Empty<MemorySearchResult>());
+        }
+
+        public static ProviderRecallReport Success(
+            int index,
+            string providerId,
+            IReadOnlyList<MemorySearchResult> results)
+        {
+            return new ProviderRecallReport(
+                index,
+                providerId,
+                failed: false,
+                results);
+        }
+    }
+}

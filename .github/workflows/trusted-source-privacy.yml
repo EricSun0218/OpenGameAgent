@@ -1,0 +1,954 @@
+name: Trusted release gate
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+concurrency:
+  group: trusted-release-gate-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  identity:
+    name: Resolve candidate
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (
+        github.event.workflow_run.event == 'pull_request' ||
+        github.event.workflow_run.event == 'push' ||
+        github.event.workflow_run.event == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      head_repository: ${{ steps.candidate.outputs.head_repository }}
+      head_sha: ${{ steps.candidate.outputs.head_sha }}
+    steps:
+      - name: Resolve and pin candidate identity
+        id: candidate
+        shell: pwsh
+        env:
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:HEAD_SHA -notmatch '^[0-9a-f]{40}$' -or
+              $env:HEAD_REPOSITORY -notmatch
+                '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+            throw 'The workflow candidate identity is invalid.'
+          }
+          if ($env:CI_EVENT -eq 'pull_request') {
+            if ($env:PR_NUMBER -notmatch '^[1-9][0-9]*$') {
+              throw 'The pull request identity is unavailable.'
+            }
+            $json = & gh api `
+              "repos/$env:TARGET_REPOSITORY/pulls/$env:PR_NUMBER"
+            if ($LASTEXITCODE -ne 0) {
+              throw 'The pull request candidate could not be verified.'
+            }
+            $pullRequest = $json | ConvertFrom-Json
+            if ($pullRequest.state -ne 'open' -or
+                $pullRequest.head.sha -ne $env:HEAD_SHA -or
+                $pullRequest.base.repo.full_name -ne
+                  $env:TARGET_REPOSITORY -or
+                $pullRequest.head.repo.full_name -ne
+                  $env:HEAD_REPOSITORY) {
+              throw 'The workflow run no longer matches the pull request.'
+            }
+          }
+          elseif ($env:CI_EVENT -in @('push', 'workflow_dispatch')) {
+            if ($env:HEAD_REPOSITORY -ne $env:TARGET_REPOSITORY) {
+              throw 'A non-pull-request run must originate in this repository.'
+            }
+          }
+          else {
+            throw 'The triggering workflow event is not supported.'
+          }
+          "head_repository=$env:HEAD_REPOSITORY" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "head_sha=$env:HEAD_SHA" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  source_privacy:
+    name: Trusted exact-source privacy
+    needs: identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      release_version: ${{ steps.release.outputs.release_version }}
+      expected_nuget_package_count: ${{ steps.nuget_manifest.outputs.package_count }}
+    steps:
+      - name: Check out trusted scanner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out candidate without executing it
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Scan exact candidate tree with trusted code
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ needs.identity.outputs.head_sha }}
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: |
+          $actualSha = (& git -C candidate rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $actualSha -ne $env:CANDIDATE_SHA) {
+            throw 'The checked-out candidate revision does not match the event.'
+          }
+          ./trusted/engines/shared/Test-TrackedSourcePrivacy.ps1 `
+            -Repository candidate `
+            -Revision $env:CANDIDATE_SHA `
+            -RequireInjectedDenyRegex
+      - name: Validate exact candidate release metadata with trusted code
+        id: release
+        shell: pwsh
+        run: |
+          $result = @(
+            ./trusted/engines/shared/Test-ReleaseVersionConsistency.ps1 `
+              -RepositoryRoot ./candidate)
+          $markers = @(
+            $result | Where-Object {
+              $_ -match (
+                '^RELEASE_VERSION_CONSISTENCY_PASS version=' +
+                '[0-9]+\.[0-9]+\.[0-9]+' +
+                '(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$')
+            })
+          if ($markers.Count -ne 1) {
+            throw 'The candidate release version could not be derived.'
+          }
+          $releaseVersion = $markers[0].Substring(
+            'RELEASE_VERSION_CONSISTENCY_PASS version='.Length)
+          "release_version=$releaseVersion" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Resolve trusted NuGet manifest shape
+        id: nuget_manifest
+        shell: pwsh
+        run: |
+          $packageIds = @(
+            ./trusted/engines/shared/Test-NuGetPackageManifest.ps1 `
+              -ListExpectedPackageIds)
+          if ($packageIds.Count -lt 1 -or
+              @($packageIds | Where-Object {
+                  $_ -notmatch '^GameAgent\.[A-Za-z0-9.]+$'
+                }).Count -ne 0 -or
+              @($packageIds | Sort-Object -Unique).Count -ne
+                $packageIds.Count) {
+            throw 'The trusted NuGet package manifest is invalid.'
+          }
+          "package_count=$($packageIds.Count)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  dotnet:
+    name: Trusted Windows .NET
+    needs:
+      - identity
+      - source_privacy
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
+      - name: Test
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
+      - name: Runtime performance smoke
+        run: >-
+          dotnet run
+          --project tests/GameAgent.PerformanceSmoke/GameAgent.PerformanceSmoke.csproj
+          -c Release --no-build
+
+  linux_portability:
+    name: Trusted Linux runtime portability
+    needs:
+      - identity
+      - source_privacy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore portable runtime
+        run: dotnet restore GameAgentRuntime.sln
+      - name: Build portable runtime
+        run: >-
+          dotnet build GameAgentRuntime.sln -c Release
+          --no-restore -warnaserror
+      - name: Test portable runtime
+        run: >-
+          dotnet test GameAgentRuntime.sln -c Release
+          --no-build --no-restore -m:1
+
+  quality:
+    name: Trusted quality and packages
+    needs:
+      - identity
+      - source_privacy
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+      EXPECTED_NUGET_PACKAGE_COUNT: "${{ needs.source_privacy.outputs.expected_nuget_package_count }}"
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore candidate/GameAgentRuntime.sln
+      - name: Verify formatting
+        run: >-
+          dotnet format candidate/GameAgentRuntime.sln
+          --verify-no-changes --no-restore
+      - name: Audit dependencies
+        shell: pwsh
+        run: >-
+          ./candidate/engines/shared/Test-NuGetDependencyHealth.ps1
+          -Solution ./candidate/GameAgentRuntime.sln
+      - name: Test deterministic directory archives
+        shell: pwsh
+        run: >-
+          ./candidate/engines/shared/Write-DeterministicDirectoryArchiveSelfTest.ps1
+      - name: Build packages
+        run: |
+          dotnet pack candidate/GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget-raw
+          dotnet pack candidate/GameAgentRuntime.sln -c Release --no-restore -o artifacts/nuget-repro-raw
+      - name: Normalize packages reproducibly
+        shell: pwsh
+        run: |
+          ./candidate/engines/shared/Write-DeterministicNuGetPackages.ps1 `
+            -SourcePath ./artifacts/nuget-raw `
+            -DestinationPath ./artifacts/nuget
+          ./candidate/engines/shared/Write-DeterministicNuGetPackages.ps1 `
+            -SourcePath ./artifacts/nuget-repro-raw `
+            -DestinationPath ./artifacts/nuget-repro
+          ./candidate/engines/shared/Test-NuGetPackageReproducibility.ps1 `
+            -FirstPath ./artifacts/nuget `
+            -SecondPath ./artifacts/nuget-repro
+      - name: Verify package consumption
+        shell: pwsh
+        run: |
+          ./candidate/engines/shared/Test-NuGetPackageConsumer.ps1 `
+            -PackagePath ./artifacts/nuget `
+            -Version $env:RELEASE_VERSION `
+            -WorkingPath (Join-Path $env:RUNNER_TEMP 'package-consumer')
+      - name: Check out trusted artifact protector
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Protect verified packages
+        shell: pwsh
+        run: |
+          $sets = @(
+            @{
+              Source = './artifacts/nuget-raw'
+              Destination = './artifacts/sealed-nuget/raw-a'
+            },
+            @{
+              Source = './artifacts/nuget-repro-raw'
+              Destination = './artifacts/sealed-nuget/raw-b'
+            })
+          foreach ($set in $sets) {
+            $destination = New-Item `
+              -ItemType Directory `
+              -Path $set.Destination
+            $packages = @(
+              Get-ChildItem `
+                -LiteralPath $set.Source `
+                -File `
+                -Filter '*.nupkg')
+            if ($env:EXPECTED_NUGET_PACKAGE_COUNT -notmatch '^[1-9][0-9]*$') {
+              throw 'The trusted NuGet package count is unavailable.'
+            }
+            if ($packages.Count -ne [int]$env:EXPECTED_NUGET_PACKAGE_COUNT) {
+              throw 'A raw NuGet package set is incomplete.'
+            }
+            foreach ($package in $packages) {
+              ./trusted/engines/shared/Protect-ReleaseArtifact.ps1 `
+                -SourcePath $package.FullName `
+                -CertificatePath ./trusted/engines/shared/release-artifact-recipient.pem `
+                -DestinationPath (Join-Path $destination.FullName ($package.Name + '.sealed'))
+            }
+          }
+      - name: Upload protected verified packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sealed-nuget-packages
+          path: artifacts/sealed-nuget
+          if-no-files-found: error
+
+  unity:
+    name: Trusted Unity package contract
+    needs:
+      - identity
+      - source_privacy
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify candidate package
+        shell: pwsh
+        run: ./candidate/engines/unity/scripts/Test-UnityPackage.ps1
+      - name: Check out trusted artifact protector
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Protect verified Unity package
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path -LiteralPath `
+            ./candidate/engines/unity/artifacts/com.gameagent.runtime.unity).Path
+          $destination = New-Item `
+            -ItemType Directory `
+            -Path ./artifacts/sealed-unity
+          $files = @(Get-ChildItem -LiteralPath $source -Recurse -File)
+          if ($files.Count -eq 0) {
+            throw 'The verified Unity package is empty.'
+          }
+          foreach ($file in $files) {
+            $relative = [IO.Path]::GetRelativePath($source, $file.FullName)
+            $protectedPath = Join-Path `
+              $destination.FullName `
+              ($relative + '.sealed')
+            $parent = Split-Path -Parent $protectedPath
+            if (-not (Test-Path -LiteralPath $parent)) {
+              $null = New-Item -ItemType Directory -Path $parent
+            }
+            ./trusted/engines/shared/Protect-ReleaseArtifact.ps1 `
+              -SourcePath $file.FullName `
+              -CertificatePath ./trusted/engines/shared/release-artifact-recipient.pem `
+              -DestinationPath $protectedPath
+          }
+      - name: Upload protected verified Unity package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sealed-unity-upm-package
+          path: artifacts/sealed-unity
+          if-no-files-found: error
+
+  godot:
+    name: Trusted Godot .NET package
+    needs:
+      - identity
+      - source_privacy
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      GODOT_VERSION: 4.7.1
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.identity.outputs.head_repository }}
+          ref: ${{ needs.identity.outputs.head_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Godot .NET
+        shell: pwsh
+        run: |
+          $godot = ./candidate/engines/godot/tools/Install-PinnedGodot.ps1 `
+            -Version $env:GODOT_VERSION `
+            -InstallPath (Join-Path $env:RUNNER_TEMP 'godot')
+          "GODOT_BIN=$godot" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test candidate addon and sample
+        shell: pwsh
+        run: >-
+          ./candidate/engines/godot/tests/run-godot-tests.ps1
+          -Godot $env:GODOT_BIN
+      - name: Build candidate addon
+        shell: pwsh
+        run: >-
+          ./candidate/engines/godot/tools/package-addon.ps1
+          -Version $env:RELEASE_VERSION
+      - name: Test candidate isolated package
+        shell: pwsh
+        run: |
+          $archive = "./candidate/engines/godot/artifacts/OpenGameAgent-godot-$env:RELEASE_VERSION.zip"
+          ./candidate/engines/godot/tests/verify-packaged-addon.ps1 `
+            -Archive $archive `
+            -Godot $env:GODOT_BIN `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./candidate/engines/godot/tests/Test-PackagedAddonArtifactSelfTest.ps1 `
+            -Archive $archive
+      - name: Check out trusted artifact protector
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Protect verified Godot package
+        shell: pwsh
+        run: |
+          $destination = New-Item `
+            -ItemType Directory `
+            -Path ./artifacts/sealed-godot
+          $fileName = "OpenGameAgent-godot-$env:RELEASE_VERSION.zip"
+          ./trusted/engines/shared/Protect-ReleaseArtifact.ps1 `
+            -SourcePath (Join-Path ./candidate/engines/godot/artifacts $fileName) `
+            -CertificatePath ./trusted/engines/shared/release-artifact-recipient.pem `
+            -DestinationPath (Join-Path $destination.FullName ($fileName + '.sealed'))
+      - name: Upload protected verified Godot package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sealed-godot-addon
+          path: artifacts/sealed-godot/*.sealed
+          if-no-files-found: error
+
+  privacy:
+    name: Recover and approve release artifacts
+    needs:
+      - identity
+      - source_privacy
+      - dotnet
+      - linux_portability
+      - quality
+      - unity
+      - godot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+      EXPECTED_NUGET_PACKAGE_COUNT: "${{ needs.source_privacy.outputs.expected_nuget_package_count }}"
+    steps:
+      - name: Check out trusted release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Download protected NuGet packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: sealed-nuget-packages
+          path: sealed-artifacts/nuget
+      - name: Download protected Unity package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: sealed-unity-upm-package
+          path: sealed-artifacts/unity
+      - name: Download protected Godot package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: sealed-godot-addon
+          path: sealed-artifacts/godot
+      - name: Recover artifacts with trusted code
+        shell: pwsh
+        env:
+          GAME_AGENT_ARTIFACT_DECRYPTION_PFX: ${{ secrets.GAME_AGENT_ARTIFACT_DECRYPTION_PFX }}
+          CANDIDATE_SHA: ${{ needs.identity.outputs.head_sha }}
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: |
+          $approved = $false
+          try {
+            if ($env:EXPECTED_NUGET_PACKAGE_COUNT -notmatch '^[1-9][0-9]*$') {
+              throw 'The trusted NuGet package count is unavailable.'
+            }
+            $expectedNuGetPackageCount = [int]::Parse(
+              $env:EXPECTED_NUGET_PACKAGE_COUNT,
+              [Globalization.CultureInfo]::InvariantCulture)
+            $certificate = (
+              './trusted/engines/shared/release-artifact-recipient.pem')
+            $recoverer = (
+              './trusted/engines/shared/Unprotect-ReleaseArtifact.ps1')
+            $sets = @(
+              @{
+                Source = './sealed-artifacts/nuget/raw-a'
+                Destination = './trusted-artifacts/nuget-raw-a'
+                Expected = $expectedNuGetPackageCount
+              },
+              @{
+                Source = './sealed-artifacts/nuget/raw-b'
+                Destination = './trusted-artifacts/nuget-raw-b'
+                Expected = $expectedNuGetPackageCount
+              },
+              @{
+                Source = './sealed-artifacts/unity'
+                Destination = './trusted-artifacts/unity'
+                Expected = 0
+              },
+              @{
+                Source = './sealed-artifacts/godot'
+                Destination = './trusted-artifacts/godot'
+                Expected = 1
+              })
+            foreach ($set in $sets) {
+              $destinationRoot = New-Item `
+                -ItemType Directory `
+                -Path $set.Destination
+              $sourceRoot = (Resolve-Path -LiteralPath $set.Source).Path
+              $protectedFiles = @(
+                Get-ChildItem -LiteralPath $sourceRoot -Recurse -File)
+              if ($protectedFiles.Count -eq 0 -or
+                  ($set.Expected -gt 0 -and
+                    $protectedFiles.Count -ne $set.Expected)) {
+                throw 'A protected release artifact set is incomplete.'
+              }
+              foreach ($protectedFile in $protectedFiles) {
+                if (-not $protectedFile.Name.EndsWith(
+                    '.sealed',
+                    [StringComparison]::Ordinal)) {
+                  throw 'A protected release artifact has an invalid name.'
+                }
+                $relative = [IO.Path]::GetRelativePath(
+                  $sourceRoot,
+                  $protectedFile.FullName)
+                $relative = $relative.Substring(0, $relative.Length - 7)
+                if ([IO.Path]::IsPathRooted($relative) -or
+                    $relative -eq '..' -or
+                    $relative.StartsWith(
+                      ('..' + [IO.Path]::DirectorySeparatorChar),
+                      [StringComparison]::Ordinal)) {
+                  throw 'A protected release artifact path is unsafe.'
+                }
+                $destination = Join-Path $destinationRoot.FullName $relative
+                $parent = Split-Path -Parent $destination
+                if (-not (Test-Path -LiteralPath $parent)) {
+                  $null = New-Item -ItemType Directory -Path $parent
+                }
+                & $recoverer `
+                  -SourcePath $protectedFile.FullName `
+                  -CertificatePath $certificate `
+                  -DestinationPath $destination `
+                  -RequireInjectedKey
+              }
+            }
+            ./trusted/engines/shared/Write-DeterministicNuGetPackages.ps1 `
+              -SourcePath ./trusted-artifacts/nuget-raw-a `
+              -DestinationPath ./trusted-artifacts/nuget
+            ./trusted/engines/shared/Write-DeterministicNuGetPackages.ps1 `
+              -SourcePath ./trusted-artifacts/nuget-raw-b `
+              -DestinationPath ./trusted-artifacts/nuget-repro
+            ./trusted/engines/shared/Test-NuGetPackageReproducibility.ps1 `
+              -FirstPath ./trusted-artifacts/nuget `
+              -SecondPath ./trusted-artifacts/nuget-repro
+            ./trusted/engines/shared/Test-NuGetPackageManifest.ps1 `
+              -Path ./trusted-artifacts/nuget `
+              -ExpectedVersion $env:RELEASE_VERSION `
+              -ExpectedCommit $env:CANDIDATE_SHA
+            ./trusted/engines/shared/Test-ReleaseArtifactPrivacy.ps1 `
+              -Path ./trusted-artifacts `
+              -RequireInjectedDenyRegex
+            $approved = $true
+          }
+          finally {
+            if (-not $approved -and
+                (Test-Path -LiteralPath ./trusted-artifacts)) {
+              Remove-Item `
+                -LiteralPath ./trusted-artifacts `
+                -Recurse `
+                -Force
+            }
+          }
+      - name: Stage privacy-approved NuGet packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: privacy-approved-nuget-packages
+          path: trusted-artifacts/nuget/*
+          if-no-files-found: error
+      - name: Stage privacy-approved Unity package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: privacy-approved-unity-upm-package
+          path: trusted-artifacts/unity
+          if-no-files-found: error
+      - name: Stage privacy-approved Godot package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: privacy-approved-godot-addon
+          path: trusted-artifacts/godot/*
+          if-no-files-found: error
+
+  validate_nuget:
+    name: Validate approved NuGet packages
+    needs:
+      - identity
+      - privacy
+      - source_privacy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      package_count: ${{ steps.validate.outputs.package_count }}
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+    steps:
+      - name: Check out trusted NuGet validation tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Download privacy-approved NuGet packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: privacy-approved-nuget-packages
+          path: approved-artifacts/nuget
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Validate approved NuGet packages
+        id: validate
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ needs.identity.outputs.head_sha }}
+        run: |
+          ./trusted/engines/shared/Test-NuGetPackageManifest.ps1 `
+            -Path ./approved-artifacts/nuget `
+            -ExpectedVersion $env:RELEASE_VERSION `
+            -ExpectedCommit $env:CANDIDATE_SHA
+          ./trusted/engines/shared/Test-NuGetPackageConsumer.ps1 `
+            -PackagePath ./approved-artifacts/nuget `
+            -Version $env:RELEASE_VERSION `
+            -WorkingPath (Join-Path $env:RUNNER_TEMP 'approved-nuget-consumer')
+          $packageCount = @(
+            Get-ChildItem `
+              -LiteralPath ./approved-artifacts/nuget `
+              -File `
+              -Filter '*.nupkg').Count
+          "package_count=$packageCount" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  validate_unity:
+    name: Validate approved Unity package
+    needs:
+      - privacy
+      - source_privacy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+    steps:
+      - name: Check out trusted Unity validation tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Download privacy-approved Unity package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: privacy-approved-unity-upm-package
+          path: approved-artifacts/unity
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Validate approved Unity package
+        shell: pwsh
+        run: |
+          ./trusted/engines/unity/scripts/Test-UnityPackageArtifact.ps1 `
+            -ArtifactPath ./approved-artifacts/unity `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./trusted/engines/unity/scripts/Test-UnityPackageArtifactSelfTest.ps1 `
+            -ArtifactPath ./approved-artifacts/unity
+
+  validate_godot:
+    name: Validate approved Godot package
+    needs:
+      - privacy
+      - source_privacy
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GODOT_VERSION: 4.7.1
+      RELEASE_VERSION: "${{ needs.source_privacy.outputs.release_version }}"
+    steps:
+      - name: Check out trusted Godot validation tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Download privacy-approved Godot package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: privacy-approved-godot-addon
+          path: approved-artifacts/godot
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Godot .NET
+        shell: pwsh
+        run: |
+          $godot = ./trusted/engines/godot/tools/Install-PinnedGodot.ps1 `
+            -Version $env:GODOT_VERSION `
+            -InstallPath (Join-Path $env:RUNNER_TEMP 'godot')
+          "GODOT_BIN=$godot" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Validate approved Godot package
+        shell: pwsh
+        run: |
+          $archives = @(
+            Get-ChildItem `
+              -LiteralPath ./approved-artifacts/godot `
+              -File `
+              -Filter 'OpenGameAgent-godot-*.zip')
+          if ($archives.Count -ne 1) {
+            throw 'The approved Godot package set is invalid.'
+          }
+          ./trusted/engines/godot/tests/verify-packaged-addon.ps1 `
+            -Archive $archives[0].FullName `
+            -Godot $env:GODOT_BIN `
+            -ExpectedVersion $env:RELEASE_VERSION
+          ./trusted/engines/godot/tests/Test-PackagedAddonArtifactSelfTest.ps1 `
+            -Archive $archives[0].FullName
+
+  publish:
+    name: Publish immutable approved artifacts
+    needs:
+      - identity
+      - privacy
+      - validate_nuget
+      - validate_unity
+      - validate_godot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download approved NuGet packages without executing them
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: privacy-approved-nuget-packages
+          path: publish-artifacts/nuget
+      - name: Download approved Unity package without executing it
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: privacy-approved-unity-upm-package
+          path: publish-artifacts/unity
+      - name: Download approved Godot package without executing it
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: privacy-approved-godot-addon
+          path: publish-artifacts/godot
+      - name: Verify immutable artifact set shape
+        shell: pwsh
+        env:
+          EXPECTED_NUGET_PACKAGE_COUNT: ${{ needs.validate_nuget.outputs.package_count }}
+        run: |
+          if ($env:EXPECTED_NUGET_PACKAGE_COUNT -notmatch '^[1-9][0-9]*$') {
+            throw 'The validated NuGet package count is unavailable.'
+          }
+          $expectedNuGetPackageCount = [int]::Parse(
+            $env:EXPECTED_NUGET_PACKAGE_COUNT,
+            [Globalization.CultureInfo]::InvariantCulture)
+          $nuget = @(
+            Get-ChildItem -LiteralPath ./publish-artifacts/nuget -File)
+          $unity = @(
+            Get-ChildItem `
+              -LiteralPath ./publish-artifacts/unity `
+              -Recurse `
+              -File)
+          $godot = @(
+            Get-ChildItem -LiteralPath ./publish-artifacts/godot -File)
+          if ($nuget.Count -ne $expectedNuGetPackageCount -or
+              @($nuget | Where-Object {
+                  $_.Extension -ne '.nupkg'
+                }).Count -ne 0 -or
+              $unity.Count -eq 0 -or
+              $godot.Count -ne 1 -or
+              $godot[0].Extension -ne '.zip') {
+            throw 'The immutable approved artifact set is incomplete.'
+          }
+      - name: Upload trusted NuGet packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: trusted-nuget-packages
+          path: publish-artifacts/nuget/*
+          if-no-files-found: error
+      - name: Upload trusted Unity package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: trusted-unity-upm-package
+          path: publish-artifacts/unity
+          if-no-files-found: error
+      - name: Upload trusted Godot package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: trusted-godot-addon
+          path: publish-artifacts/godot/*
+          if-no-files-found: error
+
+  status:
+    name: Publish trusted release status
+    if: always()
+    needs:
+      - identity
+      - source_privacy
+      - dotnet
+      - linux_portability
+      - quality
+      - unity
+      - godot
+      - privacy
+      - validate_nuget
+      - validate_unity
+      - validate_godot
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish immutable candidate status
+        shell: pwsh
+        env:
+          HEAD_SHA: ${{ needs.identity.outputs.head_sha }}
+          IDENTITY_RESULT: ${{ needs.identity.result }}
+          SOURCE_PRIVACY_RESULT: ${{ needs.source_privacy.result }}
+          DOTNET_RESULT: ${{ needs.dotnet.result }}
+          LINUX_PORTABILITY_RESULT: ${{ needs.linux_portability.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          UNITY_RESULT: ${{ needs.unity.result }}
+          GODOT_RESULT: ${{ needs.godot.result }}
+          PRIVACY_RESULT: ${{ needs.privacy.result }}
+          NUGET_VALIDATION_RESULT: ${{ needs.validate_nuget.result }}
+          UNITY_VALIDATION_RESULT: ${{ needs.validate_unity.result }}
+          GODOT_VALIDATION_RESULT: ${{ needs.validate_godot.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          TRUSTED_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:HEAD_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw 'No verified candidate revision is available.'
+          }
+          $results = @(
+            $env:IDENTITY_RESULT,
+            $env:SOURCE_PRIVACY_RESULT,
+            $env:DOTNET_RESULT,
+            $env:LINUX_PORTABILITY_RESULT,
+            $env:QUALITY_RESULT,
+            $env:UNITY_RESULT,
+            $env:GODOT_RESULT,
+            $env:PRIVACY_RESULT,
+            $env:NUGET_VALIDATION_RESULT,
+            $env:UNITY_VALIDATION_RESULT,
+            $env:GODOT_VALIDATION_RESULT,
+            $env:PUBLISH_RESULT)
+          $passed = @(
+            $results | Where-Object { $_ -ne 'success' }
+          ).Count -eq 0
+          $state = if ($passed) { 'success' } else { 'failure' }
+          $description = if ($passed) {
+            'Exact source, builds, tests, and packages passed trusted gates.'
+          }
+          else {
+            'The exact candidate failed a trusted release gate.'
+          }
+          & gh api `
+            --method POST `
+            "repos/$env:TARGET_REPOSITORY/statuses/$env:HEAD_SHA" `
+            -f "state=$state" `
+            -f 'context=trusted/source-privacy' `
+            -f "target_url=$env:TRUSTED_RUN_URL" `
+            -f "description=$description"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Publishing the trusted release status failed.'
+          }
+          if (-not $passed) {
+            throw 'The candidate failed the trusted release gate.'
+          }

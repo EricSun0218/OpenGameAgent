@@ -1,0 +1,52 @@
+<Project>
+  <ItemGroup>
+    <Reference Include="GameAgent.Protocol">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Protocol.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Core">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Persistence">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Persistence.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Generation">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Generation.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Providers.Anthropic">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.Anthropic.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Providers.Native">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.Native.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Providers.OpenAICompatible">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.OpenAICompatible.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Providers.MediaHttp">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Providers.MediaHttp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Runtime">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Runtime.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Remote.Client">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Remote.Client.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Simulation">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Simulation.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="GameAgent.Workflow">
+      <HintPath>$(MSBuildThisFileDirectory)lib/netstandard2.1/GameAgent.Workflow.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

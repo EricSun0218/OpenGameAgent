@@ -1,0 +1,20 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "observationId": "obs-resource-empty-digest",
+  "worldId": "world-demo",
+  "source": "game.resource",
+  "kind": "resource_ref",
+  "contentType": "application/octet-stream",
+  "resourceRef": {
+    "uri": "game://state/actors/agent-demo",
+    "mediaType": "application/octet-stream",
+    "digest": ""
+  },
+  "observedAt": "2026-07-28T00:00:00Z",
+  "trust": "trusted",
+  "visibility": {
+    "scope": "world",
+    "audienceIds": []
+  }
+}

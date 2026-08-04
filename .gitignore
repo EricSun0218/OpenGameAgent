@@ -1,0 +1,24 @@
+bin/
+obj/
+TestResults/
+/artifacts/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Engine-generated state.
+.godot/
+Library/
+Temp/
+Logs/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Local secrets and provider credentials.
+.env
+.env.*
+!.env.example
+*.pfx
+*.key

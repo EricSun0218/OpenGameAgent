@@ -1,0 +1,381 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable version tag to release (for example, v0.2.0-alpha.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  prepare:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.identity.outputs.commit_sha }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      release_version: ${{ steps.identity.outputs.release_version }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Resolve approved release identity
+        id: identity
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch
+              '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
+            throw 'The release tag is invalid.'
+          }
+          $commitSha = (& gh api `
+              "repos/$env:TARGET_REPOSITORY/commits/$env:RELEASE_TAG" `
+              --jq .sha).Trim()
+          if ($LASTEXITCODE -ne 0 -or $commitSha -notmatch '^[0-9a-f]{40}$') {
+            throw 'The release tag does not resolve to a commit.'
+          }
+
+          $combined = & gh api `
+            "repos/$env:TARGET_REPOSITORY/commits/$commitSha/status"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The trusted commit status could not be read.'
+          }
+          $statuses = @(
+            ($combined | ConvertFrom-Json).statuses |
+              Where-Object {
+                $_.context -eq 'trusted/source-privacy' -and
+                $_.state -eq 'success' -and
+                $_.target_url -match '/actions/runs/[1-9][0-9]*$'
+              })
+          if ($statuses.Count -lt 1) {
+            throw 'The tagged commit has no successful trusted release gate.'
+          }
+          $runId = [regex]::Match(
+              $statuses[0].target_url,
+              '/actions/runs/([1-9][0-9]*)$').Groups[1].Value
+          $run = & gh api `
+            "repos/$env:TARGET_REPOSITORY/actions/runs/$runId"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The trusted workflow run could not be read.'
+          }
+          $run = $run | ConvertFrom-Json
+          if ($run.name -ne 'Trusted release gate' -or
+              $run.event -ne 'workflow_run' -or
+              $run.head_sha -cne $commitSha -or
+              -not [string]::Equals(
+                $run.repository.full_name,
+                $env:TARGET_REPOSITORY,
+                [StringComparison]::OrdinalIgnoreCase) -or
+              $run.status -ne 'completed' -or
+              $run.conclusion -ne 'success') {
+            throw 'The referenced trusted workflow run has the wrong identity or result.'
+          }
+
+          $version = $env:RELEASE_TAG.Substring(1)
+          "commit_sha=$commitSha" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_tag=$env:RELEASE_TAG" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_version=$version" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "trusted_run_id=$runId" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Check out trusted release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out release notes source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.identity.outputs.commit_sha }}
+          path: release-source
+          persist-credentials: false
+
+      - name: Download approved NuGet packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: trusted-nuget-packages
+          path: release-input/nuget
+          run-id: ${{ steps.identity.outputs.trusted_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download approved Unity package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: trusted-unity-upm-package
+          path: release-input/unity
+          run-id: ${{ steps.identity.outputs.trusted_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download approved Godot package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: trusted-godot-addon
+          path: release-input/godot
+          run-id: ${{ steps.identity.outputs.trusted_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Assemble deterministic release assets
+        shell: pwsh
+        env:
+          COMMIT_SHA: ${{ steps.identity.outputs.commit_sha }}
+          RELEASE_VERSION: ${{ steps.identity.outputs.release_version }}
+        run: |
+          New-Item -ItemType Directory -Path release-assets | Out-Null
+          ./trusted/engines/shared/Test-NuGetPackageManifest.ps1 `
+            -Path ./release-input/nuget `
+            -ExpectedVersion $env:RELEASE_VERSION `
+            -ExpectedCommit $env:COMMIT_SHA
+          ./trusted/engines/unity/scripts/Test-UnityPackageArtifact.ps1 `
+            -ArtifactPath ./release-input/unity `
+            -ExpectedVersion $env:RELEASE_VERSION
+
+          $godot = @(
+            Get-ChildItem `
+              -LiteralPath ./release-input/godot `
+              -File `
+              -Filter "OpenGameAgent-godot-$env:RELEASE_VERSION.zip")
+          if ($godot.Count -ne 1) {
+            throw 'The approved Godot release archive is missing or duplicated.'
+          }
+          Get-ChildItem `
+              -LiteralPath ./release-input/nuget `
+              -File `
+              -Filter '*.nupkg' |
+            Copy-Item -Destination ./release-assets
+          Copy-Item -LiteralPath $godot[0].FullName -Destination ./release-assets
+          ./trusted/engines/shared/Write-DeterministicDirectoryArchive.ps1 `
+            -SourcePath ./release-input/unity `
+            -DestinationPath (
+              "./release-assets/OpenGameAgent-unity-$env:RELEASE_VERSION.zip") `
+            -RootDirectoryName 'com.gameagent.runtime.unity' | Out-Null
+
+          $heading = "## $env:RELEASE_VERSION"
+          $lines = @(Get-Content -LiteralPath ./release-source/CHANGELOG.md)
+          $starts = @(
+            0..($lines.Count - 1) | Where-Object { $lines[$_] -ceq $heading })
+          if ($starts.Count -ne 1) {
+            throw 'The release version has no unique changelog section.'
+          }
+          $end = $lines.Count
+          for ($index = $starts[0] + 1; $index -lt $lines.Count; $index++) {
+            if ($lines[$index] -match '^## ') {
+              $end = $index
+              break
+            }
+          }
+          $notes = @($lines[$starts[0]..($end - 1)])
+          if (@($notes | Where-Object { $_ -match '^- ' }).Count -lt 1) {
+            throw 'The release changelog section is empty.'
+          }
+          [IO.File]::WriteAllLines(
+            (Join-Path $PWD 'RELEASE_NOTES.md'),
+            $notes,
+            [Text.UTF8Encoding]::new($false))
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: release-input
+          format: spdx-json
+          output-file: release-assets/OpenGameAgent-${{ steps.identity.outputs.release_version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Generate and verify release checksums
+        shell: pwsh
+        run: |
+          $assets = @(
+            Get-ChildItem -LiteralPath ./release-assets -File |
+              Sort-Object Name -CaseSensitive)
+          if ($assets.Count -lt 4 -or
+              @($assets | Group-Object Name | Where-Object { $_.Count -ne 1 }).Count -ne 0) {
+            throw 'The release asset set is incomplete or ambiguous.'
+          }
+          $packages = @($assets | Where-Object {
+              $_.Extension -in @('.nupkg', '.zip')
+            })
+          $allChecksums = @($assets | ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            })
+          $packageChecksums = @($packages | ForEach-Object {
+              $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            })
+          [IO.File]::WriteAllLines(
+            (Join-Path (Join-Path $PWD 'release-assets') 'SHA256SUMS'),
+            $allChecksums,
+            [Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllLines(
+            (Join-Path (Join-Path $PWD 'release-assets') 'ARTIFACT_SHA256SUMS'),
+            $packageChecksums,
+            [Text.UTF8Encoding]::new($false))
+          foreach ($line in $allChecksums) {
+            if ($line -notmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)$') {
+              throw 'A generated checksum entry is invalid.'
+            }
+            $actual = (Get-FileHash `
+                -LiteralPath (Join-Path ./release-assets $Matches[2]) `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -cne $Matches[1]) {
+              throw 'A release checksum failed immediate verification.'
+            }
+          }
+
+      - name: Scan final release assets
+        shell: pwsh
+        env:
+          GAME_AGENT_RELEASE_DENY_REGEX: ${{ secrets.GAME_AGENT_RELEASE_DENY_REGEX }}
+        run: >-
+          ./trusted/engines/shared/Test-ReleaseArtifactPrivacy.ps1
+          -Path ./release-assets
+          -RequireInjectedDenyRegex
+
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ steps.identity.outputs.release_version }}
+          path: |
+            release-assets
+            RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Download immutable release candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-${{ needs.prepare.outputs.release_version }}
+          path: candidate
+
+      - name: Verify release candidate checksums
+        shell: pwsh
+        run: |
+          $assetRoot = [IO.Path]::GetFullPath('./candidate/release-assets')
+          $manifest = Join-Path $assetRoot 'SHA256SUMS'
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw 'The release checksum manifest is missing.'
+          }
+          $listed = @()
+          foreach ($line in @(Get-Content -LiteralPath $manifest)) {
+            if ($line -notmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)$') {
+              throw 'The release checksum manifest is malformed.'
+            }
+            $listed += $Matches[2]
+            $file = Join-Path $assetRoot $Matches[2]
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw 'A checksummed release asset is missing.'
+            }
+            $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -cne $Matches[1]) {
+              throw 'A release asset failed checksum verification.'
+            }
+          }
+          if (@($listed | Sort-Object -Unique).Count -ne $listed.Count) {
+            throw 'The release checksum manifest contains duplicate names.'
+          }
+          $actualAssets = @(
+            Get-ChildItem -LiteralPath $assetRoot -File |
+              Where-Object { $_.Name -notin @('SHA256SUMS', 'ARTIFACT_SHA256SUMS') } |
+              ForEach-Object Name |
+              Sort-Object -CaseSensitive)
+          if ([string]::Join("`n", @($listed | Sort-Object -CaseSensitive)) -cne
+              [string]::Join("`n", $actualAssets)) {
+            throw 'The release asset set does not match its checksum manifest.'
+          }
+
+      - name: Attest release build provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: candidate/release-assets/*
+
+      - name: Attest release SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            candidate/release-assets/*.nupkg
+            candidate/release-assets/*.zip
+          sbom-path: candidate/release-assets/OpenGameAgent-${{ needs.prepare.outputs.release_version }}.spdx.json
+
+      - name: Publish immutable GitHub prerelease
+        shell: pwsh
+        env:
+          COMMIT_SHA: ${{ needs.prepare.outputs.commit_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+          TARGET_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          & gh release view $env:RELEASE_TAG `
+            --repo $env:TARGET_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw 'The release already exists and will not be replaced.'
+          }
+          $tagSha = (& gh api `
+              "repos/$env:TARGET_REPOSITORY/commits/$env:RELEASE_TAG" `
+              --jq .sha).Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagSha -cne $env:COMMIT_SHA) {
+            throw 'The release tag moved after preparation.'
+          }
+          $assets = @(
+            Get-ChildItem `
+              -LiteralPath ./candidate/release-assets `
+              -File |
+              Sort-Object Name -CaseSensitive |
+              ForEach-Object FullName)
+          if ($assets.Count -lt 6) {
+            throw 'The publishable release asset set is incomplete.'
+          }
+          $arguments = @(
+            'release', 'create', $env:RELEASE_TAG,
+            '--repo', $env:TARGET_REPOSITORY,
+            '--verify-tag',
+            '--prerelease',
+            '--title', "OpenGameAgent $env:RELEASE_VERSION",
+            '--notes-file', './candidate/RELEASE_NOTES.md') + $assets
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Publishing the GitHub release failed.'
+          }

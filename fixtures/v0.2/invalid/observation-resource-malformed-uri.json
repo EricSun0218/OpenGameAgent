@@ -1,0 +1,19 @@
+{
+  "protocolVersion": "0.2",
+  "schemaVersion": "0.2",
+  "observationId": "obs-resource-malformed-uri",
+  "worldId": "world-demo",
+  "source": "game.resource",
+  "kind": "resource_ref",
+  "contentType": "application/octet-stream",
+  "resourceRef": {
+    "uri": "game://state/actor with space",
+    "mediaType": "application/octet-stream"
+  },
+  "observedAt": "2026-07-28T00:00:00Z",
+  "trust": "trusted",
+  "visibility": {
+    "scope": "world",
+    "audienceIds": []
+  }
+}

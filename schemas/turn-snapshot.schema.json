@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/EricSun0218/OpenGameAgent/main/schemas/turn-snapshot.schema.json",
+  "title": "TurnSnapshot",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "schemaVersion",
+    "turnId",
+    "runId",
+    "runtimeGeneration",
+    "providerId",
+    "modelId",
+    "promptLayoutVersion",
+    "stablePrefixHash",
+    "skillGeneration",
+    "skillDigests",
+    "toolCatalogGeneration",
+    "directToolDigest",
+    "contextPolicyVersion",
+    "budgetPolicyVersion",
+    "createdAt"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "schemaVersion": {
+      "$ref": "common.schema.json#/$defs/schemaVersion"
+    },
+    "turnId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runId": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "runtimeGeneration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "providerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "promptLayoutVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "stablePrefixHash": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "skillGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "skillDigests": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "toolCatalogGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "directToolDigest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "deferredCatalogDigest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "contextPolicyVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "budgetPolicyVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "maxSideEffectToolCallsPerTurn": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4096
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "$ref": "common.schema.json#/$defs/extensions"
+    }
+  },
+  "additionalProperties": false
+}

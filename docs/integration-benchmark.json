@@ -1,0 +1,27 @@
+{
+  "version": "1",
+  "allowedInputs": [
+    "README.md",
+    "docs/coding-agent-quickstart.md",
+    "docs/game-integration-patterns.md",
+    "docs/living-world-scheduling.md",
+    "docs/deployment-and-remote-hosting.md",
+    "engines/godot/README.md",
+    "engines/unity/README.md",
+    "published engine package"
+  ],
+  "requiredSlices": [
+    "structured input without natural language",
+    "authoritative tool receipt",
+    "game-time trigger",
+    "bounded multi-NPC scheduling",
+    "multi-step action workflow",
+    "restart or unknown-outcome reconciliation"
+  ],
+  "forbiddenShortcuts": [
+    "reference repository source projects from the generated consumer",
+    "embed a permanent provider credential",
+    "move game legality into the runtime",
+    "report a write as successful without an authoritative receipt"
+  ]
+}
