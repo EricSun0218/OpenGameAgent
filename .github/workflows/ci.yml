@@ -125,7 +125,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Restore portable runtime
-        run: dotnet restore GameAgentRuntime.sln
+        run: dotnet restore GameAgentRuntime.sln --locked-mode
       - name: Build portable runtime
         run: >-
           dotnet build GameAgentRuntime.sln -c Release
