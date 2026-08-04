@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -125,7 +125,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Restore portable runtime
-        run: dotnet restore GameAgentRuntime.sln
+        run: dotnet restore GameAgentRuntime.sln --locked-mode
       - name: Build portable runtime
         run: >-
           dotnet build GameAgentRuntime.sln -c Release

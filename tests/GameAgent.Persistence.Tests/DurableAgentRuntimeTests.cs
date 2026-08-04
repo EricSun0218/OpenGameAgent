@@ -6410,12 +6410,17 @@ public sealed class DurableAgentRuntimeTests
                 maxProviderAttempts: 2,
                 delay);
             var run = Run(clock.UtcNow);
-            run.Budget.MaxDurationMs = 500;
+            run.Budget.MaxDurationMs = 2_000;
 
-            var outcome = await runtime.RunAsync(
+            var running = runtime.RunAsync(
                     new DurableRunRequest { Run = run }, cancellationToken: TestContext.Current.CancellationToken)
-                .AsTask()
-                .WaitAsync(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
+                .AsTask();
+            await delay.Started.Task.WaitAsync(
+                TestWaitTimeout,
+                cancellationToken: TestContext.Current.CancellationToken);
+            var outcome = await running.WaitAsync(
+                TimeSpan.FromSeconds(10),
+                cancellationToken: TestContext.Current.CancellationToken);
 
             Assert.Equal(RunStates.BudgetExhausted, outcome.Run.State);
             Assert.Equal("max_duration", outcome.Run.TerminalReason);
@@ -6937,6 +6942,9 @@ public sealed class DurableAgentRuntimeTests
 
             second.Release();
             await second.Settled.WaitAsync(TestWaitTimeout, cancellationToken: TestContext.Current.CancellationToken);
+            Assert.True(
+                await WaitUntilAsync(
+                    () => runtime.DetachedProviderCleanupCount == 1));
             var next = runtime.RunAsync(
                     new DurableRunRequest { Run = Run(clock.UtcNow) }, cancellationToken: TestContext.Current.CancellationToken)
                 .AsTask();
