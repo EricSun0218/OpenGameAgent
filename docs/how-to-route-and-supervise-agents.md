@@ -45,10 +45,46 @@ var outcome = await built.Execution.RunAsync(
     }, cancellationToken);
 ```
 
-The default policy chooses `Agent` for this request. For a durable one-turn
-conversation, set `Requirements = ExecutionRequirements.None`; it chooses
-`Direct`. Use `ExplicitPath` only when the caller already knows the path and can
-supply compatible requirements.
+The default policy chooses `Agent` for this request because declared
+requirements always win. When requirements are absent, it also reads the
+bounded `Signal` and latest normalized user input: a short dialogue can use
+`Direct`, while actionable, structured, long, or ambiguous work uses `Agent`.
+Use `ExplicitPath` only when the caller already knows the path and can supply
+compatible requirements.
+
+Configure automatic model tiers once at composition time:
+
+```csharp
+builder.WithAutomaticExecutionRouting(
+    new AutomaticExecutionRoutingOptions
+    {
+        DirectModelProfile = new ExecutionRouteModelProfile
+        {
+            Inference = new ModelInferenceOptions
+            {
+                ReasoningEnabled = false,
+                ReasoningEffort = ModelReasoningEfforts.None
+            },
+            RoutePreference = new ProviderRoutePreference
+            {
+                ProviderIds = new[] { "fast-dialogue" },
+                AllowUnlistedFallback = true
+            }
+        },
+        AgentModelProfile = new ExecutionRouteModelProfile
+        {
+            RoutePreference = new ProviderRoutePreference
+            {
+                ProviderIds = new[] { "capable-agent" },
+                AllowUnlistedFallback = true
+            }
+        }
+    });
+```
+
+Provider IDs are application configuration identities, not model-name guesses.
+The runtime cannot infer which configured route is cheaper or faster. Explicit
+per-run inference or provider preferences override the selected profile.
 
 For a fixed orchestration, compile and register workflows, then attach the
 routed workflow runtime:
@@ -82,10 +118,10 @@ builder.WithExecutionRoutePolicy(
 ```
 
 Do not ask a model merely to choose between `Direct` and `Agent` for every
-request. Prefer deterministic requirements first. A custom policy failure
-falls back from immutable requirements: capability-free work uses `Direct`,
-Agent capabilities use `Agent`, and workflow requirements use `Workflow`.
-Required tools or durability are therefore never skipped.
+request. The built-in router resolves obvious inputs locally and invokes an
+optional classifier only for ambiguous text. Prefer deterministic requirements
+first. Classifier failure or timeout falls back to the conservative local
+result; required tools or durability are never skipped.
 
 ## Run bounded child Agents
 

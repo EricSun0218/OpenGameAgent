@@ -20,22 +20,37 @@ tool call. `Direct` is not stateless: it uses the same durable input, context,
 memory, provider resilience, accounting, and recovery contracts as `Agent`, but
 exposes no tools or skills and ends after one provider response.
 
-### Deterministic routing
+### Hybrid automatic routing
 
 `RoutedExecutionRuntime` accepts an `ExecutionRouteRequest`. The default
-`DeterministicExecutionRoutePolicy` selects:
+`AutomaticExecutionRoutePolicy` first applies immutable requirements:
 
 - `Workflow` when `ExecutionRequirements.Workflow` or `ParallelActors` is
   present; multi-actor work must use a workflow that coordinates participants;
 - `Agent` for tools, skills, durable effects, or multiple model turns;
-- `Direct` when none of those capabilities is required.
+- `Direct` remains the minimum path when none of those capabilities is
+  required.
+
+It then combines the bounded structured `Signal` with the latest normalized
+user input. Short scalar dialogue stays on `Direct`; actionable terms,
+structured or multipart input, and long input select `Agent`. Intermediate text
+is ambiguous and conservatively selects `Agent` unless an optional
+`IAutomaticExecutionClassifier` returns a valid, sufficiently confident
+decision. Obvious cases never pay for a classifier call. A workflow hint may
+select `Workflow` only when a workflow payload is present.
+
+The same policy can attach a `DirectModelProfile` or `AgentModelProfile` with
+provider-route and inference defaults. Explicit `Inference` and
+`RoutePreference` values on the durable run win independently, so automatic
+selection never replaces a caller override.
 
 An explicit path is validated against the requirements. A custom
 `IExecutionRoutePolicy` receives an optional bounded structured `Signal`.
-Policy execution is concurrency-limited and timed out. A failed, timed-out, or
-invalid custom policy uses the least-capable deterministic path that satisfies
-the immutable requirements: `Direct` for none, `Agent` for Agent capabilities,
-and `Workflow` for workflow requirements. Configure it with
+Policy execution is concurrency-limited and timed out. The automatic policy
+uses its local conservative result when its optional classifier fails or times
+out. Other failed, timed-out, or invalid custom policies use the least-capable
+deterministic path that satisfies immutable requirements. Configure the built-in
+policy with `WithAutomaticExecutionRouting(...)`, or replace it through
 `WithExecutionRoutePolicy(...)`.
 
 A workflow route additionally requires an `IRoutedWorkflowRuntime`. The

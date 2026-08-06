@@ -30,14 +30,18 @@ public sealed class ExecutionRouteRequest
     public ExecutionRequirements Requirements { get; set; }
 
     /// <summary>
-    /// Optional bounded structured routing signal. It is supplied to custom
-    /// policies as data and is never interpreted by the deterministic policy.
+    /// Optional bounded structured routing signal. The automatic policy reads
+    /// standard hints and arbitrary input; custom policies receive the owned
+    /// snapshot as data.
     /// </summary>
     public JsonElement? Signal { get; set; }
 }
 
 public static class ExecutionRouteReasonCodes
 {
+    public const string AutomaticDirect = "automatic_direct";
+    public const string AutomaticAgent = "automatic_agent";
+    public const string AutomaticWorkflow = "automatic_workflow";
     public const string Explicit = "explicit_path";
     public const string WorkflowRequired = "workflow_required";
     public const string AgentCapabilitiesRequired =
@@ -51,11 +55,28 @@ public static class ExecutionRouteReasonCodes
 
 public sealed class ExecutionRouteDecision
 {
+    private readonly ExecutionRouteModelProfile? _modelProfile;
+
     public ExecutionRouteDecision(
         ExecutionPath path,
         string reasonCode,
         string policyId,
         string policyVersion)
+        : this(
+            path,
+            reasonCode,
+            policyId,
+            policyVersion,
+            modelProfile: null)
+    {
+    }
+
+    public ExecutionRouteDecision(
+        ExecutionPath path,
+        string reasonCode,
+        string policyId,
+        string policyVersion,
+        ExecutionRouteModelProfile? modelProfile)
     {
         Path = path;
         ReasonCode = RuntimeGuard.RequiredReasonCode(
@@ -69,6 +90,7 @@ public sealed class ExecutionRouteDecision
             policyVersion,
             64,
             nameof(policyVersion));
+        _modelProfile = modelProfile?.Snapshot();
     }
 
     public ExecutionPath Path { get; }
@@ -78,6 +100,13 @@ public sealed class ExecutionRouteDecision
     public string PolicyId { get; }
 
     public string PolicyVersion { get; }
+
+    /// <summary>
+    /// Optional model defaults chosen by the policy. Explicit controls on the
+    /// run take precedence when the route is executed.
+    /// </summary>
+    public ExecutionRouteModelProfile? ModelProfile =>
+        _modelProfile?.Snapshot();
 }
 
 public interface IExecutionRoutePolicy
@@ -337,7 +366,7 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
     {
         _agent = agent ?? throw new ArgumentNullException(nameof(agent));
         _workflow = workflow;
-        _policy = policy ?? new DeterministicExecutionRoutePolicy();
+        _policy = policy ?? new AutomaticExecutionRoutePolicy();
         _options = (options ?? new ExecutionRouterOptions()).Snapshot();
         _shutdownDispatcher = shutdownDispatcher
                                ?? throw new ArgumentNullException(
@@ -394,7 +423,11 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             ? null
             : SnapshotWorkflowRequest(request.Workflow);
         using var active = EnterOperation(cancellationToken);
-        var decision = await SelectBoundedAsync(route, active.Token)
+        var decision = await SelectBoundedAsync(
+                route,
+                runRequest,
+                workflowRequest,
+                active.Token)
             .ConfigureAwait(false);
         switch (decision.Path)
         {
@@ -416,7 +449,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
                         run,
                         decision.Path == ExecutionPath.Direct
                             ? DurableExecutionModes.Direct
-                            : DurableExecutionModes.Agent);
+                            : DurableExecutionModes.Agent,
+                        decision.ModelProfile);
                     var outcome = await _agent
                         .RunAsync(routed, active.Token)
                         .ConfigureAwait(false);
@@ -459,11 +493,20 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
 
     private async ValueTask<ExecutionRouteDecision> SelectBoundedAsync(
         ExecutionRouteRequest request,
+        DurableRunRequest? runRequest,
+        RoutedWorkflowRequest? workflowRequest,
         CancellationToken cancellationToken)
     {
         var validationRequest = ExecutionRouteValidation.Snapshot(request);
         var policyRequest = ExecutionRouteValidation.Snapshot(
             validationRequest);
+        var contextual = _policy as IContextualExecutionRoutePolicy;
+        var contextualRequest = contextual is null
+            ? null
+            : CreateContextualRequest(
+                policyRequest,
+                runRequest,
+                workflowRequest);
         using var queueTimeout = new CancellationTokenSource(
             _options.PolicyTimeout);
         using var queue = CancellationTokenSource.CreateLinkedTokenSource(
@@ -478,7 +521,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
         {
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyTimeoutFallback,
-                validationRequest);
+                validationRequest,
+                contextualRequest);
         }
 
         if (cancellationToken.IsCancellationRequested)
@@ -504,9 +548,13 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             EnterNestedOperation();
             nestedEntered = true;
             if (!_callbackExecutionDispatcher.TryExecute(
-                        () => _policy.SelectAsync(
-                            policyRequest,
-                            policyToken),
+                        () => contextual is null
+                            ? _policy.SelectAsync(
+                                policyRequest,
+                                policyToken)
+                            : contextual.SelectAsync(
+                                contextualRequest!,
+                                policyToken),
                         out var acceptedEvaluation))
             {
                 ExitOperation();
@@ -516,7 +564,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
                 _policySlots.Release();
                 return Fallback(
                     ExecutionRouteReasonCodes.PolicyErrorFallback,
-                    validationRequest);
+                    validationRequest,
+                    contextualRequest);
             }
 
             evaluation = acceptedEvaluation;
@@ -531,7 +580,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             _policySlots.Release();
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyErrorFallback,
-                validationRequest);
+                validationRequest,
+                contextualRequest);
         }
 
         using var signals = new OperationDeadlineSignals(
@@ -561,26 +611,32 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyTimeoutFallback,
-                validationRequest);
+                validationRequest,
+                contextualRequest);
         }
 
         try
         {
             var decision = await evaluation.ConfigureAwait(false);
-            return ValidateDecision(decision, validationRequest);
+            return ValidateDecision(
+                decision,
+                validationRequest,
+                contextualRequest);
         }
         catch (OperationCanceledException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyTimeoutFallback,
-                validationRequest);
+                validationRequest,
+                contextualRequest);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyErrorFallback,
-                validationRequest);
+                validationRequest,
+                contextualRequest);
         }
         finally
         {
@@ -611,13 +667,15 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
 
     private ExecutionRouteDecision ValidateDecision(
         ExecutionRouteDecision? decision,
-        ExecutionRouteRequest request)
+        ExecutionRouteRequest request,
+        ContextualExecutionRouteRequest? contextualRequest)
     {
         if (decision is null || !Enum.IsDefined(typeof(ExecutionPath), decision.Path))
         {
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyResultInvalidFallback,
-                request);
+                request,
+                contextualRequest);
         }
 
         try
@@ -626,7 +684,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
                 decision.Path,
                 decision.ReasonCode,
                 decision.PolicyId,
-                decision.PolicyVersion);
+                decision.PolicyVersion,
+                decision.ModelProfile);
             if (!string.Equals(
                     decision.PolicyId,
                     _policyId,
@@ -638,7 +697,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             {
                 return Fallback(
                     ExecutionRouteReasonCodes.PolicyResultInvalidFallback,
-                    request);
+                    request,
+                    contextualRequest);
             }
 
             if (request.ExplicitPath.HasValue
@@ -646,7 +706,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             {
                 return Fallback(
                     ExecutionRouteReasonCodes.PolicyResultInvalidFallback,
-                    request);
+                    request,
+                    contextualRequest);
             }
 
             if (!ExecutionRouteValidation.CanSatisfy(
@@ -655,7 +716,8 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             {
                 return Fallback(
                     ExecutionRouteReasonCodes.PolicyResultInvalidFallback,
-                    request);
+                    request,
+                    contextualRequest);
             }
 
             return decision;
@@ -664,19 +726,49 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
         {
             return Fallback(
                 ExecutionRouteReasonCodes.PolicyResultInvalidFallback,
-                request);
+                request,
+                contextualRequest);
         }
     }
 
     private ExecutionRouteDecision Fallback(
         string reasonCode,
-        ExecutionRouteRequest request) =>
-        new(
-            request.ExplicitPath
-            ?? ExecutionRouteValidation.MinimumPath(request.Requirements),
+        ExecutionRouteRequest request,
+        ContextualExecutionRouteRequest? contextualRequest)
+    {
+        var path = request.ExplicitPath
+                   ?? ExecutionRouteValidation.MinimumPath(
+                       request.Requirements);
+        if (!request.ExplicitPath.HasValue
+            && path == ExecutionPath.Direct
+            && contextualRequest is not null
+            && _policy is IContextualExecutionRouteFallbackPolicy fallback)
+        {
+            try
+            {
+                var candidate = fallback.SelectFallback(contextualRequest);
+                if (Enum.IsDefined(typeof(ExecutionPath), candidate)
+                    && ExecutionRouteValidation.CanSatisfy(
+                        candidate,
+                        request.Requirements))
+                {
+                    path = candidate;
+                }
+            }
+            catch (Exception exception)
+                when (exception is not OutOfMemoryException
+                      and not StackOverflowException)
+            {
+                path = ExecutionPath.Agent;
+            }
+        }
+
+        return new ExecutionRouteDecision(
+            path,
             reasonCode,
             _policyId,
             _policyVersion);
+    }
 
     public async ValueTask<bool> StopAsync()
     {
@@ -933,8 +1025,14 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
 
     private static DurableRunRequest CopyRunRequest(
         DurableRunRequest source,
-        string executionMode)
+        string executionMode,
+        ExecutionRouteModelProfile? modelProfile)
     {
+        var routedInference = source.Inference?.CloneValidated()
+                              ?? modelProfile?.Inference?.CloneValidated();
+        var routedPreference = source.RoutePreference?.CloneValidated()
+                               ?? modelProfile?.RoutePreference
+                                   ?.CloneValidated();
         return new DurableRunRequest
         {
             Run = source.Run,
@@ -944,10 +1042,67 @@ public sealed class RoutedExecutionRuntime : IAsyncDisposable
             LaneId = source.LaneId,
             WorkloadClass = source.WorkloadClass,
             ExecutionMode = executionMode,
-            Inference = source.Inference?.CloneValidated(),
-            RoutePreference = source.RoutePreference?.CloneValidated(),
+            Inference = routedInference,
+            RoutePreference = routedPreference,
             FinalOutputContract = source.FinalOutputContract
         };
+    }
+
+    private static ContextualExecutionRouteRequest CreateContextualRequest(
+        ExecutionRouteRequest route,
+        DurableRunRequest? runRequest,
+        RoutedWorkflowRequest? workflowRequest)
+    {
+        string? latestText = null;
+        var hasStructuredInput = false;
+        var inputPartCount = 0;
+        if (runRequest is not null)
+        {
+            for (var index = runRequest.InitialTranscript.Count - 1;
+                 index >= 0;
+                 index--)
+            {
+                var message = runRequest.InitialTranscript[index];
+                if (!string.Equals(
+                        message.Role,
+                        NormalizedRoles.User,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                inputPartCount = message.Parts.Count;
+                if (inputPartCount == 1)
+                {
+                    var part = message.Parts[0];
+                    if (string.Equals(
+                            part.Type,
+                            NormalizedPartTypes.Text,
+                            StringComparison.Ordinal)
+                        && part.Text is not null)
+                    {
+                        latestText = part.Text;
+                    }
+                    else
+                    {
+                        hasStructuredInput = true;
+                    }
+                }
+                else if (inputPartCount > 0)
+                {
+                    hasStructuredInput = true;
+                }
+
+                break;
+            }
+        }
+
+        return new ContextualExecutionRouteRequest(
+            route,
+            latestText,
+            hasStructuredInput,
+            inputPartCount,
+            workflowRequest is not null);
     }
 
     private static RoutedWorkflowRequest SnapshotWorkflowRequest(

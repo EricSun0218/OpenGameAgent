@@ -53,10 +53,12 @@ The runtime exposes four execution shapes:
 | Agent | Yes | Bounded loop | Yes | stateful NPC or world action |
 | Workflow | Yes | Declared | Per stage | deterministic orchestration |
 
-The deterministic router selects the least-capable shape that satisfies the
-request. A simple line of dialogue therefore does not need to enter a complex
-tool loop. Games can supply a bounded custom routing policy; invalid or timed-out
-decisions fall back to the least-capable valid route.
+The automatic router first enforces declared capability requirements, then
+combines a bounded structured signal with the latest user input. Obvious
+dialogue uses Direct without entering a tool loop; actionable, structured,
+long, or ambiguous work retains Agent capability. Games can configure model
+profiles, add a classifier for ambiguous text, or replace the policy. Invalid
+or timed-out custom policies still fall back to the least-capable valid route.
 
 ## Game-native runtime primitives
 

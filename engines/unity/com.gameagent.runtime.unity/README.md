@@ -130,8 +130,11 @@ integration checklist.
 
 The built runtime backend also exposes `RunRoutedAsync`, `CompleteAsync`,
 `RunChildAsync`, and `CancelChildren` through `UnityAgentRuntimeHost`. These use
-the shared durable routing, per-operation inference/provider selection, and
-bounded child-lineage contracts rather than Unity-specific Agent behavior.
+the shared hybrid automatic routing, per-operation inference/provider
+selection, and bounded child-lineage contracts rather than Unity-specific
+Agent behavior. Obvious dialogue stays on the one-turn Direct path; actionable
+or structured input retains Agent capabilities, and explicit requirements or
+per-run model choices always win.
 Use the `RunChildAsync(AgentRun, ...)` overload when the parent was restored
 from durable storage or delegation continues after supervisor cache eviction;
 the string overload is intended for roots or currently supervised parents.

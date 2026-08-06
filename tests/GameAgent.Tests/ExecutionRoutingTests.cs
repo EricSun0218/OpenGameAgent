@@ -16,6 +16,33 @@ public sealed class ProcessCancellationWorkerPoolCollection
 public sealed class ExecutionRoutingTests
 {
     [Fact]
+    public void RouteDecisionRetainsItsFourArgumentConstructor()
+    {
+        var constructor = typeof(ExecutionRouteDecision).GetConstructor(
+            new[]
+            {
+                typeof(ExecutionPath),
+                typeof(string),
+                typeof(string),
+                typeof(string)
+            });
+
+        Assert.NotNull(constructor);
+    }
+
+    [Fact]
+    public void AutomaticRouterRejectsOverlappingTextThresholds()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new AutomaticExecutionRoutePolicy(
+                new AutomaticExecutionRoutingOptions
+                {
+                    DirectTextMaxCharacters = 32,
+                    AgentTextMinCharacters = 32
+                }));
+    }
+
+    [Fact]
     public async Task CapabilityFreeRequestExecutesDurableDirectPath()
     {
         var agent = new RecordingAgentRuntime();
@@ -38,6 +65,433 @@ public sealed class ExecutionRoutingTests
             agent.LastRequest!.ExecutionMode);
         Assert.Equal(1, agent.CallCount);
         Assert.Equal(0, workflow.CallCount);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterKeepsShortDialogueOnDirectPath()
+    {
+        var agent = new RecordingAgentRuntime();
+        var router = new RoutedExecutionRuntime(agent);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest
+                {
+                    OperationKind = "npc-dialogue"
+                },
+                Run = RunRequestWithText(
+                    "automatic-direct",
+                    "你今天心情怎么样？")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Direct, outcome.Decision.Path);
+        Assert.Equal(
+            ExecutionRouteReasonCodes.AutomaticDirect,
+            outcome.Decision.ReasonCode);
+        Assert.Equal(
+            DurableExecutionModes.Direct,
+            agent.LastRequest!.ExecutionMode);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterEscalatesActionableDialogueToAgent()
+    {
+        var agent = new RecordingAgentRuntime();
+        var router = new RoutedExecutionRuntime(agent);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest
+                {
+                    OperationKind = "npc-dialogue"
+                },
+                Run = RunRequestWithText(
+                    "automatic-agent",
+                    "请帮我建造一座仓库并收集需要的材料。")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Agent, outcome.Decision.Path);
+        Assert.Equal(
+            ExecutionRouteReasonCodes.AutomaticAgent,
+            outcome.Decision.ReasonCode);
+        Assert.Equal(
+            DurableExecutionModes.Agent,
+            agent.LastRequest!.ExecutionMode);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterTreatsStructuredGameInputAsAgentWork()
+    {
+        var agent = new RecordingAgentRuntime();
+        var router = new RoutedExecutionRuntime(agent);
+        var request = RunRequest("automatic-structured");
+        request.InitialTranscript = new[]
+        {
+            UserMessage(
+                NormalizedContentPart.FromJson(
+                    JsonDocument.Parse(
+                        """{"self":{"hp":18},"legalActionIds":[2,5]}""")
+                        .RootElement
+                        .Clone()))
+        };
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = request
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Agent, outcome.Decision.Path);
+        Assert.Equal(
+            DurableExecutionModes.Agent,
+            agent.LastRequest!.ExecutionMode);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterUsesClassifierOnlyForAmbiguousText()
+    {
+        var agent = new RecordingAgentRuntime();
+        var classifier = new RecordingAutomaticClassifier(
+            new AutomaticExecutionClassification(
+                ExecutionPath.Direct,
+                confidence: 0.95));
+        var policy = new AutomaticExecutionRoutePolicy(
+            new AutomaticExecutionRoutingOptions
+            {
+                DirectTextMaxCharacters = 8,
+                AgentTextMinCharacters = 128
+            },
+            classifier);
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText(
+                    "automatic-classifier",
+                    "请介绍一下你看到的天气和周围环境。")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Direct, outcome.Decision.Path);
+        Assert.Equal(1, classifier.CallCount);
+        Assert.Equal(
+            "请介绍一下你看到的天气和周围环境。",
+            classifier.LastRequest!.Text);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterDoesNotSpendClassifierOnObviousDialogue()
+    {
+        var agent = new RecordingAgentRuntime();
+        var classifier = new RecordingAutomaticClassifier(
+            new AutomaticExecutionClassification(
+                ExecutionPath.Agent,
+                confidence: 1));
+        var policy = new AutomaticExecutionRoutePolicy(
+            classifier: classifier);
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText("automatic-no-classifier", "你好")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Direct, outcome.Decision.Path);
+        Assert.Equal(0, classifier.CallCount);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterDoesNotMatchIntentInsideAnotherWord()
+    {
+        var agent = new RecordingAgentRuntime();
+        var router = new RoutedExecutionRuntime(agent);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText(
+                    "automatic-word-boundary",
+                    "Which planet is closest?")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Direct, outcome.Decision.Path);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterClassifiesAmbiguousSignalText()
+    {
+        var agent = new RecordingAgentRuntime();
+        var classifier = new RecordingAutomaticClassifier(
+            new AutomaticExecutionClassification(
+                ExecutionPath.Direct,
+                confidence: 0.95));
+        var policy = new AutomaticExecutionRoutePolicy(
+            new AutomaticExecutionRoutingOptions
+            {
+                DirectTextMaxCharacters = 4,
+                AgentTextMinCharacters = 128
+            },
+            classifier);
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy);
+        const string signalText = "Describe the nearby weather in one sentence.";
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest
+                {
+                    Signal = JsonDocument.Parse(
+                            "\"Describe the nearby weather in one sentence.\"")
+                        .RootElement
+                        .Clone()
+                },
+                Run = RunRequest("automatic-signal-classifier")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Direct, outcome.Decision.Path);
+        Assert.Equal(1, classifier.CallCount);
+        Assert.Equal(signalText, classifier.LastRequest!.Text);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterRejectsLowConfidenceClassification()
+    {
+        var agent = new RecordingAgentRuntime();
+        var classifier = new RecordingAutomaticClassifier(
+            new AutomaticExecutionClassification(
+                ExecutionPath.Direct,
+                confidence: 0.5));
+        var policy = new AutomaticExecutionRoutePolicy(
+            new AutomaticExecutionRoutingOptions
+            {
+                DirectTextMaxCharacters = 4,
+                AgentTextMinCharacters = 128,
+                MinimumClassifierConfidence = 0.75
+            },
+            classifier);
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText(
+                    "automatic-low-confidence",
+                    "ordinary dialogue whose intent remains unclear")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Agent, outcome.Decision.Path);
+        Assert.Equal(1, classifier.CallCount);
+    }
+
+    [Fact]
+    public async Task DeclaredCapabilityRequirementPrecedesAutomaticClassification()
+    {
+        var agent = new RecordingAgentRuntime();
+        var classifier = new RecordingAutomaticClassifier(
+            new AutomaticExecutionClassification(
+                ExecutionPath.Direct,
+                confidence: 1));
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            new AutomaticExecutionRoutePolicy(classifier: classifier));
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest
+                {
+                    Requirements = ExecutionRequirements.Tools
+                },
+                Run = RunRequestWithText(
+                    "automatic-requirement-first",
+                    "hello")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Agent, outcome.Decision.Path);
+        Assert.Equal(0, classifier.CallCount);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterFailsConservativelyWhenClassifierFails()
+    {
+        var agent = new RecordingAgentRuntime();
+        var policy = new AutomaticExecutionRoutePolicy(
+            new AutomaticExecutionRoutingOptions
+            {
+                DirectTextMaxCharacters = 4,
+                AgentTextMinCharacters = 128
+            },
+            new ThrowingAutomaticClassifier());
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy);
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText(
+                    "automatic-classifier-fallback",
+                    "普通但无法由本地规则明确判断的对话")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Agent, outcome.Decision.Path);
+        Assert.Equal(
+            DurableExecutionModes.Agent,
+            agent.LastRequest!.ExecutionMode);
+    }
+
+    [Fact]
+    public async Task AutomaticRouterFailsConservativelyWhenClassifierTimesOut()
+    {
+        var agent = new RecordingAgentRuntime();
+        var classifier = new IgnoringAutomaticClassifier();
+        var policy = new AutomaticExecutionRoutePolicy(
+            new AutomaticExecutionRoutingOptions
+            {
+                DirectTextMaxCharacters = 4,
+                AgentTextMinCharacters = 128
+            },
+            classifier);
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy,
+            new ExecutionRouterOptions
+            {
+                PolicyTimeout = TimeSpan.FromMilliseconds(50)
+            });
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText(
+                    "automatic-classifier-timeout",
+                    "普通但无法由本地规则明确判断的对话")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Agent, outcome.Decision.Path);
+        Assert.Equal(
+            ExecutionRouteReasonCodes.PolicyTimeoutFallback,
+            outcome.Decision.ReasonCode);
+        Assert.Equal(
+            DurableExecutionModes.Agent,
+            agent.LastRequest!.ExecutionMode);
+        classifier.Release.TrySetResult();
+        await router.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task AutomaticRouterAppliesModelTierWithoutOverridingCaller()
+    {
+        var agent = new RecordingAgentRuntime();
+        var policy = new AutomaticExecutionRoutePolicy(
+            new AutomaticExecutionRoutingOptions
+            {
+                DirectModelProfile = new ExecutionRouteModelProfile
+                {
+                    Inference = new ModelInferenceOptions
+                    {
+                        ReasoningEnabled = false,
+                        ReasoningEffort = ModelReasoningEfforts.None
+                    },
+                    RoutePreference = new ProviderRoutePreference
+                    {
+                        ProviderIds = new[] { "fast-dialogue" },
+                        AllowUnlistedFallback = true
+                    }
+                }
+            });
+        var router = new RoutedExecutionRuntime(
+            agent,
+            workflow: null,
+            policy);
+
+        var first = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = RunRequestWithText("automatic-model-tier", "你好")
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Direct, first.Decision.Path);
+        Assert.Equal(
+            new[] { "fast-dialogue" },
+            agent.LastRequest!.RoutePreference!.ProviderIds);
+        Assert.False(agent.LastRequest.Inference!.ReasoningEnabled);
+
+        var explicitRequest = RunRequestWithText(
+            "automatic-model-override",
+            "你好");
+        explicitRequest.RoutePreference = new ProviderRoutePreference
+        {
+            ProviderIds = new[] { "caller-selected" }
+        };
+        explicitRequest.Inference = new ModelInferenceOptions
+        {
+            ReasoningEnabled = true,
+            ReasoningEffort = ModelReasoningEfforts.High
+        };
+        _ = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest(),
+                Run = explicitRequest
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            new[] { "caller-selected" },
+            agent.LastRequest!.RoutePreference!.ProviderIds);
+        Assert.True(agent.LastRequest.Inference!.ReasoningEnabled);
+        Assert.Equal(
+            ModelReasoningEfforts.High,
+            agent.LastRequest.Inference.ReasoningEffort);
+    }
+
+    [Fact]
+    public async Task AutomaticWorkflowHintRequiresAWorkflowPayload()
+    {
+        var workflow = new RecordingWorkflowRuntime();
+        var router = new RoutedExecutionRuntime(
+            new RecordingAgentRuntime(),
+            workflow);
+        var signal = JsonDocument.Parse(
+                """{"input":"advance everyone","parallelActors":true}""")
+            .RootElement
+            .Clone();
+
+        var outcome = await router.RunAsync(
+            new RoutedExecutionRequest
+            {
+                Route = new ExecutionRouteRequest { Signal = signal },
+                Workflow = WorkflowRequest()
+            }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionPath.Workflow, outcome.Decision.Path);
+        Assert.Equal(1, workflow.CallCount);
     }
 
     [Fact]
@@ -861,6 +1315,28 @@ public sealed class ExecutionRoutingTests
         };
     }
 
+    private static DurableRunRequest RunRequestWithText(
+        string runId,
+        string text)
+    {
+        var request = RunRequest(runId);
+        request.InitialTranscript = new[]
+        {
+            UserMessage(NormalizedContentPart.FromText(text))
+        };
+        return request;
+    }
+
+    private static NormalizedMessage UserMessage(
+        NormalizedContentPart part) =>
+        new()
+        {
+            MessageId = Guid.NewGuid().ToString("N"),
+            Role = NormalizedRoles.User,
+            CreatedAt = DateTimeOffset.UtcNow,
+            Parts = new List<NormalizedContentPart> { part }
+        };
+
     private static RoutedWorkflowRequest WorkflowRequest() =>
         new()
         {
@@ -919,6 +1395,75 @@ public sealed class ExecutionRoutingTests
                     Status = "completed",
                     Output = request.Input.Clone()
                 });
+        }
+    }
+
+    private sealed class RecordingAutomaticClassifier :
+        IAutomaticExecutionClassifier
+    {
+        private readonly AutomaticExecutionClassification _result;
+        private int _callCount;
+
+        internal RecordingAutomaticClassifier(
+            AutomaticExecutionClassification result)
+        {
+            _result = result;
+        }
+
+        public string ClassifierId => "test-classifier";
+
+        public string Version => "1";
+
+        internal int CallCount => Volatile.Read(ref _callCount);
+
+        internal AutomaticExecutionClassificationRequest? LastRequest
+        {
+            get;
+            private set;
+        }
+
+        public ValueTask<AutomaticExecutionClassification> ClassifyAsync(
+            AutomaticExecutionClassificationRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LastRequest = request;
+            Interlocked.Increment(ref _callCount);
+            return new ValueTask<AutomaticExecutionClassification>(_result);
+        }
+    }
+
+    private sealed class ThrowingAutomaticClassifier :
+        IAutomaticExecutionClassifier
+    {
+        public string ClassifierId => "throwing-classifier";
+
+        public string Version => "1";
+
+        public ValueTask<AutomaticExecutionClassification> ClassifyAsync(
+            AutomaticExecutionClassificationRequest request,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Injected classifier failure.");
+    }
+
+    private sealed class IgnoringAutomaticClassifier :
+        IAutomaticExecutionClassifier
+    {
+        public string ClassifierId => "ignoring-classifier";
+
+        public string Version => "1";
+
+        internal TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<AutomaticExecutionClassification> ClassifyAsync(
+            AutomaticExecutionClassificationRequest request,
+            CancellationToken cancellationToken)
+        {
+            await Release.Task;
+            return new AutomaticExecutionClassification(
+                ExecutionPath.Direct,
+                confidence: 1);
         }
     }
 

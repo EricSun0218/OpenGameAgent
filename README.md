@@ -46,7 +46,9 @@ an assistant, or a group decision without forcing games into one data model.
 - Durable streaming model/tool loops with retries, route fallback, stale-stream
   fencing, crash recovery, and explicit reconciliation of uncertain writes.
 - Stateless completion plus durable `Direct`, full `Agent`, and fixed
-  `Workflow` execution paths with bounded deterministic routing.
+  `Workflow` paths with bounded hybrid routing: obvious dialogue stays fast,
+  actionable or structured input retains Agent capabilities, and declared
+  requirements always win.
 - Typed observations and structured tool results; natural language is optional.
 - Immutable tool and skill snapshots with bounded progressive disclosure.
 - Strict tool input validation, deterministic conflict scopes, parallel reads,

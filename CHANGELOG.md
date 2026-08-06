@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Add bounded hybrid automatic routing across the shared runtime, Godot, and
+  Unity integrations: obvious dialogue uses durable one-turn Direct execution,
+  while actionable, structured, long, or ambiguous input retains Agent
+  capability.
+- Preserve explicit path and capability requirements as authoritative, consult
+  an optional classifier only for ambiguous text, and fall back conservatively
+  on classifier failure or timeout.
+- Add route-selected provider and inference profiles with independent per-run
+  override precedence.
+
 ## 0.2.0-alpha.1
 
 - Add bilingual English-first project documentation, contributor governance,

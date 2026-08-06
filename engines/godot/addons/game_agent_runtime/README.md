@@ -88,7 +88,10 @@ GDScript callers may use the Variant-compatible methods on the Autoload:
 ```gdscript
 var request_id := GameAgent.start_agent_run(run_dictionary, observations)
 var routed_id := GameAgent.start_routed_run(
-    route_dictionary,
+    {
+        "operation_kind": "npc-input",
+        "signal": { "input": player_input },
+    },
     run_dictionary,
     observations,
     options,
@@ -102,7 +105,7 @@ var completion_id := GameAgent.start_completion({
 
 Available GDScript operations include starting and resuming durable runs,
 choosing Direct or Agent execution plus inference/provider-route options through
-`start_agent_run_with_options`, deterministic Direct/Agent/Workflow routing,
+`start_agent_run_with_options`, hybrid automatic Direct/Agent/Workflow routing,
 stateless completion, starting and cancelling child Agent runs, starting
 multi-actor batches, resuming or abandoning a participant, and posting cancel,
 interrupt, steer, or follow-up controls. Inputs are converted to strict protocol
@@ -301,9 +304,11 @@ responsible for conflicts in authoritative state.
 
 ## Routing and child Agents
 
-The built backend exposes stateless completion, durable Direct/Agent routing,
-configured workflows, and bounded child supervision from the same in-process
-runtime. Child completion uses the normal run-completed/run-failed signal path;
+The built backend exposes stateless completion, durable hybrid Direct/Agent
+routing, configured workflows, and bounded child supervision from the same
+in-process runtime. Route signals may carry arbitrary bounded `input`; the
+runtime also inspects the latest normalized user message. Child completion uses
+the normal run-completed/run-failed signal path;
 validated root/parent/depth lineage is stored in the child run extensions. The
 game must still stage concurrent results and resolve them against authoritative
 state rather than applying them in network-completion order.

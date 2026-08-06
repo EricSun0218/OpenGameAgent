@@ -520,6 +520,24 @@ public sealed class GameAgentRuntimeBuilder : IAsyncDisposable
         return this;
     }
 
+    /// <summary>
+    /// Enables the built-in hybrid router with optional model tiers and an
+    /// optional classifier for ambiguous input. This is also the default
+    /// execution policy when no custom policy is registered.
+    /// </summary>
+    public GameAgentRuntimeBuilder WithAutomaticExecutionRouting(
+        AutomaticExecutionRoutingOptions? automaticOptions = null,
+        IAutomaticExecutionClassifier? classifier = null,
+        ExecutionRouterOptions? routerOptions = null)
+    {
+        ThrowIfFinished();
+        _executionRoutePolicy = new AutomaticExecutionRoutePolicy(
+            automaticOptions,
+            classifier);
+        _executionRouterOptions = routerOptions;
+        return this;
+    }
+
     public GameAgentRuntimeBuilder WithRoutedWorkflowRuntime(
         IRoutedWorkflowRuntime runtime)
     {

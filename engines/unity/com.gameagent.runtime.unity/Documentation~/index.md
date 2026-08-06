@@ -37,7 +37,8 @@ operation identifiers, and receipts stay in engine-neutral assemblies.
 With a `BuiltUnityAgentRuntimeBackend`, the host exposes:
 
 - `RunAsync` for normal durable Agent work;
-- `RunRoutedAsync` for durable Direct/Agent/Workflow selection;
+- `RunRoutedAsync` for bounded hybrid automatic Direct/Agent/Workflow
+  selection from structured signals and the latest normalized user input;
 - `CompleteAsync` for stateless single-provider-turn work;
 - `RunChildAsync` and `CancelChildren` for bounded delegation.
 - optional `SubmitGenerationAsync`, `RefreshGenerationAsync`,

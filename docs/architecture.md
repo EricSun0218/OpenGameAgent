@@ -59,8 +59,11 @@ The execution surfaces are deliberately distinct. Stateless completion avoids
 session and journal overhead for isolated model calls. Durable direct execution
 keeps context, memory, accounting, and recovery but performs one tool-free model
 turn. Agent execution owns the bounded tool loop. Workflow execution owns a
-fixed recoverable graph around Agent steps. Routing therefore optimizes latency
-without allowing a cheap path to silently omit required capabilities.
+fixed recoverable graph around Agent steps. The default hybrid router classifies
+obvious dialogue locally, escalates actionable, structured, long, or ambiguous
+input, and consults an optional classifier only for ambiguous text. Routing
+therefore optimizes latency without adding a classification call to every
+request or allowing a cheap path to silently omit required capabilities.
 
 Game-semantic coordinates remain engine-neutral. Named clocks, timelines,
 save/state revisions, entity incarnations, observer perspective, spatial scope,
