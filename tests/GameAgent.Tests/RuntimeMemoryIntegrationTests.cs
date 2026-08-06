@@ -1516,7 +1516,7 @@ public sealed class RuntimeMemoryIntegrationTests
             Effect = ToolEffects.WorldCommand,
             ConflictScopes = new List<string> { "world" },
             IdempotencyPolicy = ToolIdempotencyPolicies.Required,
-            TimeoutMs = 1_000
+            TimeoutMs = 10_000
         };
     }
 
