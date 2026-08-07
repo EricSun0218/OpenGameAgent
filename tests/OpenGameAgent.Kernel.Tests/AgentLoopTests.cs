@@ -1776,10 +1776,23 @@ public sealed class AgentLoopTests
             model: "test",
             stopReason: ModelStopReason.Stop));
         var agent = new Agent(options);
+        var runStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRun = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = agent.Subscribe(async (agentEvent, cancellationToken) =>
+        {
+            if (agentEvent.Kind == AgentEventKind.RunStarted)
+            {
+                runStarted.TrySetResult();
+                await releaseRun.Task.WaitAsync(cancellationToken);
+            }
+        });
         agent.FollowUp("queued follow-up");
 
         var run = agent.ContinueAsync(TestContext.Current.CancellationToken);
-        Assert.True(agent.TrySteer("urgent steering"));
+        await runStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var steeringAccepted = agent.TrySteer("urgent steering");
+        releaseRun.TrySetResult();
+        Assert.True(steeringAccepted);
         await run;
 
         var request = Assert.Single(provider.Requests);
