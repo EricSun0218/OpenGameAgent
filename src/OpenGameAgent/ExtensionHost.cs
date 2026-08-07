@@ -677,14 +677,19 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
             throw new ArgumentNullException(nameof(channel));
         }
 
+        Registration[] handlers;
         lock (_gate)
         {
-            EnsureActive();
-        }
+            if (_disposed)
+            {
+                return;
+            }
 
-        var handlers = GetEntries(GameAgentExtensionResourceKind.EventHandler)
-            .Where(entry => ReferenceEquals(entry.EventKey, channel))
-            .ToArray();
+            handlers = SnapshotEntriesLocked()
+                .Where(entry => entry.Resource.Kind == GameAgentExtensionResourceKind.EventHandler)
+                .Where(entry => ReferenceEquals(entry.EventKey, channel))
+                .ToArray();
+        }
         foreach (var entry in handlers)
         {
             try

@@ -193,6 +193,19 @@ public sealed class ExtensionRuntimeTests
     }
 
     [Fact]
+    public async Task ExtensionChannelSettlementIsSafeDuringShutdown()
+    {
+        var extension = new ShutdownPublishingExtension();
+        var runtime = new GameAgentBuilder(new CaptureProvider(), "model")
+            .UseExtension(extension)
+            .Build();
+
+        await runtime.DisposeAsync();
+
+        Assert.True(extension.Published);
+    }
+
+    [Fact]
     public void SynchronousRuntimeDisposeDoesNotDeadlockOnAnEngineSynchronizationContext()
     {
         var extension = new YieldingDisposeExtension();
@@ -599,6 +612,27 @@ public sealed class ExtensionRuntimeTests
         {
             await Task.Yield();
             Disposed = true;
+        }
+    }
+
+    private sealed class ShutdownPublishingExtension : IGameAgentExtension, IAsyncDisposable
+    {
+        private static readonly GameAgentExtensionChannel<string> Settlement = new("shutdown-settlement");
+        private GameAgentExtensionApi? _api;
+
+        public GameAgentExtensionDescriptor Descriptor { get; } = new("shutdown-publishing", "1");
+
+        public bool Published { get; private set; }
+
+        public void Configure(GameAgentExtensionApi api)
+        {
+            _api = api;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _api!.PublishAsync(Settlement, "settled");
+            Published = true;
         }
     }
 
