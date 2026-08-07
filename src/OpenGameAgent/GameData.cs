@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent;
 
@@ -57,6 +58,14 @@ public readonly struct GameMoment : IEquatable<GameMoment>, IComparable<GameMome
 
     public static bool operator !=(GameMoment left, GameMoment right) => !left.Equals(right);
 
+    public static bool operator <(GameMoment left, GameMoment right) => left.CompareTo(right) < 0;
+
+    public static bool operator <=(GameMoment left, GameMoment right) => left.CompareTo(right) <= 0;
+
+    public static bool operator >(GameMoment left, GameMoment right) => left.CompareTo(right) > 0;
+
+    public static bool operator >=(GameMoment left, GameMoment right) => left.CompareTo(right) >= 0;
+
     internal GameMoment EnsureValid(string parameterName)
     {
         if (string.IsNullOrWhiteSpace(TimelineId))
@@ -87,7 +96,8 @@ public sealed class GameInput
         string payloadJson,
         GameMoment moment,
         string? inputId = null,
-        IReadOnlyDictionary<string, string>? metadata = null)
+        IReadOnlyDictionary<string, string>? metadata = null,
+        IReadOnlyList<ResourceContent>? resources = null)
     {
         SessionId = GameJson.RequireId(sessionId, nameof(sessionId));
         ActorId = GameJson.RequireId(actorId, nameof(actorId));
@@ -107,6 +117,13 @@ public sealed class GameInput
         }
 
         Metadata = new ReadOnlyDictionary<string, string>(copiedMetadata);
+        var copiedResources = (resources ?? Array.Empty<ResourceContent>()).ToArray();
+        if (copiedResources.Any(resource => resource is null))
+        {
+            throw new ArgumentException("Input resources cannot contain null values.", nameof(resources));
+        }
+
+        Resources = Array.AsReadOnly(copiedResources);
     }
 
     public string InputId { get; }
@@ -122,6 +139,8 @@ public sealed class GameInput
     public GameMoment Moment { get; }
 
     public IReadOnlyDictionary<string, string> Metadata { get; }
+
+    public IReadOnlyList<ResourceContent> Resources { get; }
 }
 
 public sealed class GameContextSlice
@@ -155,6 +174,8 @@ public sealed class GameRuntimeLimits
 
     public int MaxMetadataEntries { get; set; } = 64;
 
+    public int MaxInputResources { get; set; } = 16;
+
     public int MaxMetadataKeyCharacters { get; set; } = 256;
 
     public int MaxMetadataValueCharacters { get; set; } = 16_384;
@@ -163,11 +184,29 @@ public sealed class GameRuntimeLimits
 
     public int MaxConcurrentActors { get; set; } = 16;
 
+    public int MaxScheduledActors { get; set; } = 4_096;
+
     public int MaxQueuedInputsPerActor { get; set; } = 64;
 
     public int MaxSkillsPerRun { get; set; } = 16;
 
     public int MaxSkillCharactersPerRun { get; set; } = 1_000_000;
+
+    public int MaxExtensionStateEntries { get; set; } = 256;
+
+    public int MaxExtensionStateKeyCharacters { get; set; } = 1_024;
+
+    public int MaxExtensionStateValueCharacters { get; set; } = 1_000_000;
+
+    public int MaxExtensionStateCharacters { get; set; } = 4_000_000;
+
+    public int MaxExtensions { get; set; } = 256;
+
+    public int MaxExtensionResources { get; set; } = 4_096;
+
+    public int MaxExtensionDiagnostics { get; set; } = 1_024;
+
+    public int MaxExtensionDiagnosticCharacters { get; set; } = 64_000;
 
     internal GameRuntimeLimits CopyAndValidate()
     {
@@ -177,13 +216,23 @@ public sealed class GameRuntimeLimits
         RequireRange(copy.MaxContextSlices, 0, 100_000, nameof(MaxContextSlices));
         RequireRange(copy.MaxContextJsonCharacters, 2, 100_000_000, nameof(MaxContextJsonCharacters));
         RequireRange(copy.MaxMetadataEntries, 0, 100_000, nameof(MaxMetadataEntries));
+        RequireRange(copy.MaxInputResources, 0, 10_000, nameof(MaxInputResources));
         RequireRange(copy.MaxMetadataKeyCharacters, 1, 100_000, nameof(MaxMetadataKeyCharacters));
         RequireRange(copy.MaxMetadataValueCharacters, 0, 100_000_000, nameof(MaxMetadataValueCharacters));
         RequireRange(copy.MaxIdentifierCharacters, 1, 16_384, nameof(MaxIdentifierCharacters));
         RequireRange(copy.MaxConcurrentActors, 1, 4096, nameof(MaxConcurrentActors));
+        RequireRange(copy.MaxScheduledActors, copy.MaxConcurrentActors, 100_000, nameof(MaxScheduledActors));
         RequireRange(copy.MaxQueuedInputsPerActor, 1, 100_000, nameof(MaxQueuedInputsPerActor));
         RequireRange(copy.MaxSkillsPerRun, 0, 10_000, nameof(MaxSkillsPerRun));
         RequireRange(copy.MaxSkillCharactersPerRun, 0, 100_000_000, nameof(MaxSkillCharactersPerRun));
+        RequireRange(copy.MaxExtensionStateEntries, 0, 100_000, nameof(MaxExtensionStateEntries));
+        RequireRange(copy.MaxExtensionStateKeyCharacters, 1, 100_000, nameof(MaxExtensionStateKeyCharacters));
+        RequireRange(copy.MaxExtensionStateValueCharacters, 2, 100_000_000, nameof(MaxExtensionStateValueCharacters));
+        RequireRange(copy.MaxExtensionStateCharacters, 2, 100_000_000, nameof(MaxExtensionStateCharacters));
+        RequireRange(copy.MaxExtensions, 0, 100_000, nameof(MaxExtensions));
+        RequireRange(copy.MaxExtensionResources, 0, 1_000_000, nameof(MaxExtensionResources));
+        RequireRange(copy.MaxExtensionDiagnostics, 0, 1_000_000, nameof(MaxExtensionDiagnostics));
+        RequireRange(copy.MaxExtensionDiagnosticCharacters, 1, 10_000_000, nameof(MaxExtensionDiagnosticCharacters));
         return copy;
     }
 
@@ -202,6 +251,11 @@ public sealed class GameRuntimeLimits
         if (input.Metadata.Count > MaxMetadataEntries)
         {
             throw new GameRuntimeLimitException(nameof(MaxMetadataEntries), "The input has too many metadata entries.");
+        }
+
+        if (input.Resources.Count > MaxInputResources)
+        {
+            throw new GameRuntimeLimitException(nameof(MaxInputResources), "The input has too many attached resources.");
         }
 
         foreach (var value in new[] { input.InputId, input.SessionId, input.ActorId, input.Type, input.Moment.TimelineId })

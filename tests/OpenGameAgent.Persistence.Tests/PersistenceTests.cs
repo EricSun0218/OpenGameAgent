@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using OpenGameAgent.Extensions;
 using OpenGameAgent.Kernel;
 using Xunit;
 
@@ -77,6 +78,38 @@ public sealed class PersistenceTests
 
         Assert.False(stale.Saved);
         Assert.Equal(1, stale.Current.Revision);
+
+    }
+
+    [Fact]
+    public async Task IndependentSessionStoresPreserveCompareAndSwapUnderConcurrentWriters()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("session", "actor");
+        var first = new FileGameSessionStore(directory.Path);
+        var second = new FileGameSessionStore(directory.Path);
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<GameSessionSaveResult> SaveAsync(FileGameSessionStore store, string inputId)
+        {
+            await start.Task.WaitAsync(TestContext.Current.CancellationToken);
+            return await store.SaveAsync(
+                new GameSessionSnapshot(key, 1, processedInputIds: new[] { inputId }),
+                0,
+                TestContext.Current.CancellationToken);
+        }
+
+        var writes = new[] { SaveAsync(first, "one"), SaveAsync(second, "two") };
+        start.SetResult();
+        var results = await Task.WhenAll(writes);
+
+        Assert.Single(results, result => result.Saved);
+        Assert.Single(results, result => !result.Saved);
+        Assert.All(results, result => Assert.Equal(1, result.Current.Revision));
+        var loaded = await new FileGameSessionStore(directory.Path)
+            .LoadAsync(key, TestContext.Current.CancellationToken);
+        Assert.NotNull(loaded);
+        Assert.Single(loaded.ProcessedInputIds);
     }
 
     [Fact]
@@ -116,6 +149,47 @@ public sealed class PersistenceTests
         Assert.Equal(GameActionStatus.Committed, entry!.Receipt!.Status);
         Assert.Equal(2, entry.Receipt.StateRevision);
         Assert.Empty(await finalRestart.ListPendingAsync(10, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task IndependentFileDispatchersNeverExecuteTheSameOperationTwice()
+    {
+        using var directory = new TemporaryDirectory();
+        var intent = Intent("concurrent-operation");
+        var executeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executeCount = 0;
+        var recoverCount = 0;
+        var handler = new CallbackActionHandler(
+            async (candidate, cancellationToken) =>
+            {
+                Interlocked.Increment(ref executeCount);
+                executeEntered.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+                return GameActionReceipt.Committed(candidate, "{\"executed\":true}");
+            },
+            async (candidate, cancellationToken) =>
+            {
+                Interlocked.Increment(ref recoverCount);
+                await release.Task.WaitAsync(cancellationToken);
+                return GameActionReceipt.Committed(candidate, "{\"executed\":true}");
+            });
+        var first = new DurableGameActionDispatcher(new FileGameActionJournal(directory.Path), handler);
+        var second = new DurableGameActionDispatcher(new FileGameActionJournal(directory.Path), handler);
+
+        var executions = new[]
+        {
+            first.ExecuteAsync(intent, TestContext.Current.CancellationToken).AsTask(),
+            second.ExecuteAsync(intent, TestContext.Current.CancellationToken).AsTask(),
+        };
+        await executeEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        release.SetResult();
+        var receipts = await Task.WhenAll(executions);
+
+        Assert.All(receipts, receipt => Assert.Equal(GameActionStatus.Committed, receipt.Status));
+        Assert.Equal(1, executeCount);
+        Assert.InRange(recoverCount, 0, 1);
     }
 
     [Fact]
@@ -316,8 +390,21 @@ public sealed class PersistenceTests
     {
         using var directory = new TemporaryDirectory();
         var store = new FileGameWorkflowCheckpointStore(directory.Path);
+        var invocation = new GameWorkflowInvocationResult(
+            "input",
+            new[]
+            {
+                new AgentMessage(
+                    AgentRole.Assistant,
+                    new AgentContent[] { new TextContent("durable output") },
+                    DateTimeOffset.UnixEpoch,
+                    model: "model",
+                    stopReason: ModelStopReason.Stop),
+            },
+            complete: true,
+            succeeded: true);
         await store.SaveAsync(
-            new GameWorkflowCheckpoint("instance", "evolve", 1, 2, "{\"month\":4}"),
+            new GameWorkflowCheckpoint("instance", "evolve", 1, 2, "{\"month\":4}", invocation: invocation),
             0,
             TestContext.Current.CancellationToken);
 
@@ -327,6 +414,10 @@ public sealed class PersistenceTests
         Assert.NotNull(checkpoint);
         Assert.Equal(2, checkpoint.NextStep);
         Assert.Contains("\"month\":4", checkpoint.StateJson, StringComparison.Ordinal);
+        Assert.Equal("input", checkpoint.Invocation!.InputId);
+        Assert.Equal(
+            "durable output",
+            Assert.IsType<TextContent>(Assert.Single(Assert.Single(checkpoint.Invocation.Messages).Content)).Text);
     }
 
     [Fact]
@@ -380,6 +471,38 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task FileMemoryIdentifiersAreScopedToTheirGameSessionAndOwner()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new FileGameMemoryStore(directory.Path);
+        await store.AppendAsync(
+            new GameMemory("shared-id", "session-a", "npc", "personal", GameMemoryKind.Fact, "{\"value\":1}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await store.AppendAsync(
+            new GameMemory("shared-id", "session-b", "npc", "personal", GameMemoryKind.Fact, "{\"value\":2}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await store.AppendAsync(
+            new GameMemory("shared-id", "session-a", "other-npc", "personal", GameMemoryKind.Fact, "{\"value\":3}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+
+        var restarted = new FileGameMemoryStore(directory.Path);
+        var first = await restarted.SearchAsync(
+            new GameMemoryQuery("session-a", 1, ownerId: "npc", atOrBefore: new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        var second = await restarted.SearchAsync(
+            new GameMemoryQuery("session-b", 1, atOrBefore: new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("1", Assert.Single(first).PayloadJson, StringComparison.Ordinal);
+        Assert.Contains("2", Assert.Single(second).PayloadJson, StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            (await restarted.SearchAsync(
+                new GameMemoryQuery("session-a", 2, atOrBefore: new GameMoment("world", 1)),
+                TestContext.Current.CancellationToken)).Count);
+    }
+
+    [Fact]
     public async Task DirectorySkillSourceLoadsDeclarativeInstructionsOnly()
     {
         using var directory = new TemporaryDirectory();
@@ -426,6 +549,61 @@ public sealed class PersistenceTests
         Assert.Equal("building", skill.SkillId);
         Assert.Equal("Build structures from validated plans.", skill.Description);
         Assert.Equal("Inspect the region before placing anything.", skill.Instructions);
+    }
+
+    [Fact]
+    public async Task DirectorySkillSourceDiscoversNestedSkillRootsAndStopsBelowEachRoot()
+    {
+        using var directory = new TemporaryDirectory();
+        var skillDirectory = System.IO.Path.Combine(directory.Path, "packs", "building");
+        var ignoredNested = System.IO.Path.Combine(skillDirectory, "nested");
+        Directory.CreateDirectory(ignoredNested);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(skillDirectory, "SKILL.md"),
+            "---\nname: building\ndescription: Build from a validated plan.\n---\nUse the construction tools.",
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(ignoredNested, "SKILL.md"),
+            "---\nname: hidden-child\ndescription: Must not be discovered below another skill root.\n---\nIgnored.",
+            TestContext.Current.CancellationToken);
+        var source = new DirectoryGameSkillSource(directory.Path);
+
+        var selected = await source.SelectAsync(
+            new GameSkillQuery(
+                new GameInput("session", "actor", "build", "{}", new GameMoment("world", 1)),
+                Array.Empty<string>(),
+                10),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("building", Assert.Single(selected).SkillId);
+    }
+
+    [Fact]
+    public async Task DirectorySkillSourceRejectsNonPortableMarkdownSkillNames()
+    {
+        using var directory = new TemporaryDirectory();
+        var skillDirectory = System.IO.Path.Combine(directory.Path, "invalid");
+        Directory.CreateDirectory(skillDirectory);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(skillDirectory, "SKILL.md"),
+            "---\nname: Invalid Name\ndescription: Invalid portable name.\n---\nInstructions.",
+            TestContext.Current.CancellationToken);
+
+        var exception = Assert.Throws<PersistenceException>(() => new DirectoryGameSkillSource(directory.Path));
+
+        Assert.Contains("lowercase name", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DirectorySkillSourceBoundsDescriptorFreeDirectoryScanning()
+    {
+        using var directory = new TemporaryDirectory();
+        Directory.CreateDirectory(System.IO.Path.Combine(directory.Path, "one", "two", "three"));
+
+        var exception = Assert.Throws<GameRuntimeLimitException>(() =>
+            new DirectoryGameSkillSource(directory.Path, maximumScannedDirectories: 2));
+
+        Assert.Equal("maximumScannedDirectories", exception.Limit);
     }
 
     [Fact]
@@ -590,6 +768,37 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task IndependentMailboxWorkersCannotClaimTheSameMessageLease()
+    {
+        using var directory = new TemporaryDirectory();
+        var writer = new FileGameMailbox(directory.Path);
+        await writer.EnqueueAsync(
+            new GameMailboxMessage("message", "session", "npc", "signal", "{}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        var first = new FileGameMailbox(directory.Path);
+        var second = new FileGameMailbox(directory.Path);
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+
+        var claims = await Task.WhenAll(
+            first.ClaimAsync(
+                "session",
+                "npc",
+                1,
+                now,
+                TimeSpan.FromMinutes(1),
+                TestContext.Current.CancellationToken).AsTask(),
+            second.ClaimAsync(
+                "session",
+                "npc",
+                1,
+                now,
+                TimeSpan.FromMinutes(1),
+                TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Equal(1, claims.Sum(claim => claim.Count));
+    }
+
+    [Fact]
     public async Task MailboxDeduplicatesEquivalentMessagesAndRejectsIdentityReuse()
     {
         using var directory = new TemporaryDirectory();
@@ -642,6 +851,91 @@ public sealed class PersistenceTests
             TestContext.Current.CancellationToken));
 
         Assert.Equal(1, claimed.Attempt);
+    }
+
+    [Fact]
+    public async Task DelegationStateSurvivesRestartAndRejectsStaleRevision()
+    {
+        using var directory = new TemporaryDirectory();
+        var pending = new GameAgentDelegationRecord(
+            "delegation",
+            "session",
+            "actor",
+            1,
+            GameAgentDelegationStatus.Pending,
+            "{\"task\":\"inspect\"}",
+            1,
+            new GameMoment("world", 4));
+        var store = new FileGameAgentDelegationStore(directory.Path);
+        Assert.True((await store.SaveAsync(pending, 0, TestContext.Current.CancellationToken)).Saved);
+
+        var restarted = new FileGameAgentDelegationStore(directory.Path);
+        var loaded = await restarted.LoadAsync("session", "actor", "delegation", TestContext.Current.CancellationToken);
+        var stale = await restarted.SaveAsync(pending, 0, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(loaded);
+        Assert.Equal("{\"task\":\"inspect\"}", loaded.TaskJson);
+        Assert.Equal(4, loaded.CreatedAt.Tick);
+        Assert.False(stale.Saved);
+        Assert.Equal(1, stale.Current.Revision);
+
+        var otherSession = new GameAgentDelegationRecord(
+            "delegation",
+            "other-session",
+            "actor",
+            1,
+            GameAgentDelegationStatus.Pending,
+            "{\"task\":\"other\"}",
+            1,
+            new GameMoment("world", 4));
+        Assert.True((await restarted.SaveAsync(otherSession, 0, TestContext.Current.CancellationToken)).Saved);
+        Assert.Equal(
+            "{\"task\":\"other\"}",
+            (await restarted.LoadAsync("other-session", "actor", "delegation", TestContext.Current.CancellationToken))!.TaskJson);
+    }
+
+    [Fact]
+    public async Task LargeArtifactSurvivesRestartWithoutChangingFloatingPointJson()
+    {
+        using var directory = new TemporaryDirectory();
+        var artifact = new GameAgentArtifact(
+            "artifact",
+            "session",
+            "actor",
+            "application/json",
+            "{\"position\":1.75}",
+            new GameMoment("world", 8));
+        var store = new FileGameAgentArtifactStore(directory.Path);
+        await store.PutAsync(artifact, TestContext.Current.CancellationToken);
+
+        var restarted = new FileGameAgentArtifactStore(directory.Path);
+        var loaded = await restarted.GetAsync("session", "actor", "artifact", TestContext.Current.CancellationToken);
+
+        Assert.NotNull(loaded);
+        Assert.Equal("{\"position\":1.75}", loaded.Content);
+        Assert.Equal(8, loaded.CreatedAt.Tick);
+        var otherSession = new GameAgentArtifact(
+            "artifact",
+            "other-session",
+            "actor",
+            "application/json",
+            "{\"position\":2.5}",
+            new GameMoment("world", 8));
+        await restarted.PutAsync(otherSession, TestContext.Current.CancellationToken);
+        Assert.Equal(
+            "{\"position\":2.5}",
+            (await restarted.GetAsync("other-session", "actor", "artifact", TestContext.Current.CancellationToken))!.Content);
+        await restarted.PutAsync(artifact, TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<PersistenceException>(async () =>
+            await restarted.PutAsync(
+                new GameAgentArtifact(
+                    "artifact",
+                    "session",
+                    "actor",
+                    "application/json",
+                    "{\"position\":9.25}",
+                    new GameMoment("world", 8)),
+                TestContext.Current.CancellationToken));
     }
 
     private static GameActionIntent Intent(string operationId) =>

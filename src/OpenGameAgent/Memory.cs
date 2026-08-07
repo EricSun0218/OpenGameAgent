@@ -40,27 +40,42 @@ public sealed class GameMemory
             throw new ArgumentOutOfRangeException(nameof(importance), "Importance must be between 0 and 1.");
         }
 
-        MemoryId = GameJson.RequireId(memoryId, nameof(memoryId));
-        SessionId = GameJson.RequireId(sessionId, nameof(sessionId));
-        OwnerId = GameJson.RequireId(ownerId, nameof(ownerId));
-        Scope = GameJson.RequireId(scope, nameof(scope));
+        MemoryId = RequireBoundedId(memoryId, nameof(memoryId));
+        SessionId = RequireBoundedId(sessionId, nameof(sessionId));
+        OwnerId = RequireBoundedId(ownerId, nameof(ownerId));
+        Scope = RequireBoundedId(scope, nameof(scope));
         if (!Enum.IsDefined(typeof(GameMemoryKind), kind))
         {
             throw new ArgumentOutOfRangeException(nameof(kind));
         }
 
         Kind = kind;
+        if (payloadJson is null || payloadJson.Length > 10_000_000)
+        {
+            throw new ArgumentException("A memory payload cannot exceed 10000000 characters.", nameof(payloadJson));
+        }
+
         PayloadJson = GameJson.RequireValid(payloadJson, nameof(payloadJson));
         Moment = moment.EnsureValid(nameof(moment));
         Importance = importance;
+        if (searchableText?.Length > 1_000_000)
+        {
+            throw new ArgumentException("Memory searchable text cannot exceed 1000000 characters.", nameof(searchableText));
+        }
+
         SearchableText = searchableText;
-        Tags = Array.AsReadOnly(
-            (tags ?? Array.Empty<string>())
-                .Select(tag => GameJson.RequireId(tag, nameof(tags)))
+        var copiedTags = (tags ?? Array.Empty<string>())
+                .Select(tag => RequireBoundedId(tag, nameof(tags)))
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(tag => tag, StringComparer.Ordinal)
-                .ToArray());
-        SourceInputId = sourceInputId is null ? null : GameJson.RequireId(sourceInputId, nameof(sourceInputId));
+                .ToArray();
+        if (copiedTags.Length > 256)
+        {
+            throw new ArgumentException("A memory can contain at most 256 tags.", nameof(tags));
+        }
+
+        Tags = Array.AsReadOnly(copiedTags);
+        SourceInputId = sourceInputId is null ? null : RequireBoundedId(sourceInputId, nameof(sourceInputId));
         if (expiresAt is { } expiry
             && (expiry.EnsureValid(nameof(expiresAt)).TimelineId != moment.TimelineId
                 || expiry.Tick < moment.Tick))
@@ -70,12 +85,27 @@ public sealed class GameMemory
 
         ExpiresAt = expiresAt;
         var copiedMetadata = new Dictionary<string, string>(metadata ?? new Dictionary<string, string>(), StringComparer.Ordinal);
-        if (copiedMetadata.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null))
+        if (copiedMetadata.Count > 256
+            || copiedMetadata.Any(pair => string.IsNullOrWhiteSpace(pair.Key)
+                                          || pair.Key.Length > 256
+                                          || pair.Value is null
+                                          || pair.Value.Length > 65_536))
         {
             throw new ArgumentException("Memory metadata requires non-empty keys and non-null values.", nameof(metadata));
         }
 
         Metadata = new ReadOnlyDictionary<string, string>(copiedMetadata);
+    }
+
+    private static string RequireBoundedId(string value, string name)
+    {
+        var required = GameJson.RequireId(value, name);
+        if (required.Length > 1_024)
+        {
+            throw new ArgumentException("A memory identifier cannot exceed 1024 characters.", name);
+        }
+
+        return required;
     }
 
     public string MemoryId { get; }
@@ -118,7 +148,7 @@ public sealed class GameMemoryQuery
         GameMoment? atOrBefore = null,
         double minimumImportance = 0)
     {
-        if (limit < 0)
+        if (limit < 0 || limit > 100_000)
         {
             throw new ArgumentOutOfRangeException(nameof(limit));
         }
@@ -131,11 +161,11 @@ public sealed class GameMemoryQuery
             throw new ArgumentOutOfRangeException(nameof(minimumImportance));
         }
 
-        SessionId = GameJson.RequireId(sessionId, nameof(sessionId));
+        SessionId = RequireBoundedId(sessionId, nameof(sessionId));
         Limit = limit;
-        OwnerId = ownerId is null ? null : GameJson.RequireId(ownerId, nameof(ownerId));
+        OwnerId = ownerId is null ? null : RequireBoundedId(ownerId, nameof(ownerId));
         Scopes = CopyIds(scopes, nameof(scopes));
-        var copiedKinds = (kinds ?? Array.Empty<GameMemoryKind>()).ToArray();
+        var copiedKinds = (kinds ?? Array.Empty<GameMemoryKind>()).Distinct().ToArray();
         if (copiedKinds.Any(kind => !Enum.IsDefined(typeof(GameMemoryKind), kind)))
         {
             throw new ArgumentOutOfRangeException(nameof(kinds));
@@ -143,6 +173,11 @@ public sealed class GameMemoryQuery
 
         Kinds = Array.AsReadOnly(copiedKinds);
         Tags = CopyIds(tags, nameof(tags));
+        if (text?.Length > 1_000_000)
+        {
+            throw new ArgumentException("A memory query cannot exceed 1000000 text characters.", nameof(text));
+        }
+
         Text = text;
         AtOrBefore = atOrBefore?.EnsureValid(nameof(atOrBefore));
         MinimumImportance = minimumImportance;
@@ -166,11 +201,30 @@ public sealed class GameMemoryQuery
 
     public double MinimumImportance { get; }
 
-    private static IReadOnlyCollection<string> CopyIds(IReadOnlyCollection<string>? values, string parameterName) =>
-        Array.AsReadOnly((values ?? Array.Empty<string>())
-            .Select(value => GameJson.RequireId(value, parameterName))
+    private static IReadOnlyCollection<string> CopyIds(IReadOnlyCollection<string>? values, string parameterName)
+    {
+        var copied = (values ?? Array.Empty<string>())
+            .Select(value => RequireBoundedId(value, parameterName))
             .Distinct(StringComparer.Ordinal)
-            .ToArray());
+            .ToArray();
+        if (copied.Length > 256)
+        {
+            throw new ArgumentException("A memory query filter can contain at most 256 values.", parameterName);
+        }
+
+        return Array.AsReadOnly(copied);
+    }
+
+    private static string RequireBoundedId(string value, string name)
+    {
+        var required = GameJson.RequireId(value, name);
+        if (required.Length > 1_024)
+        {
+            throw new ArgumentException("A memory query identifier cannot exceed 1024 characters.", name);
+        }
+
+        return required;
+    }
 }
 
 public interface IGameMemoryStore
@@ -258,10 +312,10 @@ public sealed class RankedGameMemoryStore : IGameMemoryStore
             throw new InvalidOperationException("The memory store exceeded the requested candidate limit.");
         }
 
-        var candidateById = new Dictionary<string, GameMemory>(StringComparer.Ordinal);
+        var candidateById = new Dictionary<(string OwnerId, string MemoryId), GameMemory>();
         foreach (var memory in candidates)
         {
-            if (memory is null || !candidateById.TryAdd(memory.MemoryId, memory))
+            if (memory is null || !candidateById.TryAdd((memory.OwnerId, memory.MemoryId), memory))
             {
                 throw new InvalidOperationException("The memory store returned a null or duplicate candidate.");
             }
@@ -279,13 +333,13 @@ public sealed class RankedGameMemoryStore : IGameMemoryStore
             throw new InvalidOperationException("The memory ranker returned more memories than it received.");
         }
 
-        var returnedIds = new HashSet<string>(StringComparer.Ordinal);
+        var returnedIds = new HashSet<(string OwnerId, string MemoryId)>();
         var canonical = new List<GameMemory>(ranked.Count);
         foreach (var memory in ranked)
         {
             if (memory is null
-                || !candidateById.TryGetValue(memory.MemoryId, out var candidate)
-                || !returnedIds.Add(memory.MemoryId))
+                || !candidateById.TryGetValue((memory.OwnerId, memory.MemoryId), out var candidate)
+                || !returnedIds.Add((memory.OwnerId, memory.MemoryId)))
             {
                 throw new InvalidOperationException("The memory ranker returned an unknown, duplicate, or null memory.");
             }
@@ -293,7 +347,7 @@ public sealed class RankedGameMemoryStore : IGameMemoryStore
             canonical.Add(candidate);
         }
 
-        return canonical.Take(query.Limit).ToArray();
+        return Array.AsReadOnly(canonical.Take(query.Limit).ToArray());
     }
 
     private static bool MatchesQuery(GameMemory memory, GameMemoryQuery query)
@@ -323,7 +377,7 @@ public sealed class RankedGameMemoryStore : IGameMemoryStore
 public sealed class InMemoryGameMemoryStore : IGameMemoryStore
 {
     private readonly object _gate = new();
-    private readonly Dictionary<string, GameMemory> _memories = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string SessionId, string OwnerId, string MemoryId), GameMemory> _memories = new();
     private readonly int _capacity;
 
     public InMemoryGameMemoryStore(int capacity = 100_000)
@@ -346,7 +400,8 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore
 
         lock (_gate)
         {
-            if (_memories.TryGetValue(memory.MemoryId, out var existing))
+            var key = (memory.SessionId, memory.OwnerId, memory.MemoryId);
+            if (_memories.TryGetValue(key, out var existing))
             {
                 if (!Equivalent(existing, memory))
                 {
@@ -361,7 +416,7 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore
                 throw new GameRuntimeLimitException(nameof(_capacity), "The memory store reached its capacity.");
             }
 
-            _memories.Add(memory.MemoryId, memory);
+            _memories.Add(key, memory);
         }
 
         return default;
@@ -403,7 +458,7 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore
             .Select(candidate => candidate.Memory)
             .ToArray();
 
-        return new ValueTask<IReadOnlyList<GameMemory>>(candidates);
+        return new ValueTask<IReadOnlyList<GameMemory>>(Array.AsReadOnly(candidates));
     }
 
     private static IReadOnlyList<MemoryCandidate> ScoreCandidates(
@@ -414,8 +469,8 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore
         if (query.Text is not null && queryTerms.Length == 0)
         {
             memories = memories.Where(memory =>
-                    (memory.SearchableText?.IndexOf(query.Text, StringComparison.OrdinalIgnoreCase) ?? -1) >= 0
-                    || memory.PayloadJson.IndexOf(query.Text, StringComparison.OrdinalIgnoreCase) >= 0)
+                    (memory.SearchableText?.Contains(query.Text, StringComparison.OrdinalIgnoreCase) ?? false)
+                    || memory.PayloadJson.Contains(query.Text, StringComparison.OrdinalIgnoreCase))
                 .ToArray();
         }
 

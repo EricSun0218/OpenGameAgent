@@ -26,6 +26,26 @@ public sealed class ServerTests
         var builder = WebApplication.CreateBuilder();
         var app = builder.Build();
         Assert.Throws<ArgumentException>(() => app.UseOpenGameAgentApiKey("secret", "Bad:Name"));
+        Assert.Throws<ArgumentException>(() => app.UseOpenGameAgentApiKey("secret\0value"));
+        Assert.Throws<ArgumentException>(() => app.UseOpenGameAgentApiKey("secret", scheme: new string('s', 257)));
+    }
+
+    [Fact]
+    public void ClientRequiresTlsForRemoteServersUnlessExplicitlyOverridden()
+    {
+        using var httpClient = new HttpClient(new StaticResponseHandler("{}"));
+        Assert.Throws<ArgumentException>(() => new ServerGameAgentClient(new ServerGameAgentClientOptions(
+            httpClient,
+            new Uri("http://agent.test/"))));
+
+        var client = new ServerGameAgentClient(new ServerGameAgentClientOptions(
+            httpClient,
+            new Uri("http://agent.test/"))
+        {
+            AllowInsecureHttp = true,
+        });
+
+        Assert.NotNull(client);
     }
 
     [Fact]
@@ -57,6 +77,37 @@ public sealed class ServerTests
         var messages = document.RootElement.GetProperty("agent").GetProperty("newMessages");
         Assert.Equal(2, messages.GetArrayLength());
         Assert.Equal("hello", messages[1].GetProperty("content")[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task ServerRunPreservesResourceReferencesFromTheEngineWireFormat()
+    {
+        var provider = new ResourceCaptureProvider();
+        await using var app = await CreateAppAsync(
+            new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")));
+        using var client = app.GetTestClient();
+        var input = new GameInput(
+            "session",
+            "resource-actor",
+            "observe",
+            "{}",
+            new GameMoment("world", 1),
+            "resource-input",
+            resources: new[]
+            {
+                new ResourceContent("game://capture/frame", "image/png", "frame"),
+            });
+        using var content = new StringContent(
+            GameAgentWire.SerializeInput(input),
+            Encoding.UTF8,
+            "application/json");
+
+        using var response = await client.PostAsync("/v1/run", content, TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        var resource = Assert.Single(Assert.Single(provider.Requests).Messages.SelectMany(message => message.Content).OfType<ResourceContent>());
+        Assert.Equal("game://capture/frame", resource.Uri);
+        Assert.Equal("image/png", resource.MediaType);
     }
 
     [Fact]
@@ -151,9 +202,16 @@ public sealed class ServerTests
             "actor",
             "event",
             "{}",
-            new GameMoment("world", 1));
+            new GameMoment("world", 1),
+            resources: new[]
+            {
+                new ResourceContent("https://assets.example.test/frame.png", "image/png", "frame"),
+            });
         var roundTrip = GameAgentWire.ParseInput(GameAgentWire.SerializeInput(input));
         Assert.Null(roundTrip.Moment.CalendarJson);
+        var roundTripResource = Assert.Single(roundTrip.Resources);
+        Assert.Equal("https://assets.example.test/frame.png", roundTripResource.Uri);
+        Assert.Equal("image/png", roundTripResource.MediaType);
 
         string? json = null;
         var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new ToolIdentityProvider(), "test")
@@ -206,6 +264,38 @@ public sealed class ServerTests
             Assert.Contains("invalid_request", body, StringComparison.Ordinal);
             Assert.DoesNotContain("event: agent", body, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public async Task ServerRejectsOversizedBodiesBeforeEndpointParsing()
+    {
+        await using var app = await CreateAppAsync(maximumRequestBodyBytes: 128);
+        using var client = app.GetTestClient();
+        var oversized = "{\"padding\":\"" + new string('x', 256) + "\"}";
+
+        foreach (var path in new[] { "/v1/run", "/v1/run/stream", "/v1/control/steer", "/v1/control/abort" })
+        {
+            using var content = new StringContent(oversized, Encoding.UTF8, "application/json");
+            using var response = await client.PostAsync(path, content, TestContext.Current.CancellationToken);
+            var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+            Assert.Equal(System.Net.HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+            Assert.Contains("request_too_large", body, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task ServerRejectsNonJsonRequestBodies()
+    {
+        await using var app = await CreateAppAsync();
+        using var client = app.GetTestClient();
+        using var content = new StringContent(RequestJson("plain"), Encoding.UTF8, "text/plain");
+
+        using var response = await client.PostAsync("/v1/run", content, TestContext.Current.CancellationToken);
+        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.Contains("unsupported_media_type", body, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -516,23 +606,27 @@ public sealed class ServerTests
         }));
     }
 
-    private static async Task<WebApplication> CreateAppAsync(string? apiKey = null)
+    private static async Task<WebApplication> CreateAppAsync(
+        string? apiKey = null,
+        int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)
     {
         return await CreateAppAsync(
             new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")),
-            apiKey);
+            apiKey,
+            maximumRequestBodyBytes);
     }
 
     private static async Task<WebApplication> CreateAppAsync(
         GameAgentRuntime runtime,
-        string? apiKey = null)
+        string? apiKey = null,
+        int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(runtime);
         var app = builder.Build();
         app.UseOpenGameAgentApiKey(apiKey);
-        app.MapOpenGameAgent();
+        app.MapOpenGameAgent(maximumRequestBodyBytes);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
     }
@@ -558,11 +652,30 @@ public sealed class ServerTests
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Yield();
             yield return ModelStreamEvent.Update(
+                ModelStreamEventKind.Started,
+                new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending));
+            yield return ModelStreamEvent.Update(
                 ModelStreamEventKind.TextDelta,
                 new ModelResponse(new AgentContent[] { new TextContent("hel") }, ModelStopReason.Pending),
                 "hel");
             yield return ModelStreamEvent.Terminal(
                 new ModelResponse(new AgentContent[] { new TextContent("hello") }, ModelStopReason.Stop, new ModelUsage(2, 1)));
+        }
+    }
+
+    private sealed class ResourceCaptureProvider : IModelProvider
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<ModelRequest> Requests { get; } = new();
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Enqueue(request);
+            await Task.Yield();
+            yield return ModelStreamEvent.Terminal(
+                new ModelResponse(new AgentContent[] { new TextContent("ok") }, ModelStopReason.Stop));
         }
     }
 
@@ -579,6 +692,9 @@ public sealed class ServerTests
             await Task.Yield();
             if (Interlocked.Increment(ref _calls) == 1)
             {
+                yield return ModelStreamEvent.Update(
+                    ModelStreamEventKind.Started,
+                    new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending));
                 yield return ModelStreamEvent.Update(
                     ModelStreamEventKind.ToolCallDelta,
                     new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending),

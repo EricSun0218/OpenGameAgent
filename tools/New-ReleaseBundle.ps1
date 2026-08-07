@@ -64,7 +64,10 @@ $expectedPackages = @(
     'OpenGameAgent.Persistence',
     'OpenGameAgent.Providers.OpenAICompatible',
     'OpenGameAgent.Providers.MediaHttp',
-    'OpenGameAgent.Client'
+    'OpenGameAgent.Client',
+    'OpenGameAgent.Extensions',
+    'OpenGameAgent.Models',
+    'OpenGameAgent.Connectors.Mcp'
 )
 $nugetRoot = Join-Path $artifactsRoot 'nuget'
 foreach ($packageId in $expectedPackages) {

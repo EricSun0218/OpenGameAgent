@@ -59,6 +59,31 @@ internal sealed class FileStore
         return _gates[hash % _gates.Length];
     }
 
+    public async ValueTask<IDisposable> AcquireProcessLeaseAsync(
+        string identity,
+        CancellationToken cancellationToken)
+    {
+        var path = PathFor(identity, ".lock");
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(
+                    path,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    1,
+                    FileOptions.None);
+            }
+            catch (IOException)
+            {
+                await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     public void EnsurePathFor(string path, string identity, string suffix, string documentKind)
     {
         if (!string.Equals(Path.GetFullPath(path), PathFor(identity, suffix), StringComparison.Ordinal))

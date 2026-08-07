@@ -36,6 +36,10 @@ public sealed class AgentLoopTests
             AgentRole.User,
             new AgentContent[] { new ToolCallContent("forged", "inspect", "{}") },
             DateTimeOffset.UnixEpoch));
+        Assert.Throws<ArgumentException>(() => new ToolResult(
+            new AgentContent[] { new ReasoningContent("assistant-only") }));
+        Assert.Throws<ArgumentException>(() => new ToolResult(
+            new AgentContent[] { new ToolCallContent("nested", "inspect", "{}") }));
     }
 
     [Fact]
@@ -84,15 +88,46 @@ public sealed class AgentLoopTests
             new[]
             {
                 AgentEventKind.RunStarted,
+                AgentEventKind.TurnStarted,
                 AgentEventKind.MessageStarted,
                 AgentEventKind.MessageEnded,
-                AgentEventKind.TurnStarted,
                 AgentEventKind.MessageStarted,
                 AgentEventKind.MessageEnded,
                 AgentEventKind.TurnEnded,
                 AgentEventKind.RunEnded,
             },
             events);
+    }
+
+    [Fact]
+    public async Task InitialSteeringPollOccursInsideTheFirstTurnAfterPromptEvents()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("hello"));
+        var order = new List<string>();
+        var options = new AgentLoopOptions(provider, "test")
+        {
+            GetSteeringMessagesAsync = _ =>
+            {
+                order.Add("poll");
+                return new ValueTask<IReadOnlyList<AgentMessage>>(Array.Empty<AgentMessage>());
+            },
+        };
+
+        var result = await AgentLoop.RunAsync(
+            new[] { AgentMessage.User("hi", DateTimeOffset.UnixEpoch) },
+            new AgentContext(string.Empty),
+            options,
+            (value, _) =>
+            {
+                order.Add(value.Kind.ToString());
+                return ValueTask.CompletedTask;
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.True(order.IndexOf(AgentEventKind.TurnStarted.ToString()) < order.IndexOf("poll"));
+        Assert.True(order.IndexOf(AgentEventKind.MessageEnded.ToString()) < order.IndexOf("poll"));
+        Assert.True(order.IndexOf("poll") < order.LastIndexOf(AgentEventKind.MessageStarted.ToString()));
     }
 
     [Fact]
@@ -557,6 +592,53 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task AcceptedToolProgressSettlesBeforeToolEndEvenWhenToolDoesNotAwaitIt()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "work", "{}")),
+            Responses.Text("done"));
+        var progressStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseProgress = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var events = new List<AgentEventKind>();
+        var options = new AgentOptions(provider, "test");
+        options.Tools.Add(Responses.Tool("work", (_, context, _) =>
+        {
+            _ = context.ReportProgressAsync(new ToolProgress("working"));
+            return new ValueTask<ToolResult>(Responses.Result("done"));
+        }));
+        var agent = new Agent(options);
+        agent.Subscribe(async (value, _) =>
+        {
+            lock (events)
+            {
+                events.Add(value.Kind);
+            }
+
+            if (value.Kind == AgentEventKind.ToolProgressed)
+            {
+                progressStarted.TrySetResult();
+                await releaseProgress.Task;
+            }
+        });
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await progressStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        lock (events)
+        {
+            Assert.DoesNotContain(AgentEventKind.ToolEnded, events);
+        }
+
+        releaseProgress.TrySetResult();
+        await run;
+
+        lock (events)
+        {
+            Assert.True(events.IndexOf(AgentEventKind.ToolProgressed) < events.IndexOf(AgentEventKind.ToolEnded));
+        }
+    }
+
+    [Fact]
     public async Task SteeringIsInjectedAfterCurrentToolBatch()
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -583,6 +665,37 @@ public sealed class AgentLoopTests
         Assert.Equal(
             new[] { AgentRole.User, AgentRole.Assistant, AgentRole.Tool, AgentRole.User },
             second.Messages.Select(message => message.Role));
+    }
+
+    [Fact]
+    public async Task QueuedInputEventsBelongToTheTurnThatConsumesThem()
+    {
+        var first = Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("one", "read", "{}"));
+        var second = Responses.Text("done");
+        var provider = ScriptedProvider.FromResponses(first, second);
+        var tool = Responses.Tool("read", (_, _, _) =>
+            new ValueTask<ToolResult>(Responses.Result("ok")));
+        var agent = new Agent(new AgentOptions(provider, "model")
+        {
+            Tools = { tool },
+        });
+        agent.Steer("new direction");
+        var observed = new List<AgentEvent>();
+        using var subscription = agent.Subscribe((agentEvent, _) =>
+        {
+            observed.Add(agentEvent);
+            return ValueTask.CompletedTask;
+        });
+
+        var result = await agent.RunAsync("start", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        var queuedMessageEvents = observed.Where(agentEvent =>
+            (agentEvent.Kind is AgentEventKind.MessageStarted or AgentEventKind.MessageEnded)
+            && agentEvent.Message?.Content.OfType<TextContent>().Any(content => content.Text == "new direction") == true)
+            .ToArray();
+        Assert.Equal(2, queuedMessageEvents.Length);
+        Assert.All(queuedMessageEvents, agentEvent => Assert.Equal(1, agentEvent.Turn));
     }
 
     [Fact]
@@ -737,18 +850,19 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
-    public async Task NextTurnHookCanReplaceModelAndContext()
+    public async Task NextTurnHookCanReplaceProviderModelAndContext()
     {
-        var provider = ScriptedProvider.FromResponses(
-            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "next", "{}")),
-            Responses.Text("done"));
+        var firstProvider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "next", "{}")));
+        var secondProvider = ScriptedProvider.FromResponses(Responses.Text("done"));
         var replacement = AgentMessage.UserJson("{\"phase\":2}", DateTimeOffset.UnixEpoch);
-        var options = new AgentOptions(provider, "first")
+        var options = new AgentOptions(firstProvider, "first")
         {
             Hooks = new AgentHooks
             {
                 PrepareNextTurnAsync = (_, _) => new ValueTask<NextTurnUpdate?>(new NextTurnUpdate
                 {
+                    Provider = secondProvider,
                     Model = "second",
                     Context = new AgentContext("replacement", new[] { replacement }),
                 }),
@@ -759,7 +873,9 @@ public sealed class AgentLoopTests
 
         await agent.RunAsync("go", TestContext.Current.CancellationToken);
 
-        var second = provider.Requests.ToArray()[1];
+        Assert.Equal(1, firstProvider.CallCount);
+        Assert.Equal(1, secondProvider.CallCount);
+        var second = Assert.Single(secondProvider.Requests);
         Assert.Equal("second", second.Model);
         Assert.Equal("replacement", second.SystemPrompt);
         Assert.Single(second.Messages);
@@ -792,6 +908,32 @@ public sealed class AgentLoopTests
 
         Assert.Equal(AgentRunStatus.Stopped, result.Status);
         Assert.True(sawReplacement);
+    }
+
+    [Fact]
+    public async Task NextTurnProviderReplacementRequiresAnAtomicModelTarget()
+    {
+        var firstProvider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "next", "{}")));
+        var secondProvider = ScriptedProvider.FromResponses(Responses.Text("unused"));
+        var options = new AgentOptions(firstProvider, "first")
+        {
+            Hooks = new AgentHooks
+            {
+                PrepareNextTurnAsync = (_, _) => new ValueTask<NextTurnUpdate?>(new NextTurnUpdate
+                {
+                    Provider = secondProvider,
+                }),
+            },
+        };
+        options.Tools.Add(Responses.Tool("next", (_, _, _) => new ValueTask<ToolResult>(Responses.Result("ok"))));
+
+        var result = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.KernelError, result.Status);
+        Assert.Equal(1, firstProvider.CallCount);
+        Assert.Equal(0, secondProvider.CallCount);
+        Assert.Contains("provider replacement", result.Error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -860,13 +1002,21 @@ public sealed class AgentLoopTests
                 return new ValueTask<ToolResult>(Responses.Result("unexpected"));
             },
             ToolRisk.NonIdempotentWrite));
+        var events = new List<AgentEventKind>();
         var agent = new Agent(options);
+        agent.Subscribe((value, _) =>
+        {
+            events.Add(value.Kind);
+            return ValueTask.CompletedTask;
+        });
 
         var result = await agent.RunAsync("go", cancellation.Token);
 
         Assert.Equal(AgentRunStatus.Aborted, result.Status);
         Assert.Equal(0, executed);
         Assert.Equal(2, agent.State.Messages.Count(message => message.Role == AgentRole.Tool && message.IsError));
+        Assert.Contains(AgentEventKind.TurnEnded, events);
+        Assert.True(events.IndexOf(AgentEventKind.TurnEnded) < events.IndexOf(AgentEventKind.RunFaulted));
         AgentValidation.ValidateTranscript(agent.State.Messages, options.Limits);
     }
 
@@ -936,6 +1086,21 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task SubscriberFailureDoesNotHideThePrimaryRunFailure()
+    {
+        var provider = new ScriptedProvider((_, _, _) => throw new InvalidOperationException("provider failed"));
+        var agent = new Agent(new AgentOptions(provider, "test"));
+        agent.Subscribe((_, _) => throw new InvalidOperationException("subscriber failed"));
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.ProviderError, result.Status);
+        Assert.Contains("provider failed", result.Error, StringComparison.Ordinal);
+        Assert.Contains("provider failed", agent.State.Error, StringComparison.Ordinal);
+        Assert.Contains("subscriber failed", result.SubscriberErrors);
+    }
+
+    [Fact]
     public async Task ProviderFailureTextIsBoundedAndRetainsModelIdentity()
     {
         var provider = new ScriptedProvider((_, _, _) => throw new InvalidOperationException(new string('x', 256)));
@@ -951,6 +1116,27 @@ public sealed class AgentLoopTests
         Assert.Equal(32, result.Error!.Length);
         Assert.Equal("bounded-model", agent.State.Messages[^1].Model);
         Assert.Equal(32, agent.State.Messages[^1].ErrorMessage!.Length);
+    }
+
+    [Fact]
+    public async Task HookAndSubscriberFailureTextIsBounded()
+    {
+        var options = new AgentOptions(ScriptedProvider.FromResponses(Responses.Text("unused")), "test")
+        {
+            Limits = new AgentLimits { MaxTextCharactersPerPart = 32 },
+            Hooks = new AgentHooks
+            {
+                TransformContextAsync = (_, _) => throw new InvalidOperationException(new string('h', 256)),
+            },
+        };
+        var agent = new Agent(options);
+        agent.Subscribe((_, _) => throw new InvalidOperationException(new string('s', 256)));
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.KernelError, result.Status);
+        Assert.Equal(32, result.Error!.Length);
+        Assert.Equal(32, Assert.Single(result.SubscriberErrors).Length);
     }
 
     [Fact]
@@ -970,6 +1156,64 @@ public sealed class AgentLoopTests
         agent.Abort();
         var result = await run;
         await agent.WaitForIdleAsync();
+
+        Assert.Equal(AgentRunStatus.Aborted, result.Status);
+        Assert.False(agent.State.IsRunning);
+    }
+
+    [Fact]
+    public async Task AbortCannotBeBlockedByAThrowingCancellationCallback()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new ScriptedProvider(async (_, _, cancellationToken) =>
+        {
+            using var registration = cancellationToken.Register(
+                () => throw new InvalidOperationException("callback failed"));
+            entered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return Responses.Text("unreachable");
+        });
+        var agent = new Agent(new AgentOptions(provider, "test"));
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(agent.TryAbort());
+        var result = await run.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(AgentRunStatus.Aborted, result.Status);
+        Assert.False(agent.State.IsRunning);
+    }
+
+    [Fact]
+    public async Task ModelTimeoutSettlesEvenWhenTheProviderIgnoresCancellation()
+    {
+        var provider = new NonCooperativeProvider();
+        var agent = new Agent(new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits { ModelTimeoutMilliseconds = 25 },
+        });
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await provider.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        var result = await run.WaitAsync(TestContext.Current.CancellationToken);
+        provider.Release.TrySetResult();
+
+        Assert.Equal(AgentRunStatus.ProviderError, result.Status);
+        Assert.Contains("exceeded 25 ms", result.Error, StringComparison.Ordinal);
+        Assert.False(agent.State.IsRunning);
+    }
+
+    [Fact]
+    public async Task AbortSettlesEvenWhenTheProviderIgnoresCancellation()
+    {
+        var provider = new NonCooperativeProvider();
+        var agent = new Agent(new AgentOptions(provider, "test"));
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await provider.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        agent.Abort();
+        var result = await run.WaitAsync(TestContext.Current.CancellationToken);
+        provider.Release.TrySetResult();
 
         Assert.Equal(AgentRunStatus.Aborted, result.Status);
         Assert.False(agent.State.IsRunning);
@@ -1109,6 +1353,7 @@ public sealed class AgentLoopTests
             var partial = new ModelResponse(
                 new AgentContent[] { new TextContent("hel") },
                 ModelStopReason.Pending);
+            yield return ModelStreamEvent.Update(ModelStreamEventKind.Started, partial);
             yield return ModelStreamEvent.Update(ModelStreamEventKind.TextDelta, partial, "hel");
             await Task.Yield();
             yield return ModelStreamEvent.Terminal(Responses.Text("hello"));
@@ -1116,8 +1361,15 @@ public sealed class AgentLoopTests
 
         var agent = new Agent(new AgentOptions(new StreamingProvider((_, token) => Stream(token)), "test"));
         ModelStreamEvent? observed = null;
+        var assistantEvents = new List<AgentEventKind>();
         agent.Subscribe((value, _) =>
         {
+            if (value.Message?.Role == AgentRole.Assistant
+                && value.Kind is AgentEventKind.MessageStarted or AgentEventKind.MessageUpdated or AgentEventKind.MessageEnded)
+            {
+                assistantEvents.Add(value.Kind);
+            }
+
             if (value.Kind == AgentEventKind.MessageUpdated)
             {
                 observed = agent.State.StreamingEvent;
@@ -1135,6 +1387,9 @@ public sealed class AgentLoopTests
         Assert.NotNull(observed);
         Assert.Equal(ModelStreamEventKind.TextDelta, observed.Kind);
         Assert.Equal("hel", observed.Delta);
+        Assert.Equal(
+            new[] { AgentEventKind.MessageStarted, AgentEventKind.MessageUpdated, AgentEventKind.MessageEnded },
+            assistantEvents);
         Assert.Null(agent.State.StreamingMessage);
         Assert.Null(agent.State.StreamingEvent);
     }
@@ -1197,6 +1452,7 @@ public sealed class AgentLoopTests
         var toolResult = Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool);
         Assert.Equal("call", toolResult.ToolCallId);
         Assert.True(toolResult.IsError);
+        AgentValidation.ValidateTranscript(agent.State.Messages, options.Limits);
     }
 
     [Fact]
@@ -1509,6 +1765,30 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task ContinueFromFollowUpStillPollsNewSteeringBeforeTheFirstModelRequest()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("done"));
+        var options = new AgentOptions(provider, "test");
+        options.InitialMessages.Add(new AgentMessage(
+            AgentRole.Assistant,
+            new AgentContent[] { new TextContent("waiting") },
+            DateTimeOffset.UnixEpoch,
+            model: "test",
+            stopReason: ModelStopReason.Stop));
+        var agent = new Agent(options);
+        agent.FollowUp("queued follow-up");
+
+        var run = agent.ContinueAsync(TestContext.Current.CancellationToken);
+        Assert.True(agent.TrySteer("urgent steering"));
+        await run;
+
+        var request = Assert.Single(provider.Requests);
+        Assert.Equal(
+            new[] { "waiting", "queued follow-up", "urgent steering" },
+            request.Messages.Select(message => Assert.IsType<TextContent>(Assert.Single(message.Content)).Text));
+    }
+
+    [Fact]
     public async Task ExplicitSequentialToolOverridesParallelBatch()
     {
         var provider = ScriptedProvider.FromResponses(
@@ -1799,6 +2079,38 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task AbortSettlesBeforeAnUncooperativeWriteFinishesLate()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("slow", "write", "{}")));
+        var options = new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits { ToolTimeoutMilliseconds = 5_000 },
+        };
+        options.Tools.Add(Responses.Tool("write", async (_, _, cancellationToken) =>
+        {
+            using var registration = cancellationToken.Register(
+                () => throw new InvalidOperationException("cancellation callback failed"));
+            entered.TrySetResult();
+            return await release.Task.ConfigureAwait(false);
+        }, ToolRisk.NonIdempotentWrite));
+        var agent = new Agent(options);
+
+        var pending = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        agent.Abort();
+        var result = await pending.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        release.TrySetException(new InvalidOperationException("late failure"));
+
+        Assert.Equal(AgentRunStatus.Aborted, result.Status);
+        var tool = Assert.Single(result.NewMessages, message => message.Role == AgentRole.Tool);
+        Assert.True(tool.IsError);
+        Assert.Equal("{\"outcome\":\"uncertain\"}", tool.DetailsJson);
+    }
+
+    [Fact]
     public async Task UncertainSequentialWritePreventsLaterWritesInTheBatch()
     {
         var firstExecutions = 0;
@@ -1904,6 +2216,82 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task BeforeModelHookReplacementModelIsUsedForDispatchAndMessageIdentity()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("done"));
+        var options = new AgentOptions(provider, "original")
+        {
+            Hooks = new AgentHooks
+            {
+                BeforeModelRequestAsync = (request, _) => new ValueTask<ModelRequest>(new ModelRequest(
+                    "replacement",
+                    request.SystemPrompt,
+                    request.Messages,
+                    request.Tools,
+                    request.Parameters,
+                    request.SessionId,
+                    request.RunId,
+                    request.Turn)),
+            },
+        };
+        var agent = new Agent(options);
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("replacement", Assert.Single(provider.Requests).Model);
+        Assert.Equal("replacement", agent.State.Messages.Last().Model);
+        Assert.Equal("replacement", result.NewMessages.Last().Model);
+    }
+
+    [Fact]
+    public async Task ProviderDisposalFailureAfterTerminalCannotReplaceACompletedResponse()
+    {
+        var events = new ConcurrentQueue<AgentEvent>();
+        var agent = new Agent(new AgentOptions(new TerminalThenDisposalFailureProvider(), "model"));
+        using var subscription = agent.Subscribe((agentEvent, _) =>
+        {
+            events.Enqueue(agentEvent);
+            return default;
+        });
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, events.Count(value => value.Kind == AgentEventKind.MessageEnded
+            && value.Message?.Role == AgentRole.Assistant));
+        Assert.Equal(1, events.Count(value => value.Kind == AgentEventKind.RunEnded));
+        Assert.DoesNotContain(events, value => value.Kind == AgentEventKind.RunFaulted);
+    }
+
+    [Fact]
+    public async Task BeforeModelHookCannotChangeActiveRunCoordinates()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
+        var options = new AgentOptions(provider, "test")
+        {
+            Hooks = new AgentHooks
+            {
+                BeforeModelRequestAsync = (request, _) => new ValueTask<ModelRequest>(new ModelRequest(
+                    request.Model,
+                    request.SystemPrompt,
+                    request.Messages,
+                    request.Tools,
+                    request.Parameters,
+                    request.SessionId,
+                    "different-run",
+                    request.Turn + 1)),
+            },
+        };
+
+        var result = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.KernelError, result.Status);
+        Assert.Equal(0, provider.CallCount);
+        Assert.Contains("run ID or turn", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task IdleModelParametersCanBeReplacedWithoutSharingMutableState()
     {
         var provider = ScriptedProvider.FromResponses(Responses.Text("done"));
@@ -1921,6 +2309,73 @@ public sealed class AgentLoopTests
         Assert.Equal(0.25, Assert.Single(provider.Requests).Parameters.Temperature);
         Assert.Equal(0.25, agent.State.Parameters.Temperature);
         Assert.Equal("\"game\"", agent.State.Parameters.Extensions["mode"]);
+    }
+
+    [Fact]
+    public async Task IdleAgentCanAtomicallySwitchProviderAndModelBetweenRuns()
+    {
+        var firstProvider = ScriptedProvider.FromResponses(Responses.Text("first"));
+        var secondProvider = ScriptedProvider.FromResponses(Responses.Text("second"));
+        var agent = new Agent(new AgentOptions(firstProvider, "first-model"));
+
+        await agent.RunAsync("one", TestContext.Current.CancellationToken);
+        agent.SetModel(secondProvider, "second-model");
+        await agent.RunAsync("two", TestContext.Current.CancellationToken);
+
+        Assert.Same(secondProvider, agent.State.Provider);
+        Assert.Equal("second-model", agent.State.Model);
+        Assert.Equal(1, firstProvider.CallCount);
+        Assert.Equal(1, secondProvider.CallCount);
+        Assert.Equal("second-model", secondProvider.Requests.Single().Model);
+    }
+
+    [Fact]
+    public async Task IdleAgentCanReplaceHooksBetweenRunsWithoutSharingMutableState()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("first"), Responses.Text("second"));
+        var agent = new Agent(new AgentOptions(provider, "test"));
+
+        await agent.RunAsync("one", TestContext.Current.CancellationToken);
+        var hooks = new AgentHooks
+        {
+            BeforeModelRequestAsync = (request, _) => new ValueTask<ModelRequest>(new ModelRequest(
+                "replacement",
+                request.SystemPrompt,
+                request.Messages,
+                request.Tools,
+                request.Parameters,
+                request.SessionId,
+                request.RunId,
+                request.Turn)),
+        };
+        agent.SetHooks(hooks);
+        hooks.BeforeModelRequestAsync = null;
+
+        await agent.RunAsync("two", TestContext.Current.CancellationToken);
+
+        Assert.Equal("replacement", provider.Requests.Last().Model);
+    }
+
+    [Fact]
+    public async Task MutableRuntimeConfigurationCannotChangeDuringAnActiveRun()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new ScriptedProvider(async (_, _, cancellationToken) =>
+        {
+            started.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+            return Responses.Text("done");
+        });
+        var agent = new Agent(new AgentOptions(provider, "test"));
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.Throws<InvalidOperationException>(() => agent.SetHooks(new AgentHooks()));
+        Assert.Throws<InvalidOperationException>(() => agent.SetToolExecution(ToolExecutionMode.Sequential));
+
+        release.TrySetResult();
+        Assert.True((await run).Succeeded);
     }
 
     [Fact]
@@ -1963,5 +2418,55 @@ public sealed class AgentLoopTests
         {
             Parameters = new ModelParameters { Temperature = double.NaN },
         }));
+    }
+
+    [Fact]
+    public async Task PublicSnapshotsAndLifecycleCollectionsAreImmutableDefensiveCopies()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("done"));
+        AfterTurnContext? afterTurn = null;
+        AgentEvent? ended = null;
+        var options = new AgentOptions(provider, "test")
+        {
+            Hooks = new AgentHooks
+            {
+                ShouldStopAfterTurnAsync = (value, _) =>
+                {
+                    afterTurn = value;
+                    return new ValueTask<bool>(false);
+                },
+            },
+        };
+        options.Tools.Add(Responses.Tool("look", (_, _, _) =>
+            new ValueTask<ToolResult>(Responses.Result("ok"))));
+        var agent = new Agent(options);
+        using var subscription = agent.Subscribe((value, _) =>
+        {
+            if (value.Kind == AgentEventKind.RunEnded)
+            {
+                ended = value;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+        var state = agent.State;
+
+        AssertImmutable(result.NewMessages);
+        AssertImmutable(result.SubscriberErrors);
+        AssertImmutable(state.Messages);
+        AssertImmutable(state.Tools);
+        AssertImmutable(state.PendingToolCallIds);
+        AssertImmutable(Assert.IsType<AfterTurnContext>(afterTurn).NewMessages);
+        AssertImmutable(afterTurn!.ToolResults);
+        AssertImmutable(Assert.IsType<AgentEvent>(ended).Messages);
+    }
+
+    private static void AssertImmutable<T>(IReadOnlyCollection<T> values)
+    {
+        var list = Assert.IsAssignableFrom<IList<T>>(values);
+        Assert.True(list.IsReadOnly);
+        Assert.Throws<NotSupportedException>(() => list.Add(default!));
     }
 }

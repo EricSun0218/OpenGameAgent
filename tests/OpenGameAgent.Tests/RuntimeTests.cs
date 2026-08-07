@@ -9,6 +9,22 @@ namespace OpenGameAgent.Tests;
 public sealed class RuntimeTests
 {
     [Fact]
+    public void GameCoordinatesExposeConsistentValueOperators()
+    {
+        var first = new GameMoment("world", 1);
+        var second = new GameMoment("world", 2);
+        var key = new GameSessionKey("session", "actor");
+
+        Assert.True(first < second);
+        Assert.True(first <= second);
+        Assert.True(second > first);
+        Assert.True(second >= first);
+        Assert.True(key == new GameSessionKey("session", "actor"));
+        Assert.True(key != new GameSessionKey("session", "other"));
+        Assert.Throws<InvalidOperationException>(() => first < new GameMoment("fork", 2));
+    }
+
+    [Fact]
     public void InMemorySkillSourceRequiresPositiveCapacity()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
@@ -80,6 +96,32 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task StructuredGameInputForwardsAttachedModelResources()
+    {
+        var provider = new RecordingProvider(_ => Text("ok"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
+        var input = new GameInput(
+            "session",
+            "actor",
+            "observation",
+            "{\"question\":\"what is visible?\"}",
+            new GameMoment("world", 10),
+            resources: new[]
+            {
+                new ResourceContent("https://assets.example.test/frame.png", "image/png", "camera"),
+            });
+
+        var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        var message = Assert.Single(provider.Requests).Messages.Last();
+        Assert.IsType<JsonContent>(message.Content[0]);
+        var resource = Assert.IsType<ResourceContent>(message.Content[1]);
+        Assert.Equal("image/png", resource.MediaType);
+        Assert.Equal("https://assets.example.test/frame.png", resource.Uri);
+    }
+
+    [Fact]
     public async Task QuickRouteUsesOneModelTurnAndNoTools()
     {
         var provider = new RecordingProvider(_ => Tools(new ToolCallContent("1", "should_not_run", "{}")));
@@ -136,6 +178,103 @@ public sealed class RuntimeTests
         Assert.Equal(2, provider.CallCount);
         var entry = await journal.FindAsync("same-input:1:0", TestContext.Current.CancellationToken);
         Assert.Equal(GameActionStatus.Committed, entry!.Receipt!.Status);
+    }
+
+    [Fact]
+    public async Task SettledToolTurnIsCheckpointedBeforeTheInputIsMarkedComplete()
+    {
+        var provider = new RecordingProvider(call => call == 1
+            ? Tools(new ToolCallContent("read-1", "inspect", "{}"))
+            : Text("done"));
+        var store = new RecordingSessionStore();
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            SessionStore = store,
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(
+                new[] { ReadTool("inspect") }),
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["inspect"] = GameRouteDecision.Agent("typed"),
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("inspect", "{}", "checkpoint-input"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, result.SessionRevision);
+        Assert.Equal(2, store.SavedSnapshots.Count);
+        var checkpoint = store.SavedSnapshots[0];
+        Assert.Equal(1, checkpoint.Revision);
+        Assert.Empty(checkpoint.ProcessedInputIds);
+        Assert.Equal("checkpoint-input", checkpoint.PendingInputId);
+        Assert.Equal(3, checkpoint.Messages.Count);
+        Assert.Equal(AgentRole.Tool, checkpoint.Messages[^1].Role);
+        var final = store.SavedSnapshots[1];
+        Assert.Equal(2, final.Revision);
+        Assert.Contains("checkpoint-input", final.ProcessedInputIds);
+        Assert.Null(final.PendingInputId);
+    }
+
+    [Fact]
+    public async Task DurableToolCheckpointResumesWithoutAppendingTheInputTwice()
+    {
+        var store = new FailSecondSaveSessionStore();
+        var input = Input("inspect", "{\"target\":\"gate\"}", "resume-input");
+        var firstProvider = new RecordingProvider(call => call == 1
+            ? Tools(new ToolCallContent("read-1", "inspect", "{}"))
+            : Text("lost final response"));
+        await using (var firstRuntime = CreateCheckpointRuntime(firstProvider, store))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await firstRuntime.RunAsync(input, TestContext.Current.CancellationToken));
+        }
+
+        var checkpoint = await store.LoadAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            TestContext.Current.CancellationToken);
+        Assert.Equal("resume-input", checkpoint!.PendingInputId);
+        Assert.Equal(AgentRole.Tool, checkpoint.Messages[^1].Role);
+
+        var unrelatedProvider = new RecordingProvider(_ => Text("must not run"));
+        await using (var blockedRuntime = CreateCheckpointRuntime(unrelatedProvider, store))
+        {
+            var blocked = await blockedRuntime.RunAsync(
+                Input("inspect", "{}", "different-input"),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(GameAgentRunStatus.SessionConflict, blocked.Status);
+            Assert.Equal(0, unrelatedProvider.CallCount);
+        }
+
+        var resumeProvider = new RecordingProvider(_ => Text("resumed"));
+        await using (var resumeRuntime = CreateCheckpointRuntime(resumeProvider, store))
+        {
+            var result = await resumeRuntime.RunAsync(input, TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded);
+        }
+
+        var request = Assert.Single(resumeProvider.Requests);
+        Assert.Equal(1, request.Messages.Count(message =>
+            message.Metadata.TryGetValue("game.input_id", out var value)
+            && value == "resume-input"));
+        var completed = await store.LoadAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            TestContext.Current.CancellationToken);
+        Assert.Null(completed!.PendingInputId);
+        Assert.Contains("resume-input", completed.ProcessedInputIds);
+
+        GameAgentRuntime CreateCheckpointRuntime(IModelProvider provider, IGameSessionStore sessionStore) =>
+            new(new GameAgentRuntimeOptions(provider, "test")
+            {
+                SessionStore = sessionStore,
+                ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(
+                    new[] { ReadTool("inspect") }),
+                RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+                {
+                    ["inspect"] = GameRouteDecision.Agent("typed"),
+                }),
+            });
     }
 
     [Fact]
@@ -273,6 +412,73 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task CallerCancellationStillDurablySettlesAnAlreadyStartedRun()
+    {
+        var provider = new BlockingFirstResponseProvider();
+        var store = new InMemoryGameSessionStore();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            SessionStore = store,
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["autonomous"] = GameRouteDecision.Agent("typed"),
+            }),
+        });
+        using var cancellation = new CancellationTokenSource();
+
+        var run = runtime.RunAsync(Input("autonomous", "{}", "cancel-input"), cancellation.Token);
+        await provider.FirstRequestStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        var canceledRun = await run.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(AgentRunStatus.Aborted, canceledRun.AgentResult?.Status);
+        await runtime.DisposeAsync();
+
+        var saved = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(saved);
+        Assert.Equal(1, saved.Revision);
+        Assert.Contains("cancel-input", saved.ProcessedInputIds);
+        var terminal = Assert.IsType<AgentMessage>(saved.Messages.Last());
+        Assert.Equal(ModelStopReason.Aborted, terminal.StopReason);
+    }
+
+    [Fact]
+    public async Task CompletedWorkflowCommitsWithABoundedSettlementAfterCallerCancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new InMemoryGameSessionStore();
+        var options = new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("unused")), "test")
+        {
+            SessionStore = store,
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["month"] = GameRouteDecision.ToWorkflow("evolve", "typed"),
+            }),
+        };
+        options.Workflows.Add(new DelegateWorkflow("evolve", (_, _) =>
+        {
+            cancellation.Cancel();
+            return new ValueTask<GameWorkflowResult>(new GameWorkflowResult(
+                new[] { Assistant("advanced") },
+                succeeded: true));
+        }));
+        await using var runtime = new GameAgentRuntime(options);
+
+        var result = await runtime.RunAsync(
+            Input("month", "{}", "month-input"),
+            cancellation.Token).WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        var saved = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(1, saved!.Revision);
+        Assert.Contains("month-input", saved.ProcessedInputIds);
+    }
+
+    [Fact]
     public async Task ActionOperationRemainsStableWhenProviderChangesToolCallIdAfterSessionConflict()
     {
         var provider = new RecordingProvider(call => call % 2 == 1
@@ -320,6 +526,51 @@ public sealed class RuntimeTests
 
         Assert.Equal(GameRouteKind.Agent, result.Route.Route);
         Assert.Equal("tools-or-pending-work", result.Route.Reason);
+    }
+
+    [Fact]
+    public async Task RuntimeRefreshesDynamicToolsAndDependentSkillsWithinTheActiveRun()
+    {
+        var unlocked = 0;
+        var unlock = new AgentTool(
+            new ToolDefinition("unlock", "Unlock another capability.", "{\"type\":\"object\"}"),
+            (_, _, _) =>
+            {
+                Volatile.Write(ref unlocked, 1);
+                return new ValueTask<ToolResult>(new ToolResult(new AgentContent[] { new TextContent("unlocked") }));
+            });
+        var advanced = ReadTool("advanced");
+        var provider = new RecordingProvider(call => call == 1
+            ? Tools(new ToolCallContent("unlock-call", "unlock", "{}"))
+            : Text("done"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(
+                Volatile.Read(ref unlocked) == 0
+                    ? new[] { unlock }
+                    : new[] { unlock, advanced }),
+            SkillSource = new InMemoryGameSkillSource(new[]
+            {
+                new GameSkill(
+                    "advanced-guidance",
+                    "advanced-guidance",
+                    "Instructions for the unlocked capability.",
+                    "Use the advanced capability only after it is unlocked.",
+                    toolNames: new[] { "advanced" }),
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("command", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        var requests = provider.Requests.ToArray();
+        Assert.Equal(2, requests.Length);
+        Assert.DoesNotContain(requests[0].Tools, tool => tool.Name == "advanced");
+        Assert.Contains(requests[1].Tools, tool => tool.Name == "advanced");
+        Assert.DoesNotContain("advanced-guidance", requests[0].SystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("advanced-guidance", requests[1].SystemPrompt, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -378,6 +629,25 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task HandlerDiagnosticsCannotCreateUnboundedUncertainReceipts()
+    {
+        var dispatcher = new DurableGameActionDispatcher(
+            new InMemoryGameActionJournal(),
+            new TestActionHandler((_, _) => throw new InvalidOperationException(new string('x', 100_000))));
+
+        var receipt = await dispatcher.ExecuteAsync(Intent("bounded-diagnostic"), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameActionStatus.Uncertain, receipt.Status);
+        Assert.Equal(64_000, receipt.Message!.Length);
+        Assert.Throws<ArgumentException>(() => new GameActionReceipt(
+            receipt.OperationId,
+            GameActionStatus.Rejected,
+            "{}",
+            receipt.Moment,
+            code: new string('c', 1_025)));
+    }
+
+    [Fact]
     public async Task DispatcherRejectsJournalThatLosesDispatchClaim()
     {
         var handler = new TestActionHandler();
@@ -413,6 +683,46 @@ public sealed class RuntimeTests
         var receipts = await Task.WhenAll(first, second);
         Assert.All(receipts, receipt => Assert.Equal(GameActionStatus.Committed, receipt.Status));
         Assert.Equal(1, handler.ExecuteCount);
+    }
+
+    [Fact]
+    public async Task FinalActionReceiptIsJournaledEvenWhenCallerCancelsAfterExecution()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var journal = new InMemoryGameActionJournal();
+        var handler = new TestActionHandler((intent, _) =>
+        {
+            cancellation.Cancel();
+            return new ValueTask<GameActionReceipt>(
+                GameActionReceipt.Committed(intent, "{\"committed\":true}"));
+        });
+        var dispatcher = new DurableGameActionDispatcher(journal, handler);
+        var intent = Intent("cancel-after-commit");
+
+        var receipt = await dispatcher.ExecuteAsync(intent, cancellation.Token);
+
+        Assert.Equal(GameActionStatus.Committed, receipt.Status);
+        var stored = await journal.FindAsync(intent.OperationId, TestContext.Current.CancellationToken);
+        Assert.Equal(GameActionStatus.Committed, stored!.Receipt!.Status);
+    }
+
+    [Fact]
+    public async Task ReceiptCommitFailureReturnsUncertainInsteadOfEncouragingBlindReplay()
+    {
+        var durableJournal = new InMemoryGameActionJournal();
+        var journal = new FailingReceiptJournal(durableJournal);
+        var handler = new TestActionHandler();
+        var dispatcher = new DurableGameActionDispatcher(journal, handler);
+        var intent = Intent("commit-failure");
+
+        var receipt = await dispatcher.ExecuteAsync(intent, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameActionStatus.Uncertain, receipt.Status);
+        Assert.Contains("journal commit failed", receipt.Message, StringComparison.Ordinal);
+        Assert.Equal(1, handler.ExecuteCount);
+        var stored = await durableJournal.FindAsync(intent.OperationId, TestContext.Current.CancellationToken);
+        Assert.True(stored!.Dispatched);
+        Assert.Null(stored.Receipt);
     }
 
     [Fact]
@@ -491,6 +801,36 @@ public sealed class RuntimeTests
         var memory = Assert.Single(result);
         Assert.Equal(0.63, memory.Importance);
         Assert.Contains("0.75", memory.PayloadJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MemoryIdentifiersAreScopedToTheirGameSessionAndOwner()
+    {
+        var store = new InMemoryGameMemoryStore();
+        await store.AppendAsync(
+            new GameMemory("shared-id", "session-a", "npc", "personal", GameMemoryKind.Fact, "{\"value\":1}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await store.AppendAsync(
+            new GameMemory("shared-id", "session-b", "npc", "personal", GameMemoryKind.Fact, "{\"value\":2}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await store.AppendAsync(
+            new GameMemory("shared-id", "session-a", "other-npc", "personal", GameMemoryKind.Fact, "{\"value\":3}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+
+        var first = await store.SearchAsync(
+            new GameMemoryQuery("session-a", 1, ownerId: "npc", atOrBefore: new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        var second = await store.SearchAsync(
+            new GameMemoryQuery("session-b", 1, atOrBefore: new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("1", Assert.Single(first).PayloadJson, StringComparison.Ordinal);
+        Assert.Contains("2", Assert.Single(second).PayloadJson, StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            (await store.SearchAsync(
+                new GameMemoryQuery("session-a", 2, atOrBefore: new GameMoment("world", 1)),
+                TestContext.Current.CancellationToken)).Count);
     }
 
     [Fact]
@@ -710,6 +1050,74 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task RunningActorWorkCanReturnItsSettledOutcomeAfterCancellation()
+    {
+        var scheduler = new MultiActorScheduler(1, 1, 1);
+        using var cancellation = new CancellationTokenSource();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = scheduler.EnqueueAsync("actor", async _ =>
+        {
+            entered.TrySetResult();
+            await release.Task;
+            return 42;
+        }, cancellation.Token);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        cancellation.Cancel();
+        release.TrySetResult();
+
+        Assert.Equal(42, await work.WaitAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task MultiActorIdleBarrierWaitsForRunningAndQueuedWorkToLeaveAllLanes()
+    {
+        var scheduler = new MultiActorScheduler(1, 2, 2);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = scheduler.EnqueueAsync("actor", async token =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return 1;
+        }, TestContext.Current.CancellationToken);
+        var second = scheduler.EnqueueAsync("actor", _ => new ValueTask<int>(2), TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        var idle = scheduler.WaitForIdleAsync();
+        Assert.False(idle.IsCompleted);
+        release.TrySetResult();
+
+        Assert.Equal(new[] { 1, 2 }, await Task.WhenAll(first, second));
+        await idle.WaitAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task MultiActorIdleBarrierIsSharedUntilTheSchedulerBecomesIdle()
+    {
+        var scheduler = new MultiActorScheduler(1, 1, 1);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = scheduler.EnqueueAsync("actor", async token =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return 1;
+        }, TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        var first = scheduler.WaitForIdleAsync();
+        var second = scheduler.WaitForIdleAsync();
+
+        Assert.Same(first, second);
+        release.TrySetResult();
+        Assert.Equal(1, await work);
+        await first.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.True(scheduler.WaitForIdleAsync().IsCompletedSuccessfully);
+    }
+
+    [Fact]
     public async Task SkillsAreSelectedByInputTypeToolsAndPriority()
     {
         var source = new InMemoryGameSkillSource(new[]
@@ -815,7 +1223,111 @@ public sealed class RuntimeTests
         var events = await CollectAsync(provider.StreamAsync(ModelRequest(), TestContext.Current.CancellationToken));
 
         Assert.Equal(2, inner.CallCount);
-        Assert.Equal(2, events.Count(item => item.Kind == ModelStreamEventKind.Started));
+        Assert.Equal(1, events.Count(item => item.Kind == ModelStreamEventKind.Started));
+        Assert.True(events.Last().IsTerminal);
+    }
+
+    [Fact]
+    public async Task MeaningfulStreamStartPreventsRetryAndFallback()
+    {
+        static async Task<IReadOnlyList<ModelStreamEvent>> CaptureAsync(IModelProvider provider)
+        {
+            var events = new List<ModelStreamEvent>();
+            await foreach (var streamEvent in provider.StreamAsync(
+                               ModelRequest(),
+                               TestContext.Current.CancellationToken))
+            {
+                events.Add(streamEvent);
+            }
+
+            return events;
+        }
+
+        var retrySource = new MeaningfulStartThenFailureProvider();
+        var retry = new RetryingModelProvider(retrySource, 2, _ => TimeSpan.Zero);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => CaptureAsync(retry));
+
+        var fallbackSource = new MeaningfulStartThenFailureProvider();
+        var fallbackTarget = new RecordingProvider(_ => Text("must not run"));
+        var fallback = new FallbackModelProvider(new IModelProvider[] { fallbackSource, fallbackTarget });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => CaptureAsync(fallback));
+
+        Assert.Equal(1, retrySource.CallCount);
+        Assert.Equal(1, fallbackSource.CallCount);
+        Assert.Equal(0, fallbackTarget.CallCount);
+    }
+
+    [Fact]
+    public async Task RetryingProviderPreservesStreamOutcomeWhenEnumeratorCleanupFails()
+    {
+        var inner = new FailureThenTerminalProviderWithFailingCleanup(failuresBeforeSuccess: 1);
+        var provider = new RetryingModelProvider(inner, 2, _ => TimeSpan.Zero);
+
+        var events = await CollectAsync(provider.StreamAsync(ModelRequest(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(2, inner.CallCount);
+        Assert.Equal(2, inner.DisposeCount);
+        Assert.Equal("ok", Assert.IsType<TextContent>(Assert.Single(events.Last().Response!.Content)).Text);
+    }
+
+    [Fact]
+    public async Task RetryingProviderRespectsTypedFailureClassificationAndServerDelay()
+    {
+        var attempts = 0;
+        var transient = new RecordingProvider(_ =>
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                throw new ModelProviderException("busy", isTransient: true, retryAfter: TimeSpan.Zero);
+            }
+
+            return Text("ok");
+        });
+        var retried = new RetryingModelProvider(
+            transient,
+            2,
+            _ => throw new InvalidOperationException("the server delay should take precedence"));
+
+        var events = await CollectAsync(retried.StreamAsync(ModelRequest(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(2, attempts);
+        Assert.Equal(ModelStopReason.Stop, events.Last().Response!.StopReason);
+
+        var rejectedAttempts = 0;
+        var nonTransient = new RecordingProvider(_ =>
+        {
+            Interlocked.Increment(ref rejectedAttempts);
+            throw new ModelProviderException("invalid", isTransient: false);
+        });
+        var notRetried = new RetryingModelProvider(nonTransient, 2, _ => TimeSpan.Zero);
+
+        await Assert.ThrowsAsync<ModelProviderException>(async () =>
+            await CollectAsync(notRetried.StreamAsync(ModelRequest(), TestContext.Current.CancellationToken)));
+        Assert.Equal(1, rejectedAttempts);
+    }
+
+    [Fact]
+    public async Task RetryingProviderCapsUntrustedServerDelay()
+    {
+        var attempts = 0;
+        var inner = new RecordingProvider(_ =>
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                throw new ModelProviderException("busy", isTransient: true, retryAfter: TimeSpan.FromDays(1));
+            }
+
+            return Text("ok");
+        });
+        var provider = new RetryingModelProvider(
+            inner,
+            2,
+            _ => TimeSpan.FromDays(1),
+            maximumDelay: TimeSpan.Zero);
+
+        var events = await CollectAsync(provider.StreamAsync(ModelRequest(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(2, attempts);
         Assert.True(events.Last().IsTerminal);
     }
 
@@ -844,6 +1356,23 @@ public sealed class RuntimeTests
 
         Assert.Equal(1, first.CallCount);
         Assert.Equal(1, second.CallCount);
+        Assert.InRange(events.Count(item => item.Kind == ModelStreamEventKind.Started), 0, 1);
+        Assert.True(events.Last().IsTerminal);
+    }
+
+    [Fact]
+    public async Task FallbackProviderPreservesFailureAndTerminalAcrossCleanupFailures()
+    {
+        var first = new FailureThenTerminalProviderWithFailingCleanup(failuresBeforeSuccess: int.MaxValue);
+        var second = new FailureThenTerminalProviderWithFailingCleanup(failuresBeforeSuccess: 0);
+        var provider = new FallbackModelProvider(new IModelProvider[] { first, second });
+
+        var events = await CollectAsync(provider.StreamAsync(ModelRequest(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, first.CallCount);
+        Assert.Equal(1, first.DisposeCount);
+        Assert.Equal(1, second.CallCount);
+        Assert.Equal(1, second.DisposeCount);
         Assert.True(events.Last().IsTerminal);
     }
 
@@ -994,6 +1523,178 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task TranscriptCompactionHonorsATokenTargetEvenWhenMessageCountFits()
+    {
+        var messages = new AgentMessage[]
+        {
+            AgentMessage.User(new string('a', 200)),
+            Assistant(new string('b', 200)),
+            AgentMessage.User("recent"),
+            Assistant("recent answer"),
+        };
+        var compactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
+            new ValueTask<string>("short summary:" + removed.Count));
+
+        var compacted = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(
+                new GameSessionKey("session", "actor"),
+                messages,
+                targetMessageCount: 10,
+                targetEstimatedTokens: 100,
+                tokenEstimator: ApproximateGameTokenEstimator.EstimateMessages),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(compacted.Count < messages.Length);
+        Assert.Equal("transcript_summary", compacted[0].CustomRole);
+        Assert.True(ApproximateGameTokenEstimator.EstimateMessages(compacted) <= 100);
+    }
+
+    [Fact]
+    public async Task RuntimeCompactsBeforeAnEstimatedContextWindowOverflow()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        var history = new AgentMessage[]
+        {
+            AgentMessage.User(new string('a', 1_200)),
+            Assistant(new string('b', 1_200)),
+            AgentMessage.User(new string('c', 1_200)),
+            Assistant(new string('d', 1_200)),
+        };
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, history),
+            0,
+            TestContext.Current.CancellationToken);
+        var compacted = false;
+        var provider = new RecordingProvider(_ => Text("done"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
+            {
+                compacted = true;
+                return new ValueTask<string>("summary:" + removed.Count);
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.True(compacted);
+        Assert.Equal(1, provider.CallCount);
+        var request = Assert.Single(provider.Requests);
+        Assert.True(ApproximateGameTokenEstimator.EstimateRequest(
+            request.Model,
+            request.SystemPrompt,
+            request.Messages,
+            request.Tools) <= 900);
+    }
+
+    [Fact]
+    public async Task RuntimeRejectsAnEstimatedContextOverflowBeforeCallingTheProvider()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new[]
+            {
+                AgentMessage.User(new string('a', 2_000)),
+                Assistant(new string('b', 2_000)),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(_ => Text("must not run"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 800,
+            ContextWindowReserveTokens = 100,
+        });
+
+        var exception = await Assert.ThrowsAsync<GameRuntimeLimitException>(async () =>
+            await runtime.RunAsync(Input("chat", "{}"), TestContext.Current.CancellationToken));
+
+        Assert.Equal(nameof(GameAgentRuntimeOptions.ContextWindowTokens), exception.Limit);
+        Assert.Equal(0, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task RuntimeRejectsContextGrowthFromTheFinalRequestHookBeforeCallingTheProvider()
+    {
+        var provider = new RecordingProvider(_ => Text("must not run"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            ContextWindowTokens = 800,
+            ContextWindowReserveTokens = 100,
+            AgentHooks = new AgentHooks
+            {
+                BeforeModelRequestAsync = (request, _) => new ValueTask<ModelRequest>(new ModelRequest(
+                    request.Model,
+                    new string('x', 4_000),
+                    request.Messages,
+                    request.Tools,
+                    request.Parameters,
+                    request.SessionId,
+                    request.RunId,
+                    request.Turn)),
+            },
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
+        Assert.Equal(AgentRunStatus.KernelError, result.AgentResult!.Status);
+        Assert.Contains("context window", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task RuntimeCompactsAgainAfterALargeToolResultBeforeTheNextModelTurn()
+    {
+        var provider = new RecordingProvider(call => call == 1
+            ? Tools(new ToolCallContent("call", "inspect", "{}"))
+            : Text("done"));
+        var tool = new AgentTool(
+            new ToolDefinition("inspect", "Inspect a bounded area.", "{\"type\":\"object\"}"),
+            (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                new AgentContent[] { new TextContent(new string('x', 5_000)) })));
+        var compacted = false;
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { tool }),
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
+            {
+                compacted = true;
+                return new ValueTask<string>("tool turn summary:" + removed.Count);
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("inspect", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.True(compacted);
+        Assert.Equal(2, provider.CallCount);
+        var second = provider.Requests.Last();
+        Assert.Equal("transcript_summary", Assert.Single(second.Messages).CustomRole);
+        Assert.True(ApproximateGameTokenEstimator.EstimateRequest(
+            second.Model,
+            second.SystemPrompt,
+            second.Messages,
+            second.Tools) <= 900);
+    }
+
+    [Fact]
     public async Task RuntimeCompactsEarlyEnoughForToolTurnResults()
     {
         var store = new InMemoryGameSessionStore();
@@ -1107,14 +1808,76 @@ public sealed class RuntimeTests
         var first = await workflow.RunAsync(
             new GameWorkflowContext(firstInput, Array.Empty<GameContextSlice>(), Array.Empty<AgentTool>(), session),
             TestContext.Current.CancellationToken);
+        var committedSession = new GameSessionSnapshot(
+            session.Key,
+            1,
+            processedInputIds: new[] { firstInput.InputId });
         var second = await workflow.RunAsync(
-            new GameWorkflowContext(secondInput, Array.Empty<GameContextSlice>(), Array.Empty<AgentTool>(), session),
+            new GameWorkflowContext(secondInput, Array.Empty<GameContextSlice>(), Array.Empty<AgentTool>(), committedSession),
             TestContext.Current.CancellationToken);
 
         Assert.True(first.Succeeded);
         Assert.Equal("waiting", Assert.IsType<TextContent>(Assert.Single(Assert.Single(first.Messages).Content)).Text);
         Assert.True(second.Succeeded);
         Assert.Equal(new[] { "advanced", "done" }, second.Messages.Select(message => Assert.IsType<TextContent>(Assert.Single(message.Content)).Text));
+    }
+
+    [Fact]
+    public async Task DurableWorkflowReplaysCompletedInvocationUntilItsInputIsCommitted()
+    {
+        var executions = 0;
+        var workflow = new DurableGameWorkflow(
+            "evolve",
+            new[]
+            {
+                new GameWorkflowStep("finish", (_, _) =>
+                {
+                    Interlocked.Increment(ref executions);
+                    return new ValueTask<GameWorkflowStepResult>(
+                        GameWorkflowStepResult.Complete("{\"done\":true}", Assistant("replay me")));
+                }),
+            },
+            new InMemoryGameWorkflowCheckpointStore());
+        var input = Input("month", "{}", "workflow-replay");
+        var session = new GameSessionSnapshot(new GameSessionKey(input.SessionId, input.ActorId), 0);
+        var context = new GameWorkflowContext(
+            input,
+            Array.Empty<GameContextSlice>(),
+            Array.Empty<AgentTool>(),
+            session);
+
+        var first = await workflow.RunAsync(context, TestContext.Current.CancellationToken);
+        var replay = await workflow.RunAsync(context, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, executions);
+        Assert.Equal(
+            Assert.IsType<TextContent>(Assert.Single(Assert.Single(first.Messages).Content)).Text,
+            Assert.IsType<TextContent>(Assert.Single(Assert.Single(replay.Messages).Content)).Text);
+    }
+
+    [Fact]
+    public async Task DurableWorkflowAcceptsEquivalentValuesRehydratedByACustomStore()
+    {
+        var workflow = new DurableGameWorkflow(
+            "evolve",
+            new[]
+            {
+                new GameWorkflowStep("finish", (_, _) =>
+                    new ValueTask<GameWorkflowStepResult>(
+                        GameWorkflowStepResult.Complete("{\"done\":true}", Assistant("persisted")))),
+            },
+            new RehydratingCheckpointStore());
+        var input = Input("month", "{}", "workflow-rehydrated");
+        var context = new GameWorkflowContext(
+            input,
+            Array.Empty<GameContextSlice>(),
+            Array.Empty<AgentTool>(),
+            new GameSessionSnapshot(new GameSessionKey(input.SessionId, input.ActorId), 0));
+
+        var result = await workflow.RunAsync(context, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("persisted", Assert.IsType<TextContent>(Assert.Single(Assert.Single(result.Messages).Content)).Text);
     }
 
     [Fact]
@@ -1581,6 +2344,25 @@ public sealed class RuntimeTests
         }
     }
 
+    private sealed class DelegateWorkflow : IGameWorkflow
+    {
+        private readonly Func<GameWorkflowContext, CancellationToken, ValueTask<GameWorkflowResult>> _run;
+
+        public DelegateWorkflow(
+            string name,
+            Func<GameWorkflowContext, CancellationToken, ValueTask<GameWorkflowResult>> run)
+        {
+            Name = name;
+            _run = run;
+        }
+
+        public string Name { get; }
+
+        public ValueTask<GameWorkflowResult> RunAsync(
+            GameWorkflowContext context,
+            CancellationToken cancellationToken) => _run(context, cancellationToken);
+    }
+
     private sealed class BlockingFirstResponseProvider : IModelProvider
     {
         private int _calls;
@@ -1648,6 +2430,49 @@ public sealed class RuntimeTests
         public ValueTask<IReadOnlyList<GameContextSlice>> GetContextAsync(
             GameInput input,
             CancellationToken cancellationToken) => _getContext(input, cancellationToken);
+    }
+
+    private sealed class RecordingSessionStore : IGameSessionStore
+    {
+        private readonly InMemoryGameSessionStore _inner = new();
+
+        public List<GameSessionSnapshot> SavedSnapshots { get; } = new();
+
+        public ValueTask<GameSessionSnapshot?> LoadAsync(
+            GameSessionKey key,
+            CancellationToken cancellationToken) => _inner.LoadAsync(key, cancellationToken);
+
+        public async ValueTask<GameSessionSaveResult> SaveAsync(
+            GameSessionSnapshot snapshot,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            SavedSnapshots.Add(snapshot);
+            return await _inner.SaveAsync(snapshot, expectedRevision, cancellationToken);
+        }
+    }
+
+    private sealed class FailSecondSaveSessionStore : IGameSessionStore
+    {
+        private readonly InMemoryGameSessionStore _inner = new();
+        private int _saves;
+
+        public ValueTask<GameSessionSnapshot?> LoadAsync(
+            GameSessionKey key,
+            CancellationToken cancellationToken) => _inner.LoadAsync(key, cancellationToken);
+
+        public ValueTask<GameSessionSaveResult> SaveAsync(
+            GameSessionSnapshot snapshot,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _saves) == 2)
+            {
+                throw new InvalidOperationException("simulated process failure after the tool checkpoint");
+            }
+
+            return _inner.SaveAsync(snapshot, expectedRevision, cancellationToken);
+        }
     }
 
     private sealed class ConflictOnceSessionStore : IGameSessionStore
@@ -1781,6 +2606,102 @@ public sealed class RuntimeTests
             }
 
             yield return ModelStreamEvent.Terminal(Text("ok"));
+        }
+    }
+
+    private sealed class MeaningfulStartThenFailureProvider : IModelProvider
+    {
+        private int _calls;
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _calls);
+            yield return ModelStreamEvent.Update(
+                ModelStreamEventKind.Started,
+                new ModelResponse(
+                    new AgentContent[] { new TextContent("already visible") },
+                    ModelStopReason.Pending,
+                    new ModelUsage(1)));
+            await Task.Yield();
+            throw new InvalidOperationException("connection dropped after visible output");
+        }
+    }
+
+    private sealed class FailureThenTerminalProviderWithFailingCleanup : IModelProvider
+    {
+        private readonly int _failuresBeforeSuccess;
+        private int _calls;
+        private int _disposeCount;
+
+        public FailureThenTerminalProviderWithFailingCleanup(int failuresBeforeSuccess)
+        {
+            _failuresBeforeSuccess = failuresBeforeSuccess;
+        }
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        public IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            var call = Interlocked.Increment(ref _calls);
+            return new Stream(
+                call <= _failuresBeforeSuccess,
+                () => Interlocked.Increment(ref _disposeCount));
+        }
+
+        private sealed class Stream : IAsyncEnumerable<ModelStreamEvent>, IAsyncEnumerator<ModelStreamEvent>
+        {
+            private readonly bool _fail;
+            private readonly Action _onDispose;
+            private bool _moved;
+
+            public Stream(bool fail, Action onDispose)
+            {
+                _fail = fail;
+                _onDispose = onDispose;
+            }
+
+            public ModelStreamEvent Current { get; private set; } = null!;
+
+            public IAsyncEnumerator<ModelStreamEvent> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return this;
+            }
+
+            public ValueTask<bool> MoveNextAsync()
+            {
+                if (_moved)
+                {
+                    return new ValueTask<bool>(false);
+                }
+
+                _moved = true;
+                if (_fail)
+                {
+                    return ValueTask.FromException<bool>(new ModelProviderException("offline", isTransient: true));
+                }
+
+                Current = ModelStreamEvent.Terminal(Text("ok"));
+                return new ValueTask<bool>(true);
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                _onDispose();
+                return ValueTask.FromException(new InvalidOperationException("cleanup failed"));
+            }
         }
     }
 
@@ -1953,6 +2874,43 @@ public sealed class RuntimeTests
         }
     }
 
+    private sealed class FailingReceiptJournal : IGameActionJournal
+    {
+        private readonly IGameActionJournal _inner;
+
+        public FailingReceiptJournal(IGameActionJournal inner)
+        {
+            _inner = inner;
+        }
+
+        public ValueTask<GameActionJournalEntry> ReserveAsync(
+            GameActionIntent intent,
+            CancellationToken cancellationToken) =>
+            _inner.ReserveAsync(intent, cancellationToken);
+
+        public ValueTask<GameActionJournalEntry?> FindAsync(
+            string operationId,
+            CancellationToken cancellationToken) =>
+            _inner.FindAsync(operationId, cancellationToken);
+
+        public ValueTask<bool> MarkDispatchedAsync(
+            string operationId,
+            CancellationToken cancellationToken) =>
+            _inner.MarkDispatchedAsync(operationId, cancellationToken);
+
+        public ValueTask SaveReceiptAsync(GameActionReceipt receipt, CancellationToken cancellationToken)
+        {
+            _ = receipt;
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("simulated journal outage");
+        }
+
+        public ValueTask<IReadOnlyList<GameActionIntent>> ListPendingAsync(
+            int limit,
+            CancellationToken cancellationToken) =>
+            _inner.ListPendingAsync(limit, cancellationToken);
+    }
+
     private sealed class CorruptingCheckpointStore : IGameWorkflowCheckpointStore
     {
         public ValueTask<GameWorkflowCheckpoint?> LoadAsync(
@@ -1982,6 +2940,65 @@ public sealed class RuntimeTests
                     checkpoint.Completed,
                     checkpoint.Error)));
         }
+    }
+
+    private sealed class RehydratingCheckpointStore : IGameWorkflowCheckpointStore
+    {
+        private readonly InMemoryGameWorkflowCheckpointStore _inner = new();
+
+        public async ValueTask<GameWorkflowCheckpoint?> LoadAsync(
+            string instanceId,
+            CancellationToken cancellationToken)
+        {
+            var loaded = await _inner.LoadAsync(instanceId, cancellationToken);
+            return loaded is null ? null : Rehydrate(loaded);
+        }
+
+        public async ValueTask<GameWorkflowCheckpointSaveResult> SaveAsync(
+            GameWorkflowCheckpoint checkpoint,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            var saved = await _inner.SaveAsync(checkpoint, expectedRevision, cancellationToken);
+            return new GameWorkflowCheckpointSaveResult(saved.Saved, Rehydrate(saved.Current));
+        }
+
+        private static GameWorkflowCheckpoint Rehydrate(GameWorkflowCheckpoint checkpoint)
+        {
+            var invocation = checkpoint.Invocation is null
+                ? null
+                : new GameWorkflowInvocationResult(
+                    checkpoint.Invocation.InputId,
+                    checkpoint.Invocation.Messages.Select(Rehydrate).ToArray(),
+                    checkpoint.Invocation.Complete,
+                    checkpoint.Invocation.Succeeded,
+                    checkpoint.Invocation.Error);
+            return new GameWorkflowCheckpoint(
+                checkpoint.InstanceId,
+                checkpoint.Workflow,
+                checkpoint.Revision,
+                checkpoint.NextStep,
+                checkpoint.StateJson,
+                checkpoint.Completed,
+                checkpoint.Error,
+                invocation);
+        }
+
+        private static AgentMessage Rehydrate(AgentMessage message) =>
+            new(
+                message.Role,
+                message.Content,
+                message.Timestamp,
+                message.CustomRole,
+                message.ToolCallId,
+                message.ToolName,
+                message.IsError,
+                message.DetailsJson,
+                message.Metadata,
+                message.Model,
+                message.StopReason,
+                message.Usage,
+                message.ErrorMessage);
     }
 
     private sealed class LoadingCheckpointStore : IGameWorkflowCheckpointStore

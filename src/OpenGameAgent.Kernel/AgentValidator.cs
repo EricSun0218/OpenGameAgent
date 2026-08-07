@@ -328,6 +328,11 @@ internal static class AgentValidator
         }
 
         ValidateOptions(request.Model, request.SessionId, request.Parameters, limits, clock, runIdFactory);
+        if (request.RunId.Length > limits.MaxSessionIdCharacters)
+        {
+            throw new AgentLimitException(nameof(limits.MaxSessionIdCharacters), "The provider run ID is too large.");
+        }
+
         if (request.SystemPrompt.Length > limits.MaxSystemPromptCharacters)
         {
             throw new AgentLimitException(nameof(limits.MaxSystemPromptCharacters), "The provider system prompt is too large.");
@@ -418,10 +423,9 @@ internal static class AgentValidator
                     throw new ArgumentException("A tool-use assistant message must contain a tool call.", nameof(messages));
                 }
 
-                if (calls.Length > 0
-                    && message.StopReason is ModelStopReason.Stop or ModelStopReason.Error or ModelStopReason.Aborted)
+                if (calls.Length > 0 && message.StopReason == ModelStopReason.Stop)
                 {
-                    throw new ArgumentException("A stopped or failed assistant message cannot contain tool calls.", nameof(messages));
+                    throw new ArgumentException("A stopped assistant message cannot contain tool calls.", nameof(messages));
                 }
 
                 foreach (var call in calls)

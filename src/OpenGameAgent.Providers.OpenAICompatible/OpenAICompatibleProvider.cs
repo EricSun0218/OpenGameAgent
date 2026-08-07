@@ -1,8 +1,10 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
@@ -15,6 +17,8 @@ using OpenGameAgent.Kernel;
 namespace OpenGameAgent.Providers.OpenAICompatible;
 
 public delegate ValueTask<string?> ApiKeyProvider(CancellationToken cancellationToken);
+
+public delegate string? OpenAICompatibleResourcePartProjector(ResourceContent resource);
 
 public sealed class OpenAICompatibleProviderOptions
 {
@@ -47,6 +51,8 @@ public sealed class OpenAICompatibleProviderOptions
 
     public string ApiKeyScheme { get; set; } = "Bearer";
 
+    public bool AllowInsecureHttp { get; set; }
+
     public IDictionary<string, string> Headers { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
     public int MaxEventCharacters { get; set; } = 4_000_000;
@@ -60,6 +66,26 @@ public sealed class OpenAICompatibleProviderOptions
     public int MaxToolCallsPerResponse { get; set; } = 256;
 
     public bool IncludeUsage { get; set; } = true;
+
+    public bool AllowDoneWithoutFinishReason { get; set; }
+
+    public IList<string> ReasoningDeltaFields { get; } = new List<string>
+    {
+        "reasoning_content",
+        "reasoning",
+    };
+
+    /// <summary>
+    /// Called after an HTTP 401 or 403 response. Use this to invalidate a cached short-lived
+    /// gateway credential. The failed streamed request is not retried automatically.
+    /// </summary>
+    public Action<HttpStatusCode>? OnAuthenticationFailure { get; set; }
+
+    /// <summary>
+    /// Converts a resource into a provider-specific multimodal content-part JSON object.
+    /// Return null to use the built-in image projection or plain resource text fallback.
+    /// </summary>
+    public OpenAICompatibleResourcePartProjector? ProjectResourcePart { get; set; }
 }
 
 public sealed class OpenAICompatibleProvider : IModelProvider
@@ -77,6 +103,10 @@ public sealed class OpenAICompatibleProvider : IModelProvider
     private readonly int _maxResponseCharacters;
     private readonly int _maxToolCallsPerResponse;
     private readonly bool _includeUsage;
+    private readonly bool _allowDoneWithoutFinishReason;
+    private readonly IReadOnlyList<string> _reasoningDeltaFields;
+    private readonly Action<HttpStatusCode>? _onAuthenticationFailure;
+    private readonly OpenAICompatibleResourcePartProjector? _projectResourcePart;
 
     public OpenAICompatibleProvider(OpenAICompatibleProviderOptions options)
     {
@@ -87,27 +117,48 @@ public sealed class OpenAICompatibleProvider : IModelProvider
 
         if (options.MaxEventCharacters < 1 || options.MaxEventCharacters > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxEventCharacters));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum event size is invalid.");
         }
 
         if (options.MaxErrorCharacters < 1 || options.MaxErrorCharacters > 10_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxErrorCharacters));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum error size is invalid.");
         }
 
         if (options.MaxRequestBytes < 2 || options.MaxRequestBytes > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum request size is invalid.");
         }
 
         if (options.MaxResponseCharacters < 1 || options.MaxResponseCharacters > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxResponseCharacters));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum response size is invalid.");
         }
 
         if (options.MaxToolCallsPerResponse < 1 || options.MaxToolCallsPerResponse > 10_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxToolCallsPerResponse));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum tool-call count is invalid.");
+        }
+
+        var reasoningFields = options.ReasoningDeltaFields
+            .Select(field => string.IsNullOrWhiteSpace(field) || field.Length > 128
+                ? throw new ArgumentException("Reasoning delta field names must contain 1 to 128 characters.", nameof(options))
+                : field)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (reasoningFields.Length == 0)
+        {
+            throw new ArgumentException("At least one reasoning delta field is required.", nameof(options));
+        }
+
+        if (options.Headers.Count > 64)
+        {
+            throw new ArgumentException("At most 64 custom headers may be configured.", nameof(options));
+        }
+
+        if (reasoningFields.Any(field => field is "content" or "tool_calls" or "role"))
+        {
+            throw new ArgumentException("Reasoning delta fields cannot reuse core stream fields.", nameof(options));
         }
 
 
@@ -117,21 +168,30 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             || (!string.Equals(options.Endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(options.Endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
         {
-            throw new ArgumentException("The model endpoint must be an absolute HTTP or HTTPS URI.", nameof(options.Endpoint));
+            throw new ArgumentException("The model endpoint must be an absolute HTTP or HTTPS URI.", nameof(options));
         }
 
-        ValidateHeader(options.ApiKeyHeader, string.Empty, nameof(options.ApiKeyHeader));
-        ValidateCredential(options.ApiKey, nameof(options.ApiKey));
-        ValidateCredential(options.ApiKeyScheme, nameof(options.ApiKeyScheme));
+        if (string.Equals(options.Endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && !options.Endpoint.IsLoopback
+            && !options.AllowInsecureHttp)
+        {
+            throw new ArgumentException(
+                "Remote model endpoints must use HTTPS unless insecure HTTP is explicitly enabled.",
+                nameof(options));
+        }
+
+        ValidateHeader(options.ApiKeyHeader, string.Empty, nameof(options));
+        ValidateCredential(options.ApiKey, nameof(options));
+        ValidateCredential(options.ApiKeyScheme, nameof(options));
         foreach (var header in options.Headers)
         {
-            ValidateHeader(header.Key, header.Value, nameof(options.Headers));
+            ValidateHeader(header.Key, header.Value, nameof(options));
         }
 
         if ((!string.IsNullOrEmpty(options.ApiKey) || options.GetApiKeyAsync is not null)
             && options.Headers.ContainsKey(options.ApiKeyHeader))
         {
-            throw new ArgumentException("Custom headers cannot also define the configured API key header.", nameof(options.Headers));
+            throw new ArgumentException("Custom headers cannot also define the configured API key header.", nameof(options));
         }
 
         _httpClient = options.HttpClient;
@@ -139,7 +199,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         _apiKey = options.ApiKey;
         _getApiKey = options.GetApiKeyAsync;
         _apiKeyHeader = string.IsNullOrWhiteSpace(options.ApiKeyHeader)
-            ? throw new ArgumentException("An API key header is required.", nameof(options.ApiKeyHeader))
+            ? throw new ArgumentException("An API key header is required.", nameof(options))
             : options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;
         _headers = new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase);
@@ -149,14 +209,21 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         _maxResponseCharacters = options.MaxResponseCharacters;
         _maxToolCallsPerResponse = options.MaxToolCallsPerResponse;
         _includeUsage = options.IncludeUsage;
+        _allowDoneWithoutFinishReason = options.AllowDoneWithoutFinishReason;
+        _reasoningDeltaFields = Array.AsReadOnly(reasoningFields);
+        _onAuthenticationFailure = options.OnAuthenticationFailure;
+        _projectResourcePart = options.ProjectResourcePart;
     }
 
     private static void ValidateHeader(string name, string value, string parameterName)
     {
         if (string.IsNullOrWhiteSpace(name)
+            || name.Length > 256
             || value is null
+            || value.Length > 65_536
             || value.Contains('\r')
-            || value.Contains('\n'))
+            || value.Contains('\n')
+            || value.Contains('\0'))
         {
             throw new ArgumentException("HTTP header names must be non-empty, and names and values cannot contain line breaks.", parameterName);
         }
@@ -182,9 +249,16 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             throw new ArgumentException("A configured credential cannot contain only whitespace.", parameterName);
         }
 
-        if ((value?.Contains('\r') ?? false) || (value?.Contains('\n') ?? false))
+        if ((value?.Length ?? 0) > 65_536)
         {
-            throw new ArgumentException("Credentials cannot contain line breaks.", parameterName);
+            throw new ArgumentException("Credentials cannot exceed 65536 characters.", parameterName);
+        }
+
+        if ((value?.Contains('\r') ?? false)
+            || (value?.Contains('\n') ?? false)
+            || (value?.Contains('\0') ?? false))
+        {
+            throw new ArgumentException("Credentials contain invalid control characters.", parameterName);
         }
     }
 
@@ -215,15 +289,36 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
+            Exception? authenticationFailureException = null;
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                try
+                {
+                    _onAuthenticationFailure?.Invoke(response.StatusCode);
+                }
+                catch (Exception exception)
+                {
+                    authenticationFailureException = exception;
+                }
+            }
+
             var error = await ReadBoundedAsync(response.Content, _maxErrorCharacters, cancellationToken).ConfigureAwait(false);
-            throw new HttpRequestException(
-                $"The model endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}");
+            throw new ModelProviderException(
+                $"The model endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
+                IsTransient(response),
+                GetRetryAfter(response),
+                (int)response.StatusCode,
+                authenticationFailureException);
         }
 
         using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         using var cancellationRegistration = cancellationToken.Register(stream.Dispose);
         using var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, leaveOpen: false);
-        var state = new StreamState(request.Model, _maxResponseCharacters, _maxToolCallsPerResponse);
+        var state = new StreamState(
+            request.Model,
+            _maxResponseCharacters,
+            _maxToolCallsPerResponse,
+            _reasoningDeltaFields);
         var sawDone = false;
         yield return ModelStreamEvent.Update(ModelStreamEventKind.Started, state.Partial());
 
@@ -253,9 +348,9 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             }
         }
 
-        if (!sawDone && !state.HasFinishReason)
+        if (!state.HasFinishReason && !(sawDone && _allowDoneWithoutFinishReason))
         {
-            throw new InvalidDataException("The model stream ended before a terminal marker or finish reason was received.");
+            throw new InvalidDataException("The model stream ended before receiving a finish reason.");
         }
 
         yield return ModelStreamEvent.Terminal(state.Complete());
@@ -281,6 +376,56 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         {
             throw new InvalidOperationException($"API key header '{_apiKeyHeader}' is not valid for an HTTP request.");
         }
+    }
+
+    private static bool IsTransient(HttpResponseMessage response)
+    {
+        if (response.Headers.TryGetValues("x-should-retry", out var values))
+        {
+            var directive = values.FirstOrDefault();
+            if (string.Equals(directive, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(directive, "false", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        var status = (int)response.StatusCode;
+        return status is 408 or 409 or 429 || status >= 500;
+    }
+
+    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
+    {
+        if (response.Headers.TryGetValues("retry-after-ms", out var millisecondValues)
+            && double.TryParse(
+                millisecondValues.FirstOrDefault(),
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out var milliseconds)
+            && !double.IsNaN(milliseconds)
+            && !double.IsInfinity(milliseconds))
+        {
+            return milliseconds >= TimeSpan.MaxValue.TotalMilliseconds
+                ? TimeSpan.MaxValue
+                : TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
+        }
+
+        if (response.Headers.RetryAfter?.Delta is { } delta)
+        {
+            return delta < TimeSpan.Zero ? TimeSpan.Zero : delta;
+        }
+
+        if (response.Headers.RetryAfter?.Date is { } date)
+        {
+            var delay = date - DateTimeOffset.UtcNow;
+            return delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
+        }
+
+        return null;
     }
 
     private byte[] SerializeRequest(ModelRequest request)
@@ -445,7 +590,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         return document.RootElement.Clone();
     }
 
-    private static IReadOnlyList<object> ProjectMessages(ModelRequest request)
+    private IReadOnlyList<object> ProjectMessages(ModelRequest request)
     {
         var projected = new List<object>
         {
@@ -455,15 +600,56 @@ public sealed class OpenAICompatibleProvider : IModelProvider
                 ["content"] = request.SystemPrompt,
             },
         };
-        foreach (var message in request.Messages)
+        for (var index = 0; index < request.Messages.Count; index++)
         {
-            projected.Add(ProjectMessage(message));
+            var message = request.Messages[index];
+            if (message.Role != AgentRole.Tool)
+            {
+                projected.Add(ProjectMessage(message));
+                continue;
+            }
+
+            var attachments = new List<object>();
+            while (index < request.Messages.Count && request.Messages[index].Role == AgentRole.Tool)
+            {
+                var toolMessage = request.Messages[index];
+                projected.Add(ProjectMessage(toolMessage));
+                foreach (var resource in toolMessage.Content.OfType<ResourceContent>())
+                {
+                    var attachment = ProjectNativeResource(resource);
+                    if (attachment is not null)
+                    {
+                        attachments.Add(attachment);
+                    }
+                }
+
+                index++;
+            }
+
+            index--;
+            if (attachments.Count > 0)
+            {
+                var content = new List<object>
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "text",
+                        ["text"] = "Attached resource(s) returned by the preceding tool results:",
+                    },
+                };
+                content.AddRange(attachments);
+                projected.Add(new Dictionary<string, object?>
+                {
+                    ["role"] = "user",
+                    ["content"] = content,
+                });
+            }
         }
 
         return projected;
     }
 
-    private static object ProjectMessage(AgentMessage message)
+    private object ProjectMessage(AgentMessage message)
     {
         if (message.Role == AgentRole.Assistant)
         {
@@ -487,6 +673,19 @@ public sealed class OpenAICompatibleProvider : IModelProvider
                 assistant["tool_calls"] = calls;
             }
 
+            foreach (var reasoning in message.Content
+                         .OfType<ReasoningContent>()
+                         .Where(content => !string.IsNullOrWhiteSpace(content.Signature))
+                         .GroupBy(content => content.Signature!, StringComparer.Ordinal))
+            {
+                if (assistant.ContainsKey(reasoning.Key))
+                {
+                    throw new InvalidDataException("A reasoning signature cannot override a core assistant message field.");
+                }
+
+                assistant[reasoning.Key] = string.Join("\n", reasoning.Select(content => content.Text));
+            }
+
             return assistant;
         }
 
@@ -501,10 +700,10 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         }
 
         const string role = "user";
-        var content = JoinContent(message.Content);
+        object content = ProjectUserContent(message);
         if (message.Role == AgentRole.Custom)
         {
-            content = "[" + message.CustomRole + "]\n" + content;
+            content = PrefixCustomRole(content, message.CustomRole!);
         }
 
         return new Dictionary<string, object?>
@@ -514,17 +713,118 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         };
     }
 
+    private object ProjectUserContent(AgentMessage message)
+    {
+        var visible = message.Content.Where(part => part is not ReasoningContent and not ToolCallContent).ToArray();
+        if (!visible.Any(part => part is ResourceContent))
+        {
+            return JoinContent(visible);
+        }
+
+        var parts = new List<object>();
+        foreach (var part in visible)
+        {
+            if (part is ResourceContent resource)
+            {
+                parts.Add(ProjectResource(resource));
+                continue;
+            }
+
+            var text = ContentText(part);
+            if (text.Length > 0)
+            {
+                parts.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = text,
+                });
+            }
+        }
+
+        return parts;
+    }
+
+    private object ProjectResource(ResourceContent resource)
+    {
+        return ProjectNativeResource(resource) ?? new Dictionary<string, object?>
+        {
+            ["type"] = "text",
+            ["text"] = ResourceText(resource),
+        };
+    }
+
+    private object? ProjectNativeResource(ResourceContent resource)
+    {
+        var custom = _projectResourcePart?.Invoke(resource);
+        if (custom is not null)
+        {
+            using var document = JsonDocument.Parse(custom);
+            EnsureUnambiguous(document.RootElement, "A projected resource part contains duplicate JSON property names.");
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("A projected resource part must be a JSON object.");
+            }
+
+            return document.RootElement.Clone();
+        }
+
+        if (resource.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Dictionary<string, object?>
+            {
+                ["type"] = "image_url",
+                ["image_url"] = new Dictionary<string, object?>
+                {
+                    ["url"] = resource.Uri,
+                },
+            };
+        }
+
+        return null;
+    }
+
+    private static object PrefixCustomRole(object content, string customRole)
+    {
+        var prefix = "[" + customRole + "]";
+        if (content is string text)
+        {
+            return prefix + "\n" + text;
+        }
+
+        if (content is not IEnumerable<object> existing)
+        {
+            throw new InvalidDataException("A custom-role message produced an unsupported content projection.");
+        }
+
+        return new object[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "text",
+                ["text"] = prefix,
+            },
+        }.Concat(existing).ToArray();
+    }
+
     private static string JoinContent(IEnumerable<AgentContent> content)
     {
         return string.Join("\n", content.Where(part => part is not ReasoningContent).Select(part => part switch
         {
-            TextContent text => text.Text,
-            JsonContent json => json.Json,
-            ResourceContent resource => $"[resource name={resource.Name ?? "unnamed"} media_type={resource.MediaType}] {resource.Uri}",
-            ToolCallContent call => $"[tool_call {call.Name}] {call.ArgumentsJson}",
-            _ => string.Empty,
+            _ => ContentText(part),
         }));
     }
+
+    private static string ContentText(AgentContent content) => content switch
+    {
+        TextContent text => text.Text,
+        JsonContent json => json.Json,
+        ResourceContent resource => ResourceText(resource),
+        ToolCallContent call => $"[tool_call {call.Name}] {call.ArgumentsJson}",
+        _ => string.Empty,
+    };
+
+    private static string ResourceText(ResourceContent resource) =>
+        $"[resource name={resource.Name ?? "unnamed"} media_type={resource.MediaType}] {resource.Uri}";
 
     private static object? ParseExtension(string value)
     {
@@ -683,13 +983,20 @@ public sealed class OpenAICompatibleProvider : IModelProvider
         private bool _hasFinishReason;
         private readonly int _maximumCharacters;
         private readonly int _maximumToolCalls;
+        private readonly IReadOnlyList<string> _reasoningDeltaFields;
+        private string? _reasoningSignature;
         private long _characters;
 
-        public StreamState(string model, int maximumCharacters, int maximumToolCalls)
+        public StreamState(
+            string model,
+            int maximumCharacters,
+            int maximumToolCalls,
+            IReadOnlyList<string> reasoningDeltaFields)
         {
             _ = model;
             _maximumCharacters = maximumCharacters;
             _maximumToolCalls = maximumToolCalls;
+            _reasoningDeltaFields = reasoningDeltaFields;
         }
 
         public IReadOnlyList<ModelStreamEvent> Apply(string json)
@@ -739,7 +1046,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider
                 if (choice.TryGetProperty("delta", out var delta))
                 {
                     RequireKind(delta, JsonValueKind.Object, "A model stream delta must be an object.");
-                    ApplyText(delta, "reasoning_content", _reasoning, ref _reasoningStarted, ModelStreamEventKind.ReasoningStarted, ModelStreamEventKind.ReasoningDelta, updates);
+                    ApplyReasoning(delta, updates);
                     ApplyText(delta, "content", _text, ref _textStarted, ModelStreamEventKind.TextStarted, ModelStreamEventKind.TextDelta, updates);
                     if (delta.TryGetProperty("tool_calls", out var calls))
                     {
@@ -771,12 +1078,25 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             foreach (var call in calls.EnumerateArray())
             {
                 RequireKind(call, JsonValueKind.Object, "Each model tool call must be an object.");
-                var index = _tools.Count;
-                if (call.TryGetProperty("index", out var indexElement)
-                    && (!indexElement.TryGetInt32(out index)))
+                int? explicitIndex = null;
+                if (call.TryGetProperty("index", out var indexElement))
                 {
-                    throw new InvalidDataException("A model tool call index must be an integer.");
+                    if (!indexElement.TryGetInt32(out var parsedIndex))
+                    {
+                        throw new InvalidDataException("A model tool call index must be an integer.");
+                    }
+
+                    explicitIndex = parsedIndex;
                 }
+
+                string? incomingId = null;
+                if (call.TryGetProperty("id", out var incomingIdElement))
+                {
+                    RequireKind(incomingIdElement, JsonValueKind.String, "A model tool call ID must be a string.");
+                    incomingId = incomingIdElement.GetString();
+                }
+
+                var index = ResolveToolIndex(explicitIndex, incomingId);
 
                 if (index < 0 || index >= _maximumToolCalls)
                 {
@@ -796,17 +1116,15 @@ public sealed class OpenAICompatibleProvider : IModelProvider
                     created = true;
                 }
 
-                if (call.TryGetProperty("id", out var id))
+                if (incomingId is not null)
                 {
-                    RequireKind(id, JsonValueKind.String, "A model tool call ID must be a string.");
-                    var idText = id.GetString()!;
-                    if (builder.Id is not null && !string.Equals(builder.Id, idText, StringComparison.Ordinal))
+                    if (builder.Id is not null && !string.Equals(builder.Id, incomingId, StringComparison.Ordinal))
                     {
                         throw new InvalidDataException("A streamed model tool call changed its ID.");
                     }
 
-                    AddCharacters(idText.Length);
-                    builder.Id = idText;
+                    AddCharacters(incomingId.Length);
+                    builder.Id = incomingId;
                 }
 
                 if (call.TryGetProperty("function", out var function))
@@ -856,6 +1174,45 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             }
         }
 
+        private int ResolveToolIndex(int? explicitIndex, string? incomingId)
+        {
+            if (explicitIndex is { } index)
+            {
+                return index;
+            }
+
+            if (!string.IsNullOrEmpty(incomingId))
+            {
+                foreach (var pair in _tools)
+                {
+                    if (string.Equals(pair.Value.Id, incomingId, StringComparison.Ordinal))
+                    {
+                        return pair.Key;
+                    }
+                }
+
+                var candidate = 0;
+                while (_tools.ContainsKey(candidate))
+                {
+                    candidate++;
+                }
+
+                return candidate;
+            }
+
+            if (_tools.Count == 0)
+            {
+                return 0;
+            }
+
+            if (_tools.Count == 1)
+            {
+                return _tools.Keys.Single();
+            }
+
+            throw new InvalidDataException("A model tool call delta omitted both index and ID while multiple tool calls were active.");
+        }
+
         private void AddEndedEvents(ICollection<ModelStreamEvent> updates)
         {
             if (_reasoningStarted)
@@ -902,7 +1259,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             var content = new List<AgentContent>();
             if (_reasoning.Length > 0)
             {
-                content.Add(new ReasoningContent(_reasoning.ToString()));
+                content.Add(new ReasoningContent(_reasoning.ToString(), _reasoningSignature));
             }
 
             if (_text.Length > 0)
@@ -962,6 +1319,34 @@ public sealed class OpenAICompatibleProvider : IModelProvider
             AddCharacters(text.Length);
             builder.Append(text);
             updates.Add(ModelStreamEvent.Update(deltaKind, Partial(), text));
+        }
+
+        private void ApplyReasoning(JsonElement delta, ICollection<ModelStreamEvent> updates)
+        {
+            foreach (var property in _reasoningDeltaFields)
+            {
+                if (!delta.TryGetProperty(property, out var value) || value.ValueKind == JsonValueKind.Null)
+                {
+                    continue;
+                }
+
+                if (_reasoningSignature is not null
+                    && !string.Equals(_reasoningSignature, property, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("A model stream changed its reasoning delta field during one response.");
+                }
+
+                _reasoningSignature = property;
+                ApplyText(
+                    delta,
+                    property,
+                    _reasoning,
+                    ref _reasoningStarted,
+                    ModelStreamEventKind.ReasoningStarted,
+                    ModelStreamEventKind.ReasoningDelta,
+                    updates);
+                return;
+            }
         }
 
         private void ReadFinishReason(JsonElement choice)

@@ -21,6 +21,22 @@ public sealed class MediaHttpTests
     }
 
     [Fact]
+    public void RemotePlainHttpRequiresExplicitOptInWhileLoopbackRemainsAvailable()
+    {
+        using var client = new HttpClient(new StubHandler(_ => throw new InvalidOperationException("transport must not run")));
+
+        Assert.Throws<ArgumentException>(() => new HttpMediaGenerator(
+            new HttpMediaGeneratorOptions(client, new Uri("http://media.test/generate"))));
+        _ = new HttpMediaGenerator(
+            new HttpMediaGeneratorOptions(client, new Uri("http://127.0.0.1:8080/generate")));
+        _ = new HttpMediaGenerator(
+            new HttpMediaGeneratorOptions(client, new Uri("http://media.test/generate"))
+            {
+                AllowInsecureHttp = true,
+            });
+    }
+
+    [Fact]
     public async Task SynchronousImageResultPreservesStructuredParameters()
     {
         var handler = new StubHandler(_ => JsonResponse("""
@@ -218,6 +234,25 @@ public sealed class MediaHttpTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { "Bearer key-1", "Bearer key-2" }, handler.Authorizations);
+    }
+
+    [Fact]
+    public async Task OversizedDynamicCredentialIsRejectedBeforeTransport()
+    {
+        var handler = new StubHandler(_ => throw new InvalidOperationException("transport must not run"));
+        var generator = new HttpMediaGenerator(new HttpMediaGeneratorOptions(
+            new HttpClient(handler),
+            new Uri("https://media.test/generate"))
+        {
+            GetApiKeyAsync = _ => new ValueTask<string?>(new string('x', 65_537)),
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await generator.GenerateAsync(
+                new GameMediaGenerationRequest("image", GameMediaKind.Image, "{}"),
+                null,
+                TestContext.Current.CancellationToken));
+        Assert.Empty(handler.Requests);
     }
 
     [Fact]

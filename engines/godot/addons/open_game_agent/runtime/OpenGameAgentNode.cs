@@ -218,6 +218,10 @@ public partial class OpenGameAgentNode : Node
         {
             return false;
         }
+        catch (AggregateException)
+        {
+            return true;
+        }
     }
 
     public override void _ExitTree()
@@ -240,6 +244,9 @@ public partial class OpenGameAgentNode : Node
                 cancellation.Cancel();
             }
             catch (ObjectDisposedException)
+            {
+            }
+            catch (AggregateException)
             {
             }
         }

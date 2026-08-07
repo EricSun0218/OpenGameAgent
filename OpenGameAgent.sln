@@ -1,4 +1,4 @@
-Microsoft Visual Studio Solution File, Format Version 12.00
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
@@ -16,6 +16,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Client", "src
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Server", "src\OpenGameAgent.Server\OpenGameAgent.Server.csproj", "{126F4F68-C8D5-403B-899D-7EA25D446007}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Extensions", "src\OpenGameAgent.Extensions\OpenGameAgent.Extensions.csproj", "{6264B0A9-9050-4ED6-A7D8-F1DBBBCE6008}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Kernel.Tests", "tests\OpenGameAgent.Kernel.Tests\OpenGameAgent.Kernel.Tests.csproj", "{E0E06633-9C9A-4D70-BE88-491734701101}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Tests", "tests\OpenGameAgent.Tests\OpenGameAgent.Tests.csproj", "{D6FF2E41-75D9-463A-B9AC-26EA360F1102}"
@@ -28,7 +30,21 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Med
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Server.Tests", "tests\OpenGameAgent.Server.Tests\OpenGameAgent.Server.Tests.csproj", "{8DC373B7-B6D6-42E8-BF98-7B8DC5FD1106}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Extensions.Tests", "tests\OpenGameAgent.Extensions.Tests\OpenGameAgent.Extensions.Tests.csproj", "{D23EE0CD-40FD-47F3-9549-B0675A821107}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Example", "examples\OpenGameAgent.Example\OpenGameAgent.Example.csproj", "{48B319EF-B033-4D17-A025-8987FCABA107}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{EA3AF59A-9A1C-4197-B2A3-F93894D131B8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Connectors.Mcp", "src\OpenGameAgent.Connectors.Mcp\OpenGameAgent.Connectors.Mcp.csproj", "{01759D73-7B80-47A2-9D7D-154CC64C6851}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{86AE6217-BFEE-4349-945A-70ECEC211437}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Connectors.Mcp.Tests", "tests\OpenGameAgent.Connectors.Mcp.Tests\OpenGameAgent.Connectors.Mcp.Tests.csproj", "{98A0255B-E6C3-46C4-868C-A16FB559A79C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Models", "src\OpenGameAgent.Models\OpenGameAgent.Models.csproj", "{CC89911F-B920-4203-8CE4-03D434C3B01E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Models.Tests", "tests\OpenGameAgent.Models.Tests\OpenGameAgent.Models.Tests.csproj", "{839EA4C2-45A0-4E78-8FAE-E39155C96F4C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -64,6 +80,10 @@ Global
 		{126F4F68-C8D5-403B-899D-7EA25D446007}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{126F4F68-C8D5-403B-899D-7EA25D446007}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{126F4F68-C8D5-403B-899D-7EA25D446007}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6264B0A9-9050-4ED6-A7D8-F1DBBBCE6008}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6264B0A9-9050-4ED6-A7D8-F1DBBBCE6008}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6264B0A9-9050-4ED6-A7D8-F1DBBBCE6008}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6264B0A9-9050-4ED6-A7D8-F1DBBBCE6008}.Release|Any CPU.Build.0 = Release|Any CPU
 		{E0E06633-9C9A-4D70-BE88-491734701101}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{E0E06633-9C9A-4D70-BE88-491734701101}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{E0E06633-9C9A-4D70-BE88-491734701101}.Release|Any CPU.ActiveCfg = Release|Any CPU
@@ -88,9 +108,35 @@ Global
 		{8DC373B7-B6D6-42E8-BF98-7B8DC5FD1106}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8DC373B7-B6D6-42E8-BF98-7B8DC5FD1106}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8DC373B7-B6D6-42E8-BF98-7B8DC5FD1106}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D23EE0CD-40FD-47F3-9549-B0675A821107}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D23EE0CD-40FD-47F3-9549-B0675A821107}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D23EE0CD-40FD-47F3-9549-B0675A821107}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D23EE0CD-40FD-47F3-9549-B0675A821107}.Release|Any CPU.Build.0 = Release|Any CPU
 		{48B319EF-B033-4D17-A025-8987FCABA107}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{48B319EF-B033-4D17-A025-8987FCABA107}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{48B319EF-B033-4D17-A025-8987FCABA107}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{48B319EF-B033-4D17-A025-8987FCABA107}.Release|Any CPU.Build.0 = Release|Any CPU
+		{01759D73-7B80-47A2-9D7D-154CC64C6851}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{01759D73-7B80-47A2-9D7D-154CC64C6851}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{01759D73-7B80-47A2-9D7D-154CC64C6851}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{01759D73-7B80-47A2-9D7D-154CC64C6851}.Release|Any CPU.Build.0 = Release|Any CPU
+		{98A0255B-E6C3-46C4-868C-A16FB559A79C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{98A0255B-E6C3-46C4-868C-A16FB559A79C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{98A0255B-E6C3-46C4-868C-A16FB559A79C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{98A0255B-E6C3-46C4-868C-A16FB559A79C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CC89911F-B920-4203-8CE4-03D434C3B01E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CC89911F-B920-4203-8CE4-03D434C3B01E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CC89911F-B920-4203-8CE4-03D434C3B01E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CC89911F-B920-4203-8CE4-03D434C3B01E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{839EA4C2-45A0-4E78-8FAE-E39155C96F4C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{839EA4C2-45A0-4E78-8FAE-E39155C96F4C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{839EA4C2-45A0-4E78-8FAE-E39155C96F4C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{839EA4C2-45A0-4E78-8FAE-E39155C96F4C}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{98A0255B-E6C3-46C4-868C-A16FB559A79C} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{CC89911F-B920-4203-8CE4-03D434C3B01E} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{839EA4C2-45A0-4E78-8FAE-E39155C96F4C} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 	EndGlobalSection
 EndGlobal

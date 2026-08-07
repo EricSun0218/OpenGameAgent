@@ -1,0 +1,638 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using OpenGameAgent.Kernel;
+
+namespace OpenGameAgent;
+
+/// <summary>
+/// Describes a runtime extension without coupling it to an engine or deployment model.
+/// </summary>
+public sealed class GameAgentExtensionDescriptor
+{
+    public GameAgentExtensionDescriptor(
+        string id,
+        string version,
+        string? description = null,
+        IEnumerable<string>? capabilities = null)
+    {
+        Id = GameJson.RequireId(id, nameof(id));
+        Version = GameJson.RequireId(version, nameof(version));
+        Description = description ?? string.Empty;
+        var copied = (capabilities ?? Array.Empty<string>())
+            .Select(value => GameJson.RequireId(value, nameof(capabilities)))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        Capabilities = Array.AsReadOnly(copied);
+    }
+
+    public string Id { get; }
+
+    public string Version { get; }
+
+    public string Description { get; }
+
+    public IReadOnlyList<string> Capabilities { get; }
+}
+
+/// <summary>
+/// A package-level extension. First-party and third-party features use this same contract.
+/// </summary>
+public interface IGameAgentExtension
+{
+    GameAgentExtensionDescriptor Descriptor { get; }
+
+    void Configure(GameAgentExtensionApi api);
+}
+
+public sealed class DelegateGameAgentExtension : IGameAgentExtension
+{
+    private readonly Action<GameAgentExtensionApi> _configure;
+
+    public DelegateGameAgentExtension(
+        GameAgentExtensionDescriptor descriptor,
+        Action<GameAgentExtensionApi> configure)
+    {
+        Descriptor = descriptor ?? throw new ArgumentNullException(nameof(descriptor));
+        _configure = configure ?? throw new ArgumentNullException(nameof(configure));
+    }
+
+    public GameAgentExtensionDescriptor Descriptor { get; }
+
+    public void Configure(GameAgentExtensionApi api) =>
+        _configure(api ?? throw new ArgumentNullException(nameof(api)));
+}
+
+public enum GameAgentExtensionResourceKind
+{
+    ContextProvider,
+    Tool,
+    ToolProvider,
+    SkillProvider,
+    RouteRule,
+    PendingWorkProvider,
+    Workflow,
+    AgentHooks,
+    PromptFragment,
+    ModelProvider,
+    Service,
+    EventHandler,
+}
+
+public sealed class GameAgentExtensionResource
+{
+    internal GameAgentExtensionResource(
+        string extensionId,
+        string name,
+        GameAgentExtensionResourceKind kind,
+        int priority,
+        long sequence)
+    {
+        ExtensionId = extensionId;
+        Name = name;
+        Kind = kind;
+        Priority = priority;
+        Sequence = sequence;
+    }
+
+    public string ExtensionId { get; }
+
+    public string Name { get; }
+
+    public GameAgentExtensionResourceKind Kind { get; }
+
+    public int Priority { get; }
+
+    internal long Sequence { get; }
+}
+
+public enum GameAgentExtensionDiagnosticSeverity
+{
+    Information,
+    Warning,
+    Error,
+}
+
+public sealed class GameAgentExtensionDiagnostic
+{
+    public GameAgentExtensionDiagnostic(
+        GameAgentExtensionDiagnosticSeverity severity,
+        string code,
+        string message,
+        string? extensionId = null,
+        string? resourceName = null)
+    {
+        if (!Enum.IsDefined(typeof(GameAgentExtensionDiagnosticSeverity), severity))
+        {
+            throw new ArgumentOutOfRangeException(nameof(severity));
+        }
+
+        Severity = severity;
+        Code = GameJson.RequireId(code, nameof(code));
+        Message = string.IsNullOrWhiteSpace(message)
+            ? throw new ArgumentException("A diagnostic message is required.", nameof(message))
+            : message;
+        ExtensionId = extensionId;
+        ResourceName = resourceName;
+    }
+
+    public GameAgentExtensionDiagnosticSeverity Severity { get; }
+
+    public string Code { get; }
+
+    public string Message { get; }
+
+    public string? ExtensionId { get; }
+
+    public string? ResourceName { get; }
+}
+
+public interface IGameAgentExtensionRegistration : IDisposable
+{
+    GameAgentExtensionResource Resource { get; }
+
+    bool IsActive { get; }
+}
+
+/// <summary>
+/// A typed lifecycle event key. Matching is by object identity so unrelated extensions cannot
+/// accidentally reuse a textual channel with an incompatible payload type.
+/// </summary>
+public sealed class GameAgentExtensionEvent<TEvent>
+{
+    public GameAgentExtensionEvent(string name)
+    {
+        Name = GameJson.RequireId(name, nameof(name));
+    }
+
+    public string Name { get; }
+}
+
+/// <summary>
+/// Typed cross-extension channel. Channels are explicit objects, avoiding string-only payload contracts.
+/// </summary>
+public sealed class GameAgentExtensionChannel<TMessage>
+{
+    public GameAgentExtensionChannel(string name)
+    {
+        Name = GameJson.RequireId(name, nameof(name));
+    }
+
+    public string Name { get; }
+}
+
+public static class GameAgentExtensionEvents
+{
+    public static GameAgentExtensionEvent<GameAgentInputEvent> InputReceived { get; } = new("input.received");
+
+    public static GameAgentExtensionEvent<GameAgentSessionEvent> SessionLoaded { get; } = new("session.loaded");
+
+    public static GameAgentExtensionEvent<GameAgentContextEvent> ContextCollected { get; } = new("context.collected");
+
+    public static GameAgentExtensionEvent<GameAgentToolsEvent> ToolsCollected { get; } = new("tools.collected");
+
+    public static GameAgentExtensionEvent<GameAgentRouteEvent> RouteSelected { get; } = new("route.selected");
+
+    public static GameAgentExtensionEvent<GameAgentSkillsEvent> SkillsSelected { get; } = new("skills.selected");
+
+    public static GameAgentExtensionEvent<GameAgentKernelEvent> KernelEvent { get; } = new("kernel.event");
+
+    public static GameAgentExtensionEvent<GameAgentRunEvent> RunCompleted { get; } = new("run.completed");
+
+    public static GameAgentExtensionEvent<GameAgentSessionEvent> SessionSaving { get; } = new("session.saving");
+
+    public static GameAgentExtensionEvent<GameAgentSessionEvent> SessionSaved { get; } = new("session.saved");
+
+    public static GameAgentExtensionEvent<GameAgentFailureEvent> RunFailed { get; } = new("run.failed");
+}
+
+public sealed class GameAgentInputEvent
+{
+    public GameAgentInputEvent(GameInput input)
+    {
+        Input = input ?? throw new ArgumentNullException(nameof(input));
+    }
+
+    public GameInput Input { get; }
+}
+
+public sealed class GameAgentSessionEvent
+{
+    public GameAgentSessionEvent(GameSessionSnapshot session)
+    {
+        Session = session ?? throw new ArgumentNullException(nameof(session));
+    }
+
+    public GameSessionSnapshot Session { get; }
+}
+
+public sealed class GameAgentContextEvent
+{
+    public GameAgentContextEvent(IReadOnlyList<GameContextSlice> context)
+    {
+        var copy = (context ?? throw new ArgumentNullException(nameof(context))).ToArray();
+        if (copy.Any(value => value is null))
+        {
+            throw new ArgumentException("Context events cannot contain null slices.", nameof(context));
+        }
+
+        Context = Array.AsReadOnly(copy);
+    }
+
+    public IReadOnlyList<GameContextSlice> Context { get; }
+}
+
+public sealed class GameAgentToolsEvent
+{
+    public GameAgentToolsEvent(IReadOnlyList<AgentTool> tools)
+    {
+        var copy = (tools ?? throw new ArgumentNullException(nameof(tools))).ToArray();
+        if (copy.Any(value => value is null))
+        {
+            throw new ArgumentException("Tool events cannot contain null tools.", nameof(tools));
+        }
+
+        Tools = Array.AsReadOnly(copy);
+    }
+
+    public IReadOnlyList<AgentTool> Tools { get; }
+}
+
+public sealed class GameAgentRouteEvent
+{
+    public GameAgentRouteEvent(GameRouteDecision decision)
+    {
+        Decision = decision ?? throw new ArgumentNullException(nameof(decision));
+    }
+
+    public GameRouteDecision Decision { get; set; }
+}
+
+public sealed class GameAgentSkillsEvent
+{
+    public GameAgentSkillsEvent(IReadOnlyList<GameSkill> skills)
+    {
+        var copy = (skills ?? throw new ArgumentNullException(nameof(skills))).ToArray();
+        if (copy.Any(value => value is null))
+        {
+            throw new ArgumentException("Skill events cannot contain null skills.", nameof(skills));
+        }
+
+        Skills = Array.AsReadOnly(copy);
+    }
+
+    public IReadOnlyList<GameSkill> Skills { get; }
+}
+
+public sealed class GameAgentKernelEvent
+{
+    public GameAgentKernelEvent(AgentEvent value)
+    {
+        Value = value ?? throw new ArgumentNullException(nameof(value));
+    }
+
+    public AgentEvent Value { get; }
+}
+
+public sealed class GameAgentRunEvent
+{
+    public GameAgentRunEvent(GameAgentRunResult result)
+    {
+        Result = result ?? throw new ArgumentNullException(nameof(result));
+    }
+
+    public GameAgentRunResult Result { get; }
+}
+
+public sealed class GameAgentFailureEvent
+{
+    public GameAgentFailureEvent(Exception exception)
+    {
+        Exception = exception ?? throw new ArgumentNullException(nameof(exception));
+    }
+
+    public Exception Exception { get; }
+}
+
+/// <summary>
+/// Mutable, namespaced session state for one extension. Values are JSON and are not added to
+/// model context unless the owning extension explicitly contributes them.
+/// </summary>
+public sealed class GameAgentExtensionState
+{
+    private readonly GameAgentSessionState _state;
+    private readonly string _extensionId;
+    private readonly GameAgentExtensionRunLease _lease;
+
+    internal GameAgentExtensionState(
+        GameAgentSessionState state,
+        string extensionId,
+        GameAgentExtensionRunLease lease)
+    {
+        _state = state;
+        _extensionId = extensionId;
+        _lease = lease;
+    }
+
+    public IReadOnlyDictionary<string, string> Snapshot()
+    {
+        _lease.EnsureActive();
+        return _state.Snapshot(_extensionId);
+    }
+
+    public bool TryGet(string key, out string json)
+    {
+        _lease.EnsureActive();
+        return _state.TryGet(_extensionId, key, out json);
+    }
+
+    public string? Get(string key) => TryGet(key, out var json) ? json : null;
+
+    public void Set(string key, string json)
+    {
+        _lease.EnsureActive();
+        _state.Set(_extensionId, key, json);
+    }
+
+    public bool Remove(string key)
+    {
+        _lease.EnsureActive();
+        return _state.Remove(_extensionId, key);
+    }
+}
+
+public interface IGameAgentServiceProvider
+{
+    bool TryGet<T>(string name, out T service) where T : class;
+
+    T GetRequired<T>(string name) where T : class;
+}
+
+public sealed class GameAgentExtensionRunContext
+{
+    internal GameAgentExtensionRunContext(
+        GameInput input,
+        GameSessionSnapshot session,
+        GameAgentSessionState sessionState,
+        GameAgentExtensionState state,
+        GameAgentExtensionRunLease lease,
+        IGameAgentServiceProvider services,
+        IReadOnlyList<GameAgentExtensionResource> resources)
+    {
+        Input = input ?? throw new ArgumentNullException(nameof(input));
+        Session = session ?? throw new ArgumentNullException(nameof(session));
+        SessionState = sessionState ?? throw new ArgumentNullException(nameof(sessionState));
+        State = state ?? throw new ArgumentNullException(nameof(state));
+        Lease = lease ?? throw new ArgumentNullException(nameof(lease));
+        Services = services ?? throw new ArgumentNullException(nameof(services));
+        Resources = Array.AsReadOnly(
+            (resources ?? throw new ArgumentNullException(nameof(resources))).ToArray());
+    }
+
+    public GameInput Input { get; }
+
+    public GameSessionSnapshot Session { get; }
+
+    public GameAgentExtensionState State { get; }
+
+    public IGameAgentServiceProvider Services { get; }
+
+    public IReadOnlyList<GameAgentExtensionResource> Resources { get; }
+
+    public bool IsActive => Lease.IsActive;
+
+    internal GameAgentSessionState SessionState { get; }
+
+    internal GameAgentExtensionRunLease Lease { get; }
+
+    internal void EnsureActive() => Lease.EnsureActive();
+
+    internal void Invalidate() => Lease.Invalidate();
+}
+
+public delegate ValueTask<IReadOnlyList<GameContextSlice>> GameExtensionContextProvider(
+    GameAgentExtensionRunContext context,
+    CancellationToken cancellationToken);
+
+public delegate ValueTask<IReadOnlyList<AgentTool>> GameExtensionToolProvider(
+    GameAgentExtensionRunContext context,
+    CancellationToken cancellationToken);
+
+public delegate ValueTask<IReadOnlyList<GameSkill>> GameExtensionSkillProvider(
+    GameAgentExtensionRunContext context,
+    IReadOnlyCollection<string> activeToolNames,
+    int maximumSkills,
+    CancellationToken cancellationToken);
+
+public delegate ValueTask<GameRouteDecision?> GameExtensionRouteRule(
+    GameAgentExtensionRunContext context,
+    int availableToolCount,
+    bool hasPendingWork,
+    CancellationToken cancellationToken);
+
+public delegate ValueTask<bool> GameExtensionPendingWorkProvider(
+    GameAgentExtensionRunContext context,
+    CancellationToken cancellationToken);
+
+public delegate AgentHooks GameExtensionHookFactory(GameAgentExtensionRunContext context);
+
+public delegate ValueTask GameAgentExtensionEventHandler<TEvent>(
+    TEvent value,
+    GameAgentExtensionRunContext context,
+    CancellationToken cancellationToken);
+
+public delegate ValueTask GameAgentExtensionChannelHandler<TMessage>(
+    TMessage message,
+    CancellationToken cancellationToken);
+
+/// <summary>
+/// API exposed to extensions. Registrations remain live until their returned handle is disposed.
+/// </summary>
+public sealed class GameAgentExtensionApi
+{
+    private readonly GameAgentExtensionHost _host;
+    private readonly string _extensionId;
+
+    internal GameAgentExtensionApi(GameAgentExtensionHost host, string extensionId)
+    {
+        _host = host;
+        _extensionId = extensionId;
+    }
+
+    public string ExtensionId => _extensionId;
+
+    public IReadOnlyList<GameAgentExtensionResource> GetResources() => _host.GetResources();
+
+    public IReadOnlyList<GameAgentExtensionDiagnostic> GetDiagnostics() => _host.GetDiagnostics();
+
+    public IGameAgentExtensionRegistration RegisterContextProvider(
+        string name,
+        GameExtensionContextProvider provider,
+        int priority = 0) =>
+        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.ContextProvider, provider, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterTool(
+        AgentTool tool,
+        int priority = 0)
+    {
+        if (tool is null)
+        {
+            throw new ArgumentNullException(nameof(tool));
+        }
+
+        return _host.Register(
+            _extensionId,
+            tool.Definition.Name,
+            GameAgentExtensionResourceKind.Tool,
+            tool,
+            priority,
+            unique: true);
+    }
+
+    public IGameAgentExtensionRegistration RegisterToolProvider(
+        string name,
+        GameExtensionToolProvider provider,
+        int priority = 0) =>
+        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.ToolProvider, provider, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterSkillProvider(
+        string name,
+        GameExtensionSkillProvider provider,
+        int priority = 0) =>
+        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.SkillProvider, provider, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterRouteRule(
+        string name,
+        GameExtensionRouteRule rule,
+        int priority = 0) =>
+        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.RouteRule, rule, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterPendingWorkProvider(
+        string name,
+        GameExtensionPendingWorkProvider provider,
+        int priority = 0) =>
+        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.PendingWorkProvider, provider, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterWorkflow(IGameWorkflow workflow, int priority = 0)
+    {
+        if (workflow is null)
+        {
+            throw new ArgumentNullException(nameof(workflow));
+        }
+
+        return _host.Register(
+            _extensionId,
+            workflow.Name,
+            GameAgentExtensionResourceKind.Workflow,
+            workflow,
+            priority,
+            unique: true);
+    }
+
+    public IGameAgentExtensionRegistration RegisterAgentHooks(
+        string name,
+        GameExtensionHookFactory factory,
+        int priority = 0) =>
+        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.AgentHooks, factory, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterPromptFragment(
+        string name,
+        string instructions,
+        int priority = 0)
+    {
+        if (instructions is null)
+        {
+            throw new ArgumentNullException(nameof(instructions));
+        }
+
+        return _host.Register(
+            _extensionId,
+            name,
+            GameAgentExtensionResourceKind.PromptFragment,
+            instructions,
+            priority,
+            unique: true);
+    }
+
+    public IGameAgentExtensionRegistration RegisterModelProvider(
+        string name,
+        IModelProvider provider,
+        int priority = 0)
+    {
+        if (provider is null)
+        {
+            throw new ArgumentNullException(nameof(provider));
+        }
+
+        return _host.Register(
+            _extensionId,
+            name,
+            GameAgentExtensionResourceKind.ModelProvider,
+            provider,
+            priority,
+            unique: true);
+    }
+
+    public IGameAgentExtensionRegistration RegisterService<T>(
+        string name,
+        T service,
+        int priority = 0)
+        where T : class
+    {
+        if (service is null)
+        {
+            throw new ArgumentNullException(nameof(service));
+        }
+
+        return _host.RegisterService(_extensionId, name, typeof(T), service, priority);
+    }
+
+    public IGameAgentExtensionRegistration On<TEvent>(
+        GameAgentExtensionEvent<TEvent> eventKey,
+        GameAgentExtensionEventHandler<TEvent> handler,
+        int priority = 0)
+    {
+        if (eventKey is null)
+        {
+            throw new ArgumentNullException(nameof(eventKey));
+        }
+
+        if (handler is null)
+        {
+            throw new ArgumentNullException(nameof(handler));
+        }
+
+        return _host.RegisterEvent(_extensionId, eventKey, handler, priority);
+    }
+
+    public IGameAgentExtensionRegistration Subscribe<TMessage>(
+        GameAgentExtensionChannel<TMessage> channel,
+        GameAgentExtensionChannelHandler<TMessage> handler,
+        int priority = 0)
+    {
+        if (channel is null)
+        {
+            throw new ArgumentNullException(nameof(channel));
+        }
+
+        if (handler is null)
+        {
+            throw new ArgumentNullException(nameof(handler));
+        }
+
+        return _host.RegisterChannel(_extensionId, channel, handler, priority);
+    }
+
+    public ValueTask PublishAsync<TMessage>(
+        GameAgentExtensionChannel<TMessage> channel,
+        TMessage message,
+        CancellationToken cancellationToken = default) =>
+        _host.PublishChannelAsync(
+            channel ?? throw new ArgumentNullException(nameof(channel)),
+            message,
+            cancellationToken);
+}

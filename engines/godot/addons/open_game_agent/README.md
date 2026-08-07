@@ -11,4 +11,6 @@ Use the typed async methods from C#. `SteerActorAsync` and `AbortActorAsync` wor
 
 The distributable add-on contains its shared runtime DLLs. Generated packages belong in `engines/godot/artifacts` and are not committed.
 
+Persistence, provider, official extension, model-catalog, and external-tool packages are versioned separately so a project can include only what it needs. A permanent model key embedded in an exported game can be extracted; use BYOK, a local endpoint, or developer-issued short-lived credentials.
+
 Full setup, lifecycle, cancellation, and main-thread guidance is in `docs/engine-integration.md` at the repository root.

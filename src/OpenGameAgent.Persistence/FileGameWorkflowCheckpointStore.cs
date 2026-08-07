@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -30,6 +32,7 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(instanceId + Suffix, cancellationToken).ConfigureAwait(false);
             var document = await _files.ReadAsync<CheckpointDocument>(
                 _files.PathFor(instanceId, Suffix),
                 cancellationToken).ConfigureAwait(false);
@@ -66,6 +69,7 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(checkpoint.InstanceId + Suffix, cancellationToken).ConfigureAwait(false);
             var path = _files.PathFor(checkpoint.InstanceId, Suffix);
             var document = await _files.ReadAsync<CheckpointDocument>(path, cancellationToken).ConfigureAwait(false);
             var current = document is null ? null : Decode(document);
@@ -109,7 +113,7 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
 
     private static CheckpointDocument Encode(GameWorkflowCheckpoint checkpoint) => new()
     {
-        FormatVersion = 1,
+        FormatVersion = 2,
         InstanceId = checkpoint.InstanceId,
         Workflow = checkpoint.Workflow,
         Revision = checkpoint.Revision,
@@ -117,11 +121,19 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
         StateJson = checkpoint.StateJson,
         Completed = checkpoint.Completed,
         Error = checkpoint.Error,
+        Invocation = checkpoint.Invocation is null ? null : new InvocationDocument
+        {
+            InputId = checkpoint.Invocation.InputId,
+            Messages = checkpoint.Invocation.Messages.Select(AgentMessageCodec.Encode).ToList(),
+            Complete = checkpoint.Invocation.Complete,
+            Succeeded = checkpoint.Invocation.Succeeded,
+            Error = checkpoint.Invocation.Error,
+        },
     };
 
     private static GameWorkflowCheckpoint Decode(CheckpointDocument document)
     {
-        if (document.FormatVersion != 1)
+        if (document.FormatVersion is not (1 or 2))
         {
             throw new PersistenceException("The workflow checkpoint has an unsupported format.");
         }
@@ -135,7 +147,17 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
                 document.NextStep,
                 document.StateJson,
                 document.Completed,
-                document.Error));
+                document.Error,
+                document.FormatVersion >= 2 && document.Invocation is not null
+                    ? new GameWorkflowInvocationResult(
+                        document.Invocation.InputId,
+                        (document.Invocation.Messages ?? throw new PersistenceException("Workflow invocation messages are missing."))
+                        .Select(AgentMessageCodec.Decode)
+                        .ToArray(),
+                        document.Invocation.Complete,
+                        document.Invocation.Succeeded,
+                        document.Invocation.Error)
+                    : null));
     }
 
     private sealed class CheckpointDocument
@@ -153,6 +175,21 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
         public string StateJson { get; set; } = "{}";
 
         public bool Completed { get; set; }
+
+        public string? Error { get; set; }
+
+        public InvocationDocument? Invocation { get; set; }
+    }
+
+    private sealed class InvocationDocument
+    {
+        public string InputId { get; set; } = string.Empty;
+
+        public List<MessageDocument>? Messages { get; set; }
+
+        public bool Complete { get; set; }
+
+        public bool Succeeded { get; set; }
 
         public string? Error { get; set; }
     }

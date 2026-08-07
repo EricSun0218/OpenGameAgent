@@ -10,16 +10,22 @@ namespace OpenGameAgent.Persistence;
 
 public sealed class DirectoryGameSkillSource : IGameSkillSource
 {
+    private static readonly JsonSerializerOptions ManifestSerializerOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
     private readonly string _root;
     private readonly int _maximumSkills;
     private readonly int _maximumManifestCharacters;
     private readonly int _maximumInstructionsCharacters;
+    private readonly int _maximumScannedDirectories;
 
     public DirectoryGameSkillSource(
         string directory,
         int maximumSkills = 1_000,
         int maximumManifestCharacters = 100_000,
-        int maximumInstructionsCharacters = 1_000_000)
+        int maximumInstructionsCharacters = 1_000_000,
+        int maximumScannedDirectories = 10_000)
     {
         if (string.IsNullOrWhiteSpace(directory))
         {
@@ -41,6 +47,11 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             throw new ArgumentOutOfRangeException(nameof(maximumInstructionsCharacters));
         }
 
+        if (maximumScannedDirectories <= 0 || maximumScannedDirectories > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumScannedDirectories));
+        }
+
         _root = Path.GetFullPath(directory);
         if (!Directory.Exists(_root))
         {
@@ -50,6 +61,7 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         _maximumSkills = maximumSkills;
         _maximumManifestCharacters = maximumManifestCharacters;
         _maximumInstructionsCharacters = maximumInstructionsCharacters;
+        _maximumScannedDirectories = maximumScannedDirectories;
         _ = LoadManifests();
     }
 
@@ -79,7 +91,7 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
 
     private IReadOnlyList<Manifest> LoadManifests()
     {
-        var manifests = EnumerateSkillDescriptors()
+        var manifests = EnumerateSkillDescriptors(_maximumScannedDirectories)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Take(_maximumSkills + 1)
             .ToArray();
@@ -141,10 +153,9 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         {
             using var document = JsonDocument.Parse(manifestText, new JsonDocumentOptions { MaxDepth = 128 });
             EnsureManifestIsUnambiguous(document.RootElement, manifestPath);
-            manifest = JsonSerializer.Deserialize<ManifestDocument>(document.RootElement.GetRawText(), new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-            }) ?? throw new PersistenceException("A skill manifest is empty.");
+            manifest = JsonSerializer.Deserialize<ManifestDocument>(
+                document.RootElement.GetRawText(),
+                ManifestSerializerOptions) ?? throw new PersistenceException("A skill manifest is empty.");
         }
         catch (JsonException exception)
         {
@@ -259,6 +270,12 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             throw new PersistenceException($"Skill file '{path}' requires a description.");
         }
 
+        ValidatePortableSkillName(name, path);
+        if (description.Length > 1_024)
+        {
+            throw new PersistenceException($"Skill file '{path}' has a description longer than 1024 characters.");
+        }
+
         var document = new ManifestDocument
         {
             Id = name,
@@ -298,7 +315,7 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         foreach (var rawLine in text.Split('\n'))
         {
             var line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal))
+            if (line.Length == 0 || line.StartsWith('#'))
             {
                 continue;
             }
@@ -312,8 +329,8 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             var key = line.Substring(0, separator).Trim();
             var value = line.Substring(separator + 1).Trim();
             if (value.Length >= 2
-                && ((value.StartsWith("\"", StringComparison.Ordinal) && value.EndsWith("\"", StringComparison.Ordinal))
-                || (value.StartsWith("'", StringComparison.Ordinal) && value.EndsWith("'", StringComparison.Ordinal)))
+                && ((value.StartsWith('"') && value.EndsWith('"'))
+                || (value.StartsWith('\'') && value.EndsWith('\'')))
                )
             {
                 value = value.Substring(1, value.Length - 2);
@@ -328,21 +345,22 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         return values;
     }
 
-    private IEnumerable<string> EnumerateSkillDescriptors()
+    private IEnumerable<string> EnumerateSkillDescriptors(int maximumScannedDirectories)
     {
-        var rootJson = Path.Combine(_root, "skill.json");
-        var rootMarkdown = Path.Combine(_root, "SKILL.md");
-        if (File.Exists(rootJson))
+        var pending = new Stack<string>();
+        pending.Push(_root);
+        var scanned = 0;
+        while (pending.Count > 0)
         {
-            yield return rootJson;
-        }
-        else if (File.Exists(rootMarkdown))
-        {
-            yield return rootMarkdown;
-        }
+            var directory = pending.Pop();
+            scanned++;
+            if (scanned > maximumScannedDirectories)
+            {
+                throw new GameRuntimeLimitException(
+                    nameof(maximumScannedDirectories),
+                    "The skill directory tree exceeds its configured scan limit.");
+            }
 
-        foreach (var directory in Directory.EnumerateDirectories(_root, "*", SearchOption.TopDirectoryOnly))
-        {
             if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
             {
                 continue;
@@ -353,11 +371,45 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             if (File.Exists(json))
             {
                 yield return json;
+                continue;
             }
-            else if (File.Exists(markdown))
+
+            if (File.Exists(markdown))
             {
                 yield return markdown;
+                continue;
             }
+
+            var children = Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly)
+                .Where(path =>
+                {
+                    var name = Path.GetFileName(path);
+                    return !name.StartsWith('.')
+                        && !string.Equals(name, "node_modules", StringComparison.OrdinalIgnoreCase)
+                        && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0;
+                })
+                .OrderByDescending(path => path, StringComparer.Ordinal)
+                .ToArray();
+            foreach (var child in children)
+            {
+                pending.Push(child);
+            }
+        }
+    }
+
+    private static void ValidatePortableSkillName(string name, string path)
+    {
+        if (name.Length > 64
+            || name.StartsWith('-')
+            || name.EndsWith('-')
+            || name.Contains("--", StringComparison.Ordinal)
+            || name.Any(character =>
+                character is not (>= 'a' and <= 'z')
+                && character is not (>= '0' and <= '9')
+                && character != '-'))
+        {
+            throw new PersistenceException(
+                $"Skill file '{path}' requires a lowercase name of at most 64 letters, digits, or single hyphens.");
         }
     }
 

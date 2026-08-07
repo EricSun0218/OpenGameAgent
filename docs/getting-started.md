@@ -62,6 +62,24 @@ var runtime = new GameAgentRuntime(options);
 
 `GameAgentRuntimeOptions` is snapshotted by the constructor. Build a new runtime to deploy a different model, prompt, tool set, or limit policy.
 
+For a composition that third-party packages can extend, use the one-shot builder:
+
+```csharp
+var runtime = new GameAgentBuilder(provider, modelName)
+    .UseInstructions("Use supplied game state as truth. Mutations require tools.")
+    .UseSessionStore(new FileGameSessionStore(sessionDirectory))
+    .UseExtension(new ToolPolicyExtension(new[] { gamePolicy }))
+    .UseExtension(new GameMemoryExtension(memoryStore, recallQueryFactory))
+    .Configure(options =>
+    {
+        options.ContextProvider = contextProvider;
+        options.ToolProvider = toolProvider;
+    })
+    .Build();
+```
+
+The builder can only build once. Extensions can contribute prompt fragments, context, tools, skills, routes, workflows, hooks, providers, services, and typed lifecycle handlers without changing the kernel. Register optional features this way rather than adding them to every run.
+
 ## Supply context
 
 Implement `IGameContextProvider`. Return only data this actor is allowed to observe, and include versions when they help the model reason about freshness.
@@ -140,7 +158,21 @@ Inspect the region and estimate resources before placing a blueprint.
 
 For game-specific selection, use `skill.json` with `id`, `name`, optional `inputTypes`, `toolNames`, `priority`, and `instructionsFile` fields. The default instruction file is `instructions.md`. The `SKILL.md` loader supports scalar front matter; use the JSON manifest when richer metadata is needed.
 
+The directory loader scans nested skill folders, rejects paths that escape the selected skill directory, and loads instructions only for selected skills. Imported instructions are untrusted content; they do not install code or grant tool permission.
+
 After any tool turn, the runtime refreshes game context, tools, and selected skills before asking the model to continue. Set `RefreshContextAfterToolTurns = false` only when a game supplies immutable turn context or implements replacement context in `AgentHooks.PrepareNextTurnAsync`.
+
+## Keep large catalogs and outputs out of context
+
+Use `ToolCatalogExtension` for game-owned catalogs that are too large to expose on every turn. Use `McpToolConnectorExtension` for external tool servers; its default `OnDemand` mode exposes one fixed search/describe/call tool and connects only when the model invokes it. Choose `GameMcpToolExposure.Direct` only for a small trusted catalog whose native schemas should always be visible.
+
+Use `ArtifactExtension` when tools can return large text or JSON. Results above its configured threshold are saved by `IGameAgentArtifactStore` and replaced inline with a bounded artifact handle and preview. The model can retrieve the artifact when it actually needs the full value. This preserves the canonical result while preventing one observation from consuming the remaining context window.
+
+## Choose models and credentials
+
+`OpenGameAgent.Models` describes input/output capabilities, context and output limits, reasoning levels, availability, and cost separately from the core provider interface. A `GameModelCatalog` can combine static and dynamically refreshed local or remote providers and resolve a compatible model for a run.
+
+Authentication is replaceable: static credentials, environment resolution, game-owned credential stores, or local/no-auth providers can share the same catalog. If the developer pays for inference, use `DeveloperGatewayProvider` to obtain short-lived scoped access from the developer's authenticated gateway. Never ship a permanent upstream provider key in a client build.
 
 ## Steer or abort an active actor
 

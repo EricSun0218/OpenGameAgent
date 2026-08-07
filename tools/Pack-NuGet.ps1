@@ -22,7 +22,10 @@ $projects = @(
     'src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj',
     'src/OpenGameAgent.Providers.OpenAICompatible/OpenGameAgent.Providers.OpenAICompatible.csproj',
     'src/OpenGameAgent.Providers.MediaHttp/OpenGameAgent.Providers.MediaHttp.csproj',
-    'src/OpenGameAgent.Client/OpenGameAgent.Client.csproj'
+    'src/OpenGameAgent.Client/OpenGameAgent.Client.csproj',
+    'src/OpenGameAgent.Extensions/OpenGameAgent.Extensions.csproj',
+    'src/OpenGameAgent.Models/OpenGameAgent.Models.csproj',
+    'src/OpenGameAgent.Connectors.Mcp/OpenGameAgent.Connectors.Mcp.csproj'
 )
 
 foreach ($project in $projects) {

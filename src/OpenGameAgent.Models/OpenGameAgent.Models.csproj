@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Optional provider catalog, model capability, reasoning, and credential runtime for OpenGameAgent.</Description>
+    <PackageId>OpenGameAgent.Models</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+  </ItemGroup>
+</Project>

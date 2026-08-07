@@ -134,7 +134,8 @@ public sealed class GameWorkflowCheckpoint
         int nextStep,
         string stateJson,
         bool completed = false,
-        string? error = null)
+        string? error = null,
+        GameWorkflowInvocationResult? invocation = null)
     {
         if (revision < 0 || nextStep < 0)
         {
@@ -158,6 +159,7 @@ public sealed class GameWorkflowCheckpoint
 
         Completed = completed;
         Error = error;
+        Invocation = invocation;
     }
 
     public string InstanceId { get; }
@@ -171,6 +173,61 @@ public sealed class GameWorkflowCheckpoint
     public string StateJson { get; }
 
     public bool Completed { get; }
+
+    public string? Error { get; }
+
+    public GameWorkflowInvocationResult? Invocation { get; }
+}
+
+public sealed class GameWorkflowInvocationResult
+{
+    public GameWorkflowInvocationResult(
+        string inputId,
+        IReadOnlyList<AgentMessage> messages,
+        bool complete,
+        bool succeeded = false,
+        string? error = null)
+    {
+        InputId = GameJson.RequireId(inputId, nameof(inputId));
+        var copied = (messages ?? throw new ArgumentNullException(nameof(messages))).ToArray();
+        if (copied.Any(message => message is null))
+        {
+            throw new ArgumentException("Workflow invocation messages cannot contain null entries.", nameof(messages));
+        }
+
+        if (succeeded && (!complete || error is not null))
+        {
+            throw new ArgumentException("Only a completed successful invocation can be marked successful.", nameof(succeeded));
+        }
+
+        if (complete && !succeeded && string.IsNullOrWhiteSpace(error))
+        {
+            throw new ArgumentException("A completed failed invocation requires an error.", nameof(error));
+        }
+
+        if (!complete && error is not null)
+        {
+            throw new ArgumentException("An incomplete invocation cannot carry an error.", nameof(error));
+        }
+
+        if (error is { Length: > 65_536 })
+        {
+            throw new ArgumentException("A workflow invocation error cannot exceed 65,536 characters.", nameof(error));
+        }
+
+        Messages = Array.AsReadOnly(copied);
+        Complete = complete;
+        Succeeded = succeeded;
+        Error = error;
+    }
+
+    public string InputId { get; }
+
+    public IReadOnlyList<AgentMessage> Messages { get; }
+
+    public bool Complete { get; }
+
+    public bool Succeeded { get; }
 
     public string? Error { get; }
 }
@@ -366,17 +423,51 @@ public sealed class DurableGameWorkflow : IGameWorkflow
             throw new InvalidOperationException("The workflow checkpoint points past the end of the workflow.");
         }
 
+        var invocation = checkpoint.Invocation;
+        if (invocation is not null
+            && !string.Equals(invocation.InputId, context.Input.InputId, StringComparison.Ordinal)
+            && !context.Session.ProcessedInputIds.Contains(invocation.InputId, StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Workflow input '{invocation.InputId}' has durable progress that must be replayed before another input can continue this instance.");
+        }
+
+        if (invocation is { Complete: true }
+            && string.Equals(invocation.InputId, context.Input.InputId, StringComparison.Ordinal))
+        {
+            context.ValidateOutput(invocation.Messages);
+            return new GameWorkflowResult(invocation.Messages, invocation.Succeeded, invocation.Error);
+        }
+
         if (checkpoint.Completed)
         {
             return new GameWorkflowResult(Array.Empty<AgentMessage>(), checkpoint.Error is null, checkpoint.Error);
         }
 
-        var messages = new List<AgentMessage>();
+        if (invocation is null
+            || !string.Equals(invocation.InputId, context.Input.InputId, StringComparison.Ordinal))
+        {
+            invocation = new GameWorkflowInvocationResult(
+                context.Input.InputId,
+                Array.Empty<AgentMessage>(),
+                complete: false);
+        }
+
+        var messages = invocation.Messages.ToList();
+        context.ValidateOutput(messages);
         for (var executed = 0; executed < _maximumStepsPerRun; executed++)
         {
             if (checkpoint.NextStep >= _steps.Count)
             {
-                checkpoint = await SaveAsync(checkpoint, checkpoint.NextStep, checkpoint.StateJson, completed: true, null, cancellationToken).ConfigureAwait(false);
+                invocation = CompleteInvocation(context.Input.InputId, messages, succeeded: true, error: null);
+                checkpoint = await SaveAsync(
+                    checkpoint,
+                    checkpoint.NextStep,
+                    checkpoint.StateJson,
+                    completed: true,
+                    error: null,
+                    invocation: invocation,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
                 return new GameWorkflowResult(messages, true);
             }
 
@@ -396,12 +487,25 @@ public sealed class DurableGameWorkflow : IGameWorkflow
                 ? checkpoint.NextStep
                 : checkpoint.NextStep + 1;
             var completed = result.Status is GameWorkflowStepStatus.Complete or GameWorkflowStepStatus.Failed;
+            invocation = result.Status is GameWorkflowStepStatus.Wait
+                or GameWorkflowStepStatus.Complete
+                or GameWorkflowStepStatus.Failed
+                ? CompleteInvocation(
+                    context.Input.InputId,
+                    messages,
+                    succeeded: result.Status != GameWorkflowStepStatus.Failed,
+                    error: result.Error)
+                : new GameWorkflowInvocationResult(
+                    context.Input.InputId,
+                    messages,
+                    complete: false);
             checkpoint = await SaveAsync(
                 checkpoint,
                 nextStep,
                 result.StateJson,
                 completed,
                 result.Error,
+                invocation,
                 cancellationToken).ConfigureAwait(false);
 
             if (result.Status == GameWorkflowStepStatus.Wait)
@@ -420,7 +524,17 @@ public sealed class DurableGameWorkflow : IGameWorkflow
             }
         }
 
-        return new GameWorkflowResult(messages, false, "The workflow reached its per-run step limit.");
+        const string limitError = "The workflow reached its per-run step limit.";
+        invocation = CompleteInvocation(context.Input.InputId, messages, succeeded: false, error: limitError);
+        _ = await SaveAsync(
+            checkpoint,
+            checkpoint.NextStep,
+            checkpoint.StateJson,
+            completed: false,
+            error: null,
+            invocation: invocation,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return new GameWorkflowResult(messages, false, limitError);
     }
 
     private async ValueTask<GameWorkflowCheckpoint> SaveAsync(
@@ -429,6 +543,7 @@ public sealed class DurableGameWorkflow : IGameWorkflow
         string stateJson,
         bool completed,
         string? error,
+        GameWorkflowInvocationResult invocation,
         CancellationToken cancellationToken)
     {
         var next = new GameWorkflowCheckpoint(
@@ -438,7 +553,8 @@ public sealed class DurableGameWorkflow : IGameWorkflow
             nextStep,
             stateJson,
             completed,
-            error);
+            error,
+            invocation);
         var save = await _checkpoints.SaveAsync(next, current.Revision, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The workflow checkpoint store returned null.");
         if (!save.Saved)
@@ -452,11 +568,20 @@ public sealed class DurableGameWorkflow : IGameWorkflow
             || save.Current.NextStep != next.NextStep
             || save.Current.Completed != next.Completed
             || !string.Equals(save.Current.StateJson, next.StateJson, StringComparison.Ordinal)
-            || !string.Equals(save.Current.Error, next.Error, StringComparison.Ordinal))
+            || !string.Equals(save.Current.Error, next.Error, StringComparison.Ordinal)
+            || !GameAgentValueComparer.WorkflowInvocationEquals(save.Current.Invocation, next.Invocation))
         {
             throw new InvalidOperationException("The workflow checkpoint store returned a different saved checkpoint.");
         }
 
         return save.Current;
     }
+
+    private static GameWorkflowInvocationResult CompleteInvocation(
+        string inputId,
+        IReadOnlyList<AgentMessage> messages,
+        bool succeeded,
+        string? error) =>
+        new(inputId, messages, complete: true, succeeded, error);
+
 }

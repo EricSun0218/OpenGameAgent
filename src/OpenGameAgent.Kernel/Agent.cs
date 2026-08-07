@@ -12,11 +12,11 @@ public sealed class Agent
 {
     private readonly object _gate = new();
     private readonly SemaphoreSlim _eventGate = new(1, 1);
-    private readonly IModelProvider _provider;
+    private IModelProvider _provider;
     private readonly AgentLimits _limits;
-    private readonly AgentHooks _hooks;
+    private AgentHooks _hooks;
     private ModelParameters _parameters;
-    private readonly ToolExecutionMode _toolExecution;
+    private ToolExecutionMode _toolExecution;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Func<string> _runIdFactory;
     private readonly string? _sessionId;
@@ -45,7 +45,8 @@ public sealed class Agent
             throw new ArgumentNullException(nameof(options));
         }
 
-        _limits = options.Limits?.Copy() ?? throw new ArgumentNullException(nameof(options.Limits));
+        _limits = options.Limits?.Copy()
+            ?? throw new ArgumentException("Agent limits are required.", nameof(options));
         ValidateQueueMode(options.SteeringMode, nameof(options.SteeringMode));
         ValidateQueueMode(options.FollowUpMode, nameof(options.FollowUpMode));
         ValidateToolExecutionMode(options.ToolExecution, nameof(options.ToolExecution));
@@ -58,10 +59,12 @@ public sealed class Agent
             options.RunIdFactory);
         _provider = options.Provider;
         _model = options.Model;
-        _systemPrompt = options.SystemPrompt ?? throw new ArgumentNullException(nameof(options.SystemPrompt));
+        _systemPrompt = options.SystemPrompt
+            ?? throw new ArgumentException("A system prompt value is required.", nameof(options));
         _sessionId = options.SessionId;
         _parameters = options.Parameters.Copy();
-        _hooks = CopyHooks(options.Hooks ?? throw new ArgumentNullException(nameof(options.Hooks)));
+        _hooks = CopyHooks(options.Hooks
+            ?? throw new ArgumentException("Agent hooks are required.", nameof(options)));
         _toolExecution = options.ToolExecution;
         _clock = options.Clock;
         _runIdFactory = options.RunIdFactory;
@@ -80,6 +83,7 @@ public sealed class Agent
             {
                 return new AgentState(
                     _systemPrompt,
+                    _provider,
                     _model,
                     _parameters,
                     _tools,
@@ -170,18 +174,21 @@ public sealed class Agent
             if (_messages[_messages.Count - 1].Role == AgentRole.Assistant)
             {
                 IReadOnlyList<AgentMessage> queuedPrompts = _steering.Drain();
-                if (queuedPrompts.Count == 0)
+                if (queuedPrompts.Count > 0)
                 {
-                    queuedPrompts = _followUps.Drain();
+                    return StartRun(
+                        (context, options, emit, token) => AgentLoop.RunQueuedAsync(queuedPrompts, context, options, emit, token),
+                        cancellationToken);
                 }
 
+                queuedPrompts = _followUps.Drain();
                 if (queuedPrompts.Count == 0)
                 {
                     throw new InvalidOperationException("Cannot continue from an assistant message without queued input.");
                 }
 
                 return StartRun(
-                    (context, options, emit, token) => AgentLoop.RunQueuedAsync(queuedPrompts, context, options, emit, token),
+                    (context, options, emit, token) => AgentLoop.RunAsync(queuedPrompts, context, options, emit, token),
                     cancellationToken);
             }
 
@@ -252,6 +259,10 @@ public sealed class Agent
         {
             // Run completion won the race after the cancellation source was captured.
         }
+        catch (AggregateException)
+        {
+            // A cancellation callback cannot prevent the abort request from being recorded.
+        }
     }
 
     public bool TryAbort()
@@ -276,6 +287,11 @@ public sealed class Agent
         {
             return false;
         }
+        catch (AggregateException)
+        {
+            // Cancellation was requested even though a callback failed.
+            return true;
+        }
     }
 
     public Task WaitForIdleAsync()
@@ -296,6 +312,22 @@ public sealed class Agent
         }
     }
 
+    public void SetModel(IModelProvider provider, string model)
+    {
+        if (provider is null)
+        {
+            throw new ArgumentNullException(nameof(provider));
+        }
+
+        lock (_gate)
+        {
+            EnsureIdle();
+            AgentValidator.ValidateOptions(model, _sessionId, _parameters, _limits, _clock, _runIdFactory);
+            _provider = provider;
+            _model = model;
+        }
+    }
+
     public void SetModelParameters(ModelParameters parameters)
     {
         if (parameters is null)
@@ -308,6 +340,30 @@ public sealed class Agent
             EnsureIdle();
             AgentValidator.ValidateOptions(_model, _sessionId, parameters, _limits, _clock, _runIdFactory);
             _parameters = parameters.Copy();
+        }
+    }
+
+    public void SetHooks(AgentHooks hooks)
+    {
+        if (hooks is null)
+        {
+            throw new ArgumentNullException(nameof(hooks));
+        }
+
+        lock (_gate)
+        {
+            EnsureIdle();
+            _hooks = CopyHooks(hooks);
+        }
+    }
+
+    public void SetToolExecution(ToolExecutionMode toolExecution)
+    {
+        ValidateToolExecutionMode(toolExecution, nameof(toolExecution));
+        lock (_gate)
+        {
+            EnsureIdle();
+            _toolExecution = toolExecution;
         }
     }
 
@@ -412,7 +468,7 @@ public sealed class Agent
             lock (_gate)
             {
                 subscriberErrors = _runSubscriberErrors.ToArray();
-                if (subscriberErrors.Length > 0)
+                if (subscriberErrors.Length > 0 && _error is null)
                 {
                     _error = "One or more agent event subscribers failed.";
                 }
@@ -484,7 +540,7 @@ public sealed class Agent
 
     private async ValueTask ProcessEventAsync(AgentEvent agentEvent, CancellationToken cancellationToken)
     {
-        await _eventGate.WaitAsync().ConfigureAwait(false);
+        await _eventGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
             Subscriber[] subscribers;
@@ -548,7 +604,13 @@ public sealed class Agent
                 {
                     lock (_gate)
                     {
-                        _runSubscriberErrors.Add(exception.Message);
+                        var error = exception.Message ?? exception.GetType().Name;
+                        if (error.Length > _limits.MaxTextCharactersPerPart)
+                        {
+                            error = error.Substring(0, _limits.MaxTextCharactersPerPart);
+                        }
+
+                        _runSubscriberErrors.Add(error);
                         _subscribers.RemoveAll(candidate => candidate.Id == subscriber.Id);
                     }
                 }

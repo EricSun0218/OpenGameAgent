@@ -21,9 +21,9 @@ public sealed class HttpMediaGeneratorOptions
     {
         HttpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         Endpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
-        if (!endpoint.IsAbsoluteUri)
+        if (!endpoint.IsAbsoluteUri || endpoint.UserInfo.Length > 0)
         {
-            throw new ArgumentException("The media endpoint must be an absolute URI.", nameof(endpoint));
+            throw new ArgumentException("The media endpoint must be absolute and cannot contain user information.", nameof(endpoint));
         }
 
 
@@ -61,6 +61,8 @@ public sealed class HttpMediaGeneratorOptions
     public bool RestrictStatusUrlToEndpointOrigin { get; set; } = true;
 
     public bool SendAuthorizationToCrossOriginStatusUrls { get; set; }
+
+    public bool AllowInsecureHttp { get; set; }
 }
 
 public sealed class HttpMediaGenerator : IGameMediaGenerator
@@ -79,6 +81,7 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
     private readonly TimeSpan _pollInterval;
     private readonly bool _restrictStatusOrigin;
     private readonly bool _sendCrossOriginAuthorization;
+    private readonly bool _allowInsecureHttp;
 
     public HttpMediaGenerator(HttpMediaGeneratorOptions options)
     {
@@ -89,32 +92,32 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
 
         if (options.MaxResponseBytes < 2 || options.MaxResponseBytes > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxResponseBytes));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum response size is invalid.");
         }
 
         if (options.MaxRequestBytes < 2 || options.MaxRequestBytes > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRequestBytes));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum request size is invalid.");
         }
 
         if (options.MaxSources < 0 || options.MaxSources > 10_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxSources));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum source count is invalid.");
         }
 
         if (options.MaxOutputs < 1 || options.MaxOutputs > 10_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxOutputs));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum output count is invalid.");
         }
 
         if (options.MaxPollAttempts < 1 || options.MaxPollAttempts > 100_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxPollAttempts));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum poll count is invalid.");
         }
 
         if (options.PollInterval < TimeSpan.Zero || options.PollInterval > TimeSpan.FromMinutes(5))
         {
-            throw new ArgumentOutOfRangeException(nameof(options.PollInterval));
+            throw new ArgumentOutOfRangeException(nameof(options), "The polling interval is invalid.");
         }
 
 
@@ -124,25 +127,38 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
             || (!string.Equals(options.Endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(options.Endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
         {
-            throw new ArgumentException("The media endpoint must be an absolute HTTP or HTTPS URI.", nameof(options.Endpoint));
+            throw new ArgumentException("The media endpoint must be an absolute HTTP or HTTPS URI.", nameof(options));
         }
 
-        if (!IsValidHeaderName(options.ApiKeyHeader))
+        if (string.Equals(options.Endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && !options.Endpoint.IsLoopback
+            && !options.AllowInsecureHttp)
         {
-            throw new ArgumentException("A valid media API key header is required.", nameof(options.ApiKeyHeader));
+            throw new ArgumentException(
+                "Remote media endpoints must use HTTPS unless insecure HTTP is explicitly enabled.",
+                nameof(options));
+        }
+
+        if (!IsValidHeaderName(options.ApiKeyHeader) || options.ApiKeyHeader.Length > 256)
+        {
+            throw new ArgumentException("A valid media API key header is required.", nameof(options));
         }
 
         if ((options.ApiKey?.Contains('\r') ?? false)
             || (options.ApiKey?.Contains('\n') ?? false)
+            || (options.ApiKey?.Contains('\0') ?? false)
+            || (options.ApiKey?.Length ?? 0) > 65_536
             || (options.ApiKeyScheme?.Contains('\r') ?? false)
-            || (options.ApiKeyScheme?.Contains('\n') ?? false))
+            || (options.ApiKeyScheme?.Contains('\n') ?? false)
+            || (options.ApiKeyScheme?.Contains('\0') ?? false)
+            || (options.ApiKeyScheme?.Length ?? 0) > 256)
         {
-            throw new ArgumentException("Media API credentials cannot contain line breaks.", nameof(options.ApiKey));
+            throw new ArgumentException("Media API credentials cannot contain line breaks.", nameof(options));
         }
 
         if (options.ApiKey is { Length: > 0 } && string.IsNullOrWhiteSpace(options.ApiKey))
         {
-            throw new ArgumentException("A configured media API key cannot contain only whitespace.", nameof(options.ApiKey));
+            throw new ArgumentException("A configured media API key cannot contain only whitespace.", nameof(options));
         }
 
         _httpClient = options.HttpClient;
@@ -150,7 +166,7 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
         _apiKey = options.ApiKey;
         _getApiKey = options.GetApiKeyAsync;
         _apiKeyHeader = string.IsNullOrWhiteSpace(options.ApiKeyHeader)
-            ? throw new ArgumentException("A media API key header is required.", nameof(options.ApiKeyHeader))
+            ? throw new ArgumentException("A media API key header is required.", nameof(options))
             : options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;
         _maxResponseBytes = options.MaxResponseBytes;
@@ -161,6 +177,7 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
         _pollInterval = options.PollInterval;
         _restrictStatusOrigin = options.RestrictStatusUrlToEndpointOrigin;
         _sendCrossOriginAuthorization = options.SendAuthorizationToCrossOriginStatusUrls;
+        _allowInsecureHttp = options.AllowInsecureHttp;
     }
 
     private static bool IsValidHeaderName(string? name)
@@ -240,7 +257,7 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
 
             if (current.Status == MediaJobStatus.Failed)
             {
-                throw new MediaGenerationException(current.Error ?? "The media generation job failed.");
+                throw new MediaGenerationException(BoundError(current.Error ?? "The media generation job failed."));
             }
 
             if (attempt >= _maxPollAttempts)
@@ -373,7 +390,8 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
             var httpError = root.TryGetProperty("error", out var errorElement)
                 ? errorElement.ToString()
                 : root.GetRawText();
-            throw new MediaGenerationException($"The media endpoint returned HTTP {(int)httpStatus}. {httpError}");
+            throw new MediaGenerationException(BoundError(
+                $"The media endpoint returned HTTP {(int)httpStatus}. {httpError}"));
         }
 
         var statusText = root.TryGetProperty("status", out var statusElement)
@@ -459,6 +477,13 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
             throw new MediaGenerationException("The media status URL must use HTTP or HTTPS.");
         }
 
+        if (string.Equals(statusUrl.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && !statusUrl.IsLoopback
+            && !_allowInsecureHttp)
+        {
+            throw new MediaGenerationException("Remote media status URLs must use HTTPS.");
+        }
+
         if (_restrictStatusOrigin && !IsSameOrigin(statusUrl))
         {
             throw new MediaGenerationException("The media status URL points to a different origin.");
@@ -483,7 +508,10 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
         var apiKey = _getApiKey is null
             ? _apiKey
             : await _getApiKey(cancellationToken).ConfigureAwait(false);
-        if ((apiKey?.Contains('\r') ?? false) || (apiKey?.Contains('\n') ?? false))
+        if ((apiKey?.Contains('\r') ?? false)
+            || (apiKey?.Contains('\n') ?? false)
+            || (apiKey?.Contains('\0') ?? false)
+            || (apiKey?.Length ?? 0) > 65_536)
         {
             throw new InvalidOperationException("The media API key provider returned a credential containing line breaks.");
         }
@@ -518,7 +546,7 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var read = await source.ReadAsync(rented, 0, rented.Length, cancellationToken).ConfigureAwait(false);
+                var read = await source.ReadAsync(rented.AsMemory(), cancellationToken).ConfigureAwait(false);
                 if (read == 0)
                 {
                     break;
@@ -529,7 +557,7 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
                     throw new MediaGenerationException("The media endpoint response exceeded the configured size limit.");
                 }
 
-                await buffer.WriteAsync(rented, 0, read, cancellationToken).ConfigureAwait(false);
+                await buffer.WriteAsync(rented.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
             }
 
             buffer.Position = 0;
@@ -578,6 +606,9 @@ public sealed class HttpMediaGenerator : IGameMediaGenerator
             }
         }
     }
+
+    private static string BoundError(string value) =>
+        value.Length <= 65_536 ? value : value.Substring(0, 65_536);
 
     private sealed class RequestDocument
     {

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,16 +8,15 @@ namespace OpenGameAgent.Server;
 
 public static class ServerEndpoints
 {
+    public const int DefaultMaximumRequestBodyBytes = 8_000_000;
+
     public static IApplicationBuilder UseOpenGameAgentApiKey(
         this IApplicationBuilder app,
         string? apiKey,
         string headerName = "Authorization",
         string scheme = "Bearer")
     {
-        if (app is null)
-        {
-            throw new ArgumentNullException(nameof(app));
-        }
+        ArgumentNullException.ThrowIfNull(app);
 
         if (string.IsNullOrEmpty(apiKey))
         {
@@ -28,17 +28,25 @@ public static class ServerEndpoints
             throw new ArgumentException("A configured API key cannot contain only whitespace.", nameof(apiKey));
         }
 
-        if (!IsValidHeaderName(headerName))
+        if (apiKey.Length > 65_536)
+        {
+            throw new ArgumentException("A configured API key cannot exceed 65536 characters.", nameof(apiKey));
+        }
+
+        if (!IsValidHeaderName(headerName) || headerName.Length > 256)
         {
             throw new ArgumentException("A valid API key header name is required.", nameof(headerName));
         }
 
         if (apiKey.Contains('\r')
             || apiKey.Contains('\n')
+            || apiKey.Contains('\0')
             || (scheme?.Contains('\r') ?? false)
-            || (scheme?.Contains('\n') ?? false))
+            || (scheme?.Contains('\n') ?? false)
+            || (scheme?.Contains('\0') ?? false)
+            || (scheme?.Length ?? 0) > 256)
         {
-            throw new ArgumentException("API key credentials cannot contain line breaks.", nameof(apiKey));
+            throw new ArgumentException("API key credentials contain invalid characters or exceed their size limit.", nameof(apiKey));
         }
 
         var expected = string.IsNullOrWhiteSpace(scheme) ? apiKey : scheme + " " + apiKey;
@@ -80,8 +88,17 @@ public static class ServerEndpoints
         }
     }
 
-    public static IEndpointRouteBuilder MapOpenGameAgent(this IEndpointRouteBuilder endpoints)
+    public static IEndpointRouteBuilder MapOpenGameAgent(
+        this IEndpointRouteBuilder endpoints,
+        int maximumRequestBodyBytes = DefaultMaximumRequestBodyBytes)
     {
+        ArgumentNullException.ThrowIfNull(endpoints);
+
+        if (maximumRequestBodyBytes < 2 || maximumRequestBodyBytes > 100_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumRequestBodyBytes));
+        }
+
         endpoints.MapGet("/healthz", () => Results.Ok(new { status = "healthy" }));
         endpoints.MapGet("/v1/capabilities", () => Results.Ok(new
         {
@@ -93,24 +110,52 @@ public static class ServerEndpoints
             execution = new[] { "in-process", "server" },
             control = new[] { "steer", "abort" },
         }));
-        endpoints.MapPost("/v1/run", RunAsync);
-        endpoints.MapPost("/v1/run/stream", StreamAsync);
-        endpoints.MapPost("/v1/control/steer", Steer);
-        endpoints.MapPost("/v1/control/abort", Abort);
+        endpoints.MapPost(
+            "/v1/run",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                RunAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/run/stream",
+            (HttpRequest request, GameAgentRuntime runtime, HttpResponse response, CancellationToken cancellationToken) =>
+                StreamAsync(request, runtime, response, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/control/steer",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                SteerAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/control/abort",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                AbortAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
         return endpoints;
     }
 
-    private static IResult Steer(JsonElement requestDocument, GameAgentRuntime runtime)
+    private static async Task<IResult> SteerAsync(
+        HttpRequest httpRequest,
+        GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var request = ParseRequest<ControlRequest>(requestDocument);
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            var request = ParseRequest<ControlRequest>(requestDocument.RootElement);
             var accepted = runtime.TrySteer(
                 request.ToKey(),
                 AgentMessage.UserJson(request.GetPayloadJson()));
             return accepted
                 ? Results.Ok(new { accepted = true })
                 : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
         }
         catch (Exception exception) when (exception is ArgumentException
             or AgentLimitException
@@ -123,17 +168,33 @@ public static class ServerEndpoints
         }
     }
 
-    private static IResult Abort(JsonElement requestDocument, GameAgentRuntime runtime)
+    private static async Task<IResult> AbortAsync(
+        HttpRequest httpRequest,
+        GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var request = ParseRequest<ControlRequest>(requestDocument);
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            var request = ParseRequest<ControlRequest>(requestDocument.RootElement);
             var accepted = runtime.TryAbort(request.ToKey());
             return accepted
                 ? Results.Ok(new { accepted = true })
                 : Results.NotFound(new { accepted = false, error = "actor_not_running" });
         }
-        catch (ArgumentException exception)
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
         {
             return Results.Json(
                 new { accepted = false, error = "invalid_request", message = exception.Message },
@@ -142,15 +203,27 @@ public static class ServerEndpoints
     }
 
     private static async Task<IResult> RunAsync(
-        JsonElement requestDocument,
+        HttpRequest httpRequest,
         GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
         CancellationToken cancellationToken)
     {
         GameInput input;
         try
         {
-            var request = ParseRequest<RunRequest>(requestDocument);
-            input = request.ToInput();
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            input = GameAgentWire.ParseInput(requestDocument.RootElement.GetRawText());
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
         }
         catch (Exception exception) when (exception is ArgumentException or GameRuntimeLimitException or JsonException)
         {
@@ -176,16 +249,36 @@ public static class ServerEndpoints
     }
 
     private static async Task StreamAsync(
-        JsonElement requestDocument,
+        HttpRequest httpRequest,
         GameAgentRuntime runtime,
         HttpResponse response,
+        int maximumRequestBodyBytes,
         CancellationToken cancellationToken)
     {
         GameInput input;
         try
         {
-            var request = ParseRequest<RunRequest>(requestDocument);
-            input = request.ToInput();
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            input = GameAgentWire.ParseInput(requestDocument.RootElement.GetRawText());
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            await response.WriteAsJsonAsync(
+                new { error = "request_too_large", message = exception.Message },
+                cancellationToken);
+            return;
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            response.StatusCode = StatusCodes.Status415UnsupportedMediaType;
+            await response.WriteAsJsonAsync(
+                new { error = "unsupported_media_type", message = exception.Message },
+                cancellationToken);
+            return;
         }
         catch (Exception exception) when (exception is ArgumentException or GameRuntimeLimitException or JsonException)
         {
@@ -223,8 +316,22 @@ public static class ServerEndpoints
             return;
         }
 
-        var result = await pendingRun;
-        await WriteEventAsync(response, "result", GameAgentWire.SerializeResult(result), cancellationToken);
+        try
+        {
+            var result = await pendingRun;
+            await WriteEventAsync(response, "result", GameAgentWire.SerializeResult(result), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            await WriteEventAsync(
+                response,
+                "error",
+                "{\"error\":\"run_failed\"}",
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static async Task WriteEventAsync(
@@ -240,14 +347,74 @@ public static class ServerEndpoints
 
     private static bool FixedTimeEquals(string supplied, string expected)
     {
-        using var algorithm = SHA256.Create();
-        var suppliedHash = algorithm.ComputeHash(Encoding.UTF8.GetBytes(supplied));
-        var expectedHash = algorithm.ComputeHash(Encoding.UTF8.GetBytes(expected));
+        var suppliedHash = SHA256.HashData(Encoding.UTF8.GetBytes(supplied));
+        var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
         return CryptographicOperations.FixedTimeEquals(suppliedHash, expectedHash);
     }
 
     private static bool IsInvalidRequest(Exception exception) =>
         exception is ArgumentException or AgentLimitException or GameRuntimeLimitException or JsonException;
+
+    private static IResult RequestError(int statusCode, string error, string message) =>
+        Results.Json(new { error, message }, statusCode: statusCode);
+
+    private static async Task<JsonDocument> ReadRequestDocumentAsync(
+        HttpRequest request,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
+    {
+        if (!request.HasJsonContentType())
+        {
+            throw new UnsupportedRequestContentTypeException();
+        }
+
+        if (request.ContentLength > maximumRequestBodyBytes)
+        {
+            throw new RequestBodyTooLargeException(maximumRequestBodyBytes);
+        }
+
+        var initialCapacity = request.ContentLength is > 0
+            ? (int)Math.Min(request.ContentLength.Value, maximumRequestBodyBytes)
+            : Math.Min(4096, maximumRequestBodyBytes);
+        using var body = new MemoryStream(initialCapacity);
+        var buffer = ArrayPool<byte>.Shared.Rent(Math.Min(81_920, maximumRequestBodyBytes + 1));
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var remaining = maximumRequestBodyBytes - body.Length;
+                var requested = (int)Math.Min(buffer.Length, remaining + 1);
+                var read = await request.Body.ReadAsync(
+                    buffer.AsMemory(0, requested),
+                    cancellationToken);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                if (body.Length + read > maximumRequestBodyBytes)
+                {
+                    throw new RequestBodyTooLargeException(maximumRequestBodyBytes);
+                }
+
+                body.Write(buffer, 0, read);
+            }
+
+            if (body.Length == 0)
+            {
+                throw new JsonException("The request body is empty.");
+            }
+
+            return JsonDocument.Parse(
+                body.ToArray(),
+                new JsonDocumentOptions { MaxDepth = 128 });
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
 
     private static T ParseRequest<T>(JsonElement document)
     {
@@ -300,41 +467,22 @@ public static class ServerEndpoints
         PropertyNameCaseInsensitive = true,
     };
 
-}
+    private sealed class RequestBodyTooLargeException : Exception
+    {
+        public RequestBodyTooLargeException(int maximumRequestBodyBytes)
+            : base($"The request body exceeded {maximumRequestBodyBytes} bytes.")
+        {
+        }
+    }
 
-public sealed class RunRequest
-{
-    public string? InputId { get; set; }
+    private sealed class UnsupportedRequestContentTypeException : Exception
+    {
+        public UnsupportedRequestContentTypeException()
+            : base("The request content type must be application/json.")
+        {
+        }
+    }
 
-    public string SessionId { get; set; } = string.Empty;
-
-    public string ActorId { get; set; } = string.Empty;
-
-    public string Type { get; set; } = string.Empty;
-
-    public JsonElement Payload { get; set; }
-
-    public string TimelineId { get; set; } = "default";
-
-    public long Tick { get; set; }
-
-    public JsonElement? Calendar { get; set; }
-
-    public Dictionary<string, string>? Metadata { get; set; }
-
-    public GameInput ToInput() => new(
-        SessionId,
-        ActorId,
-        Type,
-        Payload.ValueKind == JsonValueKind.Undefined ? "{}" : Payload.GetRawText(),
-        new GameMoment(
-            TimelineId,
-            Tick,
-            Calendar is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } calendar
-                ? calendar.GetRawText()
-                : null),
-        InputId,
-        Metadata);
 }
 
 public sealed class ControlRequest

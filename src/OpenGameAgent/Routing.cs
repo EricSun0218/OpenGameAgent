@@ -217,6 +217,7 @@ public sealed class ModelGameRouteClassifier
             {
                 MaxTurns = 1,
                 MaxTotalTokens = 16_384,
+                ModelTimeoutMilliseconds = 15_000,
                 MaxTextCharactersPerPart = 16_384,
                 MaxJsonCharactersPerPart = 1_000_000,
             },

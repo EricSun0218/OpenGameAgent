@@ -86,6 +86,13 @@ public sealed class ToolResult
             throw new ArgumentException("Tool result content cannot contain null parts.", nameof(content));
         }
 
+        if (copied.Any(part => part is ReasoningContent or ToolCallContent))
+        {
+            throw new ArgumentException(
+                "Tool results cannot contain assistant-only reasoning or tool-call parts.",
+                nameof(content));
+        }
+
         Content = Array.AsReadOnly(copied);
         IsError = isError;
         DetailsJson = detailsJson is null ? null : JsonValue.RequireValid(detailsJson, nameof(detailsJson));
@@ -184,6 +191,13 @@ public sealed class AgentTool
     public ToolExecutionMode? ExecutionMode { get; }
 
     public Func<JsonElement, string?>? ConflictKey { get; }
+
+    public string? ValidateArguments(string argumentsJson)
+    {
+        var valid = JsonValue.RequireObject(argumentsJson, nameof(argumentsJson));
+        using var document = JsonDocument.Parse(valid);
+        return Validate(document.RootElement);
+    }
 
     internal string? Validate(JsonElement arguments)
     {

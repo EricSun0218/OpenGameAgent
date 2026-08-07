@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,6 +37,10 @@ public readonly struct GameSessionKey : IEquatable<GameSessionKey>
 
     public override string ToString() => (SessionId ?? string.Empty) + ":" + (ActorId ?? string.Empty);
 
+    public static bool operator ==(GameSessionKey left, GameSessionKey right) => left.Equals(right);
+
+    public static bool operator !=(GameSessionKey left, GameSessionKey right) => !left.Equals(right);
+
     internal GameSessionKey EnsureValid(string parameterName)
     {
         if (string.IsNullOrWhiteSpace(SessionId) || string.IsNullOrWhiteSpace(ActorId))
@@ -54,7 +59,9 @@ public sealed class GameSessionSnapshot
         long revision,
         IReadOnlyList<AgentMessage>? messages = null,
         IReadOnlyCollection<string>? processedInputIds = null,
-        GameMoment? lastMoment = null)
+        GameMoment? lastMoment = null,
+        IReadOnlyDictionary<string, string>? extensionState = null,
+        string? pendingInputId = null)
     {
         if (revision < 0)
         {
@@ -75,7 +82,27 @@ public sealed class GameSessionSnapshot
             .ToArray();
         Messages = Array.AsReadOnly(copiedMessages);
         ProcessedInputIds = Array.AsReadOnly(copiedInputIds);
+        PendingInputId = pendingInputId is null
+            ? null
+            : GameJson.RequireId(pendingInputId, nameof(pendingInputId));
+        if (PendingInputId is not null && ProcessedInputIds.Contains(PendingInputId, StringComparer.Ordinal))
+        {
+            throw new ArgumentException("A pending input cannot already be marked as processed.", nameof(pendingInputId));
+        }
+
         LastMoment = lastMoment?.EnsureValid(nameof(lastMoment));
+        var copiedExtensionState = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in extensionState ?? new Dictionary<string, string>())
+        {
+            var stateKey = GameJson.RequireId(pair.Key, nameof(extensionState));
+            var value = GameJson.RequireValid(pair.Value, nameof(extensionState));
+            if (!copiedExtensionState.TryAdd(stateKey, value))
+            {
+                throw new ArgumentException($"Duplicate extension state key '{stateKey}'.", nameof(extensionState));
+            }
+        }
+
+        ExtensionState = new ReadOnlyDictionary<string, string>(copiedExtensionState);
     }
 
     public GameSessionKey Key { get; }
@@ -86,7 +113,19 @@ public sealed class GameSessionSnapshot
 
     public IReadOnlyCollection<string> ProcessedInputIds { get; }
 
+    /// <summary>
+    /// Input whose completed tool turns were durably checkpointed but whose agent run has not reached
+    /// a terminal commit. Resubmitting the same input resumes after the checkpoint; a different input
+    /// is rejected until this one is settled or explicitly repaired by the host.
+    /// </summary>
+    public string? PendingInputId { get; }
+
     public GameMoment? LastMoment { get; }
+
+    /// <summary>
+    /// Namespaced extension-owned JSON state. It is persisted but never added to model context automatically.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ExtensionState { get; }
 }
 
 public sealed class GameSessionSaveResult
@@ -189,5 +228,12 @@ public sealed class InMemoryGameSessionStore : IGameSessionStore
     }
 
     private static GameSessionSnapshot Copy(GameSessionSnapshot snapshot) =>
-        new(snapshot.Key, snapshot.Revision, snapshot.Messages, snapshot.ProcessedInputIds, snapshot.LastMoment);
+        new(
+            snapshot.Key,
+            snapshot.Revision,
+            snapshot.Messages,
+            snapshot.ProcessedInputIds,
+            snapshot.LastMoment,
+            snapshot.ExtensionState,
+            snapshot.PendingInputId);
 }
