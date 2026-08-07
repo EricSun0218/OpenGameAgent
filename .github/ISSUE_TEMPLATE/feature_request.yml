@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a reusable Runtime, provider, persistence, or engine-integration capability.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the game-development problem before proposing an API. Game-specific rules and authoritative state changes remain in game code.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What game or integration problem cannot be expressed safely with the current Runtime?
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Concrete use case
+      description: Include actors, typed inputs, tools, timing, concurrency, persistence, and expected outcome where relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Runtime and Agent Loop
+        - Tools, Skills, or memory
+        - Multi-actor or living-world simulation
+        - Provider or generated content
+        - Persistence or remote hosting
+        - Godot integration
+        - Unity integration
+        - Evaluation, observability, or developer experience
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain existing APIs or game-owned code you tried and why they are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Authority, failure, and resource bounds
+      description: Who owns final state, and how should retry, cancellation, recovery, concurrency, and budgets behave?
+    validations:
+      required: true

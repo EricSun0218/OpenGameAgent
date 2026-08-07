@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>OpenGameAgent.Providers.MediaHttp</RootNamespace>
+    <Description>Generic HTTP image, audio, and video generation transport for cloud or local services.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+  </ItemGroup>
+</Project>

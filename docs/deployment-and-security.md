@@ -1,0 +1,80 @@
+# Deployment and security
+
+OpenGameAgent supports in-process and server placement. Choose based on authority, secrets, latency, offline requirements, and operational cost—not engine branding.
+
+## In the engine
+
+Use the local runtime when:
+
+- the game is single-player or peer-authoritative;
+- the player supplies a model endpoint/key;
+- the model endpoint is local;
+- direct game-context access and minimum latency matter more than central control.
+
+The model request does not block the engine frame when awaited correctly, but action handlers must marshal engine mutations to the main thread. A permanent provider key included in a shipped executable, resource, environment file, or managed assembly can be extracted. Running inside Unity or Godot does not protect it.
+
+## In an existing game server
+
+If the game has an authoritative C# server, reference `OpenGameAgent` there directly. This keeps rules, state transactions, operation recovery, and agent execution close together. Engine clients send normal game commands; they do not need to know that an agent produced a decision.
+
+## Separate agent service
+
+Use `OpenGameAgent.Server` when inference credentials, scaling, or agent updates must be centralized. Configure with environment variables or another ASP.NET Core configuration source:
+
+```text
+OpenGameAgent__ModelEndpoint=https://provider.example/v1/chat/completions
+OpenGameAgent__Model=your-model
+OpenGameAgent__ApiKey=provider-secret
+OpenGameAgent__ServerApiKey=game-to-agent-secret
+OpenGameAgent__DataDirectory=/var/lib/opengameagent/sessions
+```
+
+The included service exposes:
+
+- `GET /healthz`
+- `GET /v1/capabilities`
+- `POST /v1/run`
+- `POST /v1/run/stream` (Server-Sent Events)
+- `POST /v1/control/steer`
+- `POST /v1/control/abort`
+
+When `ServerApiKey` is set, run and control endpoints require `Authorization: Bearer <key>`. If it is omitted, those endpoints are unauthenticated; only do that behind an already authenticated trusted boundary. Health and capability endpoints remain public. Control requests only address an already active `(session, actor)` loop; they cannot register tools or mutate game state directly. A player-facing gateway must additionally verify that the authenticated player may address that exact session and actor. Put TLS, request-rate limits, tenant quotas, and abuse protection at the gateway. The included shared-secret gate is a deployment minimum, not an account or actor-authorization system.
+
+The included file stores are appropriate for a single process. Multi-instance services must replace interfaces with transactional shared storage and coordinate actor ownership. Custom session, workflow, action, and ranking implementations are checked at their trust boundaries; inconsistent saved state and cross-session memory candidates are rejected.
+
+## Remote game actions
+
+The included server runs tools that are registered in its process. If authoritative game state lives elsewhere, prefer one of these designs:
+
+1. run the runtime inside the authoritative game server;
+2. implement server-side tools that call authenticated internal game APIs using operation IDs;
+3. let the agent service return a proposal and have the game execute it as a separate command.
+
+Do not create an unauthenticated generic “execute any client action” endpoint. Tool catalogs and permissions are part of the game deployment.
+
+## Untrusted boundaries
+
+Treat all of the following as untrusted or potentially sensitive:
+
+- model output and tool arguments;
+- imported skill instructions;
+- player-authored prompts and structured payloads;
+- remote resources and generated-media URLs;
+- provider errors and streamed event sizes;
+- stored transcripts, memory, and game context.
+
+Always expose narrow tools with JSON Schema, revalidate in game code, and enforce permissions independently of prompts. Do not expose arbitrary shell, code execution, filesystem, network proxy, reflection, or unrestricted asset-write tools to game content.
+
+## Data and retention
+
+The local stores are not encrypted. Put them in an access-controlled game save or service data directory. Decide which prompts, context, memories, generated assets, and provider identifiers may contain player data. Implement retention, export, deletion, consent, and regional handling for your product. The included stores retain completed records needed for deduplication and recovery and do not provide a generic purge policy; archive them only when the game can prove their replay-safety window has ended.
+
+Never log credentials. Avoid logging full prompts and tool payloads in production unless the player has consented and access is controlled.
+
+Use provider endpoints without URI-embedded credentials. If an `HttpClient` follows redirects, configure its handler so authentication and sensitive custom headers cannot be forwarded to an untrusted origin; prefer fixed provider endpoints and deny unexpected redirects.
+
+## Limits and cancellation
+
+Keep runtime limits below the maximum values accepted by the framework. Set tighter limits for user-authored content, including provider response characters and tool calls per response. A canceled or timed-out write may have committed: reconcile by operation ID. Read-only work may be retried; non-idempotent writes must not be retried blindly.
+
+See [SECURITY.md](../SECURITY.md) for vulnerability reporting.

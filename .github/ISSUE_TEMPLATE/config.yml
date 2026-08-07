@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and integration help
+    url: https://github.com/EricSun0218/OpenGameAgent/discussions
+    about: Ask usage and integration questions in GitHub Discussions.
+  - name: Security vulnerability
+    url: https://github.com/EricSun0218/OpenGameAgent/security/advisories/new
+    about: Report security issues privately.

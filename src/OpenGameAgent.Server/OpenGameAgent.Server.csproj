@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>OpenGameAgent.Server</RootNamespace>
+    <Description>Runnable C# server host for OpenGameAgent.</Description>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Persistence\OpenGameAgent.Persistence.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
+  </ItemGroup>
+</Project>

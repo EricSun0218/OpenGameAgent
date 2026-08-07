@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    name: .NET (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - name: Restore locked dependencies
+        run: dotnet restore OpenGameAgent.sln --locked-mode
+      - name: Build
+        run: dotnet build OpenGameAgent.sln -c Release --no-restore
+      - name: Test
+        run: dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
+      - name: Verify formatting
+        run: dotnet format OpenGameAgent.sln --verify-no-changes --no-restore
+      - name: Pack libraries
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./tools/Pack-NuGet.ps1
+      - name: Validate public tree
+        shell: pwsh
+        run: ./tools/Test-PublicTree.ps1
+
+  engine-packages:
+    name: Engine package gates
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - name: Build Unity compile stubs
+        shell: pwsh
+        run: dotnet build tests/OpenGameAgent.Unity.Stubs/OpenGameAgent.Unity.Stubs.csproj -c Release -o artifacts/unity-stubs
+      - name: Verify Unity package
+        shell: pwsh
+        run: ./engines/unity/test-package.ps1 -UnityManagedDir artifacts/unity-stubs
+      - name: Download Godot .NET
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'godot.zip'
+          Invoke-WebRequest -Uri 'https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_mono_win64.zip' -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA512).Hash.ToLowerInvariant()
+          $expected = 'aa04876c7932c2e6807233e6908da4045e904781a83dc3c793c34ba71c9f66292eb4da82aa55a6b8694fccf856f8c244c7709cfba20405066445daf9c2749b71'
+          if ($actual -ne $expected) { throw 'Godot archive checksum mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'godot')
+      - name: Verify Godot package and editor
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'godot'
+          $editor = Get-ChildItem -LiteralPath $root -Recurse -Filter '*console.exe' | Select-Object -First 1 -ExpandProperty FullName
+          $sharp = Split-Path -Parent (Get-ChildItem -LiteralPath $root -Recurse -Filter GodotSharp.dll | Where-Object FullName -like '*Api*Debug*' | Select-Object -First 1 -ExpandProperty FullName)
+          ./engines/godot/test-package.ps1 -GodotSharpDir $sharp
+          ./engines/godot/test-engine.ps1 -Godot $editor -GodotSharpDir $sharp

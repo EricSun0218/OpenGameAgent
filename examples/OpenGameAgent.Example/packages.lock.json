@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0": {
+      "System.Text.Json": {
+        "type": "Transitive",
+        "resolved": "8.0.6",
+        "contentHash": "BvSpVBsVN9b+Y+wONbvJOHd1HjXQf33+XiC28ZMOwRsYb42mz3Q8YHnpTSwpwJLqYCMqM+0UUVC3V+pi25XfkQ=="
+      },
+      "opengameagent": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.kernel": {
+        "type": "Project",
+        "dependencies": {
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providers.openaicompatible": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,274 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace OpenGameAgent;
+
+public sealed class GameMailboxMessage
+{
+    public GameMailboxMessage(
+        string messageId,
+        string sessionId,
+        string recipientId,
+        string kind,
+        string payloadJson,
+        GameMoment moment,
+        string? senderId = null,
+        string? correlationId = null)
+    {
+        MessageId = GameJson.RequireId(messageId, nameof(messageId));
+        SessionId = GameJson.RequireId(sessionId, nameof(sessionId));
+        RecipientId = GameJson.RequireId(recipientId, nameof(recipientId));
+        Kind = GameJson.RequireId(kind, nameof(kind));
+        PayloadJson = GameJson.RequireValid(payloadJson, nameof(payloadJson));
+        Moment = moment.EnsureValid(nameof(moment));
+        SenderId = senderId is null ? null : GameJson.RequireId(senderId, nameof(senderId));
+        CorrelationId = correlationId is null ? null : GameJson.RequireId(correlationId, nameof(correlationId));
+    }
+
+    public string MessageId { get; }
+
+    public string SessionId { get; }
+
+    public string RecipientId { get; }
+
+    public string Kind { get; }
+
+    public string PayloadJson { get; }
+
+    public GameMoment Moment { get; }
+
+    public string? SenderId { get; }
+
+    public string? CorrelationId { get; }
+}
+
+public sealed class GameMailboxDelivery
+{
+    public GameMailboxDelivery(
+        GameMailboxMessage message,
+        string leaseToken,
+        int attempt,
+        DateTimeOffset operationalLeaseExpiresAt)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        LeaseToken = GameJson.RequireId(leaseToken, nameof(leaseToken));
+        Attempt = attempt > 0 ? attempt : throw new ArgumentOutOfRangeException(nameof(attempt));
+        OperationalLeaseExpiresAt = operationalLeaseExpiresAt;
+    }
+
+    public GameMailboxMessage Message { get; }
+
+    public string LeaseToken { get; }
+
+    public int Attempt { get; }
+
+    public DateTimeOffset OperationalLeaseExpiresAt { get; }
+}
+
+public interface IGameMailbox
+{
+    ValueTask<bool> EnqueueAsync(GameMailboxMessage message, CancellationToken cancellationToken);
+
+    ValueTask<IReadOnlyList<GameMailboxDelivery>> ClaimAsync(
+        string sessionId,
+        string recipientId,
+        int maximum,
+        DateTimeOffset operationalNow,
+        TimeSpan operationalLease,
+        CancellationToken cancellationToken);
+
+    ValueTask CompleteAsync(string messageId, string leaseToken, CancellationToken cancellationToken);
+
+    ValueTask AbandonAsync(string messageId, string leaseToken, CancellationToken cancellationToken);
+}
+
+public sealed class InMemoryGameMailbox : IGameMailbox
+{
+    private readonly object _gate = new();
+    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly int _capacity;
+    private long _sequence;
+
+    public InMemoryGameMailbox(int capacity = 100_000)
+    {
+        if (capacity <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        }
+
+        _capacity = capacity;
+    }
+
+    public ValueTask<bool> EnqueueAsync(GameMailboxMessage message, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (message is null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        lock (_gate)
+        {
+            if (_entries.TryGetValue(message.MessageId, out var existing))
+            {
+                EnsureEquivalent(existing.Message, message);
+                return new ValueTask<bool>(false);
+            }
+
+            if (_entries.Count >= _capacity)
+            {
+                throw new GameRuntimeLimitException(nameof(_capacity), "The game mailbox reached its capacity.");
+            }
+
+            _entries.Add(message.MessageId, new Entry(message, checked(++_sequence)));
+            return new ValueTask<bool>(true);
+        }
+    }
+
+    public ValueTask<IReadOnlyList<GameMailboxDelivery>> ClaimAsync(
+        string sessionId,
+        string recipientId,
+        int maximum,
+        DateTimeOffset operationalNow,
+        TimeSpan operationalLease,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        GameJson.RequireId(sessionId, nameof(sessionId));
+        GameJson.RequireId(recipientId, nameof(recipientId));
+        if (maximum < 0 || maximum > _capacity)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximum));
+        }
+
+        if (operationalLease <= TimeSpan.Zero || operationalLease > TimeSpan.FromDays(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(operationalLease));
+        }
+
+        DateTimeOffset leaseExpiresAt;
+        try
+        {
+            leaseExpiresAt = operationalNow + operationalLease;
+        }
+        catch (ArgumentOutOfRangeException exception)
+        {
+            throw new ArgumentOutOfRangeException(nameof(operationalNow), exception.Message);
+        }
+
+        lock (_gate)
+        {
+            var selected = _entries.Values
+                .Where(entry => !entry.Completed)
+                .Where(entry => entry.LeaseToken is null || entry.LeaseExpiresAt <= operationalNow)
+                .Where(entry => string.Equals(entry.Message.SessionId, sessionId, StringComparison.Ordinal))
+                .Where(entry => string.Equals(entry.Message.RecipientId, recipientId, StringComparison.Ordinal))
+                .OrderBy(entry => entry.Sequence)
+                .Take(maximum)
+                .ToArray();
+            var deliveries = new List<GameMailboxDelivery>(selected.Length);
+            foreach (var entry in selected)
+            {
+                var nextAttempt = checked(entry.Attempts + 1);
+                entry.LeaseToken = Guid.NewGuid().ToString("N");
+                entry.LeaseExpiresAt = leaseExpiresAt;
+                entry.Attempts = nextAttempt;
+                deliveries.Add(new GameMailboxDelivery(
+                    entry.Message,
+                    entry.LeaseToken,
+                    entry.Attempts,
+                    entry.LeaseExpiresAt));
+            }
+
+            return new ValueTask<IReadOnlyList<GameMailboxDelivery>>(deliveries);
+        }
+    }
+
+    public ValueTask CompleteAsync(string messageId, string leaseToken, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var entry = RequireLease(messageId, leaseToken);
+            entry.Completed = true;
+            entry.LeaseToken = null;
+            entry.LeaseExpiresAt = default;
+        }
+
+        return default;
+    }
+
+    public ValueTask AbandonAsync(string messageId, string leaseToken, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var entry = RequireLease(messageId, leaseToken);
+            entry.LeaseToken = null;
+            entry.LeaseExpiresAt = default;
+        }
+
+        return default;
+    }
+
+    private Entry RequireLease(string messageId, string leaseToken)
+    {
+        GameJson.RequireId(messageId, nameof(messageId));
+        GameJson.RequireId(leaseToken, nameof(leaseToken));
+        if (!_entries.TryGetValue(messageId, out var entry))
+        {
+            throw new InvalidOperationException("The mailbox message does not exist.");
+        }
+
+        if (entry.Completed)
+        {
+            throw new InvalidOperationException("The mailbox message is already complete.");
+        }
+
+        if (!string.Equals(entry.LeaseToken, leaseToken, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The mailbox lease token is stale or invalid.");
+        }
+
+        return entry;
+    }
+
+    private static void EnsureEquivalent(GameMailboxMessage left, GameMailboxMessage right)
+    {
+        if (!string.Equals(left.MessageId, right.MessageId, StringComparison.Ordinal)
+            || !string.Equals(left.SessionId, right.SessionId, StringComparison.Ordinal)
+            || !string.Equals(left.RecipientId, right.RecipientId, StringComparison.Ordinal)
+            || !string.Equals(left.SenderId, right.SenderId, StringComparison.Ordinal)
+            || !string.Equals(left.Kind, right.Kind, StringComparison.Ordinal)
+            || !string.Equals(left.PayloadJson, right.PayloadJson, StringComparison.Ordinal)
+            || left.Moment != right.Moment
+            || !string.Equals(left.CorrelationId, right.CorrelationId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("A mailbox message ID cannot be reused for different content.");
+        }
+    }
+
+    private sealed class Entry
+    {
+        public Entry(GameMailboxMessage message, long sequence)
+        {
+            Message = message;
+            Sequence = sequence;
+        }
+
+        public GameMailboxMessage Message { get; }
+
+        public long Sequence { get; }
+
+        public int Attempts { get; set; }
+
+        public string? LeaseToken { get; set; }
+
+        public DateTimeOffset LeaseExpiresAt { get; set; }
+
+        public bool Completed { get; set; }
+    }
+}

@@ -1,0 +1,16 @@
+<Project>
+  <ItemGroup>
+    <Reference Include="OpenGameAgent.Kernel">
+      <HintPath>$(MSBuildThisFileDirectory)lib\OpenGameAgent.Kernel.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OpenGameAgent">
+      <HintPath>$(MSBuildThisFileDirectory)lib\OpenGameAgent.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OpenGameAgent.Client">
+      <HintPath>$(MSBuildThisFileDirectory)lib\OpenGameAgent.Client.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

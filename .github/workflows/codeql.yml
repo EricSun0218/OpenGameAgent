@@ -1,0 +1,31 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 3 * * 2'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - uses: github/codeql-action/init@24c7eb380a2dc368f2d129e4c65e51d172983a1e # v4
+        with:
+          languages: csharp
+          build-mode: manual
+          queries: security-extended
+      - run: dotnet restore OpenGameAgent.sln --locked-mode
+      - run: dotnet build OpenGameAgent.sln -c Release --no-restore
+      - uses: github/codeql-action/analyze@24c7eb380a2dc368f2d129e4c65e51d172983a1e # v4

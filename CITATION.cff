@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If OpenGameAgent supports your research or published work, please cite it using this metadata."
+title: "OpenGameAgent"
+type: software
+authors:
+  - family-names: "Sun"
+    given-names: "Eric"
+repository-code: "https://github.com/EricSun0218/OpenGameAgent"
+url: "https://github.com/EricSun0218/OpenGameAgent"
+license: "Apache-2.0"
+version: "0.3.0-alpha.1"
+keywords:
+  - game AI
+  - AI agents
+  - agent runtime
+  - autonomous NPCs
+  - Godot
+  - Unity
+  - C sharp
+  - multi-agent systems

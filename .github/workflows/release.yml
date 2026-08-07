@@ -1,0 +1,64 @@
+name: Build release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version for the artifacts
+        required: true
+        default: 0.3.0-alpha.1
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw 'The release version is not valid SemVer.'
+          }
+      - run: dotnet restore OpenGameAgent.sln --locked-mode
+      - run: dotnet build OpenGameAgent.sln -c Release --no-restore "-p:Version=${RELEASE_VERSION}"
+      - run: dotnet test OpenGameAgent.sln -c Release --no-build --no-restore "-p:Version=${RELEASE_VERSION}"
+      - shell: pwsh
+        run: ./tools/Pack-NuGet.ps1 -PackageVersion $env:RELEASE_VERSION
+      - run: dotnet publish src/OpenGameAgent.Server/OpenGameAgent.Server.csproj -c Release --no-build --no-restore "-p:Version=${RELEASE_VERSION}" -o artifacts/server
+      - name: Build Unity package
+        shell: pwsh
+        run: |
+          $stubs = Join-Path $env:RUNNER_TEMP 'unity-stubs'
+          dotnet restore tests/OpenGameAgent.Unity.Stubs/OpenGameAgent.Unity.Stubs.csproj --locked-mode
+          dotnet build tests/OpenGameAgent.Unity.Stubs/OpenGameAgent.Unity.Stubs.csproj -c Release --no-restore -o $stubs
+          ./engines/unity/test-package.ps1 -UnityManagedDir $stubs -Version $env:RELEASE_VERSION
+      - name: Build Godot package
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'godot.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'godot'
+          Invoke-WebRequest -Uri 'https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_mono_win64.zip' -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA512).Hash.ToLowerInvariant()
+          $expected = 'aa04876c7932c2e6807233e6908da4045e904781a83dc3c793c34ba71c9f66292eb4da82aa55a6b8694fccf856f8c244c7709cfba20405066445daf9c2749b71'
+          if ($actual -ne $expected) { throw 'Godot archive checksum mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          $sharp = Split-Path -Parent (Get-ChildItem -LiteralPath $root -Recurse -Filter GodotSharp.dll | Where-Object FullName -like '*Api*Debug*' | Select-Object -First 1 -ExpandProperty FullName)
+          ./engines/godot/test-package.ps1 -GodotSharpDir $sharp -Version $env:RELEASE_VERSION
+      - name: Validate public tree
+        shell: pwsh
+        run: ./tools/Test-PublicTree.ps1
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: OpenGameAgent-${{ inputs.version }}
+          path: artifacts
+          if-no-files-found: error
