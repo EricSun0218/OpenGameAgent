@@ -1,4 +1,4 @@
-name: Build release artifacts
+name: Release
 
 on:
   workflow_dispatch:
@@ -7,6 +7,11 @@ on:
         description: Semantic version for the artifacts
         required: true
         default: 0.3.0-alpha.1
+      publish:
+        description: Publish NuGet packages and the GitHub pre-release
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -57,8 +62,134 @@ jobs:
       - name: Validate public tree
         shell: pwsh
         run: ./tools/Test-PublicTree.ps1
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      - name: Build release bundle
+        shell: pwsh
+        run: ./tools/New-ReleaseBundle.ps1 -Version $env:RELEASE_VERSION
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: OpenGameAgent-${{ inputs.version }}
-          path: artifacts
+          name: OpenGameAgent-release-${{ inputs.version }}
+          path: artifacts/release
           if-no-files-found: error
+
+  stage-github-release:
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: OpenGameAgent-release-${{ inputs.version }}
+          path: release-assets
+      - name: Stage immutable GitHub pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+
+          existing_release="$(gh release view "${tag}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ "${existing_release}" == "false" ]]; then
+            echo "::error::Release ${tag} is already public and cannot be replaced."
+            exit 1
+          fi
+          if [[ "${existing_release}" == "true" ]]; then
+            gh release delete "${tag}" --yes
+          fi
+
+          tag_commit="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+          release_target=(--target "${SOURCE_COMMIT}")
+          if [[ -n "${tag_commit}" ]]; then
+            if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
+              echo "::error::Tag ${tag} points to ${tag_commit}, expected ${SOURCE_COMMIT}."
+              exit 1
+            fi
+            release_target=(--verify-tag)
+          fi
+
+          mapfile -t assets < <(
+            find release-assets -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print |
+              sort
+          )
+          if [[ "${#assets[@]}" -ne 10 ]]; then
+            echo "::error::Expected 10 downloadable assets, found ${#assets[@]}."
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+
+          gh release create "${tag}" +            "${release_target[@]}" +            --draft +            --prerelease +            --title "OpenGameAgent ${tag}" +            --notes-file release-assets/RELEASE_NOTES.md +            "${assets[@]}"
+
+          expected="$(printf '%s\n' "${assets[@]##*/}" | sort)"
+          actual="$(gh release view "${tag}" --json assets --jq '.assets[].name' | sort)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::Draft release asset set is incomplete."
+            diff -u <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}") || true
+            exit 1
+          fi
+
+  publish-nuget:
+    if: ${{ inputs.publish }}
+    needs: stage-github-release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: OpenGameAgent-release-${{ inputs.version }}
+          path: release-assets
+      - name: Exchange GitHub OIDC token for a temporary NuGet key
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Publish NuGet packages
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find release-assets -maxdepth 1 -type f -name '*.nupkg' -print | sort)
+          if [[ "${#packages[@]}" -ne 6 ]]; then
+            echo "::error::Expected 6 NuGet packages, found ${#packages[@]}."
+            exit 1
+          fi
+          for package in "${packages[@]}"; do
+            dotnet nuget push "${package}" +              --api-key "${NUGET_API_KEY}" +              --source https://api.nuget.org/v3/index.json +              --skip-duplicate
+          done
+
+  publish-github-release:
+    if: ${{ inputs.publish }}
+    needs: publish-nuget
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Publish GitHub pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          gh release edit "${tag}" --draft=false --prerelease
+          gh release view "${tag}" +            --json isDraft,isPrerelease +            --jq 'select(.isDraft == false and .isPrerelease == true)' >/dev/null

@@ -14,6 +14,16 @@ Inputs are bounded JSON. They may represent dialogue, combat observations, simul
 
 > Current version: `0.3.0-alpha.1`. Public APIs can change before `1.0`.
 
+## Install
+
+Install the complete game runtime from NuGet:
+
+```bash
+dotnet add package OpenGameAgent --version 0.3.0-alpha.1
+```
+
+The kernel, persistence, providers, and engine-compatible client are also published as separate `OpenGameAgent.*` packages. Godot, Unity, and portable server archives are available on the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
+
 ## Why game-specific?
 
 General agent loops commonly assume one user, wall-clock time, and a linear conversation. A game may have multiple timelines, save forks, thousands of actors, offline time jumps, engine main-thread constraints, and actions that must never be repeated after an uncertain failure.

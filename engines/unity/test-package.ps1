@@ -13,6 +13,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Building the Unity package failed.' }
 $packagePath = [string]$buildOutput[-1]
 
 $required = @(
+    'LICENSE.md',
     'package.json',
     'package.json.meta',
     'Runtime.meta',
@@ -33,6 +34,13 @@ foreach ($relative in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $packagePath $relative) -PathType Leaf)) {
         throw "Unity package is missing '$relative'."
     }
+}
+
+$repositoryRoot = Split-Path -Parent (Split-Path -Parent $engineRoot)
+$sourceLicenseHash = (Get-FileHash -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Algorithm SHA256).Hash
+$packagedLicenseHash = (Get-FileHash -LiteralPath (Join-Path $packagePath 'LICENSE.md') -Algorithm SHA256).Hash
+if ($packagedLicenseHash -ne $sourceLicenseHash) {
+    throw 'Unity package must contain the complete repository license.'
 }
 
 $unexpected = Get-ChildItem -LiteralPath $packagePath -Recurse -File |

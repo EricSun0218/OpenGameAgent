@@ -42,6 +42,7 @@ if (Test-Path -LiteralPath $packagePath) {
 
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $engineRoot 'Packages\com.opengameagent.runtime') -Destination $packagePath -Recurse
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Destination (Join-Path $packagePath 'LICENSE.md') -Force
 $manifestPath = Join-Path $packagePath 'package.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $manifest.version = $Version

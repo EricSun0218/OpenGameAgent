@@ -14,6 +14,16 @@ OpenGameAgent 把小型、可组合的 Agent 内核带进游戏开发。它的�
 
 > 当前版本：`0.3.0-alpha.1`。在 `1.0` 前公开 API 仍可能调整。
 
+## 安装
+
+从 NuGet 安装完整的游戏 Runtime：
+
+```bash
+dotnet add package OpenGameAgent --version 0.3.0-alpha.1
+```
+
+内核、持久化、模型提供方和引擎兼容客户端也分别提供 `OpenGameAgent.*` 包。Godot、Unity 与可移植服务端压缩包可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 页面下载。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
+
 ## 为什么要做游戏专用层
 
 通用 Agent 往往默认单用户、现实时间和线性对话。游戏却可能拥有多条时间线、存档分支、成千上万个角色、离线时间跳跃、引擎主线程限制，以及不能在故障后盲目重试的状态变更。
