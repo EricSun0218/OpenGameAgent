@@ -14,6 +14,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Building the Godot package failed.' }
 $packageRoot = [string]$buildOutput[-1]
 
 $required = @(
+    'LICENSE',
     'addons\open_game_agent\plugin.cfg',
     'addons\open_game_agent\OpenGameAgent.Godot.props',
     'addons\open_game_agent\runtime\OpenGameAgentNode.cs',
@@ -25,6 +26,12 @@ foreach ($relative in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $relative) -PathType Leaf)) {
         throw "Godot package is missing '$relative'."
     }
+}
+
+$sourceLicenseHash = (Get-FileHash -LiteralPath (Join-Path $engineRoot 'LICENSE') -Algorithm SHA256).Hash
+$packagedLicenseHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'LICENSE') -Algorithm SHA256).Hash
+if ($packagedLicenseHash -ne $sourceLicenseHash) {
+    throw 'Godot package must contain the complete repository license.'
 }
 
 $packageRoot
