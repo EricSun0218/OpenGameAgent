@@ -94,7 +94,10 @@ jobs:
           set -euo pipefail
           tag="v${RELEASE_VERSION}"
 
-          existing_release="$(gh release view "${tag}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          existing_release=""
+          if resolved_release="$(gh release view "${tag}" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            existing_release="${resolved_release}"
+          fi
           if [[ "${existing_release}" == "false" ]]; then
             echo "::error::Release ${tag} is already public and cannot be replaced."
             exit 1
@@ -103,7 +106,10 @@ jobs:
             gh release delete "${tag}" --yes
           fi
 
-          tag_commit="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+          tag_commit=""
+          if resolved_commit="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null)"; then
+            tag_commit="${resolved_commit}"
+          fi
           release_target=(--target "${SOURCE_COMMIT}")
           if [[ -n "${tag_commit}" ]]; then
             if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
