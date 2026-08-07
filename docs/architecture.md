@@ -1,6 +1,6 @@
 # Architecture
 
-OpenGameAgent has two deliberately small layers and a set of optional adapters.
+OpenGameAgent has two deliberately small layers and a set of optional extensions and adapters. The kernel contracts are designed to stabilize early: product features belong in extensions or game code unless they are required to make every model/tool loop correct.
 
 ## Layers
 
@@ -37,6 +37,17 @@ The game layer converts a `GameInput` into a bounded kernel run. It owns:
 - reusable action, workflow, memory, schedule, and mailbox primitives.
 
 It does not own a universal world model. Context remains opaque JSON supplied by the game, so a turn-based strategy game and a real-time character simulation can use the same runtime without flattening their data into a common schema.
+
+### Optional packages
+
+- `OpenGameAgent.Extensions` adds policy, searchable tools, structured player interaction, goals, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
+- `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
+- `OpenGameAgent.Connectors.Mcp` exposes external tool servers through one lazy, searchable tool by default. Direct tool exposure is an explicit opt-in.
+- Provider, persistence, engine, client, and server packages stay replaceable and do not change kernel semantics.
+
+`GameAgentBuilder` is the composition root. Extensions register prompt fragments, context, tools, skills, route rules, workflows, hooks, model providers, services, typed lifecycle events, and typed channels. Registration names are scoped and validated, extension state is namespaced inside the session, and the builder is one-shot so a running configuration cannot be mutated accidentally.
+
+This separation is the compatibility boundary. The kernel owns canonical messages, streaming, turns, tools, cancellation, steering, and transcript correctness. The game runtime owns game coordinates, actor lanes, route admission, and persistence orchestration. Everything more specialized should normally remain an optional extension.
 
 ## Authority boundary
 
@@ -89,6 +100,8 @@ Skills are bounded instruction packages selected by input type and required tool
 
 Transcript compaction is also a provider-view operation. The included summarizing compactor keeps complete conversational suffixes and never splits a tool exchange. If no complete suffix fits the requested target, it summarizes the whole prior transcript into one canonical summary message. Games that need tokenizer-aware or domain-specific summaries can replace the compactor.
 
+Context admission runs before the first request, after tool turns, and again after final request hooks. A hook therefore cannot accidentally bypass the configured context window. Large text or JSON tool results can be moved into the artifact store and replaced with a bounded handle and preview. This keeps canonical results recoverable without repeatedly paying their full context cost.
+
 The system prompt keeps the most reusable bytes first: base instructions, then selected skills, then mutable authoritative game context. This ordering preserves the longest possible provider-cache prefix when world state changes, without moving dynamic state out of the game-owned context boundary.
 
 After a tool turn, `GameAgentRuntime` refreshes authoritative context, tools, and selected skills by default before the next model request. A configured next-turn hook can supply an explicit replacement context instead. Active game-layer runs can also be steered or aborted by `GameSessionKey`; messages never cross actor lanes.
@@ -114,18 +127,25 @@ The shared projects target `netstandard2.1`. They can run:
 
 Godot and Unity adapters only bridge lifecycle, cancellation, JSON, signals/events, and main-thread callback delivery. They do not fork the runtime semantics. A remote engine client sends the same `GameInput` representation to the service.
 
+Provider credentials can be supplied directly, resolved from a game-owned credential store, or obtained as short-lived tokens from a developer-hosted gateway. The framework never claims that a secret embedded in a shipped client is protected.
+
 ## Failure model
 
 - Model transport errors become terminal run results.
+- Retry and fallback providers may switch attempts only before meaningful streamed content or usage is exposed, preventing a visible partial response or charged request from being replayed silently.
 - Invalid or truncated tool calls do not execute.
 - Every accepted tool call receives a bounded tool result, including validation and timeout failures.
 - Tool timeouts do not wait forever for a non-cooperative implementation.
 - Subscriber failures are isolated, recorded, and cause that subscriber to be removed.
 - Session revision conflicts are explicit results.
 - Custom stores must return the exact state they claim to have saved; mismatched session snapshots, checkpoints, action entries, or receipts fail closed.
-- Local stores write through temporary files and replace the durable target. They are single-process stores; create one store instance per directory. Use transactional service storage when multiple processes can write the same logical record.
+- Local stores write through temporary files and replace the durable target. Processes using the same directory coordinate with cross-process file leases. They are still local save-store building blocks, not a distributed database; multi-host services need transactional shared storage and actor ownership.
 - Bounded limits protect strings, JSON, messages, turns, tokens, queues, tools, callbacks, progress, and concurrency.
+- Durable workflow checkpoints bind the workflow, session, actor, and canonical input. The same interrupted input can resume; a different input is rejected until the unfinished invocation is settled.
+- The optional HTTP service accepts JSON only on mutation endpoints, bounds request bodies to 8 MB by default, and parses with a fixed depth limit.
 
 The framework cannot make arbitrary game code transactional. The game must make mutation handlers idempotent or recoverable at the operation-ID boundary.
+
+Workflow checkpoints and game-state commits are also separate transactions unless the host supplies a shared transactional implementation. Every workflow node that can cause a side effect should use a stable operation ID and the durable action dispatcher. When several save forks remain accessible in one store, assign a new session/save namespace as well as a new timeline ID; transcript identity is `(session, actor)`.
 
 The built-in schema validator intentionally implements a common bounded subset: type, enum/const, object properties and required fields, additional properties, arrays, strings, and numeric bounds. Unsupported assertion keywords fail closed rather than being silently ignored. For advanced validation, give the tool a permissive `{}` schema and supply its custom validation delegate; mutation handlers must still revalidate business rules.

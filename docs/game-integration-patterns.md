@@ -30,6 +30,8 @@ game tick / month advance
 
 `MultiActorScheduler` gives per-actor ordering and global concurrency. `GameTimeScheduler` emits bounded recurring occurrences. `IGameMailbox` carries durable work to actors that are not currently resident. The game supplies activation, distance, importance, and budget policy.
 
+Use `GoalLoopExtension` when an actor owns semantic goals that can wait for a tick or event and continue later. Use `AgentDelegationExtension` when one actor needs bounded background research or planning without sharing its mutable transcript. Delegates still receive explicitly scoped context and tools; delegation is not permission escalation.
+
 ## Monthly or turn-based evolution
 
 Represent the calendar in `GameMoment.CalendarJson` while using `Tick` for ordering. A monthly advance can be a named `DurableGameWorkflow`:
@@ -41,6 +43,8 @@ Represent the calendar in `GameMoment.CalendarJson` while using `Tick` for order
 5. write memories and schedule the next occurrence.
 
 Workflow checkpoints allow a wait between steps without losing progress. Use `agent.workflow_instance` metadata to resume the same instance intentionally.
+
+When independent monthly branches may run together, use `DurableGameWorkflowGraph`. Dependencies are explicit, ready nodes run with bounded concurrency, joined outputs are presented in declaration order, and completed nodes are not rerun after a wait. A node that changes the world should use the durable action dispatcher with a stable operation ID because workflow and game-state storage are not automatically one transaction.
 
 ## Social deduction and group scenes
 
@@ -57,6 +61,8 @@ Building is a normal tool-planning problem. Expose tools at the safest useful le
 
 The game converts the blueprint into blocks, tiles, entities, navmesh updates, animations, and save data. Large builds should be a durable workflow with bounded batches and progress events, not thousands of unconstrained tool calls.
 
+This supports both declarative blueprint construction and stepwise plans. The model chooses intent and parameters; ordinary game code performs collision checks, resource accounting, placement, pathfinding, animations, and rollback. No special embodied-agent subsystem is required.
+
 ## Dynamic quests, items, and rules
 
 Separate semantic generation from executable mechanics. Let the model choose from or compose game-owned primitive IDs, validate the resulting JSON, and compile it into normal game data. Never execute model-authored source code.
@@ -69,12 +75,14 @@ Supply high-level world metrics, player history, pacing targets, and a bounded e
 
 Use a separate director actor rather than mixing director privileges into every NPC. Scope tools and memory to the minimum authority each actor needs.
 
+For a very large event or command catalog, expose `ToolCatalogExtension` instead of placing every schema in every request. For external catalogs, the default on-demand connector lets the model search, inspect, and then call a selected tool. `ToolPolicyExtension` remains the authorization layer regardless of how a tool was discovered.
+
 ## Learned runtime AI
 
 Reinforcement-learning controllers, motion matching, perception networks, and low-level bots are outside the language-agent loop. They can coexist with it: learned systems produce observations or execute a high-level tool, while OpenGameAgent handles language, semantic planning, memory, and tool orchestration.
 
 ## Save and replay
 
-Use stable session, actor, input, operation, and timeline IDs. After loading a save fork, assign a new timeline ID. Persist game state and OpenGameAgent stores in the same save transaction when possible. If that is impossible, reconcile pending action journal entries before accepting new inputs.
+Use stable session, actor, input, operation, and timeline IDs. After loading a save fork that can coexist with its source, assign both a new session/save namespace and a new timeline ID. Persist game state and OpenGameAgent stores in the same save transaction when possible. If that is impossible, reconcile pending action journal entries before accepting new inputs.
 
 Never use wall-clock timestamps to decide whether an in-world memory happened before the current save state.

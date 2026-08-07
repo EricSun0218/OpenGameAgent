@@ -13,6 +13,7 @@ internal static class JsonSchemaValidator
 {
     private const int MaxDepth = 64;
     private const int MaxNumberCharacters = 4096;
+    private static readonly char[] ExponentMarkers = { 'e', 'E' };
     private static readonly string[] UnsupportedAssertionKeywords =
     {
         "$ref",
@@ -717,7 +718,7 @@ internal static class JsonSchemaValidator
 
         var negative = raw[0] == '-';
         var start = negative ? 1 : 0;
-        var exponentIndex = raw.IndexOfAny(new[] { 'e', 'E' }, start);
+        var exponentIndex = raw.IndexOfAny(ExponentMarkers, start);
         var mantissaEnd = exponentIndex < 0 ? raw.Length : exponentIndex;
         var decimalIndex = raw.IndexOf('.', start, mantissaEnd - start);
         var fractionalDigits = decimalIndex < 0 ? 0 : mantissaEnd - decimalIndex - 1;

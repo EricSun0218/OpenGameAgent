@@ -117,13 +117,19 @@ jobs:
             find release-assets -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print |
               sort
           )
-          if [[ "${#assets[@]}" -ne 10 ]]; then
-            echo "::error::Expected 10 downloadable assets, found ${#assets[@]}."
+          if [[ "${#assets[@]}" -ne 13 ]]; then
+            echo "::error::Expected 13 downloadable assets, found ${#assets[@]}."
             printf '%s\n' "${assets[@]}"
             exit 1
           fi
 
-          gh release create "${tag}" +            "${release_target[@]}" +            --draft +            --prerelease +            --title "OpenGameAgent ${tag}" +            --notes-file release-assets/RELEASE_NOTES.md +            "${assets[@]}"
+          gh release create "${tag}" \
+            "${release_target[@]}" \
+            --draft \
+            --prerelease \
+            --title "OpenGameAgent ${tag}" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            "${assets[@]}"
 
           expected="$(printf '%s\n' "${assets[@]##*/}" | sort)"
           actual="$(gh release view "${tag}" --json assets --jq '.assets[].name' | sort)"
@@ -166,12 +172,15 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t packages < <(find release-assets -maxdepth 1 -type f -name '*.nupkg' -print | sort)
-          if [[ "${#packages[@]}" -ne 6 ]]; then
-            echo "::error::Expected 6 NuGet packages, found ${#packages[@]}."
+          if [[ "${#packages[@]}" -ne 9 ]]; then
+            echo "::error::Expected 9 NuGet packages, found ${#packages[@]}."
             exit 1
           fi
           for package in "${packages[@]}"; do
-            dotnet nuget push "${package}" +              --api-key "${NUGET_API_KEY}" +              --source https://api.nuget.org/v3/index.json +              --skip-duplicate
+            dotnet nuget push "${package}" \
+              --api-key "${NUGET_API_KEY}" \
+              --source https://api.nuget.org/v3/index.json \
+              --skip-duplicate
           done
 
   publish-github-release:
@@ -192,4 +201,6 @@ jobs:
           set -euo pipefail
           tag="v${RELEASE_VERSION}"
           gh release edit "${tag}" --draft=false --prerelease
-          gh release view "${tag}" +            --json isDraft,isPrerelease +            --jq 'select(.isDraft == false and .isPrerelease == true)' >/dev/null
+          gh release view "${tag}" \
+            --json isDraft,isPrerelease \
+            --jq 'select(.isDraft == false and .isPrerelease == true)' >/dev/null

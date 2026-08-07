@@ -63,6 +63,9 @@ public sealed class GameActionIntent
 
 public sealed class GameActionReceipt
 {
+    private const int MaximumCodeCharacters = 1_024;
+    private const int MaximumMessageCharacters = 64_000;
+
     public GameActionReceipt(
         string operationId,
         GameActionStatus status,
@@ -87,6 +90,16 @@ public sealed class GameActionReceipt
         }
 
         StateRevision = stateRevision;
+        if ((code?.Length ?? 0) > MaximumCodeCharacters)
+        {
+            throw new ArgumentException("An action receipt code is too large.", nameof(code));
+        }
+
+        if ((message?.Length ?? 0) > MaximumMessageCharacters)
+        {
+            throw new ArgumentException("An action receipt message is too large.", nameof(message));
+        }
+
         Code = code;
         Message = message;
     }
@@ -123,7 +136,19 @@ public sealed class GameActionReceipt
         new(intent.OperationId, GameActionStatus.Rejected, resultJson, intent.Moment, null, code, message);
 
     public static GameActionReceipt Uncertain(GameActionIntent intent, string message) =>
-        new(intent.OperationId, GameActionStatus.Uncertain, "{}", intent.Moment, null, "outcome_uncertain", message);
+        new(
+            intent.OperationId,
+            GameActionStatus.Uncertain,
+            "{}",
+            intent.Moment,
+            null,
+            "outcome_uncertain",
+            TruncateDiagnostic(message));
+
+    private static string? TruncateDiagnostic(string? message) =>
+        message is null || message.Length <= MaximumMessageCharacters
+            ? message
+            : message.Substring(0, MaximumMessageCharacters);
 }
 
 public sealed class GameActionJournalEntry
@@ -380,11 +405,13 @@ public sealed class DurableGameActionDispatcher
     private readonly IGameActionJournal _journal;
     private readonly IGameActionHandler _handler;
     private readonly SemaphoreSlim[] _operationGates;
+    private readonly int _receiptCommitTimeoutMilliseconds;
 
     public DurableGameActionDispatcher(
         IGameActionJournal journal,
         IGameActionHandler handler,
-        int concurrencyStripes = 64)
+        int concurrencyStripes = 64,
+        int receiptCommitTimeoutMilliseconds = 10_000)
     {
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
         _handler = handler ?? throw new ArgumentNullException(nameof(handler));
@@ -393,9 +420,15 @@ public sealed class DurableGameActionDispatcher
             throw new ArgumentOutOfRangeException(nameof(concurrencyStripes));
         }
 
+        if (receiptCommitTimeoutMilliseconds < 100 || receiptCommitTimeoutMilliseconds > 300_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(receiptCommitTimeoutMilliseconds));
+        }
+
         _operationGates = Enumerable.Range(0, concurrencyStripes)
             .Select(_ => new SemaphoreSlim(1, 1))
             .ToArray();
+        _receiptCommitTimeoutMilliseconds = receiptCommitTimeoutMilliseconds;
     }
 
     public async ValueTask<GameActionReceipt> ExecuteAsync(
@@ -445,7 +478,7 @@ public sealed class DurableGameActionDispatcher
             try
             {
                 var receipt = await _handler.ExecuteAsync(intent, cancellationToken).ConfigureAwait(false);
-                return await CloseAsync(intent, receipt, cancellationToken).ConfigureAwait(false);
+                return await CloseDurablyAsync(intent, receipt).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -490,7 +523,7 @@ public sealed class DurableGameActionDispatcher
                     try
                     {
                         var receipt = await _handler.ExecuteAsync(entry.Intent, cancellationToken).ConfigureAwait(false);
-                        return await CloseAsync(entry.Intent, receipt, cancellationToken).ConfigureAwait(false);
+                        return await CloseDurablyAsync(entry.Intent, receipt).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -564,6 +597,30 @@ public sealed class DurableGameActionDispatcher
         return receipt;
     }
 
+    private async ValueTask<GameActionReceipt> CloseDurablyAsync(
+        GameActionIntent intent,
+        GameActionReceipt receipt)
+    {
+        using var settlementCancellation = new CancellationTokenSource(_receiptCommitTimeoutMilliseconds);
+        try
+        {
+            return await CloseAsync(intent, receipt, settlementCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (settlementCancellation.IsCancellationRequested)
+        {
+            return GameActionReceipt.Uncertain(
+                intent,
+                "The game action returned a final receipt, but its durable journal commit timed out. Reconcile the operation before retrying.");
+        }
+        catch (Exception exception)
+        {
+            return GameActionReceipt.Uncertain(
+                intent,
+                "The game action returned a receipt, but its durable journal commit failed. Reconcile the operation before retrying. "
+                + exception.Message);
+        }
+    }
+
     private async ValueTask<GameActionReceipt> RecoverAsync(
         GameActionIntent intent,
         CancellationToken cancellationToken)
@@ -573,7 +630,7 @@ public sealed class DurableGameActionDispatcher
             ? GameActionReceipt.Uncertain(
                 intent,
                 "The action was dispatched, but its outcome is not yet known.")
-            : await CloseAsync(intent, recovered, cancellationToken).ConfigureAwait(false);
+            : await CloseDurablyAsync(intent, recovered).ConfigureAwait(false);
     }
 
     private async ValueTask<GameActionReceipt> TryRecoverAsync(

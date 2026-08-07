@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Lazy searchable Model Context Protocol tool connector for OpenGameAgent, with optional direct exposure.</Description>
+    <PackageId>OpenGameAgent.Connectors.Mcp</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.1.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Extensions\OpenGameAgent.Extensions.csproj" />
+  </ItemGroup>
+</Project>

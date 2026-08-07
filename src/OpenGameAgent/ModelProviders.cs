@@ -14,12 +14,14 @@ public sealed class RetryingModelProvider : IModelProvider
     private readonly int _maximumAttempts;
     private readonly Func<int, TimeSpan> _delay;
     private readonly Func<Exception, bool> _isTransient;
+    private readonly TimeSpan _maximumDelay;
 
     public RetryingModelProvider(
         IModelProvider inner,
         int maximumAttempts = 3,
         Func<int, TimeSpan>? delay = null,
-        Func<Exception, bool>? isTransient = null)
+        Func<Exception, bool>? isTransient = null,
+        TimeSpan? maximumDelay = null)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         if (maximumAttempts < 1 || maximumAttempts > 32)
@@ -29,7 +31,13 @@ public sealed class RetryingModelProvider : IModelProvider
 
         _maximumAttempts = maximumAttempts;
         _delay = delay ?? (attempt => TimeSpan.FromMilliseconds(Math.Min(5_000, 200 * Math.Pow(2, attempt - 1))));
-        _isTransient = isTransient ?? (_ => true);
+        _isTransient = isTransient ?? (exception =>
+            exception is not ModelProviderException providerFailure || providerFailure.IsTransient);
+        _maximumDelay = maximumDelay ?? TimeSpan.FromSeconds(30);
+        if (_maximumDelay < TimeSpan.Zero || _maximumDelay > TimeSpan.FromMinutes(5))
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumDelay));
+        }
     }
 
     public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
@@ -40,6 +48,10 @@ public sealed class RetryingModelProvider : IModelProvider
         {
             var enumerator = _inner.StreamAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
             var emittedMeaningfulEvent = false;
+            ModelStreamEvent? pendingStart = null;
+            Exception? retryFailure = null;
+            Exception? primaryFailure = null;
+            var terminalSeen = false;
             try
             {
                 while (true)
@@ -51,11 +63,13 @@ public sealed class RetryingModelProvider : IModelProvider
                     }
                     catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                     {
+                        primaryFailure = exception;
                         if (attempt >= _maximumAttempts || emittedMeaningfulEvent || !_isTransient(exception))
                         {
                             throw;
                         }
 
+                        retryFailure = exception;
                         break;
                     }
 
@@ -68,7 +82,8 @@ public sealed class RetryingModelProvider : IModelProvider
 
                         if (attempt >= _maximumAttempts)
                         {
-                            throw new InvalidOperationException("The model provider completed without emitting a terminal event.");
+                            primaryFailure = new InvalidOperationException("The model provider completed without emitting a terminal event.");
+                            throw primaryFailure;
                         }
 
                         break;
@@ -77,28 +92,67 @@ public sealed class RetryingModelProvider : IModelProvider
                     var current = enumerator.Current;
                     if (current is null)
                     {
-                        throw new InvalidOperationException("The model provider emitted a null stream event.");
+                        primaryFailure = new InvalidOperationException("The model provider emitted a null stream event.");
+                        throw primaryFailure;
                     }
 
-                    emittedMeaningfulEvent |= current.Kind != ModelStreamEventKind.Started;
-                    yield return current;
+                    if (current.Kind == ModelStreamEventKind.Started)
+                    {
+                        if (pendingStart is not null)
+                        {
+                            primaryFailure = new InvalidOperationException("The model provider emitted more than one stream start event.");
+                            throw primaryFailure;
+                        }
+
+                        pendingStart = current;
+                        if (ModelProviderRetrySafety.HasMeaningfulStart(current))
+                        {
+                            emittedMeaningfulEvent = true;
+                            yield return pendingStart;
+                            pendingStart = null;
+                        }
+
+                        continue;
+                    }
+
+                    emittedMeaningfulEvent = true;
+                    if (pendingStart is not null)
+                    {
+                        yield return pendingStart;
+                        pendingStart = null;
+                    }
+
                     if (current.IsTerminal)
                     {
+                        terminalSeen = true;
+                        yield return current;
                         yield break;
                     }
+
+                    yield return current;
                 }
             }
             finally
             {
-                await enumerator.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await enumerator.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (primaryFailure is not null || retryFailure is not null || terminalSeen || cancellationToken.IsCancellationRequested)
+                {
+                    // Cleanup cannot replace the primary stream outcome.
+                }
             }
 
-            var wait = _delay(attempt);
-            if (wait < TimeSpan.Zero || wait > TimeSpan.FromMinutes(5))
+            var wait = retryFailure is ModelProviderException { RetryAfter: { } serverDelay }
+                ? serverDelay
+                : _delay(attempt);
+            if (wait < TimeSpan.Zero)
             {
-                throw new InvalidOperationException("The retry delay must be between zero and five minutes.");
+                throw new InvalidOperationException("The retry delay cannot be negative.");
             }
 
+            wait = wait > _maximumDelay ? _maximumDelay : wait;
             await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -125,7 +179,8 @@ public sealed class FallbackModelProvider : IModelProvider
         }
 
         _providers = new ReadOnlyCollection<IModelProvider>(copied);
-        _canFallback = canFallback ?? (_ => true);
+        _canFallback = canFallback ?? (exception =>
+            exception is not ModelProviderException providerFailure || providerFailure.IsTransient);
     }
 
     public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
@@ -136,6 +191,10 @@ public sealed class FallbackModelProvider : IModelProvider
         {
             var enumerator = _providers[index].StreamAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
             var emittedMeaningfulEvent = false;
+            ModelStreamEvent? pendingStart = null;
+            Exception? primaryFailure = null;
+            Exception? fallbackFailure = null;
+            var terminalSeen = false;
             try
             {
                 while (true)
@@ -147,11 +206,13 @@ public sealed class FallbackModelProvider : IModelProvider
                     }
                     catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                     {
+                        primaryFailure = exception;
                         if (index >= _providers.Count - 1 || emittedMeaningfulEvent || !_canFallback(exception))
                         {
                             throw;
                         }
 
+                        fallbackFailure = exception;
                         break;
                     }
 
@@ -164,7 +225,8 @@ public sealed class FallbackModelProvider : IModelProvider
 
                         if (index >= _providers.Count - 1)
                         {
-                            throw new InvalidOperationException("Every fallback model provider completed without output.");
+                            primaryFailure = new InvalidOperationException("Every fallback model provider completed without output.");
+                            throw primaryFailure;
                         }
 
                         break;
@@ -173,21 +235,64 @@ public sealed class FallbackModelProvider : IModelProvider
                     var current = enumerator.Current;
                     if (current is null)
                     {
-                        throw new InvalidOperationException("A fallback model provider emitted a null stream event.");
+                        primaryFailure = new InvalidOperationException("A fallback model provider emitted a null stream event.");
+                        throw primaryFailure;
                     }
 
-                    emittedMeaningfulEvent |= current.Kind != ModelStreamEventKind.Started;
-                    yield return current;
+                    if (current.Kind == ModelStreamEventKind.Started)
+                    {
+                        if (pendingStart is not null)
+                        {
+                            primaryFailure = new InvalidOperationException("A fallback model provider emitted more than one stream start event.");
+                            throw primaryFailure;
+                        }
+
+                        pendingStart = current;
+                        if (ModelProviderRetrySafety.HasMeaningfulStart(current))
+                        {
+                            emittedMeaningfulEvent = true;
+                            yield return pendingStart;
+                            pendingStart = null;
+                        }
+
+                        continue;
+                    }
+
+                    emittedMeaningfulEvent = true;
+                    if (pendingStart is not null)
+                    {
+                        yield return pendingStart;
+                        pendingStart = null;
+                    }
+
                     if (current.IsTerminal)
                     {
+                        terminalSeen = true;
+                        yield return current;
                         yield break;
                     }
+
+                    yield return current;
                 }
             }
             finally
             {
-                await enumerator.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    await enumerator.DisposeAsync().ConfigureAwait(false);
+                }
+                catch when (primaryFailure is not null || fallbackFailure is not null || terminalSeen || cancellationToken.IsCancellationRequested)
+                {
+                    // Cleanup cannot replace the primary stream outcome.
+                }
             }
         }
     }
+}
+
+internal static class ModelProviderRetrySafety
+{
+    public static bool HasMeaningfulStart(ModelStreamEvent streamEvent) =>
+        streamEvent.Partial is { } partial
+        && (partial.Content.Count > 0 || partial.Usage.TotalTokens > 0);
 }

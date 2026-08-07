@@ -59,6 +59,8 @@ public sealed class AgentLimits
 
     public int ToolTimeoutMilliseconds { get; set; } = 120_000;
 
+    public int ModelTimeoutMilliseconds { get; set; } = 120_000;
+
     public int MaxProgressEventsPerTool { get; set; } = 256;
 
     public int MaxSubscribers { get; set; } = 32;
@@ -94,6 +96,7 @@ public sealed class AgentLimits
         RequireRange(MaxQueuedMessages, 1, 100_000, nameof(MaxQueuedMessages));
         RequireRange(MaxConcurrentTools, 1, 1024, nameof(MaxConcurrentTools));
         RequireRange(ToolTimeoutMilliseconds, 1, 86_400_000, nameof(ToolTimeoutMilliseconds));
+        RequireRange(ModelTimeoutMilliseconds, 1, 86_400_000, nameof(ModelTimeoutMilliseconds));
         RequireRange(MaxProgressEventsPerTool, 0, 1_000_000, nameof(MaxProgressEventsPerTool));
         RequireRange(MaxSubscribers, 0, 10_000, nameof(MaxSubscribers));
     }
@@ -154,9 +157,11 @@ public sealed class AfterTurnContext
         RunId = runId;
         Turn = turn;
         Response = response;
-        ToolResults = toolResults;
-        Context = context;
-        NewMessages = newMessages;
+        ToolResults = Array.AsReadOnly(
+            (toolResults ?? throw new ArgumentNullException(nameof(toolResults))).ToArray());
+        Context = context ?? throw new ArgumentNullException(nameof(context));
+        NewMessages = Array.AsReadOnly(
+            (newMessages ?? throw new ArgumentNullException(nameof(newMessages))).ToArray());
     }
 
     public string RunId { get; }
@@ -175,6 +180,8 @@ public sealed class AfterTurnContext
 public sealed class NextTurnUpdate
 {
     public AgentContext? Context { get; set; }
+
+    public IModelProvider? Provider { get; set; }
 
     public string? Model { get; set; }
 
@@ -239,6 +246,7 @@ public sealed class AgentState
 {
     internal AgentState(
         string systemPrompt,
+        IModelProvider provider,
         string model,
         ModelParameters parameters,
         IReadOnlyList<AgentTool> tools,
@@ -250,18 +258,21 @@ public sealed class AgentState
         string? error)
     {
         SystemPrompt = systemPrompt;
+        Provider = provider ?? throw new ArgumentNullException(nameof(provider));
         Model = model;
         Parameters = parameters?.Copy() ?? throw new ArgumentNullException(nameof(parameters));
-        Tools = tools.ToArray();
-        Messages = messages.ToArray();
+        Tools = Array.AsReadOnly(tools.ToArray());
+        Messages = Array.AsReadOnly(messages.ToArray());
         IsRunning = isRunning;
         StreamingMessage = streamingMessage;
         StreamingEvent = streamingEvent;
-        PendingToolCallIds = pendingToolCallIds.ToArray();
+        PendingToolCallIds = Array.AsReadOnly(pendingToolCallIds.ToArray());
         Error = error;
     }
 
     public string SystemPrompt { get; }
+
+    public IModelProvider Provider { get; }
 
     public string Model { get; }
 

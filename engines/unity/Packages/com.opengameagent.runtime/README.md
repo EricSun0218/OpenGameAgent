@@ -11,4 +11,6 @@ The component exposes typed async methods, a JSON start method, actor-scoped ste
 
 Generated package DLLs belong in the repository-level `artifacts/unity` directory and are not committed.
 
+The base UPM package contains the adapter plus shared runtime/client assemblies. Persistence, provider, official extension, model-catalog, and external-tool packages are versioned separately so each game can choose its deployment surface. A permanent model key embedded in a Unity player can be extracted; use BYOK, a local endpoint, or developer-issued short-lived credentials.
+
 Full setup, credentials, lifecycle, and main-thread guidance is in the repository's [engine integration guide](https://github.com/EricSun0218/OpenGameAgent/blob/main/docs/engine-integration.md).

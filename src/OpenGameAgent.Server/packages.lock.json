@@ -14,6 +14,12 @@
           "System.Text.Json": "[8.0.6, )"
         }
       },
+      "opengameagent.extensions": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent": "[0.3.0-alpha.1, )"
+        }
+      },
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
@@ -24,6 +30,7 @@
         "type": "Project",
         "dependencies": {
           "OpenGameAgent": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Extensions": "[0.3.0-alpha.1, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },

@@ -55,6 +55,55 @@ internal sealed class StreamingProvider : IModelProvider
         _stream(request, cancellationToken);
 }
 
+internal sealed class TerminalThenDisposalFailureProvider : IModelProvider
+{
+    public IAsyncEnumerable<ModelStreamEvent> StreamAsync(ModelRequest request, CancellationToken cancellationToken) =>
+        new Stream();
+
+    private sealed class Stream : IAsyncEnumerable<ModelStreamEvent>, IAsyncEnumerator<ModelStreamEvent>
+    {
+        private bool _emitted;
+
+        public ModelStreamEvent Current { get; private set; } = null!;
+
+        public IAsyncEnumerator<ModelStreamEvent> GetAsyncEnumerator(CancellationToken cancellationToken = default) => this;
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            if (_emitted)
+            {
+                return new ValueTask<bool>(false);
+            }
+
+            _emitted = true;
+            Current = ModelStreamEvent.Terminal(Responses.Text("done"));
+            return new ValueTask<bool>(true);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.FromException(new InvalidOperationException("dispose failed"));
+    }
+}
+
+internal sealed class NonCooperativeProvider : IModelProvider
+{
+    public TaskCompletionSource Started { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Release { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+        ModelRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        _ = request;
+        _ = cancellationToken;
+        Started.TrySetResult();
+        await Release.Task.ConfigureAwait(false);
+        yield return ModelStreamEvent.Terminal(Responses.Text("late"));
+    }
+}
+
 internal static class Responses
 {
     public static ModelResponse Text(string text) =>

@@ -36,11 +36,13 @@ public sealed class FileGameMemoryStore : IGameMemoryStore
             throw new ArgumentNullException(nameof(memory));
         }
 
-        var gate = _files.GateFor(memory.MemoryId);
+        var storageKey = StorageKey(memory.SessionId, memory.OwnerId, memory.MemoryId);
+        var gate = _files.GateFor(storageKey);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var path = _files.PathFor(memory.MemoryId, Suffix);
+            using var processLease = await _files.AcquireProcessLeaseAsync(storageKey + Suffix, cancellationToken).ConfigureAwait(false);
+            var path = _files.PathFor(storageKey, Suffix);
             var existing = await _files.ReadAsync<MemoryDocument>(path, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
             {
@@ -51,6 +53,9 @@ public sealed class FileGameMemoryStore : IGameMemoryStore
             await _capacityGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                using var capacityLease = await _files.AcquireProcessLeaseAsync(
+                    "memory-capacity",
+                    cancellationToken).ConfigureAwait(false);
                 existing = await _files.ReadAsync<MemoryDocument>(path, cancellationToken).ConfigureAwait(false);
                 if (existing is not null)
                 {
@@ -97,7 +102,11 @@ public sealed class FileGameMemoryStore : IGameMemoryStore
             if (document is not null)
             {
                 var memory = Decode(document);
-                _files.EnsurePathFor(path, memory.MemoryId, Suffix, "memory");
+                _files.EnsurePathFor(
+                    path,
+                    StorageKey(memory.SessionId, memory.OwnerId, memory.MemoryId),
+                    Suffix,
+                    "memory");
                 await inMemory.AppendAsync(memory, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -122,6 +131,9 @@ public sealed class FileGameMemoryStore : IGameMemoryStore
         ExpiresAt = memory.ExpiresAt is null ? null : MomentDocument.Encode(memory.ExpiresAt.Value),
         Metadata = new Dictionary<string, string>(memory.Metadata, StringComparer.Ordinal),
     };
+
+    private static string StorageKey(string sessionId, string ownerId, string memoryId) =>
+        sessionId + "\n" + ownerId + "\n" + memoryId;
 
     private static GameMemory Decode(MemoryDocument document)
     {

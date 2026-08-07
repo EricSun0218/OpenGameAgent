@@ -186,6 +186,10 @@ public sealed class OpenGameAgentBehaviour : MonoBehaviour
         {
             return false;
         }
+        catch (AggregateException)
+        {
+            return true;
+        }
     }
 
     private void Update()
@@ -251,6 +255,9 @@ public sealed class OpenGameAgentBehaviour : MonoBehaviour
                 cancellation.Cancel();
             }
             catch (ObjectDisposedException)
+            {
+            }
+            catch (AggregateException)
             {
             }
         }

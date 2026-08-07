@@ -23,6 +23,65 @@ public delegate ValueTask<bool> GamePendingWorkProvider(
     GameInput input,
     CancellationToken cancellationToken);
 
+public sealed class GameModelSelection
+{
+    private readonly ModelParameters? _parameters;
+
+    public GameModelSelection(
+        string model,
+        string? registeredProviderName = null,
+        ModelParameters? parameters = null,
+        IModelProvider? provider = null,
+        int contextWindowTokens = 0,
+        int maximumOutputTokens = 0)
+    {
+        if (registeredProviderName is not null && provider is not null)
+        {
+            throw new ArgumentException("A model selection cannot specify both a registered provider name and a direct provider.");
+        }
+
+        Model = GameJson.RequireId(model, nameof(model));
+        RegisteredProviderName = registeredProviderName is null
+            ? null
+            : GameJson.RequireId(registeredProviderName, nameof(registeredProviderName));
+        if (contextWindowTokens < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(contextWindowTokens));
+        }
+
+        if (maximumOutputTokens < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumOutputTokens));
+        }
+
+        if (contextWindowTokens > 0 && maximumOutputTokens >= contextWindowTokens)
+        {
+            throw new ArgumentException("The model output limit must be smaller than its context window.");
+        }
+
+        _parameters = parameters?.Clone();
+        Provider = provider;
+        ContextWindowTokens = contextWindowTokens;
+        MaximumOutputTokens = maximumOutputTokens;
+    }
+
+    public string Model { get; }
+
+    public string? RegisteredProviderName { get; }
+
+    public ModelParameters? Parameters => _parameters?.Clone();
+
+    public IModelProvider? Provider { get; }
+
+    public int ContextWindowTokens { get; }
+
+    public int MaximumOutputTokens { get; }
+}
+
+public delegate ValueTask<GameModelSelection?> GameModelSelector(
+    GameInput input,
+    CancellationToken cancellationToken);
+
 public delegate ValueTask GameAgentEventHandler(
     GameInput input,
     AgentEvent agentEvent,
@@ -118,7 +177,12 @@ public sealed class GameWorkflowContext
 
     public GameSessionSnapshot Session { get; }
 
-    internal void ValidateOutput(IReadOnlyList<AgentMessage> messages) => _validateOutput(messages);
+    /// <summary>
+    /// Validates cumulative workflow output against the active runtime transcript limits.
+    /// Long-running workflows should call this before committing a node or step checkpoint.
+    /// </summary>
+    public void ValidateOutput(IReadOnlyList<AgentMessage> messages) =>
+        _validateOutput(messages ?? throw new ArgumentNullException(nameof(messages)));
 
     private static void ValidateNonNullOutput(IReadOnlyList<AgentMessage> messages)
     {
@@ -198,7 +262,15 @@ public sealed class GameAgentRuntimeOptions
 
     public GamePendingWorkProvider? PendingWorkProvider { get; set; }
 
+    public GameModelSelector? ModelSelector { get; set; }
+
     public IList<IGameWorkflow> Workflows { get; } = new List<IGameWorkflow>();
+
+    /// <summary>
+    /// Runtime extensions. Extensions are configured in list order and all features register
+    /// through the same public extension API.
+    /// </summary>
+    public IList<IGameAgentExtension> Extensions { get; } = new List<IGameAgentExtension>();
 
     public GameRuntimeLimits Limits { get; set; } = new();
 
@@ -208,6 +280,23 @@ public sealed class GameAgentRuntimeOptions
 
     public IGameTranscriptCompactor? TranscriptCompactor { get; set; }
 
+    /// <summary>
+    /// Model context window used when a selector does not provide model metadata. Zero disables
+    /// request-size admission and leaves message-count compaction as the only transcript budget.
+    /// </summary>
+    public int ContextWindowTokens { get; set; }
+
+    /// <summary>
+    /// Tokens reserved for model output when the active model or request does not provide an output limit.
+    /// </summary>
+    public int ContextWindowReserveTokens { get; set; } = 16_384;
+
+    public GameModelRequestTokenEstimator RequestTokenEstimator { get; set; } =
+        ApproximateGameTokenEstimator.EstimateRequest;
+
+    public GameTranscriptTokenEstimator TranscriptTokenEstimator { get; set; } =
+        ApproximateGameTokenEstimator.EstimateMessages;
+
     public AgentHooks AgentHooks { get; set; } = new();
 
     public bool RefreshContextAfterToolTurns { get; set; } = true;
@@ -215,11 +304,25 @@ public sealed class GameAgentRuntimeOptions
     public ToolExecutionMode ToolExecution { get; set; } = ToolExecutionMode.SafeParallel;
 
     public int RecentProcessedInputCapacity { get; set; } = 256;
+
+    /// <summary>
+    /// Maximum time allowed to durably settle a completed or aborted agent run after execution has begun.
+    /// This commit is intentionally independent from the caller's cancellation token so tool receipts and
+    /// terminal transcript state are not lost when cancellation stops model or tool work.
+    /// </summary>
+    public int SessionCommitTimeoutMilliseconds { get; set; } = 10_000;
+
+    /// <summary>
+    /// Persists a canonical checkpoint after each fully settled tool turn. This bounds crash recovery
+    /// without writing partial model streams or marking the input complete before the run finishes.
+    /// </summary>
+    public bool PersistToolTurnCheckpoints { get; set; } = true;
 }
 
-public sealed class GameAgentRuntime
+public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 {
     private readonly object _activeAgentsGate = new();
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly Dictionary<GameSessionKey, Agent> _activeAgents = new();
     private readonly IModelProvider _provider;
     private readonly string _model;
@@ -230,16 +333,25 @@ public sealed class GameAgentRuntime
     private readonly IGameSkillSource? _skillSource;
     private readonly GameToolProvider? _toolProvider;
     private readonly GamePendingWorkProvider? _pendingWorkProvider;
+    private readonly GameModelSelector? _modelSelector;
     private readonly IReadOnlyDictionary<string, IGameWorkflow> _workflows;
     private readonly GameRuntimeLimits _limits;
     private readonly AgentLimits _agentLimits;
     private readonly ModelParameters _modelParameters;
     private readonly IGameTranscriptCompactor? _transcriptCompactor;
+    private readonly int _contextWindowTokens;
+    private readonly int _contextWindowReserveTokens;
+    private readonly GameModelRequestTokenEstimator _requestTokenEstimator;
+    private readonly GameTranscriptTokenEstimator _transcriptTokenEstimator;
     private readonly AgentHooks _agentHooks;
     private readonly bool _refreshContextAfterToolTurns;
     private readonly ToolExecutionMode _toolExecution;
     private readonly MultiActorScheduler _actors;
     private readonly int _recentProcessedInputCapacity;
+    private readonly int _sessionCommitTimeoutMilliseconds;
+    private readonly bool _persistToolTurnCheckpoints;
+    private readonly GameAgentExtensionHost _extensions;
+    private int _disposed;
 
     public GameAgentRuntime(GameAgentRuntimeOptions options)
     {
@@ -250,53 +362,119 @@ public sealed class GameAgentRuntime
 
         _provider = options.Provider;
         _model = GameJson.RequireId(options.Model, nameof(options.Model));
-        _instructions = options.Instructions ?? throw new ArgumentNullException(nameof(options.Instructions));
-        _routePolicy = options.RoutePolicy ?? throw new ArgumentNullException(nameof(options.RoutePolicy));
-        _sessionStore = options.SessionStore ?? throw new ArgumentNullException(nameof(options.SessionStore));
+        _instructions = options.Instructions
+            ?? throw new ArgumentException("Runtime instructions are required.", nameof(options));
+        _routePolicy = options.RoutePolicy
+            ?? throw new ArgumentException("A route policy is required.", nameof(options));
+        _sessionStore = options.SessionStore
+            ?? throw new ArgumentException("A session store is required.", nameof(options));
         _contextProvider = options.ContextProvider;
         _skillSource = options.SkillSource;
         _toolProvider = options.ToolProvider;
         _pendingWorkProvider = options.PendingWorkProvider;
-        _limits = options.Limits?.CopyAndValidate() ?? throw new ArgumentNullException(nameof(options.Limits));
-        _agentLimits = CopyAgentLimits(options.AgentLimits ?? throw new ArgumentNullException(nameof(options.AgentLimits)));
-        _modelParameters = options.ModelParameters?.Clone() ?? throw new ArgumentNullException(nameof(options.ModelParameters));
+        _modelSelector = options.ModelSelector;
+        _limits = options.Limits?.CopyAndValidate()
+            ?? throw new ArgumentException("Runtime limits are required.", nameof(options));
+        _agentLimits = CopyAgentLimits(options.AgentLimits
+            ?? throw new ArgumentException("Agent limits are required.", nameof(options)));
+        _modelParameters = options.ModelParameters?.Clone()
+            ?? throw new ArgumentException("Model parameters are required.", nameof(options));
         _transcriptCompactor = options.TranscriptCompactor;
-        _agentHooks = CopyHooks(options.AgentHooks ?? throw new ArgumentNullException(nameof(options.AgentHooks)));
+        if (options.ContextWindowTokens < 0 || options.ContextWindowTokens > 1_000_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "The context-window size is invalid.");
+        }
+
+        if (options.ContextWindowReserveTokens <= 0
+            || options.ContextWindowReserveTokens > 1_000_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "The context-window reserve is invalid.");
+        }
+
+        if (options.ContextWindowTokens > 0
+            && options.ContextWindowReserveTokens >= options.ContextWindowTokens)
+        {
+            throw new ArgumentException("The context-window reserve must be smaller than the configured context window.");
+        }
+
+        if (options.ContextWindowTokens > 0
+            && _modelParameters.MaxOutputTokens is { } configuredOutput
+            && configuredOutput >= options.ContextWindowTokens)
+        {
+            throw new ArgumentException("The configured model output limit must be smaller than the context window.");
+        }
+
+        _contextWindowTokens = options.ContextWindowTokens;
+        _contextWindowReserveTokens = options.ContextWindowReserveTokens;
+        _requestTokenEstimator = options.RequestTokenEstimator
+            ?? throw new ArgumentException("A model-request token estimator is required.", nameof(options));
+        _transcriptTokenEstimator = options.TranscriptTokenEstimator
+            ?? throw new ArgumentException("A transcript token estimator is required.", nameof(options));
+        _agentHooks = CopyHooks(options.AgentHooks
+            ?? throw new ArgumentException("Agent hooks are required.", nameof(options)));
         _refreshContextAfterToolTurns = options.RefreshContextAfterToolTurns;
         if (!Enum.IsDefined(typeof(ToolExecutionMode), options.ToolExecution))
         {
-            throw new ArgumentOutOfRangeException(nameof(options.ToolExecution));
+            throw new ArgumentOutOfRangeException(nameof(options), "The tool execution mode is invalid.");
         }
 
         _toolExecution = options.ToolExecution;
         if (options.RecentProcessedInputCapacity <= 0 || options.RecentProcessedInputCapacity > 100_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.RecentProcessedInputCapacity));
+            throw new ArgumentOutOfRangeException(nameof(options), "The processed-input retention capacity is invalid.");
         }
 
         _recentProcessedInputCapacity = options.RecentProcessedInputCapacity;
-        _actors = new MultiActorScheduler(
-            _limits.MaxConcurrentActors,
-            maximumActors: checked(_limits.MaxConcurrentActors * 16),
-            _limits.MaxQueuedInputsPerActor);
-
-        var workflows = options.Workflows.ToArray();
-        if (workflows.Any(workflow => workflow is null || string.IsNullOrWhiteSpace(workflow.Name)))
+        if (options.SessionCommitTimeoutMilliseconds < 100 || options.SessionCommitTimeoutMilliseconds > 300_000)
         {
-            throw new ArgumentException("Every workflow must have a name.", nameof(options.Workflows));
+            throw new ArgumentOutOfRangeException(nameof(options), "The session commit timeout is invalid.");
         }
 
-        var duplicate = workflows.GroupBy(workflow => workflow.Name, StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null)
+        _sessionCommitTimeoutMilliseconds = options.SessionCommitTimeoutMilliseconds;
+        _persistToolTurnCheckpoints = options.PersistToolTurnCheckpoints;
+        var extensions = new GameAgentExtensionHost(options.Extensions, _limits);
+        try
         {
-            throw new ArgumentException($"Duplicate workflow name '{duplicate.Key}'.", nameof(options.Workflows));
-        }
+            var workflows = options.Workflows.Concat(extensions.GetWorkflows()).ToArray();
+            if (workflows.Any(workflow => workflow is null || string.IsNullOrWhiteSpace(workflow.Name)))
+            {
+                throw new ArgumentException("Every workflow must have a name.", nameof(options));
+            }
 
-        _workflows = workflows.ToDictionary(workflow => workflow.Name, StringComparer.Ordinal);
+            var duplicate = workflows.GroupBy(workflow => workflow.Name, StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
+            if (duplicate is not null)
+            {
+                throw new ArgumentException($"Duplicate workflow name '{duplicate.Key}'.", nameof(options));
+            }
+
+            _workflows = workflows.ToDictionary(workflow => workflow.Name, StringComparer.Ordinal);
+            _actors = new MultiActorScheduler(
+                _limits.MaxConcurrentActors,
+                maximumActors: _limits.MaxScheduledActors,
+                _limits.MaxQueuedInputsPerActor);
+            _extensions = extensions;
+        }
+        catch
+        {
+            try
+            {
+                GameAgentAsyncBridge.Run(extensions.DisposeAsync);
+            }
+            catch
+            {
+                // Preserve the runtime construction failure. Cleanup is best effort here.
+            }
+
+            throw;
+        }
     }
 
     public Task<GameAgentRunResult> RunAsync(GameInput input, CancellationToken cancellationToken = default)
         => RunAsync(input, observer: null, cancellationToken);
+
+    public IReadOnlyList<GameAgentExtensionResource> ExtensionResources => _extensions.GetResources();
+
+    public IReadOnlyList<GameAgentExtensionDiagnostic> ExtensionDiagnostics => _extensions.GetDiagnostics();
 
     public Task<GameAgentRunResult> RunAsync(
         GameInput input,
@@ -308,11 +486,30 @@ public sealed class GameAgentRuntime
             throw new ArgumentNullException(nameof(input));
         }
 
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(GameAgentRuntime));
+        }
+
         _limits.Validate(input);
-        return _actors.EnqueueAsync(
+        return EnqueueRunAsync(
+            input,
+            observer,
+            cancellationToken);
+    }
+
+    private async Task<GameAgentRunResult> EnqueueRunAsync(
+        GameInput input,
+        GameAgentEventHandler? observer,
+        CancellationToken cancellationToken)
+    {
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            _lifetimeCancellation.Token);
+        return await _actors.EnqueueAsync(
             GameJson.JoinIds(input.SessionId, input.ActorId),
             token => RunCoreAsync(input, observer, token),
-            cancellationToken);
+            linkedCancellation.Token).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -367,144 +564,383 @@ public sealed class GameAgentRuntime
         GameAgentEventHandler? observer,
         CancellationToken cancellationToken)
     {
-        var key = new GameSessionKey(input.SessionId, input.ActorId);
-        var loaded = await _sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false)
-            ?? new GameSessionSnapshot(key, 0);
-        if (!loaded.Key.Equals(key))
-        {
-            throw new InvalidOperationException("The game session store returned a snapshot for a different session key.");
-        }
-
-        if (loaded.ProcessedInputIds.Count > _recentProcessedInputCapacity)
-        {
-            throw new InvalidOperationException("The game session store returned more processed input IDs than the configured retention capacity.");
-        }
-
-        AgentValidation.ValidateTranscript(loaded.Messages, _agentLimits);
-        if (loaded.ProcessedInputIds.Contains(input.InputId, StringComparer.Ordinal))
-        {
-            return new GameAgentRunResult(
-                GameAgentRunStatus.Duplicate,
-                GameRouteDecision.Quick("duplicate-input"),
-                loaded.Revision);
-        }
-
-        var context = _contextProvider is null
-            ? Array.Empty<GameContextSlice>()
-            : (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("The game context provider returned null.")).ToArray();
-        _limits.Validate(context);
-
-        var tools = _toolProvider is null
-            ? Array.Empty<AgentTool>()
-            : (await _toolProvider(input, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("The game tool provider returned null.")).ToArray();
-        if (tools.Any(tool => tool is null))
-        {
-            throw new InvalidOperationException("The game tool provider returned a null tool.");
-        }
-
-        var hasPendingWork = _pendingWorkProvider is not null
-            && await _pendingWorkProvider(input, cancellationToken).ConfigureAwait(false);
-        var route = await _routePolicy.RouteAsync(
-            new GameRouteContext(input, tools.Length, hasPendingWork),
-            cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("The game route policy returned null.");
-
-        if (route.Route == GameRouteKind.Workflow)
-        {
-            return await RunWorkflowAsync(input, loaded, context, tools, route, cancellationToken).ConfigureAwait(false);
-        }
-
-        var activeTools = route.Route == GameRouteKind.QuickResponse ? Array.Empty<AgentTool>() : tools;
-        var skills = _skillSource is null
-            ? Array.Empty<GameSkill>()
-            : (await _skillSource.SelectAsync(
-                new GameSkillQuery(input, activeTools.Select(tool => tool.Definition.Name).ToArray(), _limits.MaxSkillsPerRun),
-                cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("The game skill source returned null.")).ToArray();
-        _limits.Validate(skills);
-
-        var agentLimits = CopyAgentLimits(_agentLimits);
-        IReadOnlyList<AgentMessage> initialMessages = loaded.Messages;
-        var minimumMessageReserve = 2;
-        var preferredMessageReserve = activeTools.Length == 0
-            ? minimumMessageReserve
-            : checked(agentLimits.MaxToolCallsPerTurn + 3);
-        if (initialMessages.Count + preferredMessageReserve > agentLimits.MaxMessages
-            && _transcriptCompactor is not null)
-        {
-            var target = Math.Max(1, agentLimits.MaxMessages - preferredMessageReserve);
-            initialMessages = await _transcriptCompactor.CompactAsync(
-                new GameTranscriptCompactionContext(loaded.Key, initialMessages, target),
-                cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("The transcript compactor returned null.");
-            if (initialMessages.Count > target)
-            {
-                throw new InvalidOperationException("The transcript compactor exceeded its requested target.");
-            }
-        }
-
-        if (initialMessages.Count + minimumMessageReserve > agentLimits.MaxMessages)
-        {
-            return new GameAgentRunResult(
-                GameAgentRunStatus.Failed,
-                route,
-                loaded.Revision,
-                error: "The session transcript cannot reserve space for the next input and model response.");
-        }
-
-        var options = new AgentOptions(_provider, _model)
-        {
-            SystemPrompt = ComposeSystemPrompt(context, skills),
-            SessionId = input.SessionId,
-            Limits = agentLimits,
-            Parameters = _modelParameters.Clone(),
-            Hooks = CreateRunHooks(route.Route, input),
-            ToolExecution = _toolExecution,
-        };
-        foreach (var message in initialMessages)
-        {
-            options.InitialMessages.Add(message);
-        }
-
-        foreach (var tool in activeTools)
-        {
-            options.Tools.Add(tool);
-        }
-
-        var agent = new Agent(options);
-        using var subscription = observer is null
-            ? null
-            : agent.Subscribe((agentEvent, token) => observer(input, agentEvent, token));
-        RegisterActiveAgent(key, agent);
-        AgentRunResult run;
+        GameAgentExtensionRunContext? failureContext = null;
         try
         {
-            run = await agent.RunAsync(CreateInputMessage(input), cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            UnregisterActiveAgent(key, agent);
-        }
+            var key = new GameSessionKey(input.SessionId, input.ActorId);
+            var loaded = await _sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false)
+                ?? new GameSessionSnapshot(key, 0);
+            if (!loaded.Key.Equals(key))
+            {
+                throw new InvalidOperationException("The game session store returned a snapshot for a different session key.");
+            }
 
-        var save = await SaveAsync(input, loaded, agent.State.Messages, cancellationToken).ConfigureAwait(false);
-        if (!save.Saved)
-        {
-            return new GameAgentRunResult(
-                GameAgentRunStatus.SessionConflict,
+            if (loaded.ProcessedInputIds.Count > _recentProcessedInputCapacity)
+            {
+                throw new InvalidOperationException("The game session store returned more processed input IDs than the configured retention capacity.");
+            }
+
+            if (loaded.ProcessedInputIds.Any(id => id.Length > _limits.MaxIdentifierCharacters)
+                || (loaded.PendingInputId?.Length ?? 0) > _limits.MaxIdentifierCharacters
+                || (loaded.LastMoment?.TimelineId.Length ?? 0) > _limits.MaxIdentifierCharacters
+                || (loaded.LastMoment?.CalendarJson?.Length ?? 0) > _limits.MaxCalendarJsonCharacters)
+            {
+                throw new InvalidOperationException("The game session store returned state that exceeds the configured runtime limits.");
+            }
+
+            AgentValidation.ValidateTranscript(loaded.Messages, _agentLimits);
+            var extensionState = new GameAgentSessionState(loaded.ExtensionState, _limits);
+            var extensionContext = _extensions.CreateRunContext(input, loaded, extensionState);
+            failureContext = extensionContext;
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.InputReceived,
+                new GameAgentInputEvent(input),
+                extensionContext,
+                cancellationToken).ConfigureAwait(false);
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.SessionLoaded,
+                new GameAgentSessionEvent(loaded),
+                extensionContext,
+                cancellationToken).ConfigureAwait(false);
+            if (loaded.ProcessedInputIds.Contains(input.InputId, StringComparer.Ordinal))
+            {
+                var duplicate = new GameAgentRunResult(
+                    GameAgentRunStatus.Duplicate,
+                    GameRouteDecision.Quick("duplicate-input"),
+                    loaded.Revision);
+                await PublishCompletedAsync(duplicate, extensionContext, cancellationToken).ConfigureAwait(false);
+                return duplicate;
+            }
+
+            if (loaded.PendingInputId is not null
+                && !string.Equals(loaded.PendingInputId, input.InputId, StringComparison.Ordinal))
+            {
+                var pending = new GameAgentRunResult(
+                    GameAgentRunStatus.SessionConflict,
+                    GameRouteDecision.Quick("pending-input"),
+                    loaded.Revision,
+                    error: $"Input '{loaded.PendingInputId}' has a durable tool-turn checkpoint and must be resumed before another input can run.");
+                await PublishCompletedAsync(pending, extensionContext, cancellationToken).ConfigureAwait(false);
+                return pending;
+            }
+
+            var resumingCheckpoint = loaded.PendingInputId is not null;
+            if (resumingCheckpoint)
+            {
+                ValidatePendingInput(loaded, input);
+            }
+
+            var baseContext = _contextProvider is null
+                ? Array.Empty<GameContextSlice>()
+                : (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The game context provider returned null.")).ToArray();
+            var context = await _extensions.CollectContextAsync(
+                extensionContext,
+                baseContext,
+                cancellationToken).ConfigureAwait(false);
+            _limits.Validate(context);
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.ContextCollected,
+                new GameAgentContextEvent(context),
+                extensionContext,
+                cancellationToken).ConfigureAwait(false);
+
+            var baseTools = _toolProvider is null
+                ? Array.Empty<AgentTool>()
+                : (await _toolProvider(input, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The game tool provider returned null.")).ToArray();
+            if (baseTools.Any(tool => tool is null))
+            {
+                throw new InvalidOperationException("The game tool provider returned a null tool.");
+            }
+
+            var tools = await _extensions.CollectToolsAsync(
+                extensionContext,
+                baseTools,
+                cancellationToken).ConfigureAwait(false);
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.ToolsCollected,
+                new GameAgentToolsEvent(tools),
+                extensionContext,
+                cancellationToken).ConfigureAwait(false);
+
+            var basePendingWork = _pendingWorkProvider is not null
+                && await _pendingWorkProvider(input, cancellationToken).ConfigureAwait(false);
+            var hasPendingWork = await _extensions.HasPendingWorkAsync(
+                extensionContext,
+                basePendingWork,
+                cancellationToken).ConfigureAwait(false);
+            var route = resumingCheckpoint
+                ? GameRouteDecision.Agent("durable-tool-checkpoint")
+                : await _extensions.SelectRouteAsync(
+                        extensionContext,
+                        tools.Count,
+                        hasPendingWork,
+                        cancellationToken).ConfigureAwait(false)
+                    ?? await _routePolicy.RouteAsync(
+                        new GameRouteContext(input, tools.Count, hasPendingWork),
+                        cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The game route policy returned null.");
+            var routeEvent = new GameAgentRouteEvent(route);
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.RouteSelected,
+                routeEvent,
+                extensionContext,
+                cancellationToken).ConfigureAwait(false);
+            route = routeEvent.Decision ?? throw new InvalidOperationException("An extension cleared the route decision.");
+            if (resumingCheckpoint && route.Route != GameRouteKind.Agent)
+            {
+                throw new InvalidOperationException("A durable tool-turn checkpoint must resume through the agent route.");
+            }
+
+            if (route.Route == GameRouteKind.Workflow)
+            {
+                var workflowRun = await RunWorkflowAsync(
+                    input,
+                    loaded,
+                    context,
+                    tools,
+                    route,
+                    extensionState,
+                    extensionContext,
+                    cancellationToken).ConfigureAwait(false);
+                await PublishCompletedAsync(workflowRun, extensionContext, CancellationToken.None).ConfigureAwait(false);
+                return workflowRun;
+            }
+
+            var activeTools = route.Route == GameRouteKind.QuickResponse
+                ? (IReadOnlyList<AgentTool>)Array.Empty<AgentTool>()
+                : tools;
+            var baseSkills = _skillSource is null
+                ? Array.Empty<GameSkill>()
+                : (await _skillSource.SelectAsync(
+                    new GameSkillQuery(input, activeTools.Select(tool => tool.Definition.Name).ToArray(), _limits.MaxSkillsPerRun),
+                    cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The game skill source returned null.")).ToArray();
+            var skills = await _extensions.CollectSkillsAsync(
+                extensionContext,
+                baseSkills,
+                activeTools.Select(tool => tool.Definition.Name).ToArray(),
+                _limits.MaxSkillsPerRun,
+                cancellationToken).ConfigureAwait(false);
+            _limits.Validate(skills);
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.SkillsSelected,
+                new GameAgentSkillsEvent(skills),
+                extensionContext,
+                cancellationToken).ConfigureAwait(false);
+
+            var selection = _modelSelector is null
+                ? null
+                : await _modelSelector(input, cancellationToken).ConfigureAwait(false);
+            var provider = selection?.Provider
+                ?? _extensions.ResolveModelProvider(selection?.RegisteredProviderName, _provider);
+            var model = selection?.Model ?? _model;
+            var parameters = selection?.Parameters?.Clone() ?? _modelParameters.Clone();
+            var contextWindowTokens = selection?.ContextWindowTokens > 0
+                ? selection.ContextWindowTokens
+                : _contextWindowTokens;
+            var maximumOutputTokens = selection?.MaximumOutputTokens ?? 0;
+            var systemPrompt = ComposeSystemPrompt(context, skills);
+            var agentLimits = CopyAgentLimits(_agentLimits);
+            IReadOnlyList<AgentMessage> initialMessages = loaded.Messages;
+            var minimumMessageReserve = resumingCheckpoint ? 1 : 2;
+            var preferredMessageReserve = activeTools.Count == 0
+                ? minimumMessageReserve
+                : checked(agentLimits.MaxToolCallsPerTurn + (resumingCheckpoint ? 2 : 3));
+            var additionalMessages = resumingCheckpoint
+                ? Array.Empty<AgentMessage>()
+                : new[] { CreateInputMessage(input) };
+            initialMessages = await FitTranscriptAsync(
+                loaded.Key,
+                initialMessages,
+                Math.Max(1, agentLimits.MaxMessages - preferredMessageReserve),
+                additionalMessages,
+                model,
+                systemPrompt,
+                activeTools.Select(tool => tool.Definition).ToArray(),
+                parameters,
+                contextWindowTokens,
+                maximumOutputTokens,
+                cancellationToken).ConfigureAwait(false);
+
+            if (resumingCheckpoint)
+            {
+                ValidatePendingInput(loaded, input, initialMessages);
+            }
+
+            if (initialMessages.Count + minimumMessageReserve > agentLimits.MaxMessages)
+            {
+                var exhausted = new GameAgentRunResult(
+                    GameAgentRunStatus.Failed,
+                    route,
+                    loaded.Revision,
+                    error: "The session transcript cannot reserve space for the next input and model response.");
+                await PublishCompletedAsync(exhausted, extensionContext, cancellationToken).ConfigureAwait(false);
+                return exhausted;
+            }
+
+            var commitBase = loaded;
+            GameSessionSaveResult? checkpointConflict = null;
+            var runHooks = CreateRunHooks(
+                route.Route,
+                input,
+                extensionContext,
+                model,
+                parameters,
+                contextWindowTokens,
+                maximumOutputTokens);
+            if (_persistToolTurnCheckpoints && route.Route == GameRouteKind.Agent)
+            {
+                var configured = runHooks.PrepareNextTurnAsync;
+                runHooks.PrepareNextTurnAsync = async (turnContext, token) =>
+                {
+                    if (!turnContext.Response.Content.OfType<ToolCallContent>().Any())
+                    {
+                        return configured is null
+                            ? null
+                            : await configured(turnContext, token).ConfigureAwait(false);
+                    }
+
+                    var checkpoint = new GameSessionSnapshot(
+                        commitBase.Key,
+                        checked(commitBase.Revision + 1),
+                        turnContext.Context.Messages,
+                        commitBase.ProcessedInputIds,
+                        commitBase.LastMoment,
+                        extensionState.SnapshotAll(),
+                        input.InputId);
+                    var checkpointSave = await _sessionStore.SaveAsync(
+                        checkpoint,
+                        commitBase.Revision,
+                        token).ConfigureAwait(false)
+                        ?? throw new InvalidOperationException("The game session store returned null.");
+                    ValidateSaveResult(commitBase, checkpoint, checkpointSave);
+                    if (!checkpointSave.Saved)
+                    {
+                        checkpointConflict = checkpointSave;
+                        throw new InvalidOperationException(
+                            "The session changed while a tool turn was being checkpointed.");
+                    }
+
+                    commitBase = checkpointSave.Current;
+                    return configured is null
+                        ? null
+                        : await configured(turnContext, token).ConfigureAwait(false);
+                };
+            }
+
+            var options = new AgentOptions(provider, model)
+            {
+                SystemPrompt = systemPrompt,
+                SessionId = input.SessionId,
+                Limits = agentLimits,
+                Parameters = parameters,
+                Hooks = runHooks,
+                ToolExecution = _toolExecution,
+            };
+            foreach (var message in initialMessages)
+            {
+                options.InitialMessages.Add(message);
+            }
+
+            foreach (var tool in activeTools)
+            {
+                options.Tools.Add(tool);
+            }
+
+            var agent = new Agent(options);
+            using var subscription = agent.Subscribe(async (agentEvent, token) =>
+            {
+                if (observer is not null)
+                {
+                    await observer(input, agentEvent, token).ConfigureAwait(false);
+                }
+
+                await _extensions.PublishAsync(
+                    GameAgentExtensionEvents.KernelEvent,
+                    new GameAgentKernelEvent(agentEvent),
+                    extensionContext,
+                    token).ConfigureAwait(false);
+            });
+            RegisterActiveAgent(key, agent);
+            AgentRunResult run;
+            try
+            {
+                run = resumingCheckpoint
+                    ? await agent.ContinueAsync(cancellationToken).ConfigureAwait(false)
+                    : await agent.RunAsync(CreateInputMessage(input), cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                UnregisterActiveAgent(key, agent);
+            }
+
+            if (checkpointConflict is not null)
+            {
+                var conflict = new GameAgentRunResult(
+                    GameAgentRunStatus.SessionConflict,
+                    route,
+                    checkpointConflict.Current.Revision,
+                    run,
+                    "The session changed while this input was running. Committed game actions must be reconciled before retrying.");
+                await PublishCompletedAsync(conflict, extensionContext, CancellationToken.None).ConfigureAwait(false);
+                return conflict;
+            }
+
+            GameSessionSaveResult save;
+            using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
+            {
+                save = await SaveAsync(
+                    input,
+                    commitBase,
+                    agent.State.Messages,
+                    extensionState,
+                    extensionContext,
+                    settlementCancellation.Token).ConfigureAwait(false);
+            }
+            if (!save.Saved)
+            {
+                var conflict = new GameAgentRunResult(
+                    GameAgentRunStatus.SessionConflict,
+                    route,
+                    save.Current.Revision,
+                    run,
+                    "The session changed while this input was running. Committed game actions must be reconciled before retrying.");
+                await PublishCompletedAsync(conflict, extensionContext, CancellationToken.None).ConfigureAwait(false);
+                return conflict;
+            }
+
+            var completed = new GameAgentRunResult(
+                run.Succeeded ? GameAgentRunStatus.Completed : GameAgentRunStatus.Failed,
                 route,
                 save.Current.Revision,
                 run,
-                "The session changed while this input was running. Committed game actions must be reconciled before retrying.");
+                run.Error);
+            await PublishCompletedAsync(completed, extensionContext, CancellationToken.None).ConfigureAwait(false);
+            return completed;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            if (failureContext is not null)
+            {
+                await _extensions.PublishAsync(
+                    GameAgentExtensionEvents.RunFailed,
+                    new GameAgentFailureEvent(exception),
+                    failureContext,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
 
-        return new GameAgentRunResult(
-            run.Succeeded ? GameAgentRunStatus.Completed : GameAgentRunStatus.Failed,
-            route,
-            save.Current.Revision,
-            run,
-            run.Error);
+            throw;
+        }
+        finally
+        {
+            failureContext?.Invalidate();
+        }
     }
 
     private void RegisterActiveAgent(GameSessionKey key, Agent agent)
@@ -537,6 +973,8 @@ public sealed class GameAgentRuntime
         IReadOnlyList<GameContextSlice> context,
         IReadOnlyList<AgentTool> tools,
         GameRouteDecision route,
+        GameAgentSessionState extensionState,
+        GameAgentExtensionRunContext extensionContext,
         CancellationToken cancellationToken)
     {
         if (route.Workflow is null || !_workflows.TryGetValue(route.Workflow, out var workflow))
@@ -569,7 +1007,17 @@ public sealed class GameAgentRuntime
             ?? throw new InvalidOperationException($"Workflow '{workflow.Name}' returned null.");
         workflowContext.ValidateOutput(result.Messages);
         var messages = loaded.Messages.Concat(new[] { CreateInputMessage(input) }).Concat(result.Messages).ToArray();
-        var save = await SaveAsync(input, loaded, messages, cancellationToken).ConfigureAwait(false);
+        GameSessionSaveResult save;
+        using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
+        {
+            save = await SaveAsync(
+                input,
+                loaded,
+                messages,
+                extensionState,
+                extensionContext,
+                settlementCancellation.Token).ConfigureAwait(false);
+        }
         return !save.Saved
             ? new GameAgentRunResult(GameAgentRunStatus.SessionConflict, route, save.Current.Revision, error: "The session changed while the workflow was running.")
             : new GameAgentRunResult(
@@ -583,8 +1031,15 @@ public sealed class GameAgentRuntime
         GameInput input,
         GameSessionSnapshot loaded,
         IReadOnlyList<AgentMessage> messages,
+        GameAgentSessionState extensionState,
+        GameAgentExtensionRunContext extensionContext,
         CancellationToken cancellationToken)
     {
+        await _extensions.PublishAsync(
+            GameAgentExtensionEvents.SessionSaving,
+            new GameAgentSessionEvent(loaded),
+            extensionContext,
+            cancellationToken).ConfigureAwait(false);
         var processed = loaded.ProcessedInputIds
             .Where(id => !string.Equals(id, input.InputId, StringComparison.Ordinal))
             .Concat(new[] { input.InputId })
@@ -595,25 +1050,44 @@ public sealed class GameAgentRuntime
             checked(loaded.Revision + 1),
             messages,
             processed,
-            input.Moment);
+            input.Moment,
+            extensionState.SnapshotAll(),
+            pendingInputId: null);
         var save = await _sessionStore.SaveAsync(snapshot, loaded.Revision, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The game session store returned null.");
-        if (!save.Current.Key.Equals(loaded.Key))
+        ValidateSaveResult(loaded, snapshot, save);
+
+        if (save.Saved)
+        {
+            await _extensions.PublishAsync(
+                GameAgentExtensionEvents.SessionSaved,
+                new GameAgentSessionEvent(save.Current),
+                extensionContext,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
+        return save;
+    }
+
+    private static void ValidateSaveResult(
+        GameSessionSnapshot expectedBase,
+        GameSessionSnapshot candidate,
+        GameSessionSaveResult save)
+    {
+        if (!save.Current.Key.Equals(expectedBase.Key))
         {
             throw new InvalidOperationException("The game session store returned a result for a different session key.");
         }
 
-        if (save.Saved && !SessionSnapshotEquals(save.Current, snapshot))
+        if (save.Saved && !SessionSnapshotEquals(save.Current, candidate))
         {
             throw new InvalidOperationException("The game session store returned a different saved snapshot.");
         }
 
-        if (!save.Saved && save.Current.Revision <= loaded.Revision)
+        if (!save.Saved && save.Current.Revision <= expectedBase.Revision)
         {
             throw new InvalidOperationException("The game session store reported a conflict without a newer revision.");
         }
-
-        return save;
     }
 
     private static bool SessionSnapshotEquals(GameSessionSnapshot left, GameSessionSnapshot right)
@@ -621,7 +1095,10 @@ public sealed class GameAgentRuntime
         if (!left.Key.Equals(right.Key)
             || left.Revision != right.Revision
             || left.LastMoment != right.LastMoment
+            || !string.Equals(left.PendingInputId, right.PendingInputId, StringComparison.Ordinal)
             || !left.ProcessedInputIds.SequenceEqual(right.ProcessedInputIds, StringComparer.Ordinal)
+            || !left.ExtensionState.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .SequenceEqual(right.ExtensionState.OrderBy(pair => pair.Key, StringComparer.Ordinal))
             || left.Messages.Count != right.Messages.Count)
         {
             return false;
@@ -629,7 +1106,7 @@ public sealed class GameAgentRuntime
 
         for (var index = 0; index < left.Messages.Count; index++)
         {
-            if (!MessageEquals(left.Messages[index], right.Messages[index]))
+            if (!GameAgentValueComparer.MessageEquals(left.Messages[index], right.Messages[index]))
             {
                 return false;
             }
@@ -637,80 +1114,12 @@ public sealed class GameAgentRuntime
 
         return true;
     }
-
-    private static bool MessageEquals(AgentMessage left, AgentMessage right)
-    {
-        if (left.Role != right.Role
-            || left.Timestamp != right.Timestamp
-            || !string.Equals(left.CustomRole, right.CustomRole, StringComparison.Ordinal)
-            || !string.Equals(left.ToolCallId, right.ToolCallId, StringComparison.Ordinal)
-            || !string.Equals(left.ToolName, right.ToolName, StringComparison.Ordinal)
-            || left.IsError != right.IsError
-            || !string.Equals(left.DetailsJson, right.DetailsJson, StringComparison.Ordinal)
-            || !string.Equals(left.Model, right.Model, StringComparison.Ordinal)
-            || left.StopReason != right.StopReason
-            || !string.Equals(left.ErrorMessage, right.ErrorMessage, StringComparison.Ordinal)
-            || !UsageEquals(left.Usage, right.Usage)
-            || left.Metadata.Count != right.Metadata.Count
-            || left.Content.Count != right.Content.Count)
-        {
-            return false;
-        }
-
-        foreach (var pair in left.Metadata)
-        {
-            if (!right.Metadata.TryGetValue(pair.Key, out var value)
-                || !string.Equals(pair.Value, value, StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-
-        for (var index = 0; index < left.Content.Count; index++)
-        {
-            if (!ContentEquals(left.Content[index], right.Content[index]))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool UsageEquals(ModelUsage? left, ModelUsage? right) =>
-        left is null
-            ? right is null
-            : right is not null
-                && left.InputTokens == right.InputTokens
-                && left.OutputTokens == right.OutputTokens
-                && left.CacheReadTokens == right.CacheReadTokens
-                && left.CacheWriteTokens == right.CacheWriteTokens;
-
-    private static bool ContentEquals(AgentContent left, AgentContent right) => (left, right) switch
-    {
-        (TextContent first, TextContent second) =>
-            string.Equals(first.Text, second.Text, StringComparison.Ordinal),
-        (JsonContent first, JsonContent second) =>
-            string.Equals(first.Json, second.Json, StringComparison.Ordinal),
-        (ReasoningContent first, ReasoningContent second) =>
-            string.Equals(first.Text, second.Text, StringComparison.Ordinal)
-            && string.Equals(first.Signature, second.Signature, StringComparison.Ordinal),
-        (ResourceContent first, ResourceContent second) =>
-            string.Equals(first.Uri, second.Uri, StringComparison.Ordinal)
-            && string.Equals(first.MediaType, second.MediaType, StringComparison.Ordinal)
-            && string.Equals(first.Name, second.Name, StringComparison.Ordinal),
-        (ToolCallContent first, ToolCallContent second) =>
-            string.Equals(first.Id, second.Id, StringComparison.Ordinal)
-            && string.Equals(first.Name, second.Name, StringComparison.Ordinal)
-            && string.Equals(first.ArgumentsJson, second.ArgumentsJson, StringComparison.Ordinal),
-        _ => false,
-    };
 
     private string ComposeSystemPrompt(
         IReadOnlyList<GameContextSlice> context,
         IReadOnlyList<GameSkill> skills)
     {
-        return _instructions
+        return _extensions.ComposePrompt(_instructions)
             + "\n\nReusable skill instructions for this run:\n"
             + JsonSerializer.Serialize(
                 skills
@@ -736,8 +1145,51 @@ public sealed class GameAgentRuntime
             ["game.timeline_id"] = input.Moment.TimelineId,
             ["game.tick"] = input.Moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
-        return AgentMessage.UserJson(payload, DateTimeOffset.UtcNow, metadata);
+        var content = new List<AgentContent>(input.Resources.Count + 1)
+        {
+            new JsonContent(payload),
+        };
+        content.AddRange(input.Resources);
+        return new AgentMessage(AgentRole.User, content, DateTimeOffset.UtcNow, metadata: metadata);
     }
+
+    private static void ValidatePendingInput(
+        GameSessionSnapshot loaded,
+        GameInput input,
+        IReadOnlyList<AgentMessage>? transcript = null)
+    {
+        var messages = transcript ?? loaded.Messages;
+        var matches = messages.Where(message =>
+                message.Role == AgentRole.User
+                && message.Metadata.TryGetValue("game.input_id", out var value)
+                && string.Equals(value, input.InputId, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            throw new InvalidOperationException("The pending input checkpoint does not contain exactly one matching input message.");
+        }
+
+        var expected = CreateInputMessage(input);
+        if (!InputMessageEquals(matches[0], expected))
+        {
+            throw new InvalidOperationException("The resubmitted input does not match its durable checkpoint.");
+        }
+
+        if (messages.Count == 0 || messages[messages.Count - 1].Role == AgentRole.Assistant)
+        {
+            throw new InvalidOperationException("The pending input checkpoint is not resumable.");
+        }
+
+    }
+
+    private static bool InputMessageEquals(AgentMessage left, AgentMessage right) =>
+        left.Role == right.Role
+        && string.Equals(left.CustomRole, right.CustomRole, StringComparison.Ordinal)
+        && left.Metadata.Count == right.Metadata.Count
+        && left.Metadata.All(pair => right.Metadata.TryGetValue(pair.Key, out var value)
+            && string.Equals(pair.Value, value, StringComparison.Ordinal))
+        && left.Content.Count == right.Content.Count
+        && left.Content.Zip(right.Content, GameAgentValueComparer.ContentEquals).All(equal => equal);
 
     private static AgentLimits CopyAgentLimits(AgentLimits value) => new()
     {
@@ -763,11 +1215,19 @@ public sealed class GameAgentRuntime
         MaxQueuedMessages = value.MaxQueuedMessages,
         MaxConcurrentTools = value.MaxConcurrentTools,
         ToolTimeoutMilliseconds = value.ToolTimeoutMilliseconds,
+        ModelTimeoutMilliseconds = value.ModelTimeoutMilliseconds,
         MaxProgressEventsPerTool = value.MaxProgressEventsPerTool,
         MaxSubscribers = value.MaxSubscribers,
     };
 
-    private AgentHooks CreateRunHooks(GameRouteKind route, GameInput input)
+    private AgentHooks CreateRunHooks(
+        GameRouteKind route,
+        GameInput input,
+        GameAgentExtensionRunContext extensionContext,
+        string model,
+        ModelParameters parameters,
+        int contextWindowTokens,
+        int maximumOutputTokens)
     {
         var hooks = CopyHooks(_agentHooks);
         if (route == GameRouteKind.QuickResponse)
@@ -784,6 +1244,8 @@ public sealed class GameAgentRuntime
             };
         }
 
+        hooks = _extensions.ComposeHooks(extensionContext, hooks);
+
         if (route == GameRouteKind.Agent && _refreshContextAfterToolTurns)
         {
             var configured = hooks.PrepareNextTurnAsync;
@@ -792,22 +1254,82 @@ public sealed class GameAgentRuntime
                 var update = configured is null
                     ? null
                     : await configured(context, cancellationToken).ConfigureAwait(false);
-                if (update?.Context is not null
-                    || !context.Response.Content.OfType<ToolCallContent>().Any())
+                if (!context.Response.Content.OfType<ToolCallContent>().Any())
                 {
                     return update;
+                }
+
+                var nextModel = update?.Model ?? model;
+                var nextParameters = update?.Parameters ?? parameters;
+                if (update?.Context is { } replacement)
+                {
+                    var preferredMessageReserve = replacement.Tools.Count == 0
+                        ? 1
+                        : checked(_agentLimits.MaxToolCallsPerTurn + 2);
+                    var compacted = await FitTranscriptAsync(
+                        new GameSessionKey(input.SessionId, input.ActorId),
+                        replacement.Messages,
+                        Math.Max(1, _agentLimits.MaxMessages - preferredMessageReserve),
+                        Array.Empty<AgentMessage>(),
+                        nextModel,
+                        replacement.SystemPrompt,
+                        replacement.Tools.Select(tool => tool.Definition).ToArray(),
+                        nextParameters,
+                        contextWindowTokens,
+                        maximumOutputTokens,
+                        cancellationToken).ConfigureAwait(false);
+                    return new NextTurnUpdate
+                    {
+                        Context = new AgentContext(replacement.SystemPrompt, compacted, replacement.Tools),
+                        Provider = update.Provider,
+                        Model = update.Model,
+                        Parameters = update.Parameters,
+                    };
                 }
 
                 var refreshed = await RefreshTurnContextAsync(
                     input,
                     context.Context.Messages,
+                    extensionContext,
+                    nextModel,
+                    nextParameters,
+                    contextWindowTokens,
+                    maximumOutputTokens,
                     cancellationToken).ConfigureAwait(false);
                 return new NextTurnUpdate
                 {
                     Context = refreshed,
+                    Provider = update?.Provider,
                     Model = update?.Model,
                     Parameters = update?.Parameters,
                 };
+            };
+        }
+
+        if (contextWindowTokens > 0)
+        {
+            var configured = hooks.BeforeModelRequestAsync;
+            hooks.BeforeModelRequestAsync = async (request, cancellationToken) =>
+            {
+                var prepared = configured is null
+                    ? request
+                    : await configured(request, cancellationToken).ConfigureAwait(false);
+                var available = GetAvailableInputTokens(
+                    prepared.Parameters,
+                    contextWindowTokens,
+                    maximumOutputTokens);
+                if (EstimateRequestTokens(
+                        prepared.Model,
+                        prepared.SystemPrompt,
+                        prepared.Messages,
+                        prepared.Tools) > available)
+                {
+                    throw new GameRuntimeLimitException(
+                        nameof(GameAgentRuntimeOptions.ContextWindowTokens),
+                        "The prepared model request exceeds the active context window.");
+                }
+
+                return prepared;
             };
         }
 
@@ -817,32 +1339,201 @@ public sealed class GameAgentRuntime
     private async ValueTask<AgentContext> RefreshTurnContextAsync(
         GameInput input,
         IReadOnlyList<AgentMessage> messages,
+        GameAgentExtensionRunContext extensionContext,
+        string model,
+        ModelParameters parameters,
+        int contextWindowTokens,
+        int maximumOutputTokens,
         CancellationToken cancellationToken)
     {
-        var context = _contextProvider is null
+        var baseContext = _contextProvider is null
             ? Array.Empty<GameContextSlice>()
             : (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The game context provider returned null.")).ToArray();
+        var context = await _extensions.CollectContextAsync(
+            extensionContext,
+            baseContext,
+            cancellationToken).ConfigureAwait(false);
         _limits.Validate(context);
 
-        var tools = _toolProvider is null
+        var baseTools = _toolProvider is null
             ? Array.Empty<AgentTool>()
             : (await _toolProvider(input, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The game tool provider returned null.")).ToArray();
-        if (tools.Any(tool => tool is null))
+        if (baseTools.Any(tool => tool is null))
         {
             throw new InvalidOperationException("The game tool provider returned a null tool.");
         }
 
-        var skills = _skillSource is null
+        var tools = await _extensions.CollectToolsAsync(
+            extensionContext,
+            baseTools,
+            cancellationToken).ConfigureAwait(false);
+
+        var baseSkills = _skillSource is null
             ? Array.Empty<GameSkill>()
             : (await _skillSource.SelectAsync(
                 new GameSkillQuery(input, tools.Select(tool => tool.Definition.Name).ToArray(), _limits.MaxSkillsPerRun),
                 cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The game skill source returned null.")).ToArray();
+        var skills = await _extensions.CollectSkillsAsync(
+            extensionContext,
+            baseSkills,
+            tools.Select(tool => tool.Definition.Name).ToArray(),
+            _limits.MaxSkillsPerRun,
+            cancellationToken).ConfigureAwait(false);
         _limits.Validate(skills);
-        return new AgentContext(ComposeSystemPrompt(context, skills), messages, tools);
+        var systemPrompt = ComposeSystemPrompt(context, skills);
+        var preferredMessageReserve = tools.Count == 0
+            ? 1
+            : checked(_agentLimits.MaxToolCallsPerTurn + 2);
+        var compacted = await FitTranscriptAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            messages,
+            Math.Max(1, _agentLimits.MaxMessages - preferredMessageReserve),
+            Array.Empty<AgentMessage>(),
+            model,
+            systemPrompt,
+            tools.Select(tool => tool.Definition).ToArray(),
+            parameters,
+            contextWindowTokens,
+            maximumOutputTokens,
+            cancellationToken).ConfigureAwait(false);
+        return new AgentContext(systemPrompt, compacted, tools);
     }
+
+    private async ValueTask<IReadOnlyList<AgentMessage>> FitTranscriptAsync(
+        GameSessionKey session,
+        IReadOnlyList<AgentMessage> messages,
+        int targetMessageCount,
+        IReadOnlyList<AgentMessage> additionalMessages,
+        string model,
+        string systemPrompt,
+        IReadOnlyList<ToolDefinition> tools,
+        ModelParameters parameters,
+        int contextWindowTokens,
+        int maximumOutputTokens,
+        CancellationToken cancellationToken)
+    {
+        var tokenTarget = GetTranscriptTokenTarget(
+            model,
+            systemPrompt,
+            additionalMessages,
+            tools,
+            parameters,
+            contextWindowTokens,
+            maximumOutputTokens);
+        var messageCompactionRequired = messages.Count > targetMessageCount;
+        var tokenCompactionRequired = tokenTarget is { } target
+            && EstimateTranscriptTokens(messages) > target;
+        IReadOnlyList<AgentMessage> fitted = messages;
+        if ((messageCompactionRequired || tokenCompactionRequired) && _transcriptCompactor is not null)
+        {
+            fitted = await _transcriptCompactor.CompactAsync(
+                new GameTranscriptCompactionContext(
+                    session,
+                    messages,
+                    targetMessageCount,
+                    tokenTarget,
+                    tokenTarget is null ? null : _transcriptTokenEstimator),
+                cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The transcript compactor returned null.");
+        }
+
+        if (fitted.Count > targetMessageCount)
+        {
+            throw new GameRuntimeLimitException(
+                nameof(AgentLimits.MaxMessages),
+                _transcriptCompactor is null
+                    ? "The session transcript requires compaction before another model turn."
+                    : "The transcript compactor exceeded its requested message target.");
+        }
+
+        AgentValidation.ValidateTranscript(fitted, _agentLimits);
+        var requestMessages = fitted.Concat(additionalMessages).ToArray();
+        if (contextWindowTokens > 0)
+        {
+            var available = GetAvailableInputTokens(parameters, contextWindowTokens, maximumOutputTokens);
+            var estimate = EstimateRequestTokens(model, systemPrompt, requestMessages, tools);
+            if (estimate > available)
+            {
+                throw new GameRuntimeLimitException(
+                    nameof(GameAgentRuntimeOptions.ContextWindowTokens),
+                    _transcriptCompactor is null
+                        ? "The estimated model request exceeds the context window and no transcript compactor is configured."
+                        : "The compacted model request still exceeds the configured context window.");
+            }
+        }
+
+        return fitted;
+    }
+
+    private long? GetTranscriptTokenTarget(
+        string model,
+        string systemPrompt,
+        IReadOnlyList<AgentMessage> additionalMessages,
+        IReadOnlyList<ToolDefinition> tools,
+        ModelParameters parameters,
+        int contextWindowTokens,
+        int maximumOutputTokens)
+    {
+        if (contextWindowTokens == 0)
+        {
+            return null;
+        }
+
+        var available = GetAvailableInputTokens(parameters, contextWindowTokens, maximumOutputTokens);
+        var fixedTokens = EstimateRequestTokens(model, systemPrompt, additionalMessages, tools);
+        if (fixedTokens >= available)
+        {
+            throw new GameRuntimeLimitException(
+                nameof(GameAgentRuntimeOptions.ContextWindowTokens),
+                "The system prompt, tools, and new input leave no context budget for the session transcript.");
+        }
+
+        return available - fixedTokens;
+    }
+
+    private long GetAvailableInputTokens(
+        ModelParameters parameters,
+        int contextWindowTokens,
+        int maximumOutputTokens)
+    {
+        var reserve = parameters.MaxOutputTokens is > 0
+            ? parameters.MaxOutputTokens.Value
+            : maximumOutputTokens > 0
+                ? maximumOutputTokens
+                : _contextWindowReserveTokens;
+        if (reserve >= contextWindowTokens)
+        {
+            throw new GameRuntimeLimitException(
+                nameof(GameAgentRuntimeOptions.ContextWindowReserveTokens),
+                "The output-token reserve must be smaller than the active model context window.");
+        }
+
+        return contextWindowTokens - reserve;
+    }
+
+    private long EstimateRequestTokens(
+        string model,
+        string systemPrompt,
+        IReadOnlyList<AgentMessage> messages,
+        IReadOnlyList<ToolDefinition> tools)
+    {
+        var estimate = _requestTokenEstimator(model, systemPrompt, messages, tools);
+        return ValidateTokenEstimate(estimate, "request");
+    }
+
+    private long EstimateTranscriptTokens(IReadOnlyList<AgentMessage> messages)
+    {
+        var estimate = _transcriptTokenEstimator(messages);
+        return ValidateTokenEstimate(estimate, "transcript");
+    }
+
+    private static long ValidateTokenEstimate(long estimate, string kind) =>
+        estimate is >= 0 and <= 10_000_000_000
+            ? estimate
+            : throw new InvalidOperationException($"The {kind} token estimator returned an invalid value.");
 
     private static AgentHooks CopyHooks(AgentHooks value) => new()
     {
@@ -853,6 +1544,59 @@ public sealed class GameAgentRuntime
         BeforeToolCallAsync = value.BeforeToolCallAsync,
         AfterToolCallAsync = value.AfterToolCallAsync,
     };
+
+    private ValueTask PublishCompletedAsync(
+        GameAgentRunResult result,
+        GameAgentExtensionRunContext extensionContext,
+        CancellationToken cancellationToken) =>
+        _extensions.PublishAsync(
+            GameAgentExtensionEvents.RunCompleted,
+            new GameAgentRunEvent(result),
+            extensionContext,
+            cancellationToken);
+
+    public void Dispose()
+    {
+        GameAgentAsyncBridge.Run(DisposeAsync);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            _lifetimeCancellation.Cancel();
+        }
+        catch (AggregateException)
+        {
+            // User cancellation callbacks cannot prevent runtime shutdown.
+        }
+
+        Agent[] active;
+        lock (_activeAgentsGate)
+        {
+            active = _activeAgents.Values.ToArray();
+        }
+
+        foreach (var agent in active)
+        {
+            agent.TryAbort();
+        }
+
+        try
+        {
+            await _actors.WaitForIdleAsync().ConfigureAwait(false);
+            await _extensions.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _lifetimeCancellation.Dispose();
+        }
+    }
 
     private sealed class InputPayload
     {

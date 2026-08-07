@@ -42,6 +42,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(intent.OperationId + Suffix, cancellationToken).ConfigureAwait(false);
             var path = _files.PathFor(intent.OperationId, Suffix);
             var existing = await _files.ReadAsync<ActionDocument>(path, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
@@ -58,6 +59,9 @@ public sealed class FileGameActionJournal : IGameActionJournal
             await _capacityGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                using var capacityLease = await _files.AcquireProcessLeaseAsync(
+                    "action-journal-capacity",
+                    cancellationToken).ConfigureAwait(false);
                 var raced = await _files.ReadAsync<ActionDocument>(path, cancellationToken).ConfigureAwait(false);
                 if (raced is not null)
                 {
@@ -105,6 +109,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(operationId + Suffix, cancellationToken).ConfigureAwait(false);
             var document = await _files.ReadAsync<ActionDocument>(
                 _files.PathFor(operationId, Suffix),
                 cancellationToken).ConfigureAwait(false);
@@ -144,6 +149,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(operationId + Suffix, cancellationToken).ConfigureAwait(false);
             var path = _files.PathFor(operationId, Suffix);
             var existing = await _files.ReadAsync<ActionDocument>(path, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Cannot dispatch an action without a matching intent.");
@@ -186,6 +192,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(receipt.OperationId + Suffix, cancellationToken).ConfigureAwait(false);
             var path = _files.PathFor(receipt.OperationId, Suffix);
             var existing = await _files.ReadAsync<ActionDocument>(path, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Cannot save a receipt without a matching action intent.");

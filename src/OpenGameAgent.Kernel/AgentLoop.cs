@@ -78,10 +78,11 @@ public static class AgentLoop
             throw new ArgumentNullException(nameof(emit));
         }
 
-        var limits = options.Limits?.Copy() ?? throw new ArgumentNullException(nameof(options.Limits));
+        var limits = options.Limits?.Copy()
+            ?? throw new ArgumentException("Agent limits are required.", nameof(options));
         if (!Enum.IsDefined(typeof(ToolExecutionMode), options.ToolExecution))
         {
-            throw new ArgumentOutOfRangeException(nameof(options.ToolExecution));
+            throw new ArgumentOutOfRangeException(nameof(options), "The tool execution mode is invalid.");
         }
 
         AgentValidator.ValidateOptions(
@@ -109,6 +110,7 @@ public static class AgentLoop
         var turns = 0;
         var toolCallCount = 0;
         var totalTokens = 0L;
+        var provider = options.Provider;
         var model = options.Model;
         var parameters = options.Parameters.Copy();
         var ended = false;
@@ -116,7 +118,7 @@ public static class AgentLoop
 
         async ValueTask EmitCoreAsync(AgentEvent value, CancellationToken callbackToken)
         {
-            await emitGate.WaitAsync().ConfigureAwait(false);
+            await emitGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
                 await emit(value, callbackToken).ConfigureAwait(false);
@@ -164,18 +166,8 @@ public static class AgentLoop
 
         try
         {
-            if (!isContinuation)
-            {
-                foreach (var prompt in prompts)
-                {
-                    await EmitMessageAsync(prompt, runId, 0, EmitAsync).ConfigureAwait(false);
-                }
-            }
-
-            IReadOnlyList<AgentMessage> pendingMessages = skipInitialSteeringPoll
-                ? Array.Empty<AgentMessage>()
-                : await DrainAsync(options.GetSteeringMessagesAsync, cancellationToken).ConfigureAwait(false);
-            ValidateQueuedMessages(pendingMessages, limits);
+            IReadOnlyList<AgentMessage> pendingMessages = Array.Empty<AgentMessage>();
+            var firstTurn = true;
 
             while (true)
             {
@@ -189,6 +181,29 @@ public static class AgentLoop
                             $"The run reached the maximum of {limits.MaxTurns} model turns.").ConfigureAwait(false);
                     }
 
+                    turns++;
+                    await EmitAsync(new AgentEvent(AgentEventKind.TurnStarted, runId, turns)).ConfigureAwait(false);
+
+                    if (firstTurn)
+                    {
+                        firstTurn = false;
+                        if (!isContinuation)
+                        {
+                            foreach (var prompt in prompts)
+                            {
+                                await EmitMessageAsync(prompt, runId, turns, EmitAsync).ConfigureAwait(false);
+                            }
+                        }
+
+                        if (!skipInitialSteeringPoll)
+                        {
+                            pendingMessages = await DrainAsync(
+                                options.GetSteeringMessagesAsync,
+                                cancellationToken).ConfigureAwait(false);
+                            ValidateQueuedMessages(pendingMessages, limits);
+                        }
+                    }
+
                     if (pendingMessages.Count > 0)
                     {
                         EnsureMessageCapacity(current.Messages.Count, pendingMessages.Count, limits);
@@ -197,28 +212,30 @@ public static class AgentLoop
                             AgentValidator.ValidateMessage(pending, limits);
                             current.Messages.Add(pending);
                             newMessages.Add(pending);
-                            await EmitMessageAsync(pending, runId, turns + 1, EmitAsync).ConfigureAwait(false);
+                            await EmitMessageAsync(pending, runId, turns, EmitAsync).ConfigureAwait(false);
                         }
 
                         pendingMessages = Array.Empty<AgentMessage>();
                     }
 
-                    turns++;
-                    await EmitAsync(new AgentEvent(AgentEventKind.TurnStarted, runId, turns)).ConfigureAwait(false);
+                    var responseMessageReserve = current.Tools.Count == 0
+                        ? 1
+                        : checked(1 + limits.MaxToolCallsPerTurn);
+                    EnsureMessageCapacity(current.Messages.Count, responseMessageReserve, limits);
 
-                    EnsureMessageCapacity(current.Messages.Count, 1, limits);
-
-                    var response = await StreamAssistantAsync(
+                    var streamed = await StreamAssistantAsync(
                         runId,
                         turns,
                         current,
+                        provider,
                         model,
                         parameters,
                         options,
                         limits,
                         EmitAsync,
                         cancellationToken).ConfigureAwait(false);
-                    var assistantMessage = ToAssistantMessage(response, options.Clock(), model);
+                    var response = streamed.Response;
+                    var assistantMessage = ToAssistantMessage(response, options.Clock(), streamed.Model);
                     current.Messages.Add(assistantMessage);
                     newMessages.Add(assistantMessage);
                     totalTokens = checked(totalTokens + response.Usage.TotalTokens);
@@ -300,14 +317,14 @@ public static class AgentLoop
                         }
                     }
 
-                    cancellationToken.ThrowIfCancellationRequested();
-
                     await EmitAsync(new AgentEvent(
                         AgentEventKind.TurnEnded,
                         runId,
                         turns,
                         assistantMessage,
                         messages: batch.Messages)).ConfigureAwait(false);
+
+                    cancellationToken.ThrowIfCancellationRequested();
 
                     if (totalTokens > limits.MaxTotalTokens)
                     {
@@ -327,10 +344,20 @@ public static class AgentLoop
                     if (options.Hooks.PrepareNextTurnAsync is not null)
                     {
                         var update = await options.Hooks.PrepareNextTurnAsync(afterTurn, cancellationToken).ConfigureAwait(false);
+                        if (update?.Provider is not null && update.Model is null)
+                        {
+                            throw new InvalidOperationException("A next-turn provider replacement must include its model name.");
+                        }
+
                         if (update?.Context is not null)
                         {
                             AgentValidator.ValidateContext(update.Context, limits);
                             current = new MutableLoopContext(update.Context, Array.Empty<AgentMessage>());
+                        }
+
+                        if (update?.Provider is not null)
+                        {
+                            provider = update.Provider;
                         }
 
                         if (update?.Model is not null)
@@ -392,7 +419,9 @@ public static class AgentLoop
         }
         catch (AgentLimitException exception)
         {
-            return await FinishAsync(AgentRunStatus.LimitExceeded, exception.Message).ConfigureAwait(false);
+            return await FinishAsync(
+                AgentRunStatus.LimitExceeded,
+                BoundError(exception.Message, limits)).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -400,14 +429,17 @@ public static class AgentLoop
         }
         catch (Exception exception)
         {
-            return await FinishAsync(AgentRunStatus.KernelError, exception.Message).ConfigureAwait(false);
+            return await FinishAsync(
+                AgentRunStatus.KernelError,
+                BoundError(exception.Message, limits)).ConfigureAwait(false);
         }
     }
 
-    private static async Task<ModelResponse> StreamAssistantAsync(
+    private static async Task<AssistantStreamResult> StreamAssistantAsync(
         string runId,
         int turn,
         MutableLoopContext context,
+        IModelProvider provider,
         string model,
         ModelParameters parameters,
         AgentLoopOptions options,
@@ -443,13 +475,51 @@ public static class AgentLoop
         }
 
         AgentValidator.ValidateRequest(request, limits, options.Clock, options.RunIdFactory);
+        if (!string.Equals(request.RunId, runId, StringComparison.Ordinal) || request.Turn != turn)
+        {
+            throw new InvalidOperationException("BeforeModelRequestAsync cannot change the active run ID or turn number.");
+        }
 
         var started = false;
         ModelResponse? lastPartial = null;
+        AssistantStreamResult? completedStream = null;
+        using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var deadlineCancellation = new CancellationTokenSource();
+        using var callerWaitCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var deadline = Task.Delay(limits.ModelTimeoutMilliseconds, deadlineCancellation.Token);
+        var callerCancellation = Task.Delay(Timeout.Infinite, callerWaitCancellation.Token);
+        IAsyncEnumerator<ModelStreamEvent>? enumerator = null;
+        var disposeEnumerator = true;
         try
         {
-            await foreach (var modelEvent in options.Provider.StreamAsync(request, cancellationToken))
+            enumerator = (provider.StreamAsync(request, requestCancellation.Token)
+                    ?? throw new InvalidOperationException("The model provider returned a null stream."))
+                .GetAsyncEnumerator(requestCancellation.Token)
+                ?? throw new InvalidOperationException("The model provider returned a null stream enumerator.");
+            while (true)
             {
+                var pendingMove = enumerator.MoveNextAsync().AsTask();
+                var winner = await Task.WhenAny(pendingMove, deadline, callerCancellation).ConfigureAwait(false);
+                if (!ReferenceEquals(winner, pendingMove) && !pendingMove.IsCompleted)
+                {
+                    disposeEnumerator = false;
+                    TryCancel(requestCancellation);
+                    _ = ObservePendingStreamAsync(enumerator, pendingMove);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
+
+                    throw new TimeoutException(
+                        $"The model request exceeded {limits.ModelTimeoutMilliseconds} ms.");
+                }
+
+                if (!await pendingMove.ConfigureAwait(false))
+                {
+                    break;
+                }
+
+                var modelEvent = enumerator.Current;
                 if (modelEvent is null)
                 {
                     throw new InvalidOperationException("The model provider emitted a null stream event.");
@@ -464,14 +534,26 @@ public static class AgentLoop
 
                     AgentValidator.ValidateResponse(modelEvent.Partial, limits);
                     lastPartial = modelEvent.Partial;
-                    var partialMessage = ToAssistantMessage(lastPartial, options.Clock(), model);
-                    if (!started)
+                    var partialMessage = ToAssistantMessage(lastPartial, options.Clock(), request.Model);
+                    if (modelEvent.Kind == ModelStreamEventKind.Started)
                     {
+                        if (started)
+                        {
+                            throw new InvalidOperationException("The model provider emitted more than one stream start event.");
+                        }
+
                         started = true;
                         await emit(new AgentEvent(AgentEventKind.MessageStarted, runId, turn, partialMessage, modelEvent)).ConfigureAwait(false);
                     }
+                    else
+                    {
+                        if (!started)
+                        {
+                            throw new InvalidOperationException("The model provider emitted a stream update before its start event.");
+                        }
 
-                    await emit(new AgentEvent(AgentEventKind.MessageUpdated, runId, turn, partialMessage, modelEvent)).ConfigureAwait(false);
+                        await emit(new AgentEvent(AgentEventKind.MessageUpdated, runId, turn, partialMessage, modelEvent)).ConfigureAwait(false);
+                    }
                 }
 
                 if (!modelEvent.IsTerminal)
@@ -491,7 +573,7 @@ public static class AgentLoop
                     context.Messages.Count,
                     1 + response.Content.Count(part => part is ToolCallContent),
                     limits);
-                var finalMessage = ToAssistantMessage(response, options.Clock(), model);
+                var finalMessage = ToAssistantMessage(response, options.Clock(), request.Model);
                 if (!started)
                 {
                     started = true;
@@ -499,20 +581,26 @@ public static class AgentLoop
                 }
 
                 await emit(new AgentEvent(AgentEventKind.MessageEnded, runId, turn, finalMessage, modelEvent)).ConfigureAwait(false);
-                return response;
+                completedStream = new AssistantStreamResult(response, request.Model);
+                return completedStream;
             }
 
-            return await EmitSyntheticModelFailureAsync(
+            var syntheticResponse = await EmitSyntheticModelFailureAsync(
                 "The model stream ended without a terminal response.",
                 ModelStopReason.Error,
                 lastPartial,
                 started,
                 runId,
                 turn,
-                model,
+                request.Model,
                 options.Clock,
                 limits,
                 emit).ConfigureAwait(false);
+            return new AssistantStreamResult(syntheticResponse, request.Model);
+        }
+        catch (Exception) when (completedStream is not null)
+        {
+            return completedStream;
         }
         catch (AgentLimitException)
         {
@@ -520,32 +608,119 @@ public static class AgentLoop
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return await EmitSyntheticModelFailureAsync(
+            var syntheticResponse = await EmitSyntheticModelFailureAsync(
                 "The model request was aborted.",
                 ModelStopReason.Aborted,
                 lastPartial,
                 started,
                 runId,
                 turn,
-                model,
+                request.Model,
                 options.Clock,
                 limits,
                 emit).ConfigureAwait(false);
+            return new AssistantStreamResult(syntheticResponse, request.Model);
         }
         catch (Exception exception)
         {
-            return await EmitSyntheticModelFailureAsync(
+            var syntheticResponse = await EmitSyntheticModelFailureAsync(
                 exception.Message,
                 ModelStopReason.Error,
                 lastPartial,
                 started,
                 runId,
                 turn,
-                model,
+                request.Model,
                 options.Clock,
                 limits,
                 emit).ConfigureAwait(false);
+            return new AssistantStreamResult(syntheticResponse, request.Model);
         }
+        finally
+        {
+            TryCancel(deadlineCancellation);
+            TryCancel(callerWaitCancellation);
+            if (disposeEnumerator && enumerator is not null)
+            {
+                TryCancel(requestCancellation);
+                var cleanup = enumerator.DisposeAsync().AsTask();
+                if (cleanup.IsCompleted)
+                {
+                    try
+                    {
+                        await cleanup.ConfigureAwait(false);
+                    }
+                    catch when (completedStream is not null || cancellationToken.IsCancellationRequested)
+                    {
+                        // Stream cleanup cannot replace a completed or cancelled request outcome.
+                    }
+                }
+                else
+                {
+                    _ = IgnoreFailureAsync(cleanup);
+                }
+            }
+        }
+    }
+
+    private static void TryCancel(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            cancellation.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (AggregateException)
+        {
+            // A provider cancellation callback cannot replace the request outcome.
+        }
+    }
+
+    private static async Task ObservePendingStreamAsync(
+        IAsyncEnumerator<ModelStreamEvent> enumerator,
+        Task<bool> pendingMove)
+    {
+        try
+        {
+            _ = await pendingMove.ConfigureAwait(false);
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+        }
+    }
+
+    private static async Task IgnoreFailureAsync(Task task)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed class AssistantStreamResult
+    {
+        public AssistantStreamResult(ModelResponse response, string model)
+        {
+            Response = response;
+            Model = model;
+        }
+
+        public ModelResponse Response { get; }
+
+        public string Model { get; }
     }
 
     private static async Task<ModelResponse> EmitSyntheticModelFailureAsync(
@@ -924,7 +1099,9 @@ public static class AgentLoop
         CancellationToken cancellationToken)
     {
         var progressCount = 0;
-        var acceptingProgress = 1;
+        var progressGate = new object();
+        var acceptedProgress = new List<Task>();
+        var acceptingProgress = true;
         var dispatched = false;
         var uncertainSideEffect = false;
         var executionContext = new ToolExecutionContext(
@@ -936,32 +1113,41 @@ public static class AgentLoop
             {
                 progressCancellation.ThrowIfCancellationRequested();
                 AgentValidator.ValidateProgress(progress, limits);
-                if (Volatile.Read(ref acceptingProgress) == 0)
+                TaskCompletionSource<object?> completion;
+                lock (progressGate)
                 {
-                    return;
+                    if (!acceptingProgress)
+                    {
+                        return;
+                    }
+
+                    progressCount++;
+                    if (progressCount > limits.MaxProgressEventsPerTool)
+                    {
+                        return;
+                    }
+
+                    completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    acceptedProgress.Add(completion.Task);
                 }
 
-                var count = Interlocked.Increment(ref progressCount);
-                if (count > limits.MaxProgressEventsPerTool)
-                {
-                    return;
-                }
-
-                await emit(new AgentEvent(
-                    AgentEventKind.ToolProgressed,
-                    runId,
-                    turn,
-                    toolCall: prepared.Call,
-                    progress: progress)).ConfigureAwait(false);
+                _ = CompleteProgressAsync(completion, emit, new AgentEvent(
+                        AgentEventKind.ToolProgressed,
+                        runId,
+                        turn,
+                        toolCall: prepared.Call,
+                        progress: progress));
+                await completion.Task.ConfigureAwait(false);
             });
 
         ToolResult result;
+        Task<ToolResult>? execution = null;
         try
         {
             using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             using var timeoutDelayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             dispatched = true;
-            var execution = prepared.Tool.ExecuteAsync(
+            execution = prepared.Tool.ExecuteAsync(
                 prepared.Arguments,
                 executionContext,
                 timeoutCancellation.Token).AsTask();
@@ -969,15 +1155,15 @@ public static class AgentLoop
             var completed = await Task.WhenAny(execution, timeout).ConfigureAwait(false);
             if (completed == execution)
             {
-                timeoutDelayCancellation.Cancel();
+                TryCancel(timeoutDelayCancellation);
                 result = await execution.ConfigureAwait(false) ?? CreateToolError("The tool returned no result.", limits);
                 uncertainSideEffect |= result.OutcomeUncertain;
             }
             else
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                timeoutCancellation.Cancel();
                 _ = ObserveToolCompletionAsync(execution);
+                cancellationToken.ThrowIfCancellationRequested();
+                TryCancel(timeoutCancellation);
                 uncertainSideEffect = prepared.Tool.Risk != ToolRisk.ReadOnly;
                 result = CreateToolError(
                     prepared.Tool.Risk == ToolRisk.ReadOnly
@@ -989,6 +1175,11 @@ public static class AgentLoop
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            if (execution is not null)
+            {
+                _ = ObserveToolCompletionAsync(execution);
+            }
+
             uncertainSideEffect = dispatched && prepared.Tool.Risk != ToolRisk.ReadOnly;
             result = CreateToolError(
                 prepared.Tool.Risk == ToolRisk.ReadOnly
@@ -1004,8 +1195,19 @@ public static class AgentLoop
         }
         finally
         {
-            Interlocked.Exchange(ref acceptingProgress, 0);
+            lock (progressGate)
+            {
+                acceptingProgress = false;
+            }
         }
+
+        Task[] progressToSettle;
+        lock (progressGate)
+        {
+            progressToSettle = acceptedProgress.ToArray();
+        }
+
+        await Task.WhenAll(progressToSettle).ConfigureAwait(false);
 
         try
         {
@@ -1041,6 +1243,22 @@ public static class AgentLoop
         return new ToolCallOutcome(prepared.Index, prepared.Call, result, uncertainSideEffect);
     }
 
+    private static async Task CompleteProgressAsync(
+        TaskCompletionSource<object?> completion,
+        Func<AgentEvent, ValueTask> emit,
+        AgentEvent agentEvent)
+    {
+        try
+        {
+            await emit(agentEvent).ConfigureAwait(false);
+            completion.TrySetResult(null);
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+    }
+
     private static async Task ObserveToolCompletionAsync(Task<ToolResult> execution)
     {
         try
@@ -1070,6 +1288,14 @@ public static class AgentLoop
             detailsJson: uncertain ? "{\"outcome\":\"uncertain\"}" : null,
             terminate: terminate,
             outcomeUncertain: uncertain);
+    }
+
+    private static string BoundError(string? message, AgentLimits limits)
+    {
+        var value = string.IsNullOrWhiteSpace(message) ? "The agent run failed." : message;
+        return value.Length <= limits.MaxTextCharactersPerPart
+            ? value
+            : value.Substring(0, limits.MaxTextCharactersPerPart);
     }
 
     private static bool ShouldExecuteInParallel(IReadOnlyList<PreparedToolCall> calls, ToolExecutionMode mode)

@@ -105,6 +105,8 @@ public sealed class ServerGameAgentClientOptions
 
     public string ApiKeyScheme { get; set; } = "Bearer";
 
+    public bool AllowInsecureHttp { get; set; }
+
     public int MaxResponseCharacters { get; set; } = 8_000_000;
 
     public int MaxEventCharacters { get; set; } = 4_000_000;
@@ -135,17 +137,17 @@ public sealed class ServerGameAgentClient
 
         if (options.MaxResponseCharacters < 2 || options.MaxResponseCharacters > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxResponseCharacters));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum response size is invalid.");
         }
 
         if (options.MaxEventCharacters < 2 || options.MaxEventCharacters > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxEventCharacters));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum stream-event size is invalid.");
         }
 
         if (options.MaxRequestCharacters < 2 || options.MaxRequestCharacters > 100_000_000)
         {
-            throw new ArgumentOutOfRangeException(nameof(options.MaxRequestCharacters));
+            throw new ArgumentOutOfRangeException(nameof(options), "The maximum request size is invalid.");
         }
 
 
@@ -157,25 +159,38 @@ public sealed class ServerGameAgentClient
             || (!string.Equals(options.ServerBaseUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(options.ServerBaseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
         {
-            throw new ArgumentException("The server base URI must be an absolute HTTP or HTTPS URI.", nameof(options.ServerBaseUri));
+            throw new ArgumentException("The server base URI must be an absolute HTTP or HTTPS URI.", nameof(options));
         }
 
-        if (!IsValidHeaderName(options.ApiKeyHeader))
+        if (string.Equals(options.ServerBaseUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && !options.ServerBaseUri.IsLoopback
+            && !options.AllowInsecureHttp)
         {
-            throw new ArgumentException("A valid API key header name is required.", nameof(options.ApiKeyHeader));
+            throw new ArgumentException(
+                "Remote agent servers must use HTTPS unless insecure HTTP is explicitly enabled.",
+                nameof(options));
+        }
+
+        if (!IsValidHeaderName(options.ApiKeyHeader) || options.ApiKeyHeader.Length > 256)
+        {
+            throw new ArgumentException("A valid API key header name is required.", nameof(options));
         }
 
         if ((options.ApiKey?.Contains('\r') ?? false)
             || (options.ApiKey?.Contains('\n') ?? false)
+            || (options.ApiKey?.Contains('\0') ?? false)
+            || (options.ApiKey?.Length ?? 0) > 65_536
             || (options.ApiKeyScheme?.Contains('\r') ?? false)
-            || (options.ApiKeyScheme?.Contains('\n') ?? false))
+            || (options.ApiKeyScheme?.Contains('\n') ?? false)
+            || (options.ApiKeyScheme?.Contains('\0') ?? false)
+            || (options.ApiKeyScheme?.Length ?? 0) > 256)
         {
-            throw new ArgumentException("API key credentials cannot contain line breaks.", nameof(options.ApiKey));
+            throw new ArgumentException("API key credentials contain invalid characters or exceed their size limit.", nameof(options));
         }
 
         if (options.ApiKey is { Length: > 0 } && string.IsNullOrWhiteSpace(options.ApiKey))
         {
-            throw new ArgumentException("A configured API key cannot contain only whitespace.", nameof(options.ApiKey));
+            throw new ArgumentException("A configured API key cannot contain only whitespace.", nameof(options));
         }
 
         _httpClient = options.HttpClient;
@@ -573,7 +588,7 @@ public sealed class ServerGameAgentClient
     }
 
     private static Uri EnsureTrailingSlash(Uri value) =>
-        value.AbsoluteUri.EndsWith("/", StringComparison.Ordinal)
+        value.AbsoluteUri.EndsWith('/')
             ? value
             : new Uri(value.AbsoluteUri + "/");
 

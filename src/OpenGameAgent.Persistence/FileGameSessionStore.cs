@@ -30,6 +30,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(identity + Suffix, cancellationToken).ConfigureAwait(false);
             var session = Decode(await _files.ReadAsync<SessionDocument>(_files.PathFor(identity, Suffix), cancellationToken).ConfigureAwait(false));
             if (session is not null && !session.Key.Equals(key))
             {
@@ -60,6 +61,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(identity + Suffix, cancellationToken).ConfigureAwait(false);
             var current = Decode(await _files.ReadAsync<SessionDocument>(path, cancellationToken).ConfigureAwait(false));
             if (current is not null && !current.Key.Equals(snapshot.Key))
             {
@@ -90,13 +92,15 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
     private static SessionDocument Encode(GameSessionSnapshot snapshot) => new()
     {
-        FormatVersion = 1,
+        FormatVersion = 2,
         SessionId = snapshot.Key.SessionId,
         ActorId = snapshot.Key.ActorId,
         Revision = snapshot.Revision,
         Messages = snapshot.Messages.Select(AgentMessageCodec.Encode).ToList(),
         ProcessedInputIds = snapshot.ProcessedInputIds.ToList(),
+        PendingInputId = snapshot.PendingInputId,
         LastMoment = snapshot.LastMoment is null ? null : MomentDocument.Encode(snapshot.LastMoment.Value),
+        ExtensionState = new Dictionary<string, string>(snapshot.ExtensionState, StringComparer.Ordinal),
     };
 
     private static void ValidateKey(GameSessionKey key)
@@ -122,7 +126,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
             return null;
         }
 
-        if (document.FormatVersion != 1)
+        if (document.FormatVersion is not (1 or 2))
         {
             throw new PersistenceException($"Unsupported session format version '{document.FormatVersion}'.");
         }
@@ -134,7 +138,9 @@ public sealed class FileGameSessionStore : IGameSessionStore
                 document.Revision,
                 (document.Messages ?? new List<MessageDocument>()).Select(AgentMessageCodec.Decode).ToArray(),
                 document.ProcessedInputIds ?? new List<string>(),
-                document.LastMoment?.Decode()));
+                document.LastMoment?.Decode(),
+                document.ExtensionState ?? new Dictionary<string, string>(StringComparer.Ordinal),
+                document.FormatVersion >= 2 ? document.PendingInputId : null));
     }
 
     private sealed class SessionDocument
@@ -151,7 +157,11 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
         public List<string>? ProcessedInputIds { get; set; }
 
+        public string? PendingInputId { get; set; }
+
         public MomentDocument? LastMoment { get; set; }
+
+        public Dictionary<string, string>? ExtensionState { get; set; }
     }
 }
 

@@ -7,7 +7,7 @@ OpenGameAgent defines provider-neutral image, audio, and video generation contra
 - `GameMediaGenerationRequest` carries a stable request ID, media kind, structured context, provider parameters, optional prompt, and source resource references.
 - `IGameMediaGenerator` performs generation and reports bounded progress.
 - `GameMediaGenerationResult` returns one or more `ResourceContent` references plus structured metadata.
-- `GameMediaGenerationTool` exposes a generator to the agent as an idempotent tool.
+- `GameMediaGenerationTool` exposes a generator to the agent as a non-idempotent write by default; a stable request ID lets the media service deduplicate or resume submissions when it implements that guarantee.
 
 `OpenGameAgent.Providers.MediaHttp` implements a bounded JSON HTTP transport for cloud or local APIs that implement the documented request/job shape. If a service uses different fields, authentication, upload semantics, or durable job handles, adapt it behind `IGameMediaGenerator` instead of pretending the wire formats are interchangeable. The game is responsible for downloading or importing resources after validating origin, content type, size, checksum, license metadata, storage quota, and content policy.
 

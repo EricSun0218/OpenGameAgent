@@ -54,7 +54,9 @@ public sealed class AgentEvent
         ToolResult = toolResult;
         Error = error;
         Status = status;
-        Messages = messages is null ? Array.Empty<AgentMessage>() : messages.ToArray();
+        Messages = messages is null
+            ? Array.Empty<AgentMessage>()
+            : Array.AsReadOnly(messages.ToArray());
     }
 
     public AgentEventKind Kind { get; }
@@ -93,11 +95,14 @@ public sealed class AgentRunResult
     {
         RunId = runId;
         Status = status;
-        NewMessages = newMessages.ToArray();
+        NewMessages = Array.AsReadOnly(
+            (newMessages ?? throw new ArgumentNullException(nameof(newMessages))).ToArray());
         Turns = turns;
         ToolCalls = toolCalls;
         Error = error;
-        SubscriberErrors = subscriberErrors?.ToArray() ?? Array.Empty<string>();
+        SubscriberErrors = subscriberErrors is null
+            ? Array.Empty<string>()
+            : Array.AsReadOnly(subscriberErrors.ToArray());
     }
 
     public string RunId { get; }

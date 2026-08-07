@@ -183,7 +183,7 @@ public static class GameMediaGenerationTool
                 })));
                 return new ToolResult(content, detailsJson: result.MetadataJson);
             },
-            ToolRisk.IdempotentWrite,
+            ToolRisk.NonIdempotentWrite,
             ToolExecutionMode.SafeParallel,
             conflictKey: _ => input.ActorId + ":media");
     }

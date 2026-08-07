@@ -72,6 +72,10 @@ Verify package structure and a real editor import/compile/execute:
 
 Local mode embeds `OpenGameAgent`, the provider adapter, tools, and optional stores in the game process. Remote mode embeds only the client-facing shared assemblies and sends `GameInput` over JSON/SSE. Actor steering and abort use authenticated control requests; canceling the local HTTP call remains available when only that caller should stop waiting.
 
+The base engine archives contain the adapter and shared runtime/client assemblies. Add the separately versioned `OpenGameAgent.Persistence`, provider, `OpenGameAgent.Extensions`, `OpenGameAgent.Models`, or external-tool connector packages only when the game uses them. Keeping these packages optional lets a dialogue-only client avoid carrying server storage or connector dependencies while preserving the same extension contracts in local and remote placement.
+
+In a shipped client, use BYOK, a local endpoint, or short-lived credentials issued by a developer-controlled gateway. Engine placement never makes an embedded permanent key secret.
+
 Use `GameAgentWire.SerializeInput` and `ParseInput` when crossing an engine's dynamic-language or event boundary. Floating-point JSON values are preserved as JSON numbers.
 
 Streaming `MessageUpdated` wire events carry only the new delta for that event. Accumulate deltas for transient UI text and treat `MessageEnded` or the terminal run result as the canonical complete message. Engine queues may drop intermediate events under pressure, so gameplay correctness must never depend on receiving every visual streaming delta.

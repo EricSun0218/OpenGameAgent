@@ -28,6 +28,12 @@ public static class GameAgentWire
                 ? (JsonElement?)null
                 : ParseElement(input.Moment.CalendarJson),
             metadata = input.Metadata,
+            resources = input.Resources.Select(resource => new
+            {
+                uri = resource.Uri,
+                mediaType = resource.MediaType,
+                name = resource.Name,
+            }).ToArray(),
         }, JsonOptions);
     }
 
@@ -242,6 +248,8 @@ public static class GameAgentWire
 
         public Dictionary<string, string>? Metadata { get; set; }
 
+        public List<InputResourceDocument>? Resources { get; set; }
+
         public GameInput ToInput() => new(
             SessionId,
             ActorId,
@@ -254,7 +262,21 @@ public static class GameAgentWire
                     ? calendar.GetRawText()
                     : null),
             InputId,
-            Metadata);
+            Metadata,
+            (Resources ?? new List<InputResourceDocument>())
+                .Select(resource => resource.ToResource())
+                .ToArray());
+    }
+
+    private sealed class InputResourceDocument
+    {
+        public string Uri { get; set; } = string.Empty;
+
+        public string MediaType { get; set; } = string.Empty;
+
+        public string? Name { get; set; }
+
+        public ResourceContent ToResource() => new(Uri, MediaType, Name);
     }
 
     private sealed class ContentDocument

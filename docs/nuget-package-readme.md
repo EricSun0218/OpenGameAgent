@@ -5,9 +5,11 @@ Open-source C# agent runtime for AI-native games, autonomous NPCs, and interacti
 - Small streaming model/tool-loop kernel
 - Arbitrary structured game inputs and game time
 - Durable game actions and workflows
-- Skills, memory, scheduling, mailboxes, and multi-actor concurrency
+- Typed extension API plus official policy, catalog, interaction, goal, memory, artifact, delegation, tracing, and workflow-graph extensions
+- Skills, scheduling, mailboxes, large-result spill, and multi-actor concurrency
+- Capability-aware model catalogs, replaceable authentication, and developer-hosted short-lived credentials
+- Lazy external tool discovery; cloud or local text/image/audio/video APIs with no bundled model
 - Godot, Unity, and .NET server placement
-- Cloud or local OpenAI-compatible endpoints; no model bundled
 
 Documentation and source: https://github.com/EricSun0218/OpenGameAgent
 

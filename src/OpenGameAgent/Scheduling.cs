@@ -241,14 +241,14 @@ public sealed class GameTimeScheduler
     {
         lock (_gate)
         {
-            return _triggers.Values
+            return Array.AsReadOnly(_triggers.Values
                 .OrderBy(state => state.NextDue.Tick)
                 .ThenBy(state => state.Trigger.TriggerId, StringComparer.Ordinal)
                 .Select(state => new ScheduledGameTriggerState(
                     state.Trigger,
                     state.NextDue,
                     state.Occurrences))
-                .ToArray();
+                .ToArray());
         }
     }
 
@@ -365,7 +365,7 @@ public sealed class GameTimeScheduler
                 _triggers.Remove(completed);
             }
 
-            return due;
+            return Array.AsReadOnly(due.ToArray());
         }
     }
 
@@ -417,6 +417,7 @@ public sealed class MultiActorScheduler
     private readonly object _gate = new();
     private readonly Dictionary<string, ActorLane> _lanes = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _concurrency;
+    private TaskCompletionSource<object?>? _idleWaiter;
     private readonly int _maximumActors;
     private readonly int _maximumQueuedPerActor;
 
@@ -484,10 +485,24 @@ public sealed class MultiActorScheduler
 
         if (startRunner)
         {
-            _ = Task.Run(() => RunLaneAsync(actorId, lane));
+            _ = Task.Run(() => RunLaneAsync(actorId, lane), CancellationToken.None);
         }
 
         return item.Task;
+    }
+
+    public Task WaitForIdleAsync()
+    {
+        lock (_gate)
+        {
+            if (_lanes.Count == 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            _idleWaiter ??= new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return _idleWaiter.Task;
+        }
     }
 
     private async Task RunLaneAsync(string actorId, ActorLane lane)
@@ -495,6 +510,7 @@ public sealed class MultiActorScheduler
         while (true)
         {
             ActorWorkItem item;
+            TaskCompletionSource<object?>? idleWaiter = null;
             lock (_gate)
             {
                 if (lane.Queue.Count == 0)
@@ -505,10 +521,25 @@ public sealed class MultiActorScheduler
                         _lanes.Remove(actorId);
                     }
 
-                    return;
-                }
+                    if (_lanes.Count == 0)
+                    {
+                        idleWaiter = _idleWaiter;
+                        _idleWaiter = null;
+                    }
 
-                item = lane.Queue.Dequeue();
+                    item = null!;
+                }
+                else
+                {
+                    item = lane.Queue.Dequeue();
+                }
+            }
+
+            if (idleWaiter is not null || item is null)
+            {
+                idleWaiter?.TrySetResult(null);
+
+                return;
             }
 
             if (item.IsCanceled)
@@ -529,7 +560,7 @@ public sealed class MultiActorScheduler
 
             try
             {
-                if (item.IsCanceled)
+                if (!item.TryStart())
                 {
                     item.Cancel();
                 }
@@ -565,6 +596,8 @@ public sealed class MultiActorScheduler
 
         public abstract Task ExecuteAsync();
 
+        public abstract bool TryStart();
+
         public abstract void Cancel();
     }
 
@@ -574,17 +607,34 @@ public sealed class MultiActorScheduler
         private readonly TaskCompletionSource<T> _completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly CancellationTokenRegistration _cancellationRegistration;
+        private int _started;
 
         public ActorWorkItem(Func<CancellationToken, ValueTask<T>> work, CancellationToken cancellationToken)
             : base(cancellationToken)
         {
             _work = work;
             _cancellationRegistration = cancellationToken.CanBeCanceled
-                ? cancellationToken.Register(() => _completion.TrySetCanceled(cancellationToken))
+                ? cancellationToken.Register(() =>
+                {
+                    if (Volatile.Read(ref _started) == 0)
+                    {
+                        _completion.TrySetCanceled(cancellationToken);
+                    }
+                })
                 : default;
         }
 
         public Task<T> Task => _completion.Task;
+
+        public override bool TryStart()
+        {
+            if (Interlocked.CompareExchange(ref _started, 1, 0) != 0)
+            {
+                return false;
+            }
+
+            return !_completion.Task.IsCompleted;
+        }
 
         public override async Task ExecuteAsync()
         {

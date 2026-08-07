@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -36,7 +37,9 @@ public sealed class ProviderTests
 
         var response = events.Last().Response!;
         Assert.Equal(ModelStopReason.ToolUse, response.StopReason);
-        Assert.Equal("think", Assert.IsType<ReasoningContent>(response.Content[0]).Text);
+        var reasoning = Assert.IsType<ReasoningContent>(response.Content[0]);
+        Assert.Equal("think", reasoning.Text);
+        Assert.Equal("reasoning_content", reasoning.Signature);
         Assert.Equal("hello", Assert.IsType<TextContent>(response.Content[1]).Text);
         var call = Assert.IsType<ToolCallContent>(response.Content[2]);
         Assert.Equal("move", call.Name);
@@ -54,6 +57,33 @@ public sealed class ProviderTests
         var toolEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
         Assert.Equal("call-1", toolEnded.ToolCallId);
         Assert.Equal("move", toolEnded.ToolName);
+    }
+
+    [Fact]
+    public async Task PreservesAlternateReasoningFieldAndMatchesToolDeltasByIdWhenIndexIsMissing()
+    {
+        const string stream = """
+            data: {"choices":[{"delta":{"reasoning":"plan"},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"name":"move","arguments":"{\"x\":"}}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"arguments":"1}"}}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+            data: [DONE]
+
+            """;
+        var handler = new StubHandler(_ => Response(HttpStatusCode.OK, stream, "text/event-stream"));
+        var provider = Create(handler);
+
+        var events = await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken));
+
+        var response = events.Last().Response!;
+        var reasoning = Assert.IsType<ReasoningContent>(response.Content[0]);
+        Assert.Equal("reasoning", reasoning.Signature);
+        var call = Assert.IsType<ToolCallContent>(response.Content[1]);
+        Assert.Equal("{\"x\":1}", call.ArgumentsJson);
     }
 
     [Fact]
@@ -115,6 +145,156 @@ public sealed class ProviderTests
     }
 
     [Fact]
+    public async Task ProjectsImageAndProviderSpecificMediaPartsWithoutFlatteningThemToText()
+    {
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream"));
+        var options = new OpenAICompatibleProviderOptions(
+            new HttpClient(handler),
+            new Uri("https://example.test/v1/chat/completions"))
+        {
+            ProjectResourcePart = resource => resource.MediaType switch
+            {
+                "audio/wav" => "{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"audio-data\",\"format\":\"wav\"}}",
+                "video/mp4" => "{\"type\":\"video_url\",\"video_url\":{\"url\":\"" + resource.Uri + "\"}}",
+                _ => null,
+            },
+        };
+        var provider = new OpenAICompatibleProvider(options);
+        var request = new ModelRequest(
+            "model",
+            "rules",
+            new[]
+            {
+                new AgentMessage(
+                    AgentRole.User,
+                    new AgentContent[]
+                    {
+                        new JsonContent("{\"question\":\"what changed?\"}"),
+                        new ResourceContent("https://assets.example.test/frame.png", "image/png", "frame"),
+                        new ResourceContent("game://capture.wav", "audio/wav", "voice"),
+                        new ResourceContent("https://assets.example.test/clip.mp4", "video/mp4", "clip"),
+                    },
+                    DateTimeOffset.UnixEpoch),
+            },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run",
+            1);
+
+        await CollectAsync(provider.StreamAsync(request, TestContext.Current.CancellationToken));
+
+        using var document = JsonDocument.Parse(handler.RequestBody!);
+        var content = document.RootElement.GetProperty("messages")[1].GetProperty("content");
+        Assert.Equal(JsonValueKind.Array, content.ValueKind);
+        Assert.Equal("text", content[0].GetProperty("type").GetString());
+        Assert.Equal("image_url", content[1].GetProperty("type").GetString());
+        Assert.Equal("https://assets.example.test/frame.png", content[1].GetProperty("image_url").GetProperty("url").GetString());
+        Assert.Equal("input_audio", content[2].GetProperty("type").GetString());
+        Assert.Equal("video_url", content[3].GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public async Task ProjectsToolReturnedImagesAfterTheCompleteToolResultBatch()
+    {
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream"));
+        var provider = new OpenAICompatibleProvider(new OpenAICompatibleProviderOptions(
+            new HttpClient(handler),
+            new Uri("https://example.test/v1/chat/completions")));
+        var firstCall = new ToolCallContent("capture", "capture_view", "{}");
+        var secondCall = new ToolCallContent("inspect", "inspect_state", "{}");
+        var request = new ModelRequest(
+            "model",
+            "rules",
+            new AgentMessage[]
+            {
+                AgentMessage.User("look"),
+                new(
+                    AgentRole.Assistant,
+                    new AgentContent[] { firstCall, secondCall },
+                    DateTimeOffset.UnixEpoch,
+                    model: "model",
+                    stopReason: ModelStopReason.ToolUse),
+                AgentMessage.ToolResult(
+                    firstCall,
+                    new ToolResult(new AgentContent[]
+                    {
+                        new ResourceContent("https://assets.example.test/capture.png", "image/png", "capture"),
+                    }),
+                    DateTimeOffset.UnixEpoch),
+                AgentMessage.ToolResult(
+                    secondCall,
+                    new ToolResult(new AgentContent[] { new TextContent("clear") }),
+                    DateTimeOffset.UnixEpoch),
+            },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run",
+            1);
+
+        await CollectAsync(provider.StreamAsync(request, TestContext.Current.CancellationToken));
+
+        using var document = JsonDocument.Parse(handler.RequestBody!);
+        var messages = document.RootElement.GetProperty("messages");
+        Assert.Equal("tool", messages[3].GetProperty("role").GetString());
+        Assert.Equal("tool", messages[4].GetProperty("role").GetString());
+        Assert.Equal("user", messages[5].GetProperty("role").GetString());
+        var attachments = messages[5].GetProperty("content");
+        Assert.Equal("image_url", attachments[1].GetProperty("type").GetString());
+        Assert.Equal(
+            "https://assets.example.test/capture.png",
+            attachments[1].GetProperty("image_url").GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public async Task ReplaysSignedReasoningForToolContinuationButKeepsUnsignedReasoningPrivate()
+    {
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream"));
+        var provider = new OpenAICompatibleProvider(new OpenAICompatibleProviderOptions(
+            new HttpClient(handler),
+            new Uri("https://example.test/v1/chat/completions")));
+        var request = new ModelRequest(
+            "model",
+            "rules",
+            new[]
+            {
+                new AgentMessage(
+                    AgentRole.Assistant,
+                    new AgentContent[]
+                    {
+                        new ReasoningContent("provider-state", "reasoning_content"),
+                        new ReasoningContent("private-state"),
+                        new TextContent("answer"),
+                    },
+                    DateTimeOffset.UnixEpoch,
+                    model: "model",
+                    stopReason: ModelStopReason.Stop),
+            },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run",
+            1);
+
+        await CollectAsync(provider.StreamAsync(request, TestContext.Current.CancellationToken));
+
+        using var document = JsonDocument.Parse(handler.RequestBody!);
+        var assistant = document.RootElement.GetProperty("messages")[1];
+        Assert.Equal("provider-state", assistant.GetProperty("reasoning_content").GetString());
+        Assert.DoesNotContain("private-state", handler.RequestBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HttpFailureBecomesProviderFailureWithoutIncludingApiKey()
     {
         var handler = new StubHandler(_ => Response(HttpStatusCode.TooManyRequests, "rate limited", "text/plain"));
@@ -126,11 +306,33 @@ public sealed class ProviderTests
         };
         var provider = new OpenAICompatibleProvider(options);
 
-        var exception = await Assert.ThrowsAsync<HttpRequestException>(async () =>
+        var exception = await Assert.ThrowsAsync<ModelProviderException>(async () =>
             await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
 
         Assert.Contains("429", exception.Message, StringComparison.Ordinal);
+        Assert.True(exception.IsTransient);
+        Assert.Equal(429, exception.StatusCode);
         Assert.DoesNotContain("do-not-expose", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HttpFailureHonorsRetryDirectivesAndBoundedServerDelay()
+    {
+        var handler = new StubHandler(_ =>
+        {
+            var response = Response(HttpStatusCode.BadRequest, "retry", "text/plain");
+            response.Headers.TryAddWithoutValidation("x-should-retry", "true");
+            response.Headers.TryAddWithoutValidation("retry-after-ms", "1250");
+            return response;
+        });
+        var provider = Create(handler);
+
+        var exception = await Assert.ThrowsAsync<ModelProviderException>(async () =>
+            await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+
+        Assert.True(exception.IsTransient);
+        Assert.Equal(TimeSpan.FromMilliseconds(1250), exception.RetryAfter);
+        Assert.Equal(400, exception.StatusCode);
     }
 
     [Fact]
@@ -146,6 +348,26 @@ public sealed class ProviderTests
             await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
 
         Assert.Contains("ended before", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DoneMarkerWithoutFinishReasonIsStrictByDefaultAndCanBeEnabledExplicitly()
+    {
+        const string stream = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: [DONE]\n\n";
+        var strict = Create(new StubHandler(_ => Response(HttpStatusCode.OK, stream, "text/event-stream")));
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await CollectAsync(strict.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+        Assert.Contains("finish reason", exception.Message, StringComparison.Ordinal);
+
+        var compatible = new OpenAICompatibleProvider(new OpenAICompatibleProviderOptions(
+            new HttpClient(new StubHandler(_ => Response(HttpStatusCode.OK, stream, "text/event-stream"))),
+            new Uri("https://example.test/v1/chat/completions"))
+        {
+            AllowDoneWithoutFinishReason = true,
+        });
+        var events = await CollectAsync(compatible.StreamAsync(Request(), TestContext.Current.CancellationToken));
+        Assert.Equal(ModelStopReason.Stop, events.Last().Response!.StopReason);
     }
 
     [Fact]
@@ -380,6 +602,24 @@ public sealed class ProviderTests
     }
 
     [Fact]
+    public void RemoteHttpEndpointsRequireAnExplicitDevelopmentOverride()
+    {
+        using var client = new HttpClient(new StubHandler(_ => throw new InvalidOperationException("transport must not run")));
+        Assert.Throws<ArgumentException>(() => new OpenAICompatibleProvider(new OpenAICompatibleProviderOptions(
+            client,
+            new Uri("http://model.test/v1/chat/completions"))));
+
+        var provider = new OpenAICompatibleProvider(new OpenAICompatibleProviderOptions(
+            client,
+            new Uri("http://model.test/v1/chat/completions"))
+        {
+            AllowInsecureHttp = true,
+        });
+
+        Assert.NotNull(provider);
+    }
+
+    [Fact]
     public void InvalidOrDuplicateAuthenticationHeadersAreRejectedBeforeTransport()
     {
         var invalid = new OpenAICompatibleProviderOptions(
@@ -396,6 +636,14 @@ public sealed class ProviderTests
         };
         duplicate.Headers["Authorization"] = "other";
         Assert.Throws<ArgumentException>(() => new OpenAICompatibleProvider(duplicate));
+
+        var embeddedNull = new OpenAICompatibleProviderOptions(
+            new HttpClient(new StubHandler(_ => throw new InvalidOperationException("transport must not run"))),
+            new Uri("https://example.test/v1/chat/completions"))
+        {
+            ApiKey = "secret\0suffix",
+        };
+        Assert.Throws<ArgumentException>(() => new OpenAICompatibleProvider(embeddedNull));
     }
 
     [Fact]
@@ -431,6 +679,193 @@ public sealed class ProviderTests
             await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
 
         Assert.Contains("after its finish reason", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DeveloperGatewayCredentialsAreSingleFlightCachedAndRefreshedBeforeExpiry()
+    {
+        var now = DateTimeOffset.Parse("2026-08-07T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        var source = new GatewayCredentialSource(() => now);
+        using var cache = new CachedDeveloperGatewayCredentialSource(
+            source,
+            TimeSpan.FromMinutes(1),
+            () => now);
+
+        var first = await Task.WhenAll(Enumerable.Range(0, 16)
+            .Select(_ => cache.GetAccessTokenAsync(TestContext.Current.CancellationToken).AsTask()));
+        now = now.AddMinutes(9).AddSeconds(1);
+        var refreshed = await cache.GetAccessTokenAsync(TestContext.Current.CancellationToken);
+
+        Assert.All(first, token => Assert.Equal("session-token-1", token));
+        Assert.Equal("session-token-2", refreshed);
+        Assert.Equal(2, source.CallCount);
+        Assert.False(source.ForceRefreshValues.First());
+        Assert.True(source.ForceRefreshValues.Last());
+    }
+
+    [Fact]
+    public async Task DeveloperGatewayCredentialBoundariesRejectControlCharactersAndAvoidClockOverflow()
+    {
+        Assert.Throws<ArgumentException>(() => new DeveloperGatewayCredential(
+            "token\0suffix",
+            DateTimeOffset.UtcNow.AddMinutes(1)));
+        var now = DateTimeOffset.MinValue;
+        var source = new FixedGatewayCredentialSource(
+            new DeveloperGatewayCredential("short-lived", now.AddMinutes(1)));
+        using var cache = new CachedDeveloperGatewayCredentialSource(
+            source,
+            TimeSpan.FromHours(1),
+            () => now);
+
+        Assert.Equal("short-lived", await cache.GetAccessTokenAsync(TestContext.Current.CancellationToken));
+        Assert.Equal("short-lived", await cache.GetAccessTokenAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(2, source.CallCount);
+    }
+
+    [Fact]
+    public async Task DeveloperGatewayProviderSendsOnlyShortLivedAccessToken()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var source = new GatewayCredentialSource(() => now);
+        using var credentials = new CachedDeveloperGatewayCredentialSource(source, clock: () => now);
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream"));
+        var provider = DeveloperGatewayProvider.Create(
+            new HttpClient(handler),
+            new Uri("https://gateway.example.test/v1/chat/completions"),
+            credentials);
+
+        await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken));
+
+        Assert.Equal("Bearer session-token-1", handler.Authorization);
+        Assert.DoesNotContain("session-token-1", handler.RequestBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DeveloperGatewayProviderRejectsStaticProviderKey()
+    {
+        using var credentials = new CachedDeveloperGatewayCredentialSource(
+            new GatewayCredentialSource(() => DateTimeOffset.UtcNow));
+
+        Assert.Throws<InvalidOperationException>(() => DeveloperGatewayProvider.Create(
+            new HttpClient(new StubHandler(_ => throw new InvalidOperationException("transport must not run"))),
+            new Uri("https://gateway.example.test/v1/chat/completions"),
+            credentials,
+            options => options.ApiKey = "static-key-is-forbid"));
+    }
+
+    [Fact]
+    public async Task HttpDeveloperGatewayExchangesPlayerSessionForScopedToken()
+    {
+        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                accessToken = "scoped-client-token",
+                expiresAt,
+                scope = "model:chat tenant:player-1",
+            }),
+            "application/json"));
+        var source = new HttpDeveloperGatewayCredentialSource(
+            new HttpClient(handler),
+            new Uri("https://game.example.test/v1/model-token"),
+            (forceRefresh, _) => new ValueTask<IReadOnlyDictionary<string, string>>(
+                new Dictionary<string, string>
+                {
+                    ["Authorization"] = "Bearer player-session-token",
+                    ["X-Force-Refresh"] = forceRefresh.ToString(),
+                }));
+
+        var credential = await source.GetCredentialAsync(true, TestContext.Current.CancellationToken);
+
+        Assert.Equal("scoped-client-token", credential.AccessToken);
+        Assert.Equal(expiresAt, credential.ExpiresAt);
+        Assert.Equal("model:chat tenant:player-1", credential.Scope);
+        Assert.Equal("Bearer player-session-token", handler.Authorization);
+        Assert.Contains("\"forceRefresh\":true", handler.RequestBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task HttpDeveloperGatewayRejectsAmbiguousCredentialResponses()
+    {
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            "{\"accessToken\":\"first\",\"accessToken\":\"second\",\"expiresAt\":\"2030-01-01T00:00:00Z\"}",
+            "application/json"));
+        var source = new HttpDeveloperGatewayCredentialSource(
+            new HttpClient(handler),
+            new Uri("https://game.example.test/v1/model-token"),
+            (_, _) => new ValueTask<IReadOnlyDictionary<string, string>>(
+                new Dictionary<string, string>()));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await source.GetCredentialAsync(false, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task AuthenticationFailureInvalidatesGatewayCredentialForNextRequest()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var source = new GatewayCredentialSource(() => now);
+        using var credentials = new CachedDeveloperGatewayCredentialSource(source, clock: () => now);
+        var calls = 0;
+        var handler = new StubHandler(_ => Interlocked.Increment(ref calls) == 1
+            ? Response(HttpStatusCode.Unauthorized, "expired", "text/plain")
+            : Response(
+                HttpStatusCode.OK,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                "text/event-stream"));
+        var provider = DeveloperGatewayProvider.Create(
+            new HttpClient(handler),
+            new Uri("https://gateway.example.test/v1/chat/completions"),
+            credentials);
+
+        await Assert.ThrowsAsync<ModelProviderException>(async () =>
+            await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+        await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken));
+
+        Assert.Equal(2, source.CallCount);
+        Assert.True(source.ForceRefreshValues.Last());
+        Assert.Equal("Bearer session-token-2", handler.Authorization);
+    }
+
+    [Fact]
+    public async Task AuthenticationFailureCallbackCannotMaskTheProviderError()
+    {
+        var handler = new StubHandler(_ => Response(HttpStatusCode.Unauthorized, "expired", "text/plain"));
+        var options = new OpenAICompatibleProviderOptions(
+            new HttpClient(handler),
+            new Uri("https://gateway.example.test/v1/chat/completions"))
+        {
+            OnAuthenticationFailure = _ => throw new InvalidOperationException("cache invalidation failed"),
+        };
+        var provider = new OpenAICompatibleProvider(options);
+
+        var exception = await Assert.ThrowsAsync<ModelProviderException>(async () =>
+            await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+
+        Assert.Equal(401, exception.StatusCode);
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+    }
+
+    [Fact]
+    public async Task InvalidationDuringCredentialRefreshCannotReinstallTheRevokedToken()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var source = new RacingCredentialSource(() => now);
+        using var credentials = new CachedDeveloperGatewayCredentialSource(source, clock: () => now);
+
+        var pending = credentials.GetAccessTokenAsync(TestContext.Current.CancellationToken).AsTask();
+        await source.FirstStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        credentials.Invalidate();
+        source.ReleaseFirst.TrySetResult();
+
+        Assert.Equal("session-token-2", await pending);
+        Assert.Equal(2, source.CallCount);
+        Assert.True(source.ForceRefreshValues.Last());
     }
 
     private static OpenAICompatibleProvider Create(HttpMessageHandler handler) =>
@@ -483,6 +918,95 @@ public sealed class ProviderTests
                 ? Assert.Single(values)
                 : null;
             return _response(request);
+        }
+    }
+
+    private sealed class GatewayCredentialSource : IDeveloperGatewayCredentialSource
+    {
+        private readonly Func<DateTimeOffset> _clock;
+        private int _calls;
+
+        public GatewayCredentialSource(Func<DateTimeOffset> clock)
+        {
+            _clock = clock;
+        }
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public ConcurrentQueue<bool> ForceRefreshValues { get; } = new();
+
+        public ValueTask<DeveloperGatewayCredential> GetCredentialAsync(
+            bool forceRefresh,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ForceRefreshValues.Enqueue(forceRefresh);
+            var call = Interlocked.Increment(ref _calls);
+            return new ValueTask<DeveloperGatewayCredential>(new DeveloperGatewayCredential(
+                "session-token-" + call.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                _clock().AddMinutes(10),
+                "model:chat"));
+        }
+    }
+
+    private sealed class FixedGatewayCredentialSource : IDeveloperGatewayCredentialSource
+    {
+        private readonly DeveloperGatewayCredential _credential;
+        private int _calls;
+
+        public FixedGatewayCredentialSource(DeveloperGatewayCredential credential)
+        {
+            _credential = credential;
+        }
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public ValueTask<DeveloperGatewayCredential> GetCredentialAsync(
+            bool forceRefresh,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _calls);
+            return new ValueTask<DeveloperGatewayCredential>(_credential);
+        }
+    }
+
+    private sealed class RacingCredentialSource : IDeveloperGatewayCredentialSource
+    {
+        private readonly Func<DateTimeOffset> _clock;
+        private int _calls;
+
+        public RacingCredentialSource(Func<DateTimeOffset> clock)
+        {
+            _clock = clock;
+        }
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public ConcurrentQueue<bool> ForceRefreshValues { get; } = new();
+
+        public TaskCompletionSource FirstStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseFirst { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<DeveloperGatewayCredential> GetCredentialAsync(
+            bool forceRefresh,
+            CancellationToken cancellationToken)
+        {
+            ForceRefreshValues.Enqueue(forceRefresh);
+            var call = Interlocked.Increment(ref _calls);
+            if (call == 1)
+            {
+                FirstStarted.TrySetResult();
+                await ReleaseFirst.Task.WaitAsync(cancellationToken);
+            }
+
+            return new DeveloperGatewayCredential(
+                "session-token-" + call.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                _clock().AddMinutes(10),
+                "model:chat");
         }
     }
 }

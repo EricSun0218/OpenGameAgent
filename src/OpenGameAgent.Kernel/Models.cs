@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net.Http;
 using System.Threading;
 
 namespace OpenGameAgent.Kernel;
@@ -341,4 +342,31 @@ public sealed class ModelStreamEvent
 public interface IModelProvider
 {
     IAsyncEnumerable<ModelStreamEvent> StreamAsync(ModelRequest request, CancellationToken cancellationToken);
+}
+
+public sealed class ModelProviderException : HttpRequestException
+{
+    public ModelProviderException(
+        string message,
+        bool isTransient,
+        TimeSpan? retryAfter = null,
+        int? statusCode = null,
+        Exception? innerException = null)
+        : base(message, innerException)
+    {
+        if (retryAfter is { } delay && delay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(retryAfter));
+        }
+
+        IsTransient = isTransient;
+        RetryAfter = retryAfter;
+        StatusCode = statusCode;
+    }
+
+    public bool IsTransient { get; }
+
+    public TimeSpan? RetryAfter { get; }
+
+    public int? StatusCode { get; }
 }

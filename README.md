@@ -8,11 +8,13 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
 
-OpenGameAgent brings the small, composable agent-kernel model to game development. Its stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, or add the game layer for game time, durable actions, sessions, skills, memory primitives, routing, workflows, and bounded multi-character concurrency.
+OpenGameAgent brings the small, composable agent-kernel model to game development. Its stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, add the game layer for game time and durable state, then opt into extension packages for memory, goals, artifacts, delegation, external tools, structured interaction, and workflow graphs.
 
 Inputs are bounded JSON. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
 
 > Current version: `0.3.0-alpha.1`. Public APIs can change before `1.0`.
+
+The kernel boundary is intentionally small and designed to stabilize early. New game-specific capabilities should normally arrive as extensions, tools, policies, workflows, or game-owned services instead of expanding the model/tool loop.
 
 ## Install
 
@@ -38,6 +40,9 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - game-time memory filtering, expiry, and optional custom ranking;
 - skills selected by input type and available tools;
 - recurring game-time triggers and persistent actor mailboxes;
+- a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
+- capability-aware model catalogs and developer-hosted short-lived credentials;
+- lazy external-tool discovery and large-result artifact spill;
 - image, audio, and video generation through replaceable APIs.
 
 The runtime does **not** decide combat legality, inventory rules, economy changes, NPC permissions, or other business rules. The game exposes narrow tools, validates every requested mutation, performs it on the correct thread or server, and returns the authoritative receipt.
@@ -50,7 +55,7 @@ Godot / Unity / .NET game server
         | GameInput (bounded JSON + GameMoment)
         v
 GameAgentRuntime
-  context | skills | route | session | actor lane
+  context | skills | route | session | actor lane | extensions
         |
         v
 small stateful Agent kernel <---- steering / follow-up
@@ -74,13 +79,17 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Agent kernel | Streaming typed messages, tool loop, progress events, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
 | Tool execution | Bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
+| Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
+| Official extensions | Tool policy and search, structured player questions/recommended replies, goals, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
 | World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes |
+| Models and auth | Capability/context/reasoning/cost catalog, dynamic model refresh, static/environment/stored/local auth, developer-hosted short-lived credential gateway |
+| External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Providers | Streaming OpenAI-compatible text/tool API; generic HTTP image/audio/video API; retry and fallback decorators |
-| Persistence | Crash-tolerant local files for sessions, action journals, workflow checkpoints, memories, mailboxes, and hot-reloaded `SKILL.md` or game-manifest skills |
+| Persistence | Crash-tolerant, cross-process-coordinated local files for sessions, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, and recursive hot-reloaded skills |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service and engine client |
 | Engines | Godot 4.7 .NET and Unity 6 packages, both exercised in real Windows editors |
 
-Run inputs, model content, tool catalogs, loops, queues, progress, and concurrency are bounded by explicit limits. Game-owned stores and rankers can replace the included in-memory or local-file implementations.
+Run inputs, model content, tool catalogs, loops, queues, progress, and concurrency are bounded by explicit limits. Context admission runs before every model request, model and tool calls have deadlines, and large tool results can be retained as artifacts instead of repeatedly filling the prompt. Game-owned stores and rankers can replace the included in-memory or local-file implementations.
 
 ## Minimal kernel
 
@@ -137,6 +146,8 @@ See the buildable [living-world example](examples/OpenGameAgent.Example/Program.
 - **Inside the engine:** simplest single-player deployment, direct access to game context, no extra agent server. Suitable for BYOK or local endpoints. A provider key shipped in a client can be extracted.
 - **In the game server:** best when the game already has an authoritative server. Run the same C# runtime beside game rules and persistence.
 - **Separate agent service:** useful for centrally paid inference, secrets, scaling, or independent updates. Engine adapters call `OpenGameAgent.Server` over JSON/SSE and can steer or abort an active actor through authenticated control endpoints.
+
+For developer-funded client inference, use a developer-controlled gateway that issues short-lived scoped credentials. The permanent upstream provider key stays on developer infrastructure; the framework supplies the client credential flow, while the game owns login, quotas, revocation, and abuse controls.
 
 Placement does not change ownership: only game code decides whether an action commits.
 

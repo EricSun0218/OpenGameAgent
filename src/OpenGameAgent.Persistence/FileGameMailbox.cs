@@ -42,6 +42,7 @@ public sealed class FileGameMailbox : IGameMailbox
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(message.MessageId + Suffix, cancellationToken).ConfigureAwait(false);
             var path = _files.PathFor(message.MessageId, Suffix);
             var existing = await _files.ReadAsync<MailboxDocument>(path, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
@@ -53,6 +54,9 @@ public sealed class FileGameMailbox : IGameMailbox
             await _capacityGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                using var capacityLease = await _files.AcquireProcessLeaseAsync(
+                    "mailbox-capacity",
+                    cancellationToken).ConfigureAwait(false);
                 var raced = await _files.ReadAsync<MailboxDocument>(path, cancellationToken).ConfigureAwait(false);
                 if (raced is not null)
                 {
@@ -157,6 +161,7 @@ public sealed class FileGameMailbox : IGameMailbox
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                using var processLease = await _files.AcquireProcessLeaseAsync(candidate.MessageId + Suffix, cancellationToken).ConfigureAwait(false);
                 var current = await _files.ReadAsync<MailboxDocument>(candidate.Path, cancellationToken).ConfigureAwait(false);
                 if (current is not null)
                 {
@@ -210,6 +215,7 @@ public sealed class FileGameMailbox : IGameMailbox
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var processLease = await _files.AcquireProcessLeaseAsync(messageId + Suffix, cancellationToken).ConfigureAwait(false);
             var path = _files.PathFor(messageId, Suffix);
             var current = await _files.ReadAsync<MailboxDocument>(path, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The mailbox message does not exist.");
