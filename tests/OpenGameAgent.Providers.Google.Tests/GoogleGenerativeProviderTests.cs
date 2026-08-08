@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 using Xunit;
 
 namespace OpenGameAgent.Providers.Google.Tests;
@@ -44,6 +45,46 @@ public sealed class GoogleGenerativeProviderTests
         Assert.Equal(2, response.Usage.ReasoningTokens);
         Assert.Contains(events, item => item.Kind == ModelStreamEventKind.ReasoningStarted);
         Assert.Contains(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
+
+        var reasoningEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ReasoningEnded);
+        Assert.Equal(reasoning.Text, reasoningEnded.Content);
+        var endedReasoning = Assert.IsType<ReasoningContent>(reasoningEnded.Partial!.Content[reasoningEnded.ContentIndex]);
+        Assert.Equal(reasoning.Text, endedReasoning.Text);
+        Assert.Equal(reasoning.Signature, endedReasoning.Signature);
+
+        var textEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.TextEnded);
+        Assert.Equal(text.Text, textEnded.Content);
+        var endedText = Assert.IsType<TextContent>(textEnded.Partial!.Content[textEnded.ContentIndex]);
+        Assert.Equal(text.Text, endedText.Text);
+        Assert.Equal(text.Signature, endedText.Signature);
+
+        var toolStarted = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallStarted);
+        var toolDeltas = events.Where(item => item.Kind == ModelStreamEventKind.ToolCallDelta).ToArray();
+        Assert.NotEmpty(toolDeltas);
+        var toolEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
+        var toolEvents = events.Where(item => item.Kind is
+            ModelStreamEventKind.ToolCallStarted or
+            ModelStreamEventKind.ToolCallDelta or
+            ModelStreamEventKind.ToolCallEnded);
+        Assert.All(toolEvents, item =>
+        {
+            Assert.Equal(toolStarted.ContentIndex, item.ContentIndex);
+            var partialToolCall = Assert.IsType<ToolCallContent>(item.Partial!.Content[item.ContentIndex]);
+            AssertJsonObject(partialToolCall.ArgumentsJson);
+        });
+
+        var endedToolCall = Assert.IsType<ToolCallContent>(toolEnded.ToolCall);
+        var endedPartialToolCall = Assert.IsType<ToolCallContent>(toolEnded.Partial!.Content[toolEnded.ContentIndex]);
+        Assert.Equal(tool.Id, endedToolCall.Id);
+        Assert.Equal(tool.Name, endedToolCall.Name);
+        Assert.Equal("{\"x\":1}", endedToolCall.ArgumentsJson);
+        Assert.Equal(tool.ArgumentsJson, endedToolCall.ArgumentsJson);
+        Assert.Equal(ValidSignature, endedToolCall.ThoughtSignature);
+        Assert.Equal(tool.ThoughtSignature, endedToolCall.ThoughtSignature);
+        Assert.Equal(tool.Namespace, endedToolCall.Namespace);
+        Assert.Equal(endedToolCall.Id, toolEnded.ToolCallId);
+        Assert.Equal(endedToolCall.Name, toolEnded.ToolName);
+        AssertToolCallEqual(endedToolCall, endedPartialToolCall);
     }
 
     [Fact]
@@ -277,6 +318,54 @@ public sealed class GoogleGenerativeProviderTests
             endpoint.AbsoluteUri);
     }
 
+    [Fact]
+    public async Task ObservesSanitizedSuccessfulResponseMetadata()
+    {
+        ProviderResponseObservation? observed = null;
+        var response = Response(StopStream());
+        response.Headers.TryAddWithoutValidation("x-goog-request-id", "google-request-1");
+        response.Headers.TryAddWithoutValidation("authorization", "Bearer secret");
+        var options = Options(new HttpClient(new StubHandler(_ => response)));
+        options.ResponseObserver = (value, _) =>
+        {
+            observed = value;
+            return default;
+        };
+        var provider = new GoogleGenerativeProvider(options);
+
+        await CollectAsync(provider.StreamAsync(Request("gemini-3-flash-preview"), TestContext.Current.CancellationToken));
+
+        Assert.NotNull(observed);
+        Assert.Equal(200, observed!.StatusCode);
+        Assert.Equal("google-request-1", observed.Metadata["x-goog-request-id"]);
+        Assert.DoesNotContain(observed.Metadata.Values, value => value.Contains("secret", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TombstoneSuppressesOptionalSessionHeaderButCannotDeleteCredential()
+    {
+        var handler = new StubHandler(_ => Response(StopStream()));
+        var options = Options(new HttpClient(handler));
+        options.Headers["x-goog-request-params"] = null;
+        options.Headers["x-goog-api-key"] = null;
+        var request = new ModelRequest(
+            "gemini-3-flash-preview",
+            string.Empty,
+            Array.Empty<AgentMessage>(),
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            "session",
+            "run",
+            1);
+
+        await CollectAsync(new GoogleGenerativeProvider(options).StreamAsync(
+            request,
+            TestContext.Current.CancellationToken));
+
+        Assert.Null(handler.RequestParameters);
+        Assert.Equal("test-key", handler.ApiKey);
+    }
+
     private static GoogleGenerativeProvider Create(HttpMessageHandler handler) =>
         new(Options(new HttpClient(handler)));
 
@@ -310,6 +399,21 @@ public sealed class GoogleGenerativeProviderTests
         return events;
     }
 
+    private static void AssertJsonObject(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
+    private static void AssertToolCallEqual(ToolCallContent expected, ToolCallContent actual)
+    {
+        Assert.Equal(expected.Id, actual.Id);
+        Assert.Equal(expected.Name, actual.Name);
+        Assert.Equal(expected.ArgumentsJson, actual.ArgumentsJson);
+        Assert.Equal(expected.ThoughtSignature, actual.ThoughtSignature);
+        Assert.Equal(expected.Namespace, actual.Namespace);
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, HttpResponseMessage> _response;
@@ -327,6 +431,8 @@ public sealed class GoogleGenerativeProviderTests
 
         public AuthenticationHeaderValue? Authorization { get; private set; }
 
+        public string? RequestParameters { get; private set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
@@ -337,6 +443,9 @@ public sealed class GoogleGenerativeProviderTests
             RequestUri = request.RequestUri?.AbsoluteUri ?? string.Empty;
             ApiKey = request.Headers.TryGetValues("x-goog-api-key", out var values) ? values.Single() : null;
             Authorization = request.Headers.Authorization;
+            RequestParameters = request.Headers.TryGetValues("x-goog-request-params", out var parameters)
+                ? parameters.Single()
+                : null;
             return _response(request);
         }
     }

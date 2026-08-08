@@ -9,11 +9,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
-    throw 'Version must be a semantic version.'
-}
+. (Join-Path $PSScriptRoot 'Release.Common.ps1')
+
+$versionInfo = Get-ReleaseVersionInfo -Version $Version
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
+Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
 if ([string]::IsNullOrWhiteSpace($ArtifactsDirectory)) {
     $ArtifactsDirectory = Join-Path $repositoryRoot 'artifacts'
 }
@@ -58,19 +60,9 @@ function New-DirectoryArchive {
         $true)
 }
 
-$expectedPackages = @(
-    'OpenGameAgent.Kernel',
-    'OpenGameAgent',
-    'OpenGameAgent.Persistence',
-    'OpenGameAgent.Providers.OpenAICompatible',
-    'OpenGameAgent.Providers.MediaHttp',
-    'OpenGameAgent.Client',
-    'OpenGameAgent.Extensions',
-    'OpenGameAgent.Models',
-    'OpenGameAgent.Connectors.Mcp'
-)
 $nugetRoot = Join-Path $artifactsRoot 'nuget'
-foreach ($packageId in $expectedPackages) {
+foreach ($package in $packages) {
+    $packageId = [string]$package.id
     $name = "$packageId.$Version.nupkg"
     $source = Join-Path $nugetRoot $name
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
@@ -91,27 +83,37 @@ if (-not $serverStage.StartsWith($outputRoot + [IO.Path]::DirectorySeparatorChar
     throw 'Server staging path is unsafe.'
 }
 New-Item -ItemType Directory -Path $serverStage | Out-Null
-$serverFiles = @(
+$serverMetadataFiles = @(
     'appsettings.json',
-    'OpenGameAgent.Kernel.dll',
-    'OpenGameAgent.dll',
-    'OpenGameAgent.Persistence.dll',
-    'OpenGameAgent.Providers.OpenAICompatible.dll',
     'OpenGameAgent.Server.deps.json',
-    'OpenGameAgent.Server.dll',
     'OpenGameAgent.Server.runtimeconfig.json'
 )
-foreach ($relative in $serverFiles) {
+$serverDeps = Join-Path $serverSource 'OpenGameAgent.Server.deps.json'
+$runtimeAssets = @(Resolve-PortableServerRuntimeAssets -PublishDirectory $serverSource -DepsFile $serverDeps)
+foreach ($relative in $serverMetadataFiles) {
     $source = Join-Path $serverSource $relative
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Portable server file '$relative' is missing."
     }
     Copy-Item -LiteralPath $source -Destination (Join-Path $serverStage $relative)
 }
+foreach ($runtimeAsset in $runtimeAssets) {
+    $destination = [IO.Path]::GetFullPath((Join-Path $serverStage $runtimeAsset.Destination))
+    if (-not $destination.StartsWith($serverStage + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Portable runtime destination '$($runtimeAsset.Destination)' is unsafe."
+    }
+    $destinationDirectory = Split-Path -Parent $destination
+    if (-not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $runtimeAsset.Source -Destination $destination
+}
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Destination (Join-Path $serverStage 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'docs\deployment-and-security.md') -Destination (Join-Path $serverStage 'README.md')
-New-DirectoryArchive -Source $serverStage -Destination (Join-Path $outputRoot "$serverBundleName.zip")
+$serverArchive = Join-Path $outputRoot "$serverBundleName.zip"
+New-DirectoryArchive -Source $serverStage -Destination $serverArchive
 Remove-Item -LiteralPath $serverStage -Recurse -Force
+Test-PortableServerArchive -Archive $serverArchive -EntryDirectoryName $serverBundleName
 
 $changelog = Get-Content -LiteralPath (Join-Path $repositoryRoot 'CHANGELOG.md') -Raw
 $escapedVersion = [regex]::Escape($Version)
@@ -132,7 +134,7 @@ $releaseNotes = @(
     '',
     'Use the versioned Godot or Unity archive below for engine integration. The portable server archive runs with `dotnet OpenGameAgent.Server.dll` on a .NET 8 host.',
     '',
-    'This is an alpha release. Public APIs can change before 1.0.'
+    (Get-ReleaseStabilityNotice -VersionInfo $versionInfo)
 ) -join [Environment]::NewLine
 $releaseNotes | Set-Content -LiteralPath (Join-Path $outputRoot 'RELEASE_NOTES.md') -Encoding utf8NoBOM
 

@@ -104,7 +104,8 @@ public sealed class GameOAuthDeviceCodeOptions
 
 public static class GameOAuth
 {
-    private const int MaximumResponseCharacters = 1_000_000;
+    private const int MaximumResponseBytes = 1_000_000;
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
     private static readonly TimeSpan MaximumLifetime = TimeSpan.FromDays(365);
 
     public static StoredGameProviderAuthentication CreateAuthorizationCodeAuthentication(
@@ -482,13 +483,49 @@ public static class GameOAuth
         };
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
             .ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        if (body.Length > MaximumResponseCharacters)
-        {
-            throw new InvalidOperationException("The OAuth response exceeded the configured safety bound.");
-        }
+        var body = await ReadBoundedResponseAsync(response.Content, cancellationToken).ConfigureAwait(false);
 
         return new FormResponse(response.IsSuccessStatusCode, response.StatusCode, body);
+    }
+
+    private static async ValueTask<string> ReadBoundedResponseAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        var stream = await CancellableOperation.WaitAsync(
+            new ValueTask<Stream>(content.ReadAsStreamAsync()),
+            cancellationToken).ConfigureAwait(false);
+        using (stream)
+        using (var buffer = new MemoryStream())
+        {
+            var chunk = new byte[8192];
+            while (true)
+            {
+                var read = await CancellableOperation.WaitAsync(
+                    new ValueTask<int>(stream.ReadAsync(chunk, 0, chunk.Length, cancellationToken)),
+                    cancellationToken).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                if (buffer.Length + read > MaximumResponseBytes)
+                {
+                    throw new InvalidOperationException("The OAuth response exceeded the configured safety bound.");
+                }
+
+                buffer.Write(chunk, 0, read);
+            }
+
+            try
+            {
+                return StrictUtf8.GetString(buffer.ToArray());
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidOperationException("The OAuth response is not valid UTF-8.", exception);
+            }
+        }
     }
 
     private static JsonDocument ParseObject(string body, string error)

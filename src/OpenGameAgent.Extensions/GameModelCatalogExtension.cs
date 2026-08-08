@@ -1,8 +1,7 @@
-using System;
-using System.Collections.Generic;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.Models;
 
-namespace OpenGameAgent.Models;
+namespace OpenGameAgent.Extensions;
 
 public sealed class GameModelCatalogExtension : IGameAgentExtension
 {
@@ -12,7 +11,7 @@ public sealed class GameModelCatalogExtension : IGameAgentExtension
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         Descriptor = new GameAgentExtensionDescriptor(
-            GameModelDescriptor.RequireId(extensionId, nameof(extensionId)),
+            extensionId,
             "1.0.0",
             "Provider discovery, model capabilities, authentication state, and model selection.",
             new[] { "model-catalog", "provider-auth", "dynamic-models" });
@@ -32,7 +31,7 @@ public sealed class GameModelCatalogExtension : IGameAgentExtension
         {
             api.RegisterModelProvider(
                 provider.Descriptor.ProviderId,
-                _catalog.CreateDispatchProvider(provider.Descriptor.ProviderId));
+                _catalog.CreateProvider(provider.Descriptor.ProviderId));
         }
     }
 
@@ -53,7 +52,7 @@ public sealed class GameModelCatalogExtension : IGameAgentExtension
         return new GameModelSelection(
             resolution.Model.ModelId,
             parameters: resolution.CreateParameters(baseline),
-            provider: _catalog.CreateDispatchProvider(resolution.Model.ProviderId),
+            provider: _catalog.CreateProvider(resolution.Model.ProviderId),
             contextWindowTokens: resolution.Model.ContextWindowTokens,
             maximumOutputTokens: resolution.Model.MaximumOutputTokens);
     }

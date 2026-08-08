@@ -38,6 +38,46 @@ public sealed class MistralConversationsProviderTests
         Assert.Equal(2, response.Usage.CacheReadTokens);
         Assert.Equal(4, response.Usage.OutputTokens);
         Assert.Contains(events, value => value.Kind == ModelStreamEventKind.ToolCallEnded);
+
+        var reasoningEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ReasoningEnded);
+        Assert.Equal(Assert.IsType<ReasoningContent>(response.Content[0]).Text, reasoningEnded.Content);
+        Assert.Equal(
+            Assert.IsType<ReasoningContent>(response.Content[0]).Text,
+            Assert.IsType<ReasoningContent>(reasoningEnded.Partial!.Content[reasoningEnded.ContentIndex]).Text);
+
+        var textEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.TextEnded);
+        Assert.Equal(Assert.IsType<TextContent>(response.Content[1]).Text, textEnded.Content);
+        Assert.Equal(
+            Assert.IsType<TextContent>(response.Content[1]).Text,
+            Assert.IsType<TextContent>(textEnded.Partial!.Content[textEnded.ContentIndex]).Text);
+
+        var toolStarted = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallStarted);
+        var toolDeltas = events.Where(item => item.Kind == ModelStreamEventKind.ToolCallDelta).ToArray();
+        Assert.NotEmpty(toolDeltas);
+        var toolEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
+        var toolEvents = events.Where(item => item.Kind is
+            ModelStreamEventKind.ToolCallStarted or
+            ModelStreamEventKind.ToolCallDelta or
+            ModelStreamEventKind.ToolCallEnded);
+        Assert.All(toolEvents, item =>
+        {
+            Assert.Equal(toolStarted.ContentIndex, item.ContentIndex);
+            var partialToolCall = Assert.IsType<ToolCallContent>(item.Partial!.Content[item.ContentIndex]);
+            AssertJsonObject(partialToolCall.ArgumentsJson);
+        });
+
+        var terminalToolCall = Assert.IsType<ToolCallContent>(response.Content[2]);
+        var endedToolCall = Assert.IsType<ToolCallContent>(toolEnded.ToolCall);
+        var endedPartialToolCall = Assert.IsType<ToolCallContent>(toolEnded.Partial!.Content[toolEnded.ContentIndex]);
+        Assert.Equal(terminalToolCall.Id, endedToolCall.Id);
+        Assert.Equal(terminalToolCall.Name, endedToolCall.Name);
+        Assert.Equal("{\"x\":1}", endedToolCall.ArgumentsJson);
+        Assert.Equal(terminalToolCall.ArgumentsJson, endedToolCall.ArgumentsJson);
+        Assert.Equal(terminalToolCall.ThoughtSignature, endedToolCall.ThoughtSignature);
+        Assert.Equal(terminalToolCall.Namespace, endedToolCall.Namespace);
+        Assert.Equal(endedToolCall.Id, toolEnded.ToolCallId);
+        Assert.Equal(endedToolCall.Name, toolEnded.ToolName);
+        AssertToolCallEqual(endedToolCall, endedPartialToolCall);
     }
 
     [Fact]
@@ -161,6 +201,68 @@ public sealed class MistralConversationsProviderTests
         Assert.Contains("finish reason", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task BadResponseObserverCannotBreakSuccessfulStream()
+    {
+        var options = Options(new HttpClient(new StubHandler(_ => Response(StopStream()))));
+        options.ResponseObserver = (_, _) => throw new InvalidOperationException("observer failed");
+        var provider = new MistralConversationsProvider(options);
+
+        var events = await CollectAsync(provider.StreamAsync(Request("model"), TestContext.Current.CancellationToken));
+
+        Assert.Equal(ModelStopReason.Stop, events.Last().Response!.StopReason);
+    }
+
+    [Fact]
+    public async Task TombstoneSuppressesOptionalAffinityButCannotDeleteCredential()
+    {
+        var handler = new StubHandler(_ => Response(StopStream()));
+        var options = Options(new HttpClient(handler));
+        options.Headers["x-affinity"] = null;
+        options.Headers["Authorization"] = null;
+        var request = new ModelRequest(
+            "model",
+            string.Empty,
+            Array.Empty<AgentMessage>(),
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters { CacheRetention = ModelCacheRetention.Short },
+            "session",
+            "run",
+            1);
+
+        await CollectAsync(new MistralConversationsProvider(options).StreamAsync(
+            request,
+            TestContext.Current.CancellationToken));
+
+        Assert.Null(handler.Affinity);
+        Assert.Equal("Bearer test-key", handler.Authorization);
+    }
+
+    [Fact]
+    public async Task ResponseObserverIsSnapshottedAtConstruction()
+    {
+        var handler = new StubHandler(_ => Response(StopStream()));
+        var options = Options(new HttpClient(handler));
+        var original = 0;
+        var replacement = 0;
+        options.ResponseObserver = (_, _) =>
+        {
+            Interlocked.Increment(ref original);
+            return default;
+        };
+        var provider = new MistralConversationsProvider(options);
+        options.ResponseObserver = (_, _) =>
+        {
+            Interlocked.Increment(ref replacement);
+            return default;
+        };
+
+        await CollectAsync(provider.StreamAsync(Request("model"), TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, original);
+        Assert.Equal(0, replacement);
+    }
+
     private static MistralConversationsProvider Create(HttpMessageHandler handler) =>
         new(Options(new HttpClient(handler)));
 
@@ -191,6 +293,21 @@ public sealed class MistralConversationsProviderTests
         return events;
     }
 
+    private static void AssertJsonObject(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
+    private static void AssertToolCallEqual(ToolCallContent expected, ToolCallContent actual)
+    {
+        Assert.Equal(expected.Id, actual.Id);
+        Assert.Equal(expected.Name, actual.Name);
+        Assert.Equal(expected.ArgumentsJson, actual.ArgumentsJson);
+        Assert.Equal(expected.ThoughtSignature, actual.ThoughtSignature);
+        Assert.Equal(expected.Namespace, actual.Namespace);
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, HttpResponseMessage> _response;
@@ -204,10 +321,13 @@ public sealed class MistralConversationsProviderTests
 
         public string? Affinity { get; private set; }
 
+        public string? Authorization { get; private set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             RequestBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             Affinity = request.Headers.TryGetValues("x-affinity", out var values) ? values.Single() : null;
+            Authorization = request.Headers.Authorization?.ToString();
             return _response(request);
         }
     }

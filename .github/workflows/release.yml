@@ -8,13 +8,17 @@ on:
         required: true
         default: 0.3.0-alpha.1
       publish:
-        description: Publish NuGet packages and the GitHub pre-release
+        description: Publish NuGet packages and the GitHub release
         required: true
         default: false
         type: boolean
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -23,6 +27,8 @@ jobs:
       RELEASE_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         env:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
@@ -30,15 +36,22 @@ jobs:
           global-json-file: global.json
       - name: Validate release version
         shell: pwsh
+        env:
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
+          SOURCE_REF: ${{ github.ref }}
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
-            throw 'The release version is not valid SemVer.'
+          ./tools/Test-ReleaseScripts.ps1 -Version $env:RELEASE_VERSION
+          if ($env:PUBLISH_REQUESTED -eq 'true' -and $env:SOURCE_REF -ne 'refs/heads/main') {
+            throw 'Published releases must run from refs/heads/main.'
           }
       - run: dotnet restore OpenGameAgent.sln --locked-mode
       - run: dotnet build OpenGameAgent.sln -c Release --no-restore "-p:Version=${RELEASE_VERSION}"
       - run: dotnet test OpenGameAgent.sln -c Release --no-build --no-restore "-p:Version=${RELEASE_VERSION}"
       - shell: pwsh
         run: ./tools/Pack-NuGet.ps1 -PackageVersion $env:RELEASE_VERSION
+      - name: Verify clean NuGet consumer
+        shell: pwsh
+        run: ./tools/Test-NuGetPackages.ps1 -PackageVersion $env:RELEASE_VERSION -ExpectedRepositoryCommit $env:GITHUB_SHA
       - run: dotnet publish src/OpenGameAgent.Server/OpenGameAgent.Server.csproj -c Release --no-build --no-restore "-p:Version=${RELEASE_VERSION}" -o artifacts/server
       - name: Build Unity package
         shell: pwsh
@@ -72,8 +85,216 @@ jobs:
           if-no-files-found: error
 
   stage-github-release:
-    if: ${{ inputs.publish }}
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: OpenGameAgent-release-${{ inputs.version }}
+          path: release-assets
+      - name: Stage immutable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v${RELEASE_VERSION}"
+          package_count="$(jq -r '.packages | length' tools/release-packages.json)"
+          expected_asset_count="$((package_count + 4))"
+          prerelease_args=()
+          expected_prerelease=false
+          if [[ "${RELEASE_VERSION}" == *-* ]]; then
+            prerelease_args+=(--prerelease)
+            expected_prerelease=true
+          fi
+
+          mapfile -t assets < <(
+            find release-assets -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print |
+              sort
+          )
+          if [[ "${#assets[@]}" -ne "${expected_asset_count}" ]]; then
+            echo "::error::Expected ${expected_asset_count} downloadable assets, found ${#assets[@]}."
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+
+          api_url="${GITHUB_API_URL:-https://api.github.com}"
+          api_response="$(mktemp)"
+          frozen_assets="$(mktemp -d)"
+          trap 'rm -f "${api_response}"; rm -rf "${frozen_assets}"' EXIT
+          tag_status="$(curl --silent --show-error --retry 2 --retry-all-errors \
+            --output "${api_response}" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "${api_url}/repos/${GH_REPO}/git/ref/tags/${tag}")"
+          release_target=(--target "${SOURCE_COMMIT}")
+          if [[ "${tag_status}" == "200" ]]; then
+            tag_commit="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha)"
+            if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
+              echo "::error::Tag ${tag} points to ${tag_commit}, expected ${SOURCE_COMMIT}."
+              exit 1
+            fi
+            release_target=(--verify-tag)
+          elif [[ "${tag_status}" != "404" ]]; then
+            echo "::error::GitHub tag lookup returned HTTP ${tag_status}."
+            exit 1
+          fi
+
+          release_status="$(curl --silent --show-error --retry 2 --retry-all-errors \
+            --output "${api_response}" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "${api_url}/repos/${GH_REPO}/releases/tags/${tag}")"
+          existing_draft=false
+          if [[ "${release_status}" == "200" ]]; then
+            existing_draft="$(jq -r '.draft' "${api_response}")"
+            if [[ "${existing_draft}" != "true" ]]; then
+              echo "::error::Release ${tag} is already public and cannot be replaced."
+              exit 1
+            fi
+            if [[ "${tag_status}" == "404" ]]; then
+              draft_target="$(jq -r '.target_commitish' "${api_response}")"
+              if [[ "${draft_target}" != "${SOURCE_COMMIT}" ]]; then
+                echo "::error::Draft release target ${draft_target} does not match ${SOURCE_COMMIT}."
+                exit 1
+              fi
+            fi
+          elif [[ "${release_status}" != "404" ]]; then
+            echo "::error::GitHub release lookup returned HTTP ${release_status}."
+            exit 1
+          fi
+
+          if [[ "${existing_draft}" == "true" ]]; then
+            remote_asset_count="$(jq -r '.assets | length' "${api_response}")"
+            if [[ "${remote_asset_count}" -eq 0 ]]; then
+              gh release upload "${tag}" "${assets[@]}"
+            else
+              remote_asset_names="$(jq -r '.assets[].name' "${api_response}" | sort)"
+              expected_asset_names="$(printf '%s\n' "${assets[@]##*/}" | sort)"
+              if [[ "${remote_asset_names}" != "${expected_asset_names}" ]]; then
+                echo "::error::Existing draft has a partial or unexpected frozen asset set."
+                diff -u \
+                  <(printf '%s\n' "${expected_asset_names}") \
+                  <(printf '%s\n' "${remote_asset_names}") || true
+                exit 1
+              fi
+              gh release download "${tag}" --dir "${frozen_assets}"
+              (
+                cd "${frozen_assets}"
+                sha256sum --check SHA256SUMS.txt
+              )
+            fi
+
+            gh release edit "${tag}" \
+              "${release_target[@]}" \
+              --draft \
+              --prerelease="${expected_prerelease}" \
+              --title "OpenGameAgent ${tag}" \
+              --notes-file release-assets/RELEASE_NOTES.md
+          else
+            gh release create "${tag}" \
+              "${release_target[@]}" \
+              --draft \
+              "${prerelease_args[@]}" \
+              --title "OpenGameAgent ${tag}" \
+              --notes-file release-assets/RELEASE_NOTES.md \
+              "${assets[@]}"
+          fi
+
+          expected="$(printf '%s\n' "${assets[@]##*/}" | sort)"
+          actual="$(gh release view "${tag}" --json assets --jq '.assets[].name' | sort)"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::Draft release asset set is incomplete."
+            diff -u <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}") || true
+            exit 1
+          fi
+
+          mkdir selected-release-assets
+          gh release download "${tag}" --dir selected-release-assets
+          (
+            cd selected-release-assets
+            sha256sum --check SHA256SUMS.txt
+          )
+      - name: Verify frozen asset provenance
+        shell: pwsh
+        run: ./tools/Test-FrozenReleaseAssets.ps1 -CandidateDirectory release-assets -FrozenDirectory selected-release-assets
+      - name: Verify frozen package manifests
+        shell: pwsh
+        run: ./tools/Test-NuGetPackages.ps1 -PackageVersion $env:RELEASE_VERSION -PackagesDirectory selected-release-assets -ExpectedRepositoryCommit $env:SOURCE_COMMIT -SkipConsumerRestore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OpenGameAgent-frozen-assets-${{ inputs.version }}
+          path: selected-release-assets
+          if-no-files-found: error
+
+  publish-nuget:
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    needs: stage-github-release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: OpenGameAgent-frozen-assets-${{ inputs.version }}
+          path: release-assets
+      - name: Verify frozen asset checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release-assets
+            sha256sum --check SHA256SUMS.txt
+          )
+      - name: Verify frozen NuGet packages
+        shell: pwsh
+        run: ./tools/Test-NuGetPackages.ps1 -PackageVersion $env:RELEASE_VERSION -PackagesDirectory release-assets -ExpectedRepositoryCommit $env:GITHUB_SHA
+      - name: Exchange GitHub OIDC token for a temporary NuGet key
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Publish NuGet packages
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: ./tools/Publish-NuGet.ps1 -Version $env:RELEASE_VERSION -ApiKey $env:NUGET_API_KEY -PackagesDirectory release-assets
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OpenGameAgent-published-assets-${{ inputs.version }}
+          path: release-assets
+          if-no-files-found: error
+
+  publish-github-release:
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    needs: publish-nuget
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,129 +305,99 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: OpenGameAgent-release-${{ inputs.version }}
+          name: OpenGameAgent-published-assets-${{ inputs.version }}
           path: release-assets
-      - name: Stage immutable GitHub pre-release
+      - name: Publish GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="v${RELEASE_VERSION}"
-
-          existing_release=""
-          if resolved_release="$(gh release view "${tag}" --json isDraft --jq .isDraft 2>/dev/null)"; then
-            existing_release="${resolved_release}"
-          fi
-          if [[ "${existing_release}" == "false" ]]; then
-            echo "::error::Release ${tag} is already public and cannot be replaced."
-            exit 1
-          fi
-          if [[ "${existing_release}" == "true" ]]; then
-            gh release delete "${tag}" --yes
+          expected_prerelease=false
+          if [[ "${RELEASE_VERSION}" == *-* ]]; then
+            expected_prerelease=true
           fi
 
-          tag_commit=""
-          if resolved_commit="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha 2>/dev/null)"; then
-            tag_commit="${resolved_commit}"
-          fi
-          release_target=(--target "${SOURCE_COMMIT}")
-          if [[ -n "${tag_commit}" ]]; then
-            if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
-              echo "::error::Tag ${tag} points to ${tag_commit}, expected ${SOURCE_COMMIT}."
+          (
+            cd release-assets
+            sha256sum --check SHA256SUMS.txt
+          )
+
+          api_url="${GITHUB_API_URL:-https://api.github.com}"
+          api_response="$(mktemp)"
+          remote_assets="$(mktemp -d)"
+          trap 'rm -f "${api_response}"; rm -rf "${remote_assets}"' EXIT
+
+          verify_tag_target() {
+            local allow_missing="$1"
+            local tag_status
+            tag_status="$(curl --silent --show-error --retry 2 --retry-all-errors \
+              --output "${api_response}" \
+              --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "${api_url}/repos/${GH_REPO}/git/ref/tags/${tag}")"
+            if [[ "${tag_status}" == "200" ]]; then
+              local tag_commit
+              tag_commit="$(gh api "repos/${GH_REPO}/commits/${tag}" --jq .sha)"
+              if [[ "${tag_commit}" != "${SOURCE_COMMIT}" ]]; then
+                echo "::error::Tag ${tag} points to ${tag_commit}, expected ${SOURCE_COMMIT}."
+                exit 1
+              fi
+            elif [[ "${tag_status}" == "404" && "${allow_missing}" == "true" ]]; then
+              local draft_target
+              draft_target="$(gh release view "${tag}" --json targetCommitish --jq .targetCommitish)"
+              if [[ "${draft_target}" != "${SOURCE_COMMIT}" ]]; then
+                echo "::error::Draft release target ${draft_target} does not match ${SOURCE_COMMIT}."
+                exit 1
+              fi
+            else
+              echo "::error::GitHub tag lookup returned HTTP ${tag_status}."
               exit 1
             fi
-            release_target=(--verify-tag)
+          }
+
+          verify_tag_target true
+          draft_state="$(gh release view "${tag}" --json isDraft --jq .isDraft)"
+          if [[ "${draft_state}" != "true" ]]; then
+            echo "::error::Release ${tag} is not the expected draft."
+            exit 1
+          fi
+          expected_notes="$(cat release-assets/RELEASE_NOTES.md)"
+          actual_notes="$(gh release view "${tag}" --json body --jq .body)"
+          if [[ "${actual_notes}" != "${expected_notes}" ]]; then
+            echo "::error::Draft release notes changed before publication."
+            exit 1
           fi
 
-          mapfile -t assets < <(
-            find release-assets -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print |
-              sort
+          gh release download "${tag}" --dir "${remote_assets}"
+          mapfile -t local_assets < <(
+            find release-assets -maxdepth 1 -type f ! -name RELEASE_NOTES.md -print | sort
           )
-          if [[ "${#assets[@]}" -ne 13 ]]; then
-            echo "::error::Expected 13 downloadable assets, found ${#assets[@]}."
-            printf '%s\n' "${assets[@]}"
+          mapfile -t downloaded_assets < <(
+            find "${remote_assets}" -maxdepth 1 -type f -print | sort
+          )
+          if [[ "${#downloaded_assets[@]}" -ne "${#local_assets[@]}" ]]; then
+            echo "::error::Draft release asset count changed before publication."
             exit 1
           fi
-
-          gh release create "${tag}" \
-            "${release_target[@]}" \
-            --draft \
-            --prerelease \
-            --title "OpenGameAgent ${tag}" \
-            --notes-file release-assets/RELEASE_NOTES.md \
-            "${assets[@]}"
-
-          expected="$(printf '%s\n' "${assets[@]##*/}" | sort)"
-          actual="$(gh release view "${tag}" --json assets --jq '.assets[].name' | sort)"
-          if [[ "${actual}" != "${expected}" ]]; then
-            echo "::error::Draft release asset set is incomplete."
-            diff -u <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}") || true
-            exit 1
-          fi
-
-  publish-nuget:
-    if: ${{ inputs.publish }}
-    needs: stage-github-release
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      RELEASE_VERSION: ${{ inputs.version }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
-        env:
-          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
-        with:
-          global-json-file: global.json
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: OpenGameAgent-release-${{ inputs.version }}
-          path: release-assets
-      - name: Exchange GitHub OIDC token for a temporary NuGet key
-        id: nuget-login
-        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
-        with:
-          user: ${{ secrets.NUGET_USER }}
-      - name: Publish NuGet packages
-        shell: bash
-        env:
-          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
-        run: |
-          set -euo pipefail
-          mapfile -t packages < <(find release-assets -maxdepth 1 -type f -name '*.nupkg' -print | sort)
-          if [[ "${#packages[@]}" -ne 9 ]]; then
-            echo "::error::Expected 9 NuGet packages, found ${#packages[@]}."
-            exit 1
-          fi
-          for package in "${packages[@]}"; do
-            dotnet nuget push "${package}" \
-              --api-key "${NUGET_API_KEY}" \
-              --source https://api.nuget.org/v3/index.json \
-              --skip-duplicate
+          for local_asset in "${local_assets[@]}"; do
+            remote_asset="${remote_assets}/${local_asset##*/}"
+            if [[ ! -f "${remote_asset}" ]] || ! cmp --silent "${local_asset}" "${remote_asset}"; then
+              echo "::error::Draft release asset '${local_asset##*/}' differs from the build artifact."
+              exit 1
+            fi
           done
 
-  publish-github-release:
-    if: ${{ inputs.publish }}
-    needs: publish-nuget
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_REPO: ${{ github.repository }}
-      RELEASE_VERSION: ${{ inputs.version }}
-    steps:
-      - name: Publish GitHub pre-release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="v${RELEASE_VERSION}"
-          gh release edit "${tag}" --draft=false --prerelease
-          gh release view "${tag}" \
+          gh release edit "${tag}" --draft=false --prerelease="${expected_prerelease}"
+          verify_tag_target false
+          actual_state="$(gh release view "${tag}" \
             --json isDraft,isPrerelease \
-            --jq 'select(.isDraft == false and .isPrerelease == true)' >/dev/null
+            --jq '[.isDraft, .isPrerelease] | @tsv')"
+          expected_state="$(printf 'false\t%s' "${expected_prerelease}")"
+          if [[ "${actual_state}" != "${expected_state}" ]]; then
+            echo "::error::Published release state '${actual_state}' does not match '${expected_state}'."
+            exit 1
+          fi

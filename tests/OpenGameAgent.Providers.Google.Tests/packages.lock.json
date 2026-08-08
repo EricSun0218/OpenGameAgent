@@ -257,8 +257,12 @@
         "dependencies": {
           "Google.Apis.Auth": "[1.75.0, )",
           "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
           "System.Text.Json": "[8.0.6, )"
         }
+      },
+      "opengameagent.providertransport": {
+        "type": "Project"
       }
     }
   }

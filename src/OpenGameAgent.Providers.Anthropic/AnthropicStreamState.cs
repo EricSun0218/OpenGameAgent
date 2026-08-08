@@ -140,30 +140,7 @@ internal sealed class AnthropicStreamState
                     content.Add(new ReasoningContent("[Reasoning redacted]", block.Signature.ToString(), redacted: true));
                     break;
                 case BlockKind.Tool:
-                    if (!block.Ended && reason == ModelStopReason.Pending)
-                    {
-                        break;
-                    }
-
-                    var arguments = block.Buffer.Length > 0 ? block.Buffer.ToString() : block.InitialInput;
-                    if (string.IsNullOrWhiteSpace(arguments))
-                    {
-                        arguments = "{}";
-                    }
-
-                    if (!IsJsonObject(arguments))
-                    {
-                        if (reason == ModelStopReason.Length)
-                        {
-                            arguments = "{}";
-                        }
-                        else
-                        {
-                            throw new InvalidDataException("A completed Anthropic tool call did not contain a JSON object.");
-                        }
-                    }
-
-                    content.Add(new ToolCallContent(block.Id!, block.Name!, arguments));
+                    content.Add(CreateToolCall(block, reason));
                     break;
             }
         }
@@ -329,12 +306,46 @@ internal sealed class AnthropicStreamState
             BlockKind.Tool => ModelStreamEventKind.ToolCallEnded,
             _ => ModelStreamEventKind.ReasoningEnded,
         };
+        var contentIndex = ContentIndex(index);
+        var partial = Partial();
+        var toolCall = kind == ModelStreamEventKind.ToolCallEnded
+            ? CreateToolCall(block, ModelStopReason.Pending)
+            : null;
         updates.Add(ModelStreamEvent.Update(
             kind,
-            Partial(),
-            contentIndex: ContentIndex(index),
+            partial,
+            contentIndex: contentIndex,
             toolCallId: block.Id,
-            toolName: block.Name));
+            toolName: block.Name,
+            toolCall: toolCall,
+            content: kind switch
+            {
+                ModelStreamEventKind.TextEnded or ModelStreamEventKind.ReasoningEnded when block.Kind == BlockKind.RedactedThinking =>
+                    "[Reasoning redacted]",
+                ModelStreamEventKind.TextEnded or ModelStreamEventKind.ReasoningEnded => block.Buffer.ToString(),
+                _ => null,
+            }));
+    }
+
+    private static ToolCallContent CreateToolCall(Block block, ModelStopReason reason)
+    {
+        var arguments = block.Buffer.Length > 0 ? block.Buffer.ToString() : block.InitialInput;
+        if (string.IsNullOrWhiteSpace(arguments))
+        {
+            arguments = "{}";
+        }
+
+        if (reason is ModelStopReason.Pending or ModelStopReason.Length)
+        {
+            arguments = StreamingJson.ParseObject(arguments);
+        }
+
+        if (!IsJsonObject(arguments))
+        {
+            throw new InvalidDataException("A completed Anthropic tool call did not contain a JSON object.");
+        }
+
+        return new ToolCallContent(block.Id!, block.Name!, arguments);
     }
 
     private void ApplyMessageDelta(JsonElement root)

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Optional secure built-in provider authentication flows for OpenGameAgent.</Description>
+    <PackageId>OpenGameAgent.Models.Auth.BuiltIn</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Models.BuiltIn\OpenGameAgent.Models.BuiltIn.csproj" />
+  </ItemGroup>
+</Project>

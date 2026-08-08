@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 using Xunit;
 
 namespace OpenGameAgent.Providers.Anthropic.Tests;
@@ -70,6 +71,47 @@ public sealed class AnthropicMessagesProviderTests
         Assert.Equal(3, response.Usage.CacheWriteTokens);
         Assert.Equal(1, response.Usage.CacheWriteOneHourTokens);
         Assert.Equal(1, response.Usage.ReasoningTokens);
+
+        var terminalReasoning = Assert.IsType<ReasoningContent>(response.Content[0]);
+        var reasoningEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ReasoningEnded);
+        Assert.Equal(terminalReasoning.Text, reasoningEnded.Content);
+        var endedReasoning = Assert.IsType<ReasoningContent>(reasoningEnded.Partial!.Content[reasoningEnded.ContentIndex]);
+        Assert.Equal(terminalReasoning.Text, endedReasoning.Text);
+        Assert.Equal(terminalReasoning.Signature, endedReasoning.Signature);
+
+        var textEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.TextEnded);
+        Assert.Equal(Assert.IsType<TextContent>(response.Content[1]).Text, textEnded.Content);
+        Assert.Equal(
+            Assert.IsType<TextContent>(response.Content[1]).Text,
+            Assert.IsType<TextContent>(textEnded.Partial!.Content[textEnded.ContentIndex]).Text);
+
+        var toolStarted = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallStarted);
+        var toolDeltas = events.Where(item => item.Kind == ModelStreamEventKind.ToolCallDelta).ToArray();
+        Assert.NotEmpty(toolDeltas);
+        var toolEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
+        var toolEvents = events.Where(item => item.Kind is
+            ModelStreamEventKind.ToolCallStarted or
+            ModelStreamEventKind.ToolCallDelta or
+            ModelStreamEventKind.ToolCallEnded);
+        Assert.All(toolEvents, item =>
+        {
+            Assert.Equal(toolStarted.ContentIndex, item.ContentIndex);
+            var partialToolCall = Assert.IsType<ToolCallContent>(item.Partial!.Content[item.ContentIndex]);
+            AssertJsonObject(partialToolCall.ArgumentsJson);
+        });
+
+        var terminalToolCall = Assert.IsType<ToolCallContent>(response.Content[2]);
+        var endedToolCall = Assert.IsType<ToolCallContent>(toolEnded.ToolCall);
+        var endedPartialToolCall = Assert.IsType<ToolCallContent>(toolEnded.Partial!.Content[toolEnded.ContentIndex]);
+        Assert.Equal(terminalToolCall.Id, endedToolCall.Id);
+        Assert.Equal(terminalToolCall.Name, endedToolCall.Name);
+        Assert.Equal("{\"x\":1}", endedToolCall.ArgumentsJson);
+        Assert.Equal(terminalToolCall.ArgumentsJson, endedToolCall.ArgumentsJson);
+        Assert.Equal(terminalToolCall.ThoughtSignature, endedToolCall.ThoughtSignature);
+        Assert.Equal(terminalToolCall.Namespace, endedToolCall.Namespace);
+        Assert.Equal(endedToolCall.Id, toolEnded.ToolCallId);
+        Assert.Equal(endedToolCall.Name, toolEnded.ToolName);
+        AssertToolCallEqual(endedToolCall, endedPartialToolCall);
     }
 
     [Fact]
@@ -180,6 +222,77 @@ public sealed class AnthropicMessagesProviderTests
         Assert.Contains("message_stop", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task ObservesSanitizedFailureMetadataAndHonorsRetryDirective()
+    {
+        ProviderResponseObservation? observed = null;
+        var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+        {
+            Content = new StringContent("rate limited", Encoding.UTF8, "text/plain"),
+        };
+        response.Headers.TryAddWithoutValidation("x-request-id", "request-1");
+        response.Headers.TryAddWithoutValidation("x-should-retry", "false");
+        response.Headers.TryAddWithoutValidation("retry-after-ms", "2000");
+        response.Headers.TryAddWithoutValidation("set-cookie", "secret=value");
+        var options = Options(new HttpClient(new StubHandler(_ => response)));
+        options.ResponseObserver = (value, _) =>
+        {
+            observed = value;
+            return default;
+        };
+        var provider = new AnthropicMessagesProvider(options);
+
+        var failure = await Assert.ThrowsAsync<ModelProviderException>(async () =>
+            await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+
+        Assert.NotNull(observed);
+        Assert.Equal(429, observed!.StatusCode);
+        Assert.Equal("request-1", observed.Metadata["x-request-id"]);
+        Assert.DoesNotContain(observed.Metadata.Keys, key => key.Contains("cookie", StringComparison.OrdinalIgnoreCase));
+        Assert.False(failure.IsTransient);
+        Assert.Equal(TimeSpan.FromSeconds(2), failure.RetryAfter);
+        Assert.Equal(429, failure.StatusCode);
+    }
+
+    [Fact]
+    public async Task TombstoneSuppressesOptionalAffinityButCannotDeleteRequiredVersionOrCredential()
+    {
+        var handler = new StubHandler(_ => Response("""
+            event: message_start
+            data: {"type":"message_start","message":{"id":"msg_1","model":"model","usage":{"input_tokens":0,"output_tokens":0}}}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """));
+        var options = Options(new HttpClient(handler));
+        options.ApiKey = "test-key";
+        options.SendSessionAffinityHeaders = true;
+        options.Headers["x-session-affinity"] = null;
+        options.Headers["anthropic-version"] = null;
+        options.Headers["x-api-key"] = null;
+        var request = new ModelRequest(
+            "model",
+            "rules",
+            Array.Empty<AgentMessage>(),
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters { CacheRetention = ModelCacheRetention.Short },
+            "session",
+            "run",
+            1);
+
+        await CollectAsync(new AnthropicMessagesProvider(options).StreamAsync(
+            request,
+            TestContext.Current.CancellationToken));
+
+        Assert.Null(handler.Header("x-session-affinity"));
+        Assert.Equal(options.ApiVersion, handler.Header("anthropic-version"));
+        Assert.Equal("test-key", handler.Header("x-api-key"));
+    }
+
     private static AnthropicMessagesProvider Create(HttpMessageHandler handler) =>
         new(Options(new HttpClient(handler)));
 
@@ -205,6 +318,21 @@ public sealed class AnthropicMessagesProviderTests
         return events;
     }
 
+    private static void AssertJsonObject(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
+    private static void AssertToolCallEqual(ToolCallContent expected, ToolCallContent actual)
+    {
+        Assert.Equal(expected.Id, actual.Id);
+        Assert.Equal(expected.Name, actual.Name);
+        Assert.Equal(expected.ArgumentsJson, actual.ArgumentsJson);
+        Assert.Equal(expected.ThoughtSignature, actual.ThoughtSignature);
+        Assert.Equal(expected.Namespace, actual.Namespace);
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, HttpResponseMessage> _response;
@@ -216,6 +344,10 @@ public sealed class AnthropicMessagesProviderTests
 
         public string? RequestBody { get; private set; }
 
+        private readonly Dictionary<string, string> _headers = new(StringComparer.OrdinalIgnoreCase);
+
+        public string? Header(string name) => _headers.TryGetValue(name, out var value) ? value : null;
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
@@ -223,6 +355,11 @@ public sealed class AnthropicMessagesProviderTests
             RequestBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken);
+            foreach (var header in request.Headers)
+            {
+                _headers[header.Key] = string.Join(",", header.Value);
+            }
+
             return _response(request);
         }
     }

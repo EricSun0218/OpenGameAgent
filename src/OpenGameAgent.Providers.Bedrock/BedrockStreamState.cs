@@ -221,12 +221,22 @@ internal sealed class BedrockStreamState
             BlockKind.Reasoning => ModelStreamEventKind.ReasoningEnded,
             _ => ModelStreamEventKind.ToolCallEnded,
         };
+        var contentIndex = _blocks.IndexOf(block);
+        var partial = Partial();
+        var toolCall = kind == ModelStreamEventKind.ToolCallEnded
+            ? partial.Content[contentIndex] as ToolCallContent
+              ?? throw new InvalidDataException("A completed Bedrock tool block did not produce a tool call.")
+            : null;
         updates.Add(ModelStreamEvent.Update(
             kind,
-            Partial(),
-            contentIndex: _blocks.IndexOf(block),
+            partial,
+            contentIndex: contentIndex,
             toolCallId: block.Id,
-            toolName: block.Name));
+            toolName: block.Name,
+            toolCall: toolCall,
+            content: kind is ModelStreamEventKind.TextEnded or ModelStreamEventKind.ReasoningEnded
+                ? block.Buffer.ToString()
+                : null));
     }
 
     private ModelResponse Build(ModelStopReason reason, string? errorMessage, bool final)
@@ -245,10 +255,19 @@ internal sealed class BedrockStreamState
             else
             {
                 var streamedArguments = block.Buffer.ToString();
-                var arguments = string.IsNullOrWhiteSpace(streamedArguments)
-                    ? "{}"
-                    : IsJsonObject(streamedArguments) ? streamedArguments : "{}";
-                if (final && arguments == "{}" && !string.IsNullOrWhiteSpace(streamedArguments))
+                var arguments = final
+                    ? string.IsNullOrWhiteSpace(streamedArguments)
+                        ? "{}"
+                        : IsJsonObject(streamedArguments)
+                            ? streamedArguments
+                            : reason == ModelStopReason.Length
+                                ? StreamingJson.ParseObject(streamedArguments)
+                                : "{}"
+                    : StreamingJson.ParseObject(streamedArguments);
+                if (final
+                    && reason != ModelStopReason.Length
+                    && arguments == "{}"
+                    && !string.IsNullOrWhiteSpace(streamedArguments))
                 {
                     throw new InvalidDataException("A completed Bedrock tool call did not contain a JSON object.");
                 }

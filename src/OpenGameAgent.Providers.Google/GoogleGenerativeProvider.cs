@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 
 namespace OpenGameAgent.Providers.Google;
 
@@ -62,8 +63,13 @@ public sealed class GoogleGenerativeProviderOptions
 
     public GoogleCredentialPlacement CredentialPlacement { get; set; }
 
-    public IDictionary<string, string> Headers { get; } =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IDictionary<string, string?> Headers { get; } =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    public ProviderResponseObserver? ResponseObserver { get; set; }
+
+    public int ResponseObserverTimeoutMilliseconds { get; set; } =
+        ProviderResponseObserverRunner.DefaultTimeoutMilliseconds;
 
     public GoogleToolChoice? ToolChoice { get; set; }
 
@@ -87,15 +93,19 @@ public sealed class GoogleGenerativeProviderOptions
 public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCapabilities
 {
     private readonly GoogleGenerativeProviderOptions _options;
-    private readonly IReadOnlyDictionary<string, string> _headers;
+    private readonly IReadOnlyDictionary<string, string?> _headers;
+    private readonly ProviderResponseObserver? _responseObserver;
+    private readonly int _responseObserverTimeoutMilliseconds;
     private readonly IReadOnlyCollection<string> _supportedApis;
 
     public GoogleGenerativeProvider(GoogleGenerativeProviderOptions options)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         ValidateOptions(options);
-        _headers = new ReadOnlyDictionary<string, string>(
-            new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _headers = new ReadOnlyDictionary<string, string?>(
+            new Dictionary<string, string?>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _responseObserver = options.ResponseObserver;
+        _responseObserverTimeoutMilliseconds = options.ResponseObserverTimeoutMilliseconds;
         _supportedApis = Array.AsReadOnly(new[] { options.ApiId });
     }
 
@@ -123,7 +133,10 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
         var credential = _options.GetCredentialAsync is null
             ? _options.Credential
-            : await _options.GetCredentialAsync(cancellationToken).ConfigureAwait(false);
+            : await ProviderCallbackRunner.RunAsync(
+                    token => _options.GetCredentialAsync(token),
+                    cancellationToken)
+                .ConfigureAwait(false);
         ApplyHeaders(httpRequest, credential, request);
         httpRequest.Content = new ByteArrayContent(SerializeRequest(request));
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json")
@@ -135,14 +148,25 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
+        await ProviderResponseObserverRunner.NotifyAsync(
+                _responseObserver,
+                ProviderResponseObservation.FromHttpResponse(
+                    _options.ProviderId,
+                    _options.ApiId,
+                    request.Model,
+                    response),
+                _responseObserverTimeoutMilliseconds,
+                cancellationToken)
+            .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             var error = await ReadBoundedAsync(response.Content, _options.MaxErrorCharacters, cancellationToken)
                 .ConfigureAwait(false);
+            var retry = ProviderHttpRetryMetadata.FromResponse(response, errorText: error);
             throw new ModelProviderException(
                 $"The Google endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
-                IsTransient(response),
-                GetRetryAfter(response),
+                retry.IsTransient,
+                retry.RetryAfter,
                 (int)response.StatusCode);
         }
 
@@ -615,9 +639,15 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
             throw new InvalidOperationException("A Google credential is required.");
         }
 
+        var suppressed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var header in _headers)
         {
-            if (!httpRequest.Headers.TryAddWithoutValidation(header.Key, header.Value))
+            httpRequest.Headers.Remove(header.Key);
+            if (header.Value is null)
+            {
+                suppressed.Add(header.Key);
+            }
+            else if (!httpRequest.Headers.TryAddWithoutValidation(header.Key, header.Value))
             {
                 throw new InvalidOperationException($"Google request header '{header.Key}' is invalid.");
             }
@@ -625,6 +655,7 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
 
         if (_options.CredentialPlacement == GoogleCredentialPlacement.ApiKeyHeader)
         {
+            httpRequest.Headers.Remove("x-goog-api-key");
             httpRequest.Headers.TryAddWithoutValidation("x-goog-api-key", credential);
         }
         else if (_options.CredentialPlacement == GoogleCredentialPlacement.BearerToken)
@@ -632,7 +663,9 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
         }
 
-        if (!string.IsNullOrWhiteSpace(request.SessionId))
+        if (!string.IsNullOrWhiteSpace(request.SessionId)
+            && !suppressed.Contains("x-goog-request-params")
+            && !httpRequest.Headers.Contains("x-goog-request-params"))
         {
             httpRequest.Headers.TryAddWithoutValidation("x-goog-request-params", "session_id=" + request.SessionId);
         }
@@ -831,25 +864,6 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
         return builder?.ToString() ?? value;
     }
 
-    private static bool IsTransient(HttpResponseMessage response)
-    {
-        var status = (int)response.StatusCode;
-        return status is 408 or 409 or 429 || status >= 500;
-    }
-
-    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("retry-after-ms", out var values)
-            && double.TryParse(values.FirstOrDefault(), NumberStyles.Float, CultureInfo.InvariantCulture, out var milliseconds)
-            && !double.IsNaN(milliseconds)
-            && !double.IsInfinity(milliseconds))
-        {
-            return TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
-        }
-
-        return response.Headers.RetryAfter?.Delta;
-    }
-
     private static async Task<string> ReadBoundedAsync(
         HttpContent content,
         int maximumCharacters,
@@ -996,10 +1010,13 @@ public sealed class GoogleGenerativeProvider : IModelProvider, IModelProviderCap
             || options.MaxErrorCharacters <= 0
             || options.MaxRequestBytes <= 0
             || options.MaxResponseCharacters <= 0
-            || options.MaxToolCallsPerResponse <= 0)
+            || options.MaxToolCallsPerResponse <= 0
+            || options.ResponseObserverTimeoutMilliseconds is < 1 or > 30_000)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Google protocol limits must be positive.");
         }
+
+        ProviderHeaderGuard.ValidateMerge(options.Headers, nameof(options));
     }
 
     private sealed class ProjectedContent

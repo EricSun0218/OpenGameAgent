@@ -21,7 +21,11 @@ public sealed class OpenAICodexResponsesTests
             "Act as the world simulation agent.",
             new[] { AgentMessage.User("advance", DateTimeOffset.UnixEpoch) },
             Array.Empty<ToolDefinition>(),
-            new ModelParameters { ReasoningLevel = "high" },
+            new ModelParameters
+            {
+                ReasoningLevel = "high",
+                Transport = ModelTransport.ServerSentEvents,
+            },
             "session-one",
             "run",
             1);
@@ -79,7 +83,7 @@ public sealed class OpenAICodexResponsesTests
         string.Empty,
         Array.Empty<AgentMessage>(),
         Array.Empty<ToolDefinition>(),
-        new ModelParameters(),
+        new ModelParameters { Transport = ModelTransport.ServerSentEvents },
         null,
         runId,
         1);

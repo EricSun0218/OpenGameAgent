@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
   </ItemGroup>
 </Project>

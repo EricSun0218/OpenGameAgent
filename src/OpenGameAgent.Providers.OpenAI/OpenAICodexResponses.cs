@@ -125,6 +125,7 @@ public static class OpenAICodexResponses
             SupportsAdditionalTools = supportsAdditionalTools,
             SupportsToolSearch = supportsToolSearch,
             SupportsLongCacheRetention = false,
+            SupportsWebSocketTransport = true,
             SessionAffinityFormat = OpenAISessionAffinityFormat.Codex,
         };
         options.Headers["OpenAI-Beta"] = "responses=experimental";
@@ -142,7 +143,7 @@ public static class OpenAICodexResponses
 
         var token = credential.ApiKey;
         var accountId = ExtractAccountId(token ?? string.Empty);
-        var headers = new Dictionary<string, string>(credential.Headers, StringComparer.OrdinalIgnoreCase)
+        var headers = new Dictionary<string, string?>(credential.Headers, StringComparer.OrdinalIgnoreCase)
         {
             ["chatgpt-account-id"] = accountId,
         };

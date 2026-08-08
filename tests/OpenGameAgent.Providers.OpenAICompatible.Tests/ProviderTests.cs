@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 using Xunit;
 
 namespace OpenGameAgent.Providers.OpenAICompatible.Tests;
@@ -52,11 +53,24 @@ public sealed class ProviderTests
         var toolDelta = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallDelta && item.Delta == "{\"speed\":");
         Assert.Equal("call-1", toolDelta.ToolCallId);
         Assert.Equal("move", toolDelta.ToolName);
-        Assert.Contains(events, item => item.Kind == ModelStreamEventKind.ReasoningEnded);
-        Assert.Contains(events, item => item.Kind == ModelStreamEventKind.TextEnded);
+        var reasoningEnded = Assert.Single(events, item =>
+            item.Kind == ModelStreamEventKind.ReasoningEnded && item.Content == "think");
+        var textEnded = Assert.Single(events, item =>
+            item.Kind == ModelStreamEventKind.TextEnded && item.Content == "hello");
+        Assert.Equal(0, reasoningEnded.ContentIndex);
+        Assert.Equal(1, textEnded.ContentIndex);
         var toolEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
+        var toolStarted = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallStarted);
         Assert.Equal("call-1", toolEnded.ToolCallId);
         Assert.Equal("move", toolEnded.ToolName);
+        Assert.Equal(2, toolStarted.ContentIndex);
+        Assert.Equal(toolStarted.ContentIndex, toolDelta.ContentIndex);
+        Assert.Equal(toolStarted.ContentIndex, toolEnded.ContentIndex);
+        Assert.Equal(call.Id, toolEnded.ToolCall!.Id);
+        Assert.Equal(call.Name, toolEnded.ToolCall.Name);
+        Assert.Equal(call.ArgumentsJson, toolEnded.ToolCall.ArgumentsJson);
+        var partialCall = Assert.IsType<ToolCallContent>(toolEnded.Partial!.Content[toolEnded.ContentIndex]);
+        Assert.Equal(call.ArgumentsJson, partialCall.ArgumentsJson);
     }
 
     [Fact]
@@ -340,6 +354,95 @@ public sealed class ProviderTests
     }
 
     [Fact]
+    public async Task ResponseObserverIsSanitizedBoundedAndCannotBreakSuccess()
+    {
+        ProviderResponseObservation? observed = null;
+        var handler = new StubHandler(_ =>
+        {
+            var response = Response(
+                HttpStatusCode.OK,
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                "text/event-stream");
+            response.Headers.TryAddWithoutValidation("x-request-id", "request-1\r\nforged");
+            response.Headers.TryAddWithoutValidation("authorization", "Bearer secret");
+            return response;
+        });
+        var options = Options(new HttpClient(handler));
+        options.ResponseObserver = (observation, _) =>
+        {
+            observed = observation;
+            throw new InvalidOperationException("observer failure");
+        };
+
+        var events = await CollectAsync(new OpenAICompatibleProvider(options).StreamAsync(
+            Request(),
+            TestContext.Current.CancellationToken));
+
+        Assert.True(events[^1].IsTerminal);
+        Assert.NotNull(observed);
+        Assert.Equal("request-1  forged", observed.Metadata["x-request-id"]);
+        Assert.Single(observed.Metadata);
+    }
+
+    [Fact]
+    public async Task HttpFailureRejectsRetryAfterDateAboveSafetyLimit()
+    {
+        var retryAt = DateTimeOffset.UtcNow.AddMinutes(3);
+        var handler = new StubHandler(_ =>
+        {
+            var response = Response(HttpStatusCode.TooManyRequests, "retry", "text/plain");
+            response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(retryAt);
+            return response;
+        });
+
+        var exception = await Assert.ThrowsAsync<ModelProviderException>(async () =>
+            await CollectAsync(Create(handler).StreamAsync(Request(), TestContext.Current.CancellationToken)));
+
+        Assert.False(exception.IsTransient);
+        Assert.InRange(exception.RetryAfter!.Value, TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(3.1));
+    }
+
+    [Fact]
+    public async Task NullHeaderSuppressesSessionDefaultAndTransportHeadersAreRejected()
+    {
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream"));
+        var options = Options(new HttpClient(handler));
+        options.Protocol.SendSessionAffinityHeaders = true;
+        options.Protocol.SessionAffinityFormat = OpenAICompatibleSessionAffinityFormat.OpenRouter;
+        options.Headers["x-session-id"] = null;
+        var request = new ModelRequest(
+            "model",
+            "rules",
+            Array.Empty<AgentMessage>(),
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            "session-one",
+            "run",
+            1);
+
+        await CollectAsync(new OpenAICompatibleProvider(options).StreamAsync(
+            request,
+            TestContext.Current.CancellationToken));
+
+        Assert.DoesNotContain("x-session-id", handler.Headers.Keys, StringComparer.OrdinalIgnoreCase);
+
+        var malicious = Options(new HttpClient(new StubHandler(_ => throw new InvalidOperationException())));
+        malicious.Headers["Content-Length"] = "1";
+        Assert.Throws<ArgumentException>(() => new OpenAICompatibleProvider(malicious));
+
+        var credentialHeader = Options(new HttpClient(new StubHandler(_ => throw new InvalidOperationException())));
+        credentialHeader.ApiKey = "secret";
+        credentialHeader.ApiKeyHeader = "Content-Length";
+        Assert.Throws<ArgumentException>(() => new OpenAICompatibleProvider(credentialHeader));
+
+        credentialHeader.ApiKeyHeader = null!;
+        Assert.Throws<ArgumentException>(() => new OpenAICompatibleProvider(credentialHeader));
+    }
+
+    [Fact]
     public async Task TruncatedStreamWithoutFinishReasonFails()
     {
         var handler = new StubHandler(_ => Response(
@@ -487,7 +590,7 @@ public sealed class ProviderTests
 
         var response = events.Last().Response!;
         Assert.Equal(ModelStopReason.Length, response.StopReason);
-        Assert.Equal("{}", Assert.IsType<ToolCallContent>(Assert.Single(response.Content)).ArgumentsJson);
+        Assert.Equal("{\"x\":null}", Assert.IsType<ToolCallContent>(Assert.Single(response.Content)).ArgumentsJson);
     }
 
     [Fact]
@@ -1054,9 +1157,10 @@ public sealed class ProviderTests
     }
 
     private static OpenAICompatibleProvider Create(HttpMessageHandler handler) =>
-        new(new OpenAICompatibleProviderOptions(
-            new HttpClient(handler),
-            new Uri("https://example.test/v1/chat/completions")));
+        new(Options(new HttpClient(handler)));
+
+    private static OpenAICompatibleProviderOptions Options(HttpClient client) =>
+        new(client, new Uri("https://example.test/v1/chat/completions"));
 
     private static ModelRequest Request() =>
         new("model", "rules", Array.Empty<AgentMessage>(), Array.Empty<ToolDefinition>(), new ModelParameters(), null, "run", 1);

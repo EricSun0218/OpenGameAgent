@@ -1,14 +1,43 @@
+using System.Net;
+using System.Text.Json;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
 using Amazon.Runtime;
-using System.Net;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 using Xunit;
 
 namespace OpenGameAgent.Providers.Bedrock.Tests;
 
 public sealed class BedrockConverseProviderTests
 {
+    [Fact]
+    public void CustomServiceUrlsRequireSafeUrisOrExplicitInsecureOptIn()
+    {
+        Assert.Throws<ArgumentException>(() => new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            ServiceUrl = "file:///tmp/bedrock",
+        }));
+        Assert.Throws<ArgumentException>(() => new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            ServiceUrl = "https://user:secret@bedrock.example/v1",
+        }));
+        Assert.Throws<ArgumentException>(() => new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            ServiceUrl = "http://bedrock.example/v1",
+        }));
+
+        _ = new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            ServiceUrl = "http://bedrock.example/v1",
+            AllowInsecureHttp = true,
+        });
+        _ = new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            ServiceUrl = "http://127.0.0.1:4566",
+        });
+    }
+
     [Fact]
     public async Task StreamsReasoningTextToolCallsAndUsage()
     {
@@ -33,6 +62,46 @@ public sealed class BedrockConverseProviderTests
         Assert.Equal(2, response.Usage.OutputTokens);
         Assert.Equal(3, response.Usage.CacheReadTokens);
         Assert.Equal(4, response.Usage.CacheWriteTokens);
+
+        var reasoningEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ReasoningEnded);
+        Assert.Equal(reasoning.Text, reasoningEnded.Content);
+        var endedReasoning = Assert.IsType<ReasoningContent>(reasoningEnded.Partial!.Content[reasoningEnded.ContentIndex]);
+        Assert.Equal(reasoning.Text, endedReasoning.Text);
+        Assert.Equal(reasoning.Signature, endedReasoning.Signature);
+
+        var textEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.TextEnded);
+        Assert.Equal(Assert.IsType<TextContent>(response.Content[1]).Text, textEnded.Content);
+        Assert.Equal(
+            Assert.IsType<TextContent>(response.Content[1]).Text,
+            Assert.IsType<TextContent>(textEnded.Partial!.Content[textEnded.ContentIndex]).Text);
+
+        var toolStarted = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallStarted);
+        var toolDeltas = events.Where(item => item.Kind == ModelStreamEventKind.ToolCallDelta).ToArray();
+        Assert.NotEmpty(toolDeltas);
+        var toolEnded = Assert.Single(events, item => item.Kind == ModelStreamEventKind.ToolCallEnded);
+        var toolEvents = events.Where(item => item.Kind is
+            ModelStreamEventKind.ToolCallStarted or
+            ModelStreamEventKind.ToolCallDelta or
+            ModelStreamEventKind.ToolCallEnded);
+        Assert.All(toolEvents, item =>
+        {
+            Assert.Equal(toolStarted.ContentIndex, item.ContentIndex);
+            var partialToolCall = Assert.IsType<ToolCallContent>(item.Partial!.Content[item.ContentIndex]);
+            AssertJsonObject(partialToolCall.ArgumentsJson);
+        });
+
+        var terminalToolCall = Assert.IsType<ToolCallContent>(response.Content[2]);
+        var endedToolCall = Assert.IsType<ToolCallContent>(toolEnded.ToolCall);
+        var endedPartialToolCall = Assert.IsType<ToolCallContent>(toolEnded.Partial!.Content[toolEnded.ContentIndex]);
+        Assert.Equal(terminalToolCall.Id, endedToolCall.Id);
+        Assert.Equal(terminalToolCall.Name, endedToolCall.Name);
+        Assert.Equal("{\"x\":1}", endedToolCall.ArgumentsJson);
+        Assert.Equal(terminalToolCall.ArgumentsJson, endedToolCall.ArgumentsJson);
+        Assert.Equal(terminalToolCall.ThoughtSignature, endedToolCall.ThoughtSignature);
+        Assert.Equal(terminalToolCall.Namespace, endedToolCall.Namespace);
+        Assert.Equal(endedToolCall.Id, toolEnded.ToolCallId);
+        Assert.Equal(endedToolCall.Name, toolEnded.ToolName);
+        AssertToolCallEqual(endedToolCall, endedPartialToolCall);
     }
 
     [Fact]
@@ -257,7 +326,7 @@ public sealed class BedrockConverseProviderTests
     [Fact]
     public void FiltersReservedHeadersBeforeSigning()
     {
-        var headers = BedrockConverseProvider.NormalizeHeaders(new Dictionary<string, string>
+        var headers = BedrockConverseProvider.NormalizeHeaders(new Dictionary<string, string?>
         {
             ["Authorization"] = "bad",
             ["HOST"] = "bad",
@@ -281,6 +350,21 @@ public sealed class BedrockConverseProviderTests
     }
 
     [Fact]
+    public void TombstonesCannotDeleteSigningHeadersAndAreNotForwarded()
+    {
+        var headers = BedrockConverseProvider.NormalizeHeaders(new Dictionary<string, string?>
+        {
+            ["Authorization"] = null,
+            ["x-amz-security-token"] = null,
+            ["x-game-session"] = null,
+            ["x-feature"] = "enabled",
+        });
+
+        Assert.Single(headers);
+        Assert.Equal("enabled", headers["x-feature"]);
+    }
+
+    [Fact]
     public void CapturesBoundedAwsFailureMetadata()
     {
         var source = new AmazonBedrockRuntimeException(
@@ -297,7 +381,87 @@ public sealed class BedrockConverseProviderTests
         Assert.Equal(
             "{\"status\":400,\"errorCode\":\"ValidationException\",\"requestId\":\"request-1\"}",
             diagnostic.DataJson);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(400, failure.StatusCode);
         Assert.Same(source, failure.InnerException);
+    }
+
+    [Fact]
+    public void AwsFailureKeepsDiagnosticsAndRetryMetadataTogether()
+    {
+        var source = new AmazonBedrockRuntimeException(
+            "temporarily unavailable",
+            ErrorType.Receiver,
+            "ServiceUnavailableException",
+            "request-2",
+            HttpStatusCode.ServiceUnavailable);
+
+        var failure = AwsBedrockTransport.CreateProviderFailure(source, null, null);
+
+        Assert.True(failure.IsTransient);
+        Assert.Equal(503, failure.StatusCode);
+        Assert.Equal("bedrock_response_failure", Assert.Single(failure.Diagnostics).Code);
+    }
+
+    [Fact]
+    public void UnknownLocalFailureIsTerminalButKnownTransportFailureIsTransient()
+    {
+        var unknown = AwsBedrockTransport.CreateProviderFailure(
+            new InvalidOperationException("bad local configuration"),
+            null,
+            null);
+        var transport = AwsBedrockTransport.CreateProviderFailure(
+            new IOException("connection reset"),
+            null,
+            null);
+
+        Assert.False(unknown.IsTransient);
+        Assert.True(transport.IsTransient);
+    }
+
+    [Fact]
+    public async Task SharedClientHeaderScopesAreSerialized()
+    {
+        var sharedClient = new object();
+        using var first = await BedrockClientRequestGate.EnterAsync(
+            sharedClient,
+            TestContext.Current.CancellationToken);
+        var second = BedrockClientRequestGate.EnterAsync(
+            sharedClient,
+            TestContext.Current.CancellationToken).AsTask();
+        await Task.Delay(20, TestContext.Current.CancellationToken);
+        Assert.False(second.IsCompleted);
+
+        first.Dispose();
+        using var acquired = await second;
+        using var independent = await BedrockClientRequestGate.EnterAsync(
+            new object(),
+            TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task BedrockResponseObservationOnlyCarriesRequestIdentity()
+    {
+        ProviderResponseObservation? observed = null;
+
+        var outcome = await AwsBedrockTransport.ObserveResponseAsync(
+            "amazon-bedrock",
+            "bedrock-converse-stream",
+            "model",
+            200,
+            "request-3",
+            (value, _) =>
+            {
+                observed = value;
+                return default;
+            },
+            500,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ProviderResponseObserverOutcome.Completed, outcome);
+        Assert.NotNull(observed);
+        Assert.Equal("request-3", observed!.Metadata["request-id"]);
+        Assert.Single(observed.Metadata);
     }
 
     [Fact]
@@ -439,5 +603,20 @@ public sealed class BedrockConverseProviderTests
         }
 
         return result;
+    }
+
+    private static void AssertJsonObject(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+    }
+
+    private static void AssertToolCallEqual(ToolCallContent expected, ToolCallContent actual)
+    {
+        Assert.Equal(expected.Id, actual.Id);
+        Assert.Equal(expected.Name, actual.Name);
+        Assert.Equal(expected.ArgumentsJson, actual.ArgumentsJson);
+        Assert.Equal(expected.ThoughtSignature, actual.ThoughtSignature);
+        Assert.Equal(expected.Namespace, actual.Namespace);
     }
 }

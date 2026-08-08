@@ -1,11 +1,11 @@
 using System.Buffers;
 using System.Collections.ObjectModel;
-using System.Globalization;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 
 namespace OpenGameAgent.Providers.Mistral;
 
@@ -43,8 +43,13 @@ public sealed class MistralConversationsProviderOptions
 
     public MistralApiKeyProvider? GetApiKeyAsync { get; set; }
 
-    public IDictionary<string, string> Headers { get; } =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IDictionary<string, string?> Headers { get; } =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    public ProviderResponseObserver? ResponseObserver { get; set; }
+
+    public int ResponseObserverTimeoutMilliseconds { get; set; } =
+        ProviderResponseObserverRunner.DefaultTimeoutMilliseconds;
 
     public string ProviderId { get; set; } = "mistral";
 
@@ -74,15 +79,19 @@ public sealed class MistralConversationsProviderOptions
 public sealed class MistralConversationsProvider : IModelProvider, IModelProviderCapabilities
 {
     private readonly MistralConversationsProviderOptions _options;
-    private readonly IReadOnlyDictionary<string, string> _headers;
+    private readonly IReadOnlyDictionary<string, string?> _headers;
+    private readonly ProviderResponseObserver? _responseObserver;
+    private readonly int _responseObserverTimeoutMilliseconds;
     private readonly IReadOnlyCollection<string> _supportedApis;
 
     public MistralConversationsProvider(MistralConversationsProviderOptions options)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         ValidateOptions(options);
-        _headers = new ReadOnlyDictionary<string, string>(
-            new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _headers = new ReadOnlyDictionary<string, string?>(
+            new Dictionary<string, string?>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _responseObserver = options.ResponseObserver;
+        _responseObserverTimeoutMilliseconds = options.ResponseObserverTimeoutMilliseconds;
         _supportedApis = Array.AsReadOnly(new[] { options.ApiId });
     }
 
@@ -108,7 +117,10 @@ public sealed class MistralConversationsProvider : IModelProvider, IModelProvide
 
         var apiKey = _options.GetApiKeyAsync is null
             ? _options.ApiKey
-            : await _options.GetApiKeyAsync(cancellationToken).ConfigureAwait(false);
+            : await ProviderCallbackRunner.RunAsync(
+                    token => _options.GetApiKeyAsync(token),
+                    cancellationToken)
+                .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(apiKey))
         {
             throw new InvalidOperationException("A Mistral API key is required.");
@@ -122,14 +134,25 @@ public sealed class MistralConversationsProvider : IModelProvider, IModelProvide
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
+        await ProviderResponseObserverRunner.NotifyAsync(
+                _responseObserver,
+                ProviderResponseObservation.FromHttpResponse(
+                    _options.ProviderId,
+                    _options.ApiId,
+                    request.Model,
+                    response),
+                _responseObserverTimeoutMilliseconds,
+                cancellationToken)
+            .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             var error = await ReadBoundedAsync(response.Content, _options.MaxErrorCharacters, cancellationToken)
                 .ConfigureAwait(false);
+            var retry = ProviderHttpRetryMetadata.FromResponse(response, errorText: error);
             throw new ModelProviderException(
                 $"The Mistral endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
-                IsTransient(response),
-                GetRetryAfter(response),
+                retry.IsTransient,
+                retry.RetryAfter,
                 (int)response.StatusCode);
         }
 
@@ -444,9 +467,15 @@ public sealed class MistralConversationsProvider : IModelProvider, IModelProvide
 
     private void ApplyHeaders(HttpRequestMessage request, string apiKey, ModelRequest modelRequest)
     {
+        var suppressed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var header in _headers)
         {
-            if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
+            request.Headers.Remove(header.Key);
+            if (header.Value is null)
+            {
+                suppressed.Add(header.Key);
+            }
+            else if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
             {
                 throw new InvalidOperationException($"Mistral request header '{header.Key}' is invalid.");
             }
@@ -455,6 +484,7 @@ public sealed class MistralConversationsProvider : IModelProvider, IModelProvide
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         if (modelRequest.Parameters.CacheRetention != ModelCacheRetention.None
             && !string.IsNullOrWhiteSpace(modelRequest.SessionId)
+            && !suppressed.Contains("x-affinity")
             && !request.Headers.Contains("x-affinity"))
         {
             request.Headers.TryAddWithoutValidation("x-affinity", modelRequest.SessionId);
@@ -547,25 +577,6 @@ public sealed class MistralConversationsProvider : IModelProvider, IModelProvide
         }
 
         return builder?.ToString() ?? value;
-    }
-
-    private static bool IsTransient(HttpResponseMessage response)
-    {
-        var status = (int)response.StatusCode;
-        return status is 408 or 409 or 429 || status >= 500;
-    }
-
-    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("retry-after-ms", out var values)
-            && double.TryParse(values.FirstOrDefault(), NumberStyles.Float, CultureInfo.InvariantCulture, out var milliseconds)
-            && !double.IsNaN(milliseconds)
-            && !double.IsInfinity(milliseconds))
-        {
-            return TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
-        }
-
-        return response.Headers.RetryAfter?.Delta;
     }
 
     private static async Task<string> ReadBoundedAsync(HttpContent content, int maximumCharacters, CancellationToken cancellationToken)
@@ -719,9 +730,12 @@ public sealed class MistralConversationsProvider : IModelProvider, IModelProvide
             || options.MaxErrorCharacters <= 0
             || options.MaxRequestBytes <= 0
             || options.MaxResponseCharacters <= 0
-            || options.MaxToolCallsPerResponse <= 0)
+            || options.MaxToolCallsPerResponse <= 0
+            || options.ResponseObserverTimeoutMilliseconds is < 1 or > 30_000)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Mistral protocol limits must be positive.");
         }
+
+        ProviderHeaderGuard.ValidateMerge(options.Headers, nameof(options));
     }
 }

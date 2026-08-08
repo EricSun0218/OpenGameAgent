@@ -10,5 +10,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Kernel\OpenGameAgent.Kernel.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
   </ItemGroup>
 </Project>

@@ -137,7 +137,8 @@ public interface IGameCredentialStore
 public sealed class InMemoryGameCredentialStore : IGameCredentialStore
 {
     private readonly Dictionary<GameCredentialKey, GameCredential> _credentials = new();
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Dictionary<GameCredentialKey, CredentialGate> _keyGates = new();
+    private readonly object _stateGate = new();
     private readonly int _capacity;
 
     public InMemoryGameCredentialStore(int capacity = 128)
@@ -153,14 +154,10 @@ public sealed class InMemoryGameCredentialStore : IGameCredentialStore
     public async ValueTask<GameCredential?> GetAsync(GameCredentialKey key, CancellationToken cancellationToken)
     {
         key.EnsureValid(nameof(key));
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        using var lease = await AcquireAsync(key, cancellationToken).ConfigureAwait(false);
+        lock (_stateGate)
         {
             return _credentials.TryGetValue(key, out var value) ? value : null;
-        }
-        finally
-        {
-            _gate.Release();
         }
     }
 
@@ -175,9 +172,10 @@ public sealed class InMemoryGameCredentialStore : IGameCredentialStore
             throw new ArgumentNullException(nameof(credential));
         }
 
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        using var lease = await AcquireAsync(key, cancellationToken).ConfigureAwait(false);
+        lock (_stateGate)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!_credentials.ContainsKey(key) && _credentials.Count >= _capacity)
             {
                 throw new InvalidOperationException("The credential store reached its capacity.");
@@ -185,23 +183,16 @@ public sealed class InMemoryGameCredentialStore : IGameCredentialStore
 
             _credentials[key] = credential;
         }
-        finally
-        {
-            _gate.Release();
-        }
     }
 
     public async ValueTask<bool> RemoveAsync(GameCredentialKey key, CancellationToken cancellationToken)
     {
         key.EnsureValid(nameof(key));
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        using var lease = await AcquireAsync(key, cancellationToken).ConfigureAwait(false);
+        lock (_stateGate)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return _credentials.Remove(key);
-        }
-        finally
-        {
-            _gate.Release();
         }
     }
 
@@ -216,12 +207,27 @@ public sealed class InMemoryGameCredentialStore : IGameCredentialStore
             throw new ArgumentNullException(nameof(mutation));
         }
 
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        return await CancellableOperation.WaitAsync(
+            ModifyCoreAsync(key, mutation, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<GameCredential?> ModifyCoreAsync(
+        GameCredentialKey key,
+        Func<GameCredential?, CancellationToken, ValueTask<GameCredential?>> mutation,
+        CancellationToken cancellationToken)
+    {
+        using var lease = await AcquireAsync(key, cancellationToken).ConfigureAwait(false);
+        GameCredential? current;
+        lock (_stateGate)
         {
-            _credentials.TryGetValue(key, out var current);
-            var next = await mutation(current, cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
+            _credentials.TryGetValue(key, out current);
+        }
+
+        var next = await mutation(current, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_stateGate)
+        {
             if (next is null)
             {
                 _credentials.Remove(key);
@@ -238,9 +244,81 @@ public sealed class InMemoryGameCredentialStore : IGameCredentialStore
 
             return next;
         }
-        finally
+    }
+
+    private async ValueTask<CredentialLease> AcquireAsync(
+        GameCredentialKey key,
+        CancellationToken cancellationToken)
+    {
+        CredentialGate gate;
+        lock (_stateGate)
         {
-            _gate.Release();
+            if (!_keyGates.TryGetValue(key, out gate!))
+            {
+                gate = new CredentialGate();
+                _keyGates.Add(key, gate);
+            }
+
+            gate.References++;
+        }
+
+        try
+        {
+            await gate.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return new CredentialLease(this, key, gate);
+        }
+        catch
+        {
+            ReleaseReference(key, gate, releaseSemaphore: false);
+            throw;
+        }
+    }
+
+    private void ReleaseReference(GameCredentialKey key, CredentialGate gate, bool releaseSemaphore)
+    {
+        if (releaseSemaphore)
+        {
+            gate.Semaphore.Release();
+        }
+
+        lock (_stateGate)
+        {
+            gate.References--;
+            if (gate.References == 0)
+            {
+                _keyGates.Remove(key);
+                gate.Semaphore.Dispose();
+            }
+        }
+    }
+
+    private sealed class CredentialGate
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        public int References { get; set; }
+    }
+
+    private sealed class CredentialLease : IDisposable
+    {
+        private InMemoryGameCredentialStore? _owner;
+        private readonly GameCredentialKey _key;
+        private readonly CredentialGate _gate;
+
+        public CredentialLease(
+            InMemoryGameCredentialStore owner,
+            GameCredentialKey key,
+            CredentialGate gate)
+        {
+            _owner = owner;
+            _key = key;
+            _gate = gate;
+        }
+
+        public void Dispose()
+        {
+            var owner = Interlocked.Exchange(ref _owner, null);
+            owner?.ReleaseReference(_key, _gate, releaseSemaphore: true);
         }
     }
 }
@@ -289,15 +367,111 @@ public sealed class GameProviderAuthStatus
 
 public sealed class GameProviderAuthResolution
 {
-    public GameProviderAuthResolution(GameCredential credential, string source)
+    public GameProviderAuthResolution(
+        GameCredential? credential,
+        string source,
+        Uri? baseUrl = null,
+        IReadOnlyDictionary<string, string?>? headers = null,
+        IReadOnlyDictionary<string, string>? configuration = null)
     {
-        Credential = credential ?? throw new ArgumentNullException(nameof(credential));
+        if (baseUrl is not null
+            && (!baseUrl.IsAbsoluteUri
+                || baseUrl.UserInfo.Length > 0
+                || baseUrl.Fragment.Length > 0
+                || baseUrl.Scheme != Uri.UriSchemeHttp && baseUrl.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new ArgumentException(
+                "An authentication base URL must be an absolute HTTP or HTTPS URI without embedded credentials or a fragment.",
+                nameof(baseUrl));
+        }
+
         Source = GameModelDescriptor.RequireId(source, nameof(source));
+        Credential = credential;
+        BaseUrl = baseUrl;
+        Headers = CopyHeaders(headers);
+        Configuration = CopyConfiguration(configuration);
     }
 
-    public GameCredential Credential { get; }
+    public GameCredential? Credential { get; }
 
     public string Source { get; }
+
+    public Uri? BaseUrl { get; }
+
+    public IReadOnlyDictionary<string, string?> Headers { get; }
+
+    public IReadOnlyDictionary<string, string> Configuration { get; }
+
+    private static IReadOnlyDictionary<string, string?> CopyHeaders(
+        IReadOnlyDictionary<string, string?>? source)
+    {
+        if (source is { Count: > 64 })
+        {
+            throw new ArgumentException("Authentication headers cannot contain more than 64 entries.", nameof(source));
+        }
+
+        var copy = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in source ?? new Dictionary<string, string?>())
+        {
+            if (!IsHeaderName(pair.Key)
+                || pair.Value is { Length: > 16_384 }
+                || pair.Value?.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0
+                || !copy.TryAdd(pair.Key, pair.Value))
+            {
+                throw new ArgumentException(
+                    "Authentication headers contain an invalid or case-insensitively duplicate entry.",
+                    nameof(source));
+            }
+        }
+
+        return new ReadOnlyDictionary<string, string?>(copy);
+    }
+
+    private static IReadOnlyDictionary<string, string> CopyConfiguration(
+        IReadOnlyDictionary<string, string>? source)
+    {
+        if (source is { Count: > 256 })
+        {
+            throw new ArgumentException(
+                "Authentication configuration cannot contain more than 256 entries.",
+                nameof(source));
+        }
+
+        var copy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in source ?? new Dictionary<string, string>())
+        {
+            var key = GameModelDescriptor.RequireId(pair.Key, nameof(source));
+            if (pair.Value is null
+                || pair.Value.Length > 16_384
+                || pair.Value.IndexOf('\0') >= 0
+                || !copy.TryAdd(key, pair.Value))
+            {
+                throw new ArgumentException(
+                    "Authentication configuration contains an invalid or case-insensitively duplicate entry.",
+                    nameof(source));
+            }
+        }
+
+        return new ReadOnlyDictionary<string, string>(copy);
+    }
+
+    private static bool IsHeaderName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 256)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var request = new System.Net.Http.HttpRequestMessage();
+            return request.Headers.TryAddWithoutValidation(name, "value");
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
 }
 
 public sealed class GameAuthInteraction
@@ -468,6 +642,7 @@ public sealed class StoredGameProviderAuthentication : IGameProviderAuthenticati
     private readonly Func<GameCredential, CancellationToken, ValueTask<GameCredential>>? _refresh;
     private readonly Func<DateTimeOffset> _clock;
     private readonly TimeSpan _refreshSkew;
+    private readonly int _refreshTimeoutMilliseconds;
     private readonly int _credentialCommitTimeoutMilliseconds;
 
     public StoredGameProviderAuthentication(
@@ -479,6 +654,7 @@ public sealed class StoredGameProviderAuthentication : IGameProviderAuthenticati
         string profile = "default",
         Func<DateTimeOffset>? clock = null,
         TimeSpan? refreshSkew = null,
+        int refreshTimeoutMilliseconds = 15_000,
         int credentialCommitTimeoutMilliseconds = 10_000)
     {
         _key = new GameCredentialKey(providerId, profile);
@@ -501,10 +677,15 @@ public sealed class StoredGameProviderAuthentication : IGameProviderAuthenticati
         _login = login;
         _refresh = refresh;
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
-        _refreshSkew = refreshSkew ?? TimeSpan.FromMinutes(1);
+        _refreshSkew = refreshSkew ?? TimeSpan.FromMinutes(5);
         if (_refreshSkew < TimeSpan.Zero || _refreshSkew > TimeSpan.FromHours(24))
         {
             throw new ArgumentOutOfRangeException(nameof(refreshSkew));
+        }
+
+        if (refreshTimeoutMilliseconds < 100 || refreshTimeoutMilliseconds > 300_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(refreshTimeoutMilliseconds));
         }
 
         if (credentialCommitTimeoutMilliseconds < 100 || credentialCommitTimeoutMilliseconds > 300_000)
@@ -512,6 +693,7 @@ public sealed class StoredGameProviderAuthentication : IGameProviderAuthenticati
             throw new ArgumentOutOfRangeException(nameof(credentialCommitTimeoutMilliseconds));
         }
 
+        _refreshTimeoutMilliseconds = refreshTimeoutMilliseconds;
         _credentialCommitTimeoutMilliseconds = credentialCommitTimeoutMilliseconds;
     }
 
@@ -562,8 +744,24 @@ public sealed class StoredGameProviderAuthentication : IGameProviderAuthenticati
                     return current;
                 }
 
-                var refreshed = await _refresh(current, token).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("The credential refresh returned no credential.");
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                timeout.CancelAfter(_refreshTimeoutMilliseconds);
+                GameCredential refreshed;
+                try
+                {
+                    refreshed = await CancellableOperation.WaitAsync(
+                            _refresh(current, timeout.Token),
+                            timeout.Token).ConfigureAwait(false)
+                        ?? throw new InvalidOperationException("The credential refresh returned no credential.");
+                }
+                catch (OperationCanceledException exception)
+                    when (!token.IsCancellationRequested && timeout.IsCancellationRequested)
+                {
+                    throw new TimeoutException(
+                        $"The credential refresh exceeded {_refreshTimeoutMilliseconds} ms.",
+                        exception);
+                }
+
                 if (refreshed.IsExpired(_clock(), _refreshSkew))
                 {
                     throw new InvalidOperationException("The credential refresh returned an expired credential.");
@@ -603,8 +801,21 @@ public sealed class StoredGameProviderAuthentication : IGameProviderAuthenticati
             throw new InvalidOperationException("The login flow returned an expired credential.");
         }
 
-        using var settlement = new CancellationTokenSource(_credentialCommitTimeoutMilliseconds);
-        await _store.SetAsync(_key, credential, settlement.Token).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var settlement = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        settlement.CancelAfter(_credentialCommitTimeoutMilliseconds);
+        try
+        {
+            await _store.SetAsync(_key, credential, settlement.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (
+            !cancellationToken.IsCancellationRequested && settlement.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"The credential commit exceeded {_credentialCommitTimeoutMilliseconds} ms.",
+                exception);
+        }
+
         return credential;
     }
 

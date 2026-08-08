@@ -592,6 +592,59 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task SettledParallelToolProgressIsIgnoredWhileAnotherToolIsRunning()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(
+                ModelStopReason.ToolUse,
+                new ToolCallContent("1", "fast", "{}"),
+                new ToolCallContent("2", "slow", "{}")),
+            Responses.Text("done"));
+        var fastEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var slowStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSlow = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ToolExecutionContext? fastContext = null;
+        var progress = 0;
+        var options = new AgentOptions(provider, "test");
+        options.Tools.Add(Responses.Tool("fast", (_, context, _) =>
+        {
+            fastContext = context;
+            return new ValueTask<ToolResult>(Responses.Result("fast"));
+        }, mode: ToolExecutionMode.Parallel));
+        options.Tools.Add(Responses.Tool("slow", async (_, _, _) =>
+        {
+            slowStarted.TrySetResult();
+            await releaseSlow.Task;
+            return Responses.Result("slow");
+        }, mode: ToolExecutionMode.Parallel));
+        var agent = new Agent(options);
+        agent.Subscribe((value, _) =>
+        {
+            if (value.Kind == AgentEventKind.ToolEnded && value.ToolCall?.Id == "1")
+            {
+                fastEnded.TrySetResult();
+            }
+            else if (value.Kind == AgentEventKind.ToolProgressed)
+            {
+                progress++;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await Task.WhenAll(fastEnded.Task, slowStarted.Task)
+            .WaitAsync(TestContext.Current.CancellationToken);
+        await fastContext!.ReportProgressAsync(
+            new ToolProgress(content: new AgentContent[] { new TextContent("late") }),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(0, progress);
+
+        releaseSlow.TrySetResult();
+        await run;
+    }
+
+    [Fact]
     public async Task AcceptedToolProgressSettlesBeforeToolEndEvenWhenToolDoesNotAwaitIt()
     {
         var provider = ScriptedProvider.FromResponses(
@@ -636,6 +689,42 @@ public sealed class AgentLoopTests
         {
             Assert.True(events.IndexOf(AgentEventKind.ToolProgressed) < events.IndexOf(AgentEventKind.ToolEnded));
         }
+    }
+
+    [Fact]
+    public async Task OversizedToolProgressContentFailsTheToolBeforePublication()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "work", "{}")),
+            Responses.Text("done"));
+        var options = new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits { MaxTextCharactersPerPart = 4 },
+        };
+        options.Tools.Add(Responses.Tool("work", async (_, context, cancellationToken) =>
+        {
+            await context.ReportProgressAsync(
+                new ToolProgress(content: new AgentContent[] { new TextContent("too large") }),
+                cancellationToken);
+            return Responses.Result("done");
+        }));
+        var progressCount = 0;
+        var agent = new Agent(options);
+        agent.Subscribe((value, _) =>
+        {
+            if (value.Kind == AgentEventKind.ToolProgressed)
+            {
+                progressCount++;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(0, progressCount);
+        Assert.True(Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool).IsError);
     }
 
     [Fact]
@@ -2127,6 +2216,55 @@ public sealed class AgentLoopTests
         Assert.Throws<ArgumentException>(() => ModelStreamEvent.Terminal(pending));
         Assert.Throws<ArgumentException>(() => ModelStreamEvent.Update(ModelStreamEventKind.Started, complete));
         Assert.Throws<ArgumentException>(() => ModelStreamEvent.Update(ModelStreamEventKind.TextDelta, pending));
+        var toolCall = new ToolCallContent(
+            "call-1",
+            "inspect",
+            "{\"depth\":2}",
+            thoughtSignature: "opaque",
+            toolNamespace: "world");
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(ModelStreamEventKind.ToolCallEnded, pending));
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(ModelStreamEventKind.TextEnded, pending, toolCall: toolCall));
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(ModelStreamEventKind.TextEnded, pending));
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(ModelStreamEventKind.Started, pending, content: "unexpected"));
+        var textPartial = new ModelResponse(
+            new AgentContent[] { new TextContent("complete text") },
+            ModelStopReason.Pending);
+        var textEnded = ModelStreamEvent.Update(
+            ModelStreamEventKind.TextEnded,
+            textPartial,
+            content: "complete text");
+        Assert.Equal("complete text", textEnded.Content);
+        Assert.Equal(0, textEnded.ContentIndex);
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(
+                ModelStreamEventKind.TextEnded,
+                textPartial,
+                content: "different"));
+        var toolPartial = new ModelResponse(new AgentContent[] { toolCall }, ModelStopReason.Pending);
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(
+                ModelStreamEventKind.ToolCallEnded,
+                toolPartial,
+                toolCallId: "different",
+                toolCall: toolCall));
+        Assert.Throws<ArgumentException>(() =>
+            ModelStreamEvent.Update(
+                ModelStreamEventKind.ToolCallEnded,
+                toolPartial,
+                toolName: "different",
+                toolCall: toolCall));
+        var toolEnded = ModelStreamEvent.Update(
+            ModelStreamEventKind.ToolCallEnded,
+            toolPartial,
+            toolCall: toolCall);
+        Assert.Same(toolCall, toolEnded.ToolCall);
+        Assert.Equal(toolCall.Id, toolEnded.ToolCallId);
+        Assert.Equal(toolCall.Name, toolEnded.ToolName);
+        Assert.Equal(0, toolEnded.ContentIndex);
         Assert.Throws<ArgumentOutOfRangeException>(() => new ModelUsage(10_000_000_001));
         Assert.Throws<ArgumentException>(() => new ModelResponse(
             Array.Empty<AgentContent>(),
@@ -2518,6 +2656,18 @@ public sealed class AgentLoopTests
         {
             Parameters = new ModelParameters { Temperature = double.NaN },
         }));
+    }
+
+    [Fact]
+    public void ToolProgressContentIsValidatedAndDefensivelyCopied()
+    {
+        var source = new AgentContent[] { new TextContent("preview") };
+        var progress = new ToolProgress(content: source);
+        source[0] = new TextContent("changed");
+
+        Assert.Equal("preview", Assert.IsType<TextContent>(Assert.Single(progress.Content)).Text);
+        Assert.Throws<ArgumentException>(() => new ToolProgress(
+            content: new AgentContent[] { new ReasoningContent("private") }));
     }
 
     [Fact]

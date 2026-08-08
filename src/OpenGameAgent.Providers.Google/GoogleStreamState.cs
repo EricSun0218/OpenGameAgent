@@ -226,12 +226,14 @@ internal sealed class GoogleStreamState
                 contentIndex,
                 id,
                 name));
+            var partial = Partial();
+            var toolCall = partial.Content[contentIndex] as ToolCallContent
+                           ?? throw new InvalidDataException("A completed Google function call did not produce a tool call.");
             updates.Add(ModelStreamEvent.Update(
                 ModelStreamEventKind.ToolCallEnded,
-                Partial(),
+                partial,
                 contentIndex: contentIndex,
-                toolCallId: id,
-                toolName: name));
+                toolCall: toolCall));
         }
     }
 
@@ -249,7 +251,8 @@ internal sealed class GoogleStreamState
                 ? ModelStreamEventKind.ReasoningEnded
                 : ModelStreamEventKind.TextEnded,
             Partial(),
-            contentIndex: contentIndex));
+            contentIndex: contentIndex,
+            content: block.Text.ToString()));
         _currentTextBlock = null;
     }
 

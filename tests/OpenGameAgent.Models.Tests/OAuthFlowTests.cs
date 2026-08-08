@@ -152,6 +152,72 @@ public sealed class OAuthFlowTests
         Assert.Empty(handler.Bodies);
     }
 
+    [Fact]
+    public async Task TokenExchangeRejectsOversizedResponsesBeforeReadingTheWholeBody()
+    {
+        var content = new CountingContent(4_000_000);
+        var handler = new QueueHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        var credential = new GameCredential(
+            GameCredentialKind.OAuth,
+            "current",
+            metadata: new Dictionary<string, string> { ["refresh_token"] = "refresh" });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await GameOAuth.RefreshAsync(
+                new HttpClient(handler),
+                new Uri("https://auth.example.test/token"),
+                "client",
+                credential,
+                cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.InRange(content.BytesRead, 1_000_001, 1_020_000);
+    }
+
+    [Fact]
+    public async Task TokenExchangeCancellationDoesNotWaitForANonCooperativeResponseStream()
+    {
+        var content = new PendingStreamContent();
+        var handler = new QueueHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        var credential = new GameCredential(
+            GameCredentialKind.OAuth,
+            "current",
+            metadata: new Dictionary<string, string> { ["refresh_token"] = "refresh" });
+        using var cancellation = new CancellationTokenSource();
+        var refresh = GameOAuth.RefreshAsync(
+            new HttpClient(handler),
+            new Uri("https://auth.example.test/token"),
+            "client",
+            credential,
+            cancellationToken: cancellation.Token).AsTask();
+        await content.ReadRequested.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => refresh);
+        content.Release(new MemoryStream(Encoding.UTF8.GetBytes("{}")));
+    }
+
+    [Fact]
+    public async Task TokenExchangeRejectsMalformedJsonWithoutExposingTheResponse()
+    {
+        const string malformed = "{\"access_token\":\"sensitive\",";
+        var handler = new QueueHandler(_ => Json(HttpStatusCode.OK, malformed));
+        var credential = new GameCredential(
+            GameCredentialKind.OAuth,
+            "current",
+            metadata: new Dictionary<string, string> { ["refresh_token"] = "refresh" });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await GameOAuth.RefreshAsync(
+                new HttpClient(handler),
+                new Uri("https://auth.example.test/token"),
+                "client",
+                credential,
+                cancellationToken: TestContext.Current.CancellationToken));
+
+        Assert.DoesNotContain("sensitive", error.Message, StringComparison.Ordinal);
+    }
+
     private static HttpResponseMessage Json(HttpStatusCode status, string body) => new(status)
     {
         Content = new StringContent(body, Encoding.UTF8, "application/json"),
@@ -190,6 +256,95 @@ public sealed class OAuthFlowTests
         {
             Bodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
             return _responses.Dequeue()(request);
+        }
+    }
+
+    private sealed class CountingContent : HttpContent
+    {
+        private readonly int _length;
+
+        public CountingContent(int length)
+        {
+            _length = length;
+        }
+
+        public int BytesRead { get; private set; }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(new CountingStream(_length, count => BytesRead += count));
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            throw new NotSupportedException();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = _length;
+            return true;
+        }
+    }
+
+    private sealed class CountingStream : Stream
+    {
+        private readonly int _length;
+        private readonly Action<int> _count;
+        private int _position;
+
+        public CountingStream(int length, Action<int> count)
+        {
+            _length = length;
+            _count = count;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _length;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = Math.Min(count, _length - _position);
+            Array.Fill<byte>(buffer, (byte)'x', offset, read);
+            _position += read;
+            _count(read);
+            return read;
+        }
+
+        public override Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken) => Task.FromResult(Read(buffer, offset, count));
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class PendingStreamContent : HttpContent
+    {
+        private readonly TaskCompletionSource<Stream> _stream =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> ReadRequested { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release(Stream stream) => _stream.TrySetResult(stream);
+
+        protected override Task<Stream> CreateContentReadStreamAsync()
+        {
+            ReadRequested.TrySetResult(true);
+            return _stream.Task;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            Task.CompletedTask;
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = -1;
+            return false;
         }
     }
 }

@@ -196,4 +196,107 @@ public sealed class ProtocolContractsTests
         Assert.Same(assistant.Content[0], normalized[0].Content[0]);
         Assert.Same(assistant.Content[1], normalized[0].Content[1]);
     }
+
+    public static IEnumerable<object[]> ProviderHandoffPairs()
+    {
+        var protocols = new[]
+        {
+            (Provider: "anthropic", Api: "anthropic-messages", Model: "claude"),
+            (Provider: "amazon-bedrock", Api: "bedrock-converse-stream", Model: "claude"),
+            (Provider: "google", Api: "google-generative-ai", Model: "gemini"),
+            (Provider: "mistral", Api: "mistral-conversations", Model: "mistral"),
+            (Provider: "openai", Api: "openai-responses", Model: "gpt"),
+            (Provider: "openai-compatible", Api: "openai-completions", Model: "compatible"),
+        };
+
+        foreach (var source in protocols)
+        {
+            foreach (var target in protocols)
+            {
+                if (source != target)
+                {
+                    yield return new object[]
+                    {
+                        source.Provider,
+                        source.Api,
+                        source.Model,
+                        target.Provider,
+                        target.Api,
+                        target.Model,
+                    };
+                }
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(ProviderHandoffPairs))]
+    public void ForeignProviderTranscriptsAreSafeAcrossEveryBuiltInProtocol(
+        string sourceProvider,
+        string sourceApi,
+        string sourceModel,
+        string targetProvider,
+        string targetApi,
+        string targetModel)
+    {
+        var originalCall = new ToolCallContent(
+            "call|with/foreign:symbols",
+            "inspect",
+            "{\"path\":\"README.md\"}",
+            "opaque-tool-state",
+            "source-only-namespace");
+        var assistant = new AgentMessage(
+            AgentRole.Assistant,
+            new AgentContent[]
+            {
+                new ReasoningContent("visible reasoning", "opaque-reasoning-state"),
+                new ReasoningContent("hidden reasoning", "opaque-redacted-state", redacted: true),
+                new TextContent("answer", "opaque-text-state", AgentTextPhase.FinalAnswer),
+                originalCall,
+            },
+            DateTimeOffset.UnixEpoch,
+            model: sourceModel,
+            stopReason: ModelStopReason.ToolUse,
+            provider: sourceProvider,
+            api: sourceApi);
+        var result = AgentMessage.ToolResult(
+            originalCall,
+            new ToolResult(new AgentContent[] { new TextContent("done") }),
+            DateTimeOffset.UnixEpoch.AddSeconds(1));
+
+        var normalized = ProviderTranscript.Normalize(
+            new AgentMessage[] { assistant, result, AgentMessage.User("continue", DateTimeOffset.UnixEpoch.AddSeconds(2)) },
+            targetProvider,
+            targetApi,
+            targetModel,
+            static (id, _, _, _) => id.Replace('|', '_').Replace('/', '_').Replace(':', '_'));
+
+        Assert.Equal(3, normalized.Count);
+        var replayedAssistant = normalized[0];
+        Assert.DoesNotContain(replayedAssistant.Content, content => content is ReasoningContent);
+        Assert.Collection(
+            replayedAssistant.Content,
+            content =>
+            {
+                var text = Assert.IsType<TextContent>(content);
+                Assert.Equal("visible reasoning", text.Text);
+                Assert.Null(text.Signature);
+            },
+            content =>
+            {
+                var text = Assert.IsType<TextContent>(content);
+                Assert.Equal("answer", text.Text);
+                Assert.Null(text.Signature);
+                Assert.Null(text.Phase);
+            },
+            content =>
+            {
+                var call = Assert.IsType<ToolCallContent>(content);
+                Assert.Equal("call_with_foreign_symbols", call.Id);
+                Assert.Null(call.ThoughtSignature);
+                Assert.Null(call.Namespace);
+            });
+        Assert.Equal("call_with_foreign_symbols", normalized[1].ToolCallId);
+        Assert.Equal(AgentRole.User, normalized[2].Role);
+    }
 }

@@ -16,5 +16,15 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Extensions\OpenGameAgent.Extensions.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Anthropic\OpenGameAgent.Providers.Anthropic.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Bedrock\OpenGameAgent.Providers.Bedrock.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Google\OpenGameAgent.Providers.Google.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Mistral\OpenGameAgent.Providers.Mistral.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAI\OpenGameAgent.Providers.OpenAI.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\PublicApiSurface.cs" Link="PublicApiSurface.cs" />
   </ItemGroup>
 </Project>

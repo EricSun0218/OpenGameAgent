@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 
 namespace OpenGameAgent.Providers.OpenAICompatible;
 
@@ -33,8 +34,10 @@ public enum OpenAICompatibleThinkingFormat
     OpenRouter,
     DeepSeek,
     Together,
+    Baseten,
     Zai,
     Qwen,
+    ChatTemplate,
     QwenChatTemplate,
     StringThinking,
     AntLing,
@@ -170,7 +173,13 @@ public sealed class OpenAICompatibleProviderOptions
 
     public bool AllowInsecureHttp { get; set; }
 
-    public IDictionary<string, string> Headers { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IDictionary<string, string?> Headers { get; } =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    public ProviderResponseObserver? ResponseObserver { get; set; }
+
+    public int ResponseObserverTimeoutMilliseconds { get; set; } =
+        ProviderResponseObserverRunner.DefaultTimeoutMilliseconds;
 
     public int MaxEventCharacters { get; set; } = 4_000_000;
 
@@ -219,7 +228,9 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
     private readonly ApiKeyProvider? _getApiKey;
     private readonly string _apiKeyHeader;
     private readonly string _apiKeyScheme;
-    private readonly IReadOnlyDictionary<string, string> _headers;
+    private readonly IReadOnlyDictionary<string, string?> _headers;
+    private readonly ProviderResponseObserver? _responseObserver;
+    private readonly int _responseObserverTimeoutMilliseconds;
     private readonly int _maxEventCharacters;
     private readonly int _maxErrorCharacters;
     private readonly int _maxRequestBytes;
@@ -273,6 +284,11 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             throw new ArgumentOutOfRangeException(nameof(options), "The maximum tool-call count is invalid.");
         }
 
+        if (options.ResponseObserverTimeoutMilliseconds is < 1 or > 30_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "The response observer timeout is invalid.");
+        }
+
         var reasoningFields = options.ReasoningDeltaFields
             .Select(field => string.IsNullOrWhiteSpace(field) || field.Length > 128
                 ? throw new ArgumentException("Reasoning delta field names must contain 1 to 128 characters.", nameof(options))
@@ -282,11 +298,6 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         if (reasoningFields.Length == 0)
         {
             throw new ArgumentException("At least one reasoning delta field is required.", nameof(options));
-        }
-
-        if (options.Headers.Count > 64)
-        {
-            throw new ArgumentException("At most 64 custom headers may be configured.", nameof(options));
         }
 
         if (reasoningFields.Any(field => field is "content" or "tool_calls" or "role"))
@@ -313,16 +324,19 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 nameof(options));
         }
 
+        if (ProviderHeaderGuard.IsTransportControlledHeader(options.ApiKeyHeader))
+        {
+            throw new ArgumentException("The API key header is controlled by the transport.", nameof(options));
+        }
+
         ValidateHeader(options.ApiKeyHeader, string.Empty, nameof(options));
         ValidateCredential(options.ApiKey, nameof(options));
         ValidateCredential(options.ApiKeyScheme, nameof(options));
-        foreach (var header in options.Headers)
-        {
-            ValidateHeader(header.Key, header.Value, nameof(options));
-        }
+        ProviderHeaderGuard.ValidateMerge(options.Headers, nameof(options));
 
         if ((!string.IsNullOrEmpty(options.ApiKey) || options.GetApiKeyAsync is not null)
-            && options.Headers.ContainsKey(options.ApiKeyHeader))
+            && options.Headers.TryGetValue(options.ApiKeyHeader, out var configuredApiKeyHeader)
+            && configuredApiKeyHeader is not null)
         {
             throw new ArgumentException("Custom headers cannot also define the configured API key header.", nameof(options));
         }
@@ -335,7 +349,9 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             ? throw new ArgumentException("An API key header is required.", nameof(options))
             : options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;
-        _headers = new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase);
+        _headers = new Dictionary<string, string?>(options.Headers, StringComparer.OrdinalIgnoreCase);
+        _responseObserver = options.ResponseObserver;
+        _responseObserverTimeoutMilliseconds = options.ResponseObserverTimeoutMilliseconds;
         _maxEventCharacters = options.MaxEventCharacters;
         _maxErrorCharacters = options.MaxErrorCharacters;
         _maxRequestBytes = options.MaxRequestBytes;
@@ -459,7 +475,10 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, _endpoint);
         var apiKey = _getApiKey is null
             ? _apiKey
-            : await _getApiKey(cancellationToken).ConfigureAwait(false);
+            : await ProviderCallbackRunner.RunAsync(
+                    token => _getApiKey(token),
+                    cancellationToken)
+                .ConfigureAwait(false);
         ValidateCredential(apiKey, nameof(OpenAICompatibleProviderOptions.GetApiKeyAsync));
         ApplyHeaders(httpRequest, apiKey, request.SessionId);
         httpRequest.Content = new ByteArrayContent(SerializeRequest(request));
@@ -472,6 +491,16 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
+        await ProviderResponseObserverRunner.NotifyAsync(
+                _responseObserver,
+                ProviderResponseObservation.FromHttpResponse(
+                    _providerId,
+                    _apiId,
+                    request.Model,
+                    response),
+                _responseObserverTimeoutMilliseconds,
+                cancellationToken)
+            .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             Exception? authenticationFailureException = null;
@@ -488,10 +517,11 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             }
 
             var error = await ReadBoundedAsync(response.Content, _maxErrorCharacters, cancellationToken).ConfigureAwait(false);
+            var retry = ProviderHttpRetryMetadata.FromResponse(response, errorText: error);
             throw new ModelProviderException(
                 $"The model endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
-                IsTransient(response),
-                GetRetryAfter(response),
+                retry.IsTransient,
+                retry.RetryAfter,
                 (int)response.StatusCode,
                 authenticationFailureException);
         }
@@ -552,8 +582,16 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
 
     private void ApplyHeaders(HttpRequestMessage request, string? apiKey, string? sessionId)
     {
+        var suppressedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var header in _headers)
         {
+            request.Headers.Remove(header.Key);
+            if (header.Value is null)
+            {
+                suppressedHeaders.Add(header.Key);
+                continue;
+            }
+
             if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
             {
                 throw new InvalidOperationException($"Header '{header.Key}' is not valid for an HTTP request.");
@@ -562,7 +600,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
 
         if (string.IsNullOrEmpty(apiKey))
         {
-            ApplySessionHeaders(request, sessionId);
+            ApplySessionHeaders(request, sessionId, suppressedHeaders);
             return;
         }
 
@@ -572,10 +610,13 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             throw new InvalidOperationException($"API key header '{_apiKeyHeader}' is not valid for an HTTP request.");
         }
 
-        ApplySessionHeaders(request, sessionId);
+        ApplySessionHeaders(request, sessionId, suppressedHeaders);
     }
 
-    private void ApplySessionHeaders(HttpRequestMessage request, string? sessionId)
+    private void ApplySessionHeaders(
+        HttpRequestMessage request,
+        string? sessionId,
+        ISet<string> suppressedHeaders)
     {
         if (!_protocol.SendSessionAffinityHeaders || string.IsNullOrEmpty(sessionId))
         {
@@ -599,61 +640,13 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         };
         foreach (var header in headers)
         {
-            if (!request.Headers.TryAddWithoutValidation(header.Item1, header.Item2))
+            if (!suppressedHeaders.Contains(header.Item1)
+                && !request.Headers.Contains(header.Item1)
+                && !request.Headers.TryAddWithoutValidation(header.Item1, header.Item2))
             {
                 throw new InvalidOperationException($"Session header '{header.Item1}' is not valid for an HTTP request.");
             }
         }
-    }
-
-    private static bool IsTransient(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("x-should-retry", out var values))
-        {
-            var directive = values.FirstOrDefault();
-            if (string.Equals(directive, "true", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (string.Equals(directive, "false", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        var status = (int)response.StatusCode;
-        return status is 408 or 409 or 429 || status >= 500;
-    }
-
-    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("retry-after-ms", out var millisecondValues)
-            && double.TryParse(
-                millisecondValues.FirstOrDefault(),
-                NumberStyles.Float,
-                CultureInfo.InvariantCulture,
-                out var milliseconds)
-            && !double.IsNaN(milliseconds)
-            && !double.IsInfinity(milliseconds))
-        {
-            return milliseconds >= TimeSpan.MaxValue.TotalMilliseconds
-                ? TimeSpan.MaxValue
-                : TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
-        }
-
-        if (response.Headers.RetryAfter?.Delta is { } delta)
-        {
-            return delta < TimeSpan.Zero ? TimeSpan.Zero : delta;
-        }
-
-        if (response.Headers.RetryAfter?.Date is { } date)
-        {
-            var delay = date - DateTimeOffset.UtcNow;
-            return delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
-        }
-
-        return null;
     }
 
     private byte[] SerializeRequest(ModelRequest request)
@@ -860,10 +853,19 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
     private void ApplyReasoningParameters(IDictionary<string, object?> payload, ModelParameters parameters)
     {
         var effort = parameters.ReasoningLevel;
-        var enabled = !string.IsNullOrWhiteSpace(effort);
+        var hasEffort = !string.IsNullOrWhiteSpace(effort);
+        var enabled = hasEffort
+                      && !string.Equals(effort, "none", StringComparison.OrdinalIgnoreCase)
+                      && !string.Equals(effort, "off", StringComparison.OrdinalIgnoreCase)
+                      && !string.Equals(effort, "disabled", StringComparison.OrdinalIgnoreCase);
         switch (_protocol.ThinkingFormat)
         {
             case OpenAICompatibleThinkingFormat.OpenRouter:
+                if (hasEffort)
+                {
+                    payload["reasoning"] = new Dictionary<string, object?> { ["effort"] = effort };
+                }
+                break;
             case OpenAICompatibleThinkingFormat.AntLing:
                 if (enabled)
                 {
@@ -872,21 +874,28 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 break;
             case OpenAICompatibleThinkingFormat.DeepSeek:
                 payload["thinking"] = new Dictionary<string, object?> { ["type"] = enabled ? "enabled" : "disabled" };
-                AddReasoningEffort(payload, effort);
+                AddReasoningEffort(payload, enabled ? effort : null);
                 break;
             case OpenAICompatibleThinkingFormat.Together:
                 payload["reasoning"] = new Dictionary<string, object?> { ["enabled"] = enabled };
-                AddReasoningEffort(payload, effort);
+                AddReasoningEffort(payload, enabled ? effort : null);
+                break;
+            case OpenAICompatibleThinkingFormat.Baseten:
+                AddTemplateValues(payload, "chat_template_args", _protocol.ChatTemplateArgumentsJson, effort, enabled);
+                AddReasoningEffort(payload, hasEffort ? effort : null);
                 break;
             case OpenAICompatibleThinkingFormat.Zai:
                 payload["thinking"] = enabled
                     ? new Dictionary<string, object?> { ["type"] = "enabled", ["clear_thinking"] = false }
                     : new Dictionary<string, object?> { ["type"] = "disabled" };
-                AddReasoningEffort(payload, effort);
+                AddReasoningEffort(payload, enabled ? effort : null);
                 break;
             case OpenAICompatibleThinkingFormat.Qwen:
                 payload["enable_thinking"] = enabled;
-                AddReasoningEffort(payload, effort);
+                AddReasoningEffort(payload, enabled ? effort : null);
+                break;
+            case OpenAICompatibleThinkingFormat.ChatTemplate:
+                AddTemplateValues(payload, "chat_template_kwargs", _protocol.ChatTemplateKeywordArgumentsJson, effort, enabled);
                 break;
             case OpenAICompatibleThinkingFormat.QwenChatTemplate:
                 payload["chat_template_kwargs"] = new Dictionary<string, object?>
@@ -896,7 +905,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 };
                 break;
             case OpenAICompatibleThinkingFormat.StringThinking:
-                payload["thinking"] = enabled ? effort : "disabled";
+                payload["thinking"] = hasEffort ? effort : "disabled";
                 break;
             default:
                 AddReasoningEffort(payload, effort);
@@ -908,6 +917,68 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             && parameters.ReasoningBudgets.TryGetValue(effort!, out var budget))
         {
             payload["thinking_token_budget"] = budget;
+        }
+    }
+
+    private static void AddTemplateValues(
+        IDictionary<string, object?> payload,
+        string field,
+        string? json,
+        string? effort,
+        bool enabled)
+    {
+        if (json is null)
+        {
+            return;
+        }
+
+        using var document = JsonDocument.Parse(json);
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in document.RootElement.EnumerateObject())
+        {
+            if (property.Value.ValueKind != JsonValueKind.Object)
+            {
+                values[property.Name] = property.Value.ValueKind switch
+                {
+                    JsonValueKind.String => property.Value.GetString(),
+                    JsonValueKind.Number when property.Value.TryGetInt64(out var integer) => integer,
+                    JsonValueKind.Number => property.Value.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.Null => null,
+                    _ => throw new InvalidOperationException("A chat-template value must be a scalar or variable."),
+                };
+                continue;
+            }
+
+            if (!property.Value.TryGetProperty("$var", out var variable)
+                || variable.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidOperationException("A chat-template variable is invalid.");
+            }
+
+            var omitWhenOff = property.Value.TryGetProperty("omitWhenOff", out var omit)
+                              && omit.ValueKind == JsonValueKind.True;
+            if (!enabled && omitWhenOff)
+            {
+                continue;
+            }
+
+            object? resolved = variable.GetString() switch
+            {
+                "thinking.enabled" => enabled,
+                "thinking.effort" => effort,
+                var name => throw new InvalidOperationException($"Unknown chat-template variable '{name}'."),
+            };
+            if (resolved is not null)
+            {
+                values[property.Name] = resolved;
+            }
+        }
+
+        if (values.Count > 0)
+        {
+            payload[field] = values;
         }
     }
 
@@ -1605,6 +1676,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         private readonly StringBuilder _text = new();
         private readonly StringBuilder _reasoning = new();
         private readonly SortedDictionary<int, ToolBuilder> _tools = new();
+        private readonly List<ContentSlot> _contentOrder = new();
         private ModelStopReason _stopReason = ModelStopReason.Stop;
         private ModelUsage _usage = new();
         private string? _errorMessage;
@@ -1755,6 +1827,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
 
                     builder = new ToolBuilder();
                     _tools.Add(index, builder);
+                    _contentOrder.Add(new ContentSlot(ContentSlotKind.Tool, index));
                     created = true;
                 }
 
@@ -1785,7 +1858,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                         updates.Add(ModelStreamEvent.Update(
                             ModelStreamEventKind.ToolCallStarted,
                             Partial(),
-                            contentIndex: index,
+                            contentIndex: ContentIndex(ContentSlotKind.Tool, index),
                             toolCallId: builder.Id,
                             toolName: builder.Name.Length == 0 ? null : builder.Name.ToString()));
                     }
@@ -1800,7 +1873,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                             ModelStreamEventKind.ToolCallDelta,
                             Partial(),
                             argumentText,
-                            index,
+                            ContentIndex(ContentSlotKind.Tool, index),
                             builder.Id,
                             builder.Name.Length == 0 ? null : builder.Name.ToString()));
                     }
@@ -1810,7 +1883,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                     updates.Add(ModelStreamEvent.Update(
                         ModelStreamEventKind.ToolCallStarted,
                         Partial(),
-                        contentIndex: index,
+                        contentIndex: ContentIndex(ContentSlotKind.Tool, index),
                         toolCallId: builder.Id));
                 }
             }
@@ -1857,30 +1930,40 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
 
         private void AddEndedEvents(ICollection<ModelStreamEvent> updates)
         {
-            if (_reasoningStarted)
+            foreach (var slot in _contentOrder)
             {
-                updates.Add(ModelStreamEvent.Update(ModelStreamEventKind.ReasoningEnded, Partial()));
-            }
-
-            if (_textStarted)
-            {
-                updates.Add(ModelStreamEvent.Update(ModelStreamEventKind.TextEnded, Partial()));
-            }
-
-            foreach (var pair in _tools)
-            {
-                var tool = pair.Value;
-                updates.Add(ModelStreamEvent.Update(
-                    ModelStreamEventKind.ToolCallEnded,
-                    Partial(),
-                    contentIndex: pair.Key,
-                    toolCallId: tool.Id,
-                    toolName: tool.Name.Length == 0 ? null : tool.Name.ToString()));
+                var contentIndex = _contentOrder.IndexOf(slot);
+                switch (slot.Kind)
+                {
+                    case ContentSlotKind.Reasoning:
+                        updates.Add(ModelStreamEvent.Update(
+                            ModelStreamEventKind.ReasoningEnded,
+                            Partial(),
+                            contentIndex: contentIndex,
+                            content: _reasoning.ToString()));
+                        break;
+                    case ContentSlotKind.Text:
+                        updates.Add(ModelStreamEvent.Update(
+                            ModelStreamEventKind.TextEnded,
+                            Partial(),
+                            contentIndex: contentIndex,
+                            content: _text.ToString()));
+                        break;
+                    case ContentSlotKind.Tool:
+                        var tool = _tools[slot.ToolIndex];
+                        var toolCall = CreateToolCall(slot.ToolIndex, tool, _stopReason);
+                        updates.Add(ModelStreamEvent.Update(
+                            ModelStreamEventKind.ToolCallEnded,
+                            Partial(),
+                            contentIndex: contentIndex,
+                            toolCall: toolCall));
+                        break;
+                }
             }
         }
 
         public ModelResponse Partial() => new(
-            CurrentContent(includeTools: false),
+            CurrentContent(includeTools: true, ModelStopReason.Pending),
             ModelStopReason.Pending,
             _usage,
             provider: _providerId,
@@ -1900,7 +1983,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 throw new InvalidDataException("A completed model tool call is missing its ID or function name.");
             }
 
-            var content = CurrentContent(includeTools: true);
+            var content = CurrentContent(includeTools: true, _stopReason);
             return new ModelResponse(
                 content,
                 _stopReason,
@@ -1926,38 +2009,48 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             _contentEnded = true;
         }
 
-        private IReadOnlyList<AgentContent> CurrentContent(bool includeTools)
+        private IReadOnlyList<AgentContent> CurrentContent(bool includeTools, ModelStopReason reason)
         {
             var content = new List<AgentContent>();
-            if (_reasoning.Length > 0)
+            foreach (var slot in _contentOrder)
             {
-                content.Add(new ReasoningContent(_reasoning.ToString(), _reasoningSignature));
-            }
-
-            if (_text.Length > 0)
-            {
-                content.Add(new TextContent(_text.ToString()));
-            }
-
-            if (includeTools)
-            {
-                foreach (var pair in _tools)
+                switch (slot.Kind)
                 {
-                    var tool = pair.Value;
-                    var arguments = tool.Arguments.Length == 0 ? "{}" : tool.Arguments.ToString();
-                    if (_stopReason == ModelStopReason.Length && !IsJsonObject(arguments))
-                    {
-                        arguments = "{}";
-                    }
-
-                    content.Add(new ToolCallContent(
-                        string.IsNullOrWhiteSpace(tool.Id) ? "call_" + pair.Key : tool.Id,
-                        tool.Name.Length == 0 ? "unknown_tool" : tool.Name.ToString(),
-                        arguments));
+                    case ContentSlotKind.Reasoning:
+                        content.Add(new ReasoningContent(_reasoning.ToString(), _reasoningSignature));
+                        break;
+                    case ContentSlotKind.Text:
+                        content.Add(new TextContent(_text.ToString()));
+                        break;
+                    case ContentSlotKind.Tool when includeTools:
+                        content.Add(CreateToolCall(slot.ToolIndex, _tools[slot.ToolIndex], reason));
+                        break;
                 }
             }
 
             return content;
+        }
+
+        private static ToolCallContent CreateToolCall(
+            int index,
+            ToolBuilder tool,
+            ModelStopReason reason)
+        {
+            var arguments = tool.Arguments.Length == 0 ? "{}" : tool.Arguments.ToString();
+            if (reason == ModelStopReason.Pending)
+            {
+                arguments = StreamingJson.ParseObject(arguments);
+            }
+
+            if (reason == ModelStopReason.Length && !IsJsonObject(arguments))
+            {
+                arguments = StreamingJson.ParseObject(arguments);
+            }
+
+            return new ToolCallContent(
+                string.IsNullOrWhiteSpace(tool.Id) ? "call_" + index : tool.Id,
+                tool.Name.Length == 0 ? "unknown_tool" : tool.Name.ToString(),
+                arguments);
         }
 
         private void ApplyText(
@@ -1985,12 +2078,40 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             if (!started)
             {
                 started = true;
-                updates.Add(ModelStreamEvent.Update(startedKind, Partial()));
+                var slotKind = startedKind == ModelStreamEventKind.ReasoningStarted
+                    ? ContentSlotKind.Reasoning
+                    : ContentSlotKind.Text;
+                _contentOrder.Add(new ContentSlot(slotKind));
+                updates.Add(ModelStreamEvent.Update(
+                    startedKind,
+                    Partial(),
+                    contentIndex: ContentIndex(slotKind)));
             }
 
             AddCharacters(text.Length);
             builder.Append(text);
-            updates.Add(ModelStreamEvent.Update(deltaKind, Partial(), text));
+            var contentKind = deltaKind == ModelStreamEventKind.ReasoningDelta
+                ? ContentSlotKind.Reasoning
+                : ContentSlotKind.Text;
+            updates.Add(ModelStreamEvent.Update(
+                deltaKind,
+                Partial(),
+                text,
+                ContentIndex(contentKind)));
+        }
+
+        private int ContentIndex(ContentSlotKind kind, int toolIndex = -1)
+        {
+            for (var index = 0; index < _contentOrder.Count; index++)
+            {
+                var slot = _contentOrder[index];
+                if (slot.Kind == kind && (kind != ContentSlotKind.Tool || slot.ToolIndex == toolIndex))
+                {
+                    return index;
+                }
+            }
+
+            throw new InvalidDataException("A streamed content block was not registered in response order.");
         }
 
         private void ApplyReasoning(JsonElement delta, ICollection<ModelStreamEvent> updates)
@@ -2184,6 +2305,26 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             public StringBuilder Name { get; } = new();
 
             public StringBuilder Arguments { get; } = new();
+        }
+
+        private enum ContentSlotKind
+        {
+            Reasoning,
+            Text,
+            Tool,
+        }
+
+        private sealed class ContentSlot
+        {
+            public ContentSlot(ContentSlotKind kind, int toolIndex = -1)
+            {
+                Kind = kind;
+                ToolIndex = toolIndex;
+            }
+
+            public ContentSlotKind Kind { get; }
+
+            public int ToolIndex { get; }
         }
     }
 }

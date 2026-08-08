@@ -9,6 +9,7 @@ using Amazon.Runtime;
 using Amazon.Runtime.CredentialManagement;
 using Amazon.Runtime.Documents;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 
 namespace OpenGameAgent.Providers.Bedrock;
 
@@ -42,6 +43,8 @@ public sealed class BedrockConverseProviderOptions
 
     public string? ServiceUrl { get; set; }
 
+    public bool AllowInsecureHttp { get; set; }
+
     public string? AccessKeyId { get; set; }
 
     public string? SecretAccessKey { get; set; }
@@ -69,8 +72,13 @@ public sealed class BedrockConverseProviderOptions
     public IDictionary<string, string> RequestMetadata { get; } =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
-    public IDictionary<string, string> Headers { get; } =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IDictionary<string, string?> Headers { get; } =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    public ProviderResponseObserver? ResponseObserver { get; set; }
+
+    public int ResponseObserverTimeoutMilliseconds { get; set; } =
+        ProviderResponseObserverRunner.DefaultTimeoutMilliseconds;
 
     public int MaxResponseCharacters { get; set; } = 16_000_000;
 
@@ -83,6 +91,8 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
     private readonly BedrockConverseProviderOptions _options;
     private readonly IReadOnlyDictionary<string, string> _requestMetadata;
     private readonly IReadOnlyDictionary<string, string> _headers;
+    private readonly ProviderResponseObserver? _responseObserver;
+    private readonly int _responseObserverTimeoutMilliseconds;
     private readonly IReadOnlyCollection<string> _supportedApis;
 
     public BedrockConverseProvider(BedrockConverseProviderOptions options)
@@ -92,6 +102,8 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
         _requestMetadata = new ReadOnlyDictionary<string, string>(
             new Dictionary<string, string>(options.RequestMetadata, StringComparer.Ordinal));
         _headers = NormalizeHeaders(options.Headers);
+        _responseObserver = options.ResponseObserver;
+        _responseObserverTimeoutMilliseconds = options.ResponseObserverTimeoutMilliseconds;
         _supportedApis = Array.AsReadOnly(new[] { options.ApiId });
     }
 
@@ -135,7 +147,16 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
                 ownedClient = client;
             }
 
-            transport = (value, token) => AwsBedrockTransport.StreamAsync(client, value, _headers, token);
+            transport = (value, token) => AwsBedrockTransport.StreamAsync(
+                client,
+                value,
+                _headers,
+                _options.ProviderId,
+                _options.ApiId,
+                request.Model,
+                _responseObserver,
+                _responseObserverTimeoutMilliseconds,
+                token);
         }
 
         try
@@ -787,6 +808,26 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
             throw new ArgumentException("Only specific tool choice can carry a required name.", nameof(options));
         }
 
+        if (!string.IsNullOrWhiteSpace(options.ServiceUrl))
+        {
+            if (!Uri.TryCreate(options.ServiceUrl, UriKind.Absolute, out var endpoint)
+                || endpoint.UserInfo.Length > 0
+                || endpoint.Fragment.Length > 0
+                || endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps)
+            {
+                throw new ArgumentException(
+                    "A Bedrock service URL must be an absolute HTTP or HTTPS URL without embedded credentials or a fragment.",
+                    nameof(options));
+            }
+
+            if (endpoint.Scheme == Uri.UriSchemeHttp && !endpoint.IsLoopback && !options.AllowInsecureHttp)
+            {
+                throw new ArgumentException(
+                    "A remote Bedrock service URL must use HTTPS unless insecure HTTP is explicitly enabled.",
+                    nameof(options));
+            }
+        }
+
         var hasAccess = !string.IsNullOrWhiteSpace(options.AccessKeyId);
         var hasSecret = !string.IsNullOrWhiteSpace(options.SecretAccessKey);
         if (hasAccess != hasSecret)
@@ -794,7 +835,9 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
             throw new ArgumentException("AWS access key ID and secret access key must be supplied together.", nameof(options));
         }
 
-        if (options.MaxResponseCharacters <= 0 || options.MaxToolCallsPerResponse <= 0)
+        if (options.MaxResponseCharacters <= 0
+            || options.MaxToolCallsPerResponse <= 0
+            || options.ResponseObserverTimeoutMilliseconds is < 1 or > 30_000)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "Bedrock protocol limits must be positive.");
         }
@@ -809,13 +852,7 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
             throw new ArgumentException("Bedrock request metadata is invalid.", nameof(options));
         }
 
-        if (options.Headers.Any(pair => string.IsNullOrWhiteSpace(pair.Key)
-                                        || pair.Key.Any(character => char.IsControl(character) || character is ':' or ' ')
-                                        || pair.Value is null
-                                        || pair.Value.Any(character => character is '\r' or '\n')))
-        {
-            throw new ArgumentException("Bedrock custom headers are invalid.", nameof(options));
-        }
+        ProviderHeaderGuard.ValidateMerge(options.Headers, nameof(options));
     }
 
     private static bool IsReservedHeader(string key) =>
@@ -824,11 +861,11 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
         || key.StartsWith("x-amz-", StringComparison.OrdinalIgnoreCase);
 
     internal static IReadOnlyDictionary<string, string> NormalizeHeaders(
-        IEnumerable<KeyValuePair<string, string>> headers) =>
+        IEnumerable<KeyValuePair<string, string?>> headers) =>
         new ReadOnlyDictionary<string, string>(
             headers
-                .Where(pair => !IsReservedHeader(pair.Key))
-                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase));
+                .Where(pair => pair.Value is not null && !IsReservedHeader(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value!, StringComparer.OrdinalIgnoreCase));
 
     private sealed class StaticTokenProvider : IAWSTokenProvider
     {

@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "id": "OpenGameAgent.Kernel",
+      "project": "src/OpenGameAgent.Kernel/OpenGameAgent.Kernel.csproj"
+    },
+    {
+      "id": "OpenGameAgent.ProviderTransport",
+      "project": "src/OpenGameAgent.ProviderTransport/OpenGameAgent.ProviderTransport.csproj"
+    },
+    {
+      "id": "OpenGameAgent",
+      "project": "src/OpenGameAgent/OpenGameAgent.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Models",
+      "project": "src/OpenGameAgent.Models/OpenGameAgent.Models.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.Anthropic",
+      "project": "src/OpenGameAgent.Providers.Anthropic/OpenGameAgent.Providers.Anthropic.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.Bedrock",
+      "project": "src/OpenGameAgent.Providers.Bedrock/OpenGameAgent.Providers.Bedrock.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.Google",
+      "project": "src/OpenGameAgent.Providers.Google/OpenGameAgent.Providers.Google.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.MessageGateway",
+      "project": "src/OpenGameAgent.Providers.MessageGateway/OpenGameAgent.Providers.MessageGateway.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.Mistral",
+      "project": "src/OpenGameAgent.Providers.Mistral/OpenGameAgent.Providers.Mistral.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.OpenAI",
+      "project": "src/OpenGameAgent.Providers.OpenAI/OpenGameAgent.Providers.OpenAI.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.OpenAICompatible",
+      "project": "src/OpenGameAgent.Providers.OpenAICompatible/OpenGameAgent.Providers.OpenAICompatible.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.Remote",
+      "project": "src/OpenGameAgent.Providers.Remote/OpenGameAgent.Providers.Remote.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Client",
+      "project": "src/OpenGameAgent.Client/OpenGameAgent.Client.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Extensions",
+      "project": "src/OpenGameAgent.Extensions/OpenGameAgent.Extensions.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Media",
+      "project": "src/OpenGameAgent.Media/OpenGameAgent.Media.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Models.BuiltIn",
+      "project": "src/OpenGameAgent.Models.BuiltIn/OpenGameAgent.Models.BuiltIn.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.MediaHttp",
+      "project": "src/OpenGameAgent.Providers.MediaHttp/OpenGameAgent.Providers.MediaHttp.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Connectors.Mcp",
+      "project": "src/OpenGameAgent.Connectors.Mcp/OpenGameAgent.Connectors.Mcp.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Models.Auth.BuiltIn",
+      "project": "src/OpenGameAgent.Models.Auth.BuiltIn/OpenGameAgent.Models.Auth.BuiltIn.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Persistence",
+      "project": "src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.OpenRouter",
+      "project": "src/OpenGameAgent.Providers.OpenRouter/OpenGameAgent.Providers.OpenRouter.csproj"
+    }
+  ]
+}

@@ -112,7 +112,11 @@ public sealed class ToolDefinition
 
 public sealed class ToolProgress
 {
-    public ToolProgress(string? message = null, double? fraction = null, string? detailsJson = null)
+    public ToolProgress(
+        string? message = null,
+        double? fraction = null,
+        string? detailsJson = null,
+        IEnumerable<AgentContent>? content = null)
     {
         if (fraction is { } value
             && (double.IsNaN(value) || double.IsInfinity(value) || value < 0 || value > 1))
@@ -123,6 +127,20 @@ public sealed class ToolProgress
         Message = message;
         Fraction = fraction;
         DetailsJson = detailsJson is null ? null : JsonValue.RequireValid(detailsJson, nameof(detailsJson));
+        var copied = content?.ToArray() ?? Array.Empty<AgentContent>();
+        if (copied.Any(part => part is null))
+        {
+            throw new ArgumentException("Tool progress content cannot contain null parts.", nameof(content));
+        }
+
+        if (copied.Any(part => part is ReasoningContent or ToolCallContent))
+        {
+            throw new ArgumentException(
+                "Tool progress cannot contain assistant-only reasoning or tool-call parts.",
+                nameof(content));
+        }
+
+        Content = Array.AsReadOnly(copied);
     }
 
     public string? Message { get; }
@@ -130,6 +148,8 @@ public sealed class ToolProgress
     public double? Fraction { get; }
 
     public string? DetailsJson { get; }
+
+    public IReadOnlyList<AgentContent> Content { get; }
 }
 
 public sealed class ToolResult

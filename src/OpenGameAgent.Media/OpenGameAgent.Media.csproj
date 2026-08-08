@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Optional authenticated image, audio, and video model registry and generation dispatcher for OpenGameAgent.</Description>
+    <PackageId>OpenGameAgent.Media</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
+  </ItemGroup>
+</Project>

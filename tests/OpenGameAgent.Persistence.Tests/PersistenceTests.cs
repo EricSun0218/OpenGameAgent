@@ -66,6 +66,218 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task SessionUsageLedgerAndCostsSurviveRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("session", "actor");
+        var records = new[]
+        {
+            new GameSessionUsageRecord(
+                "run-one-assistant",
+                GameSessionUsageCause.Assistant,
+                new ModelUsage(
+                    12,
+                    4,
+                    3,
+                    2,
+                    reasoningTokens: 2,
+                    cacheWriteOneHourTokens: 1,
+                    cost: new ModelCost(0.12, 0.08, 0.003, 0.004)),
+                "run-one",
+                "input-one"),
+            new GameSessionUsageRecord(
+                "run-one-compaction",
+                GameSessionUsageCause.Compaction,
+                new ModelUsage(6, 2, cost: new ModelCost(0.06, 0.04)),
+                "run-one",
+                "input-one",
+                "{\"removed\":8}"),
+        };
+        var store = new FileGameSessionStore(directory.Path);
+        await store.SaveAsync(
+            new GameSessionSnapshot(
+                key,
+                1,
+                usageLedger: new GameSessionUsageLedger(records)),
+            0,
+            TestContext.Current.CancellationToken);
+
+        var restarted = new FileGameSessionStore(directory.Path);
+        var loaded = await restarted.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(2, loaded.UsageLedger.Records.Count);
+        Assert.Equal(29, loaded.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(8, loaded.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+        Assert.Equal(0.307, loaded.UsageLedger.Stats.CostTotal, precision: 10);
+        Assert.Equal("{\"removed\":8}", loaded.UsageLedger.Records[1].DetailsJson);
+        Assert.Equal(2, loaded.UsageLedger.Records[0].Usage.ReasoningTokens);
+        Assert.Equal(1, loaded.UsageLedger.Records[0].Usage.CacheWriteOneHourTokens);
+        var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
+        Assert.Equal(3, JsonNode.Parse(await File.ReadAllTextAsync(
+            file,
+            TestContext.Current.CancellationToken))!["FormatVersion"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task BoundedUsageLedgerTotalsSurviveEvictionAndRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("session", "actor");
+        var records = Enumerable.Range(0, 1_000)
+            .Select(index => new GameSessionUsageRecord(
+                "record-" + index,
+                index % 2 == 0 ? GameSessionUsageCause.Assistant : GameSessionUsageCause.Compaction,
+                new ModelUsage(2, 1, cost: new ModelCost(input: 0.02, output: 0.01))))
+            .ToArray();
+        var store = new FileGameSessionStore(directory.Path);
+        await store.SaveAsync(
+            new GameSessionSnapshot(
+                key,
+                1,
+                usageLedger: new GameSessionUsageLedger(records, recentRecordCapacity: 3)),
+            0,
+            TestContext.Current.CancellationToken);
+
+        var restarted = new FileGameSessionStore(directory.Path);
+        var loaded = await restarted.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(3, loaded.UsageLedger.Records.Count);
+        Assert.Equal(1_000, loaded.UsageLedger.TotalRecordCount);
+        Assert.Equal(3_000, loaded.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(30, loaded.UsageLedger.Stats.CostTotal, precision: 10);
+        Assert.Equal(1_500, loaded.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
+        Assert.Equal(1_500, loaded.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+        Assert.Equal(new[] { "record-997", "record-998", "record-999" },
+            loaded.UsageLedger.Records.Select(record => record.RecordId));
+        Assert.True(new FileInfo(Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"))).Length < 16_384);
+
+        var truncatedTotals = GameSessionUsageLedger.Restore(
+            loaded.UsageLedger.Records,
+            new Dictionary<GameSessionUsageCause, GameSessionUsageTotals>
+            {
+                [GameSessionUsageCause.Assistant] = new GameSessionUsageTotals(
+                    2, 1, 0, 0, 0, 0, 0.02, 0.01, 0, 0),
+                [GameSessionUsageCause.Compaction] = new GameSessionUsageTotals(
+                    4, 2, 0, 0, 0, 0, 0.04, 0.02, 0, 0),
+            },
+            loaded.UsageLedger.TotalRecordCount,
+            loaded.UsageLedger.RecentRecordCapacity);
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await restarted.SaveAsync(
+                new GameSessionSnapshot(key, 2, usageLedger: truncatedTotals),
+                1,
+                TestContext.Current.CancellationToken));
+
+        var appended = loaded.UsageLedger.Append(new[]
+        {
+            new GameSessionUsageRecord(
+                "record-1000",
+                GameSessionUsageCause.Tool,
+                new ModelUsage(4, 2)),
+        });
+        Assert.True((await restarted.SaveAsync(
+            new GameSessionSnapshot(key, 2, usageLedger: appended),
+            1,
+            TestContext.Current.CancellationToken)).Saved);
+        var final = await new FileGameSessionStore(directory.Path)
+            .LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(final);
+        Assert.Equal(3, final.UsageLedger.Records.Count);
+        Assert.Equal(1_001, final.UsageLedger.TotalRecordCount);
+        Assert.Equal(3_006, final.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(new[] { "record-998", "record-999", "record-1000" },
+            final.UsageLedger.Records.Select(record => record.RecordId));
+    }
+
+    [Fact]
+    public async Task VersionTwoSessionMigratesToAnEmptyLedgerAndCanUpgrade()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("session", "actor");
+        var store = new FileGameSessionStore(directory.Path);
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new[] { AgentMessage.User("legacy") }),
+            0,
+            TestContext.Current.CancellationToken);
+        var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(
+            file,
+            TestContext.Current.CancellationToken))!.AsObject();
+        document["FormatVersion"] = 2;
+        Assert.True(document.Remove("UsageRecords"));
+        await File.WriteAllTextAsync(file, document.ToJsonString(), TestContext.Current.CancellationToken);
+
+        var restarted = new FileGameSessionStore(directory.Path);
+        var legacy = await restarted.LoadAsync(key, TestContext.Current.CancellationToken);
+        Assert.NotNull(legacy);
+        Assert.Empty(legacy.UsageLedger.Records);
+
+        var record = new GameSessionUsageRecord(
+            "upgraded-usage",
+            GameSessionUsageCause.Assistant,
+            new ModelUsage(2, 1));
+        Assert.True((await restarted.SaveAsync(
+            new GameSessionSnapshot(
+                key,
+                2,
+                legacy.Messages,
+                usageLedger: legacy.UsageLedger.Append(new[] { record })),
+            1,
+            TestContext.Current.CancellationToken)).Saved);
+        var upgraded = await new FileGameSessionStore(directory.Path)
+            .LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(upgraded);
+        Assert.Single(upgraded.UsageLedger.Records);
+        Assert.Equal(3, upgraded.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task SessionStoreRejectsUsageLedgerRemovalOrRewrite()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("session", "actor");
+        var record = new GameSessionUsageRecord(
+            "stable-usage",
+            GameSessionUsageCause.Assistant,
+            new ModelUsage(2, 1));
+        var store = new FileGameSessionStore(directory.Path);
+        await store.SaveAsync(
+            new GameSessionSnapshot(
+                key,
+                1,
+                usageLedger: new GameSessionUsageLedger(new[] { record })),
+            0,
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.SaveAsync(
+                new GameSessionSnapshot(key, 2),
+                1,
+                TestContext.Current.CancellationToken));
+        var rewritten = new GameSessionUsageRecord(
+            record.RecordId,
+            record.Cause,
+            new ModelUsage(9, 9));
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.SaveAsync(
+                new GameSessionSnapshot(
+                    key,
+                    2,
+                    usageLedger: new GameSessionUsageLedger(new[] { rewritten })),
+                1,
+                TestContext.Current.CancellationToken));
+
+        var loaded = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+        Assert.NotNull(loaded);
+        Assert.Equal(1, loaded.Revision);
+        Assert.Equal(3, loaded.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
     public async Task SessionSaveUsesOptimisticRevisionAfterRestart()
     {
         using var directory = new TemporaryDirectory();

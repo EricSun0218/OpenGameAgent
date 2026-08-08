@@ -42,6 +42,9 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 
 - `OpenGameAgent.Extensions` adds policy, searchable tools, structured player interaction, goals, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
 - `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
+- `OpenGameAgent.Models.BuiltIn` turns the bundled directory into an executable multi-provider model runtime; `OpenGameAgent.Models.Auth.BuiltIn` adds explicitly configured browser and device authorization flows.
+- `OpenGameAgent.ProviderTransport` centralizes bounded response observations, header guards, and retry metadata without adding HTTP concepts to the kernel.
+- `OpenGameAgent.Media` routes image, audio, and video generation by provider/model capability while keeping generation jobs outside the text/tool protocol.
 - `OpenGameAgent.Connectors.Mcp` exposes external tool servers through one lazy, searchable tool by default. Direct tool exposure is an explicit opt-in.
 - Provider, persistence, engine, client, and server packages stay replaceable and do not change kernel semantics.
 

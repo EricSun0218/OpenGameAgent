@@ -14,10 +14,35 @@ public sealed class GameSkill
         string name,
         string description,
         string instructions,
+        IReadOnlyCollection<string>? inputTypes,
+        IReadOnlyCollection<string>? toolNames,
+        int priority,
+        IReadOnlyDictionary<string, string>? metadata)
+        : this(
+            skillId,
+            name,
+            description,
+            instructions,
+            inputTypes,
+            toolNames,
+            priority,
+            metadata,
+            disableModelInvocation: false,
+            sourceInfo: null)
+    {
+    }
+
+    public GameSkill(
+        string skillId,
+        string name,
+        string description,
+        string instructions,
         IReadOnlyCollection<string>? inputTypes = null,
         IReadOnlyCollection<string>? toolNames = null,
         int priority = 0,
-        IReadOnlyDictionary<string, string>? metadata = null)
+        IReadOnlyDictionary<string, string>? metadata = null,
+        bool disableModelInvocation = false,
+        GameResourceSourceInfo? sourceInfo = null)
     {
         SkillId = GameJson.RequireId(skillId, nameof(skillId));
         Name = GameJson.RequireId(name, nameof(name));
@@ -41,6 +66,8 @@ public sealed class GameSkill
         }
 
         Metadata = new ReadOnlyDictionary<string, string>(copiedMetadata);
+        DisableModelInvocation = disableModelInvocation;
+        SourceInfo = sourceInfo;
     }
 
     public string SkillId { get; }
@@ -58,6 +85,10 @@ public sealed class GameSkill
     public int Priority { get; }
 
     public IReadOnlyDictionary<string, string> Metadata { get; }
+
+    public bool DisableModelInvocation { get; }
+
+    public GameResourceSourceInfo? SourceInfo { get; }
 }
 
 public sealed class GameSkillQuery
@@ -133,6 +164,7 @@ public sealed class InMemoryGameSkillSource : IGameSkillSource
 
         var tools = new HashSet<string>(query.AvailableTools, StringComparer.Ordinal);
         var selected = _skills
+            .Where(skill => !skill.DisableModelInvocation)
             .Where(skill => skill.InputTypes.Count == 0 || skill.InputTypes.Contains(query.Input.Type, StringComparer.Ordinal))
             .Where(skill => skill.ToolNames.All(tools.Contains))
             .OrderByDescending(skill => skill.Priority)

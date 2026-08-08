@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 
 namespace OpenGameAgent.Providers.OpenAI;
 
@@ -52,16 +53,18 @@ public sealed class OpenAIRequestCredential
 {
     public OpenAIRequestCredential(
         string? apiKey,
-        IReadOnlyDictionary<string, string>? headers = null)
+        IReadOnlyDictionary<string, string?>? headers = null)
     {
         ApiKey = apiKey;
-        Headers = new ReadOnlyDictionary<string, string>(
-            new Dictionary<string, string>(headers ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase));
+        Headers = new ReadOnlyDictionary<string, string?>(
+            new Dictionary<string, string?>(
+                headers ?? new Dictionary<string, string?>(),
+                StringComparer.OrdinalIgnoreCase));
     }
 
     public string? ApiKey { get; }
 
-    public IReadOnlyDictionary<string, string> Headers { get; }
+    public IReadOnlyDictionary<string, string?> Headers { get; }
 }
 
 public delegate ValueTask<OpenAIRequestCredential?> OpenAIRequestCredentialProvider(
@@ -105,8 +108,13 @@ public sealed class OpenAIResponsesProviderOptions
 
     public bool AlwaysIncludeEncryptedReasoning { get; set; }
 
-    public IDictionary<string, string> Headers { get; } =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IDictionary<string, string?> Headers { get; } =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    public ProviderResponseObserver? ResponseObserver { get; set; }
+
+    public int ResponseObserverTimeoutMilliseconds { get; set; } =
+        ProviderResponseObserverRunner.DefaultTimeoutMilliseconds;
 
     public string ProviderId { get; set; } = "openai";
 
@@ -128,6 +136,16 @@ public sealed class OpenAIResponsesProviderOptions
 
     public bool SupportsLongCacheRetention { get; set; } = true;
 
+    public bool SupportsWebSocketTransport { get; set; }
+
+    public OpenAIWebSocketConnectionFactory? WebSocketConnectionFactory { get; set; }
+
+    public int WebSocketIdleTimeoutMilliseconds { get; set; } = 300_000;
+
+    public int WebSocketSessionIdleTimeoutMilliseconds { get; set; } = 300_000;
+
+    public int WebSocketMaximumConnectionAgeMilliseconds { get; set; } = 3_300_000;
+
     public OpenAISessionAffinityFormat SessionAffinityFormat { get; set; } = OpenAISessionAffinityFormat.OpenAI;
 
     public int MaxEventCharacters { get; set; } = 4_000_000;
@@ -141,9 +159,10 @@ public sealed class OpenAIResponsesProviderOptions
     public int MaxToolCallsPerResponse { get; set; } = 256;
 }
 
-public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapabilities
+public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapabilities, IDisposable
 {
     private const int MinimumOutputTokens = 16;
+    private const string WebSocketBetaHeader = "responses_websockets=2026-02-06";
     private readonly HttpClient _httpClient;
     private readonly Uri _endpoint;
     private readonly string? _apiKey;
@@ -159,7 +178,9 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
     private readonly OpenAIToolChoice? _toolChoice;
     private readonly bool? _parallelToolCalls;
     private readonly bool _alwaysIncludeEncryptedReasoning;
-    private readonly IReadOnlyDictionary<string, string> _headers;
+    private readonly IReadOnlyDictionary<string, string?> _headers;
+    private readonly ProviderResponseObserver? _responseObserver;
+    private readonly int _responseObserverTimeoutMilliseconds;
     private readonly string _providerId;
     private readonly string _apiId;
     private readonly bool _supportsDeveloperRole;
@@ -169,6 +190,10 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
     private readonly bool _supportsToolSearch;
     private readonly bool _supportsExplicitPromptCacheMode;
     private readonly bool _supportsLongCacheRetention;
+    private readonly OpenAIWebSocketConnectionFactory? _webSocketConnectionFactory;
+    private readonly int _webSocketIdleTimeoutMilliseconds;
+    private readonly int _webSocketSessionIdleTimeoutMilliseconds;
+    private readonly int _webSocketMaximumConnectionAgeMilliseconds;
     private readonly OpenAISessionAffinityFormat _sessionAffinityFormat;
     private readonly int _maxEventCharacters;
     private readonly int _maxErrorCharacters;
@@ -176,6 +201,13 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
     private readonly int _maxResponseCharacters;
     private readonly int _maxToolCallsPerResponse;
     private readonly IReadOnlyCollection<string> _supportedApis;
+    private readonly object _webSocketGate = new();
+    private readonly Dictionary<string, Dictionary<string, CachedWebSocketConnection>> _webSocketSessions =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MutableWebSocketStatistics> _webSocketStatistics =
+        new(StringComparer.Ordinal);
+    private readonly HashSet<string> _webSocketFallbackSessions = new(StringComparer.Ordinal);
+    private bool _disposed;
 
     public OpenAIResponsesProvider(OpenAIResponsesProviderOptions options)
     {
@@ -200,8 +232,10 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         _toolChoice = options.ToolChoice;
         _parallelToolCalls = options.ParallelToolCalls;
         _alwaysIncludeEncryptedReasoning = options.AlwaysIncludeEncryptedReasoning;
-        _headers = new ReadOnlyDictionary<string, string>(
-            new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _headers = new ReadOnlyDictionary<string, string?>(
+            new Dictionary<string, string?>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _responseObserver = options.ResponseObserver;
+        _responseObserverTimeoutMilliseconds = options.ResponseObserverTimeoutMilliseconds;
         _providerId = options.ProviderId;
         _apiId = options.ApiId;
         _supportsDeveloperRole = options.SupportsDeveloperRole;
@@ -211,6 +245,12 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         _supportsToolSearch = options.SupportsToolSearch;
         _supportsExplicitPromptCacheMode = options.SupportsExplicitPromptCacheMode;
         _supportsLongCacheRetention = options.SupportsLongCacheRetention;
+        _webSocketConnectionFactory = options.SupportsWebSocketTransport
+            ? options.WebSocketConnectionFactory ?? ClientOpenAIWebSocketConnection.ConnectAsync
+            : null;
+        _webSocketIdleTimeoutMilliseconds = options.WebSocketIdleTimeoutMilliseconds;
+        _webSocketSessionIdleTimeoutMilliseconds = options.WebSocketSessionIdleTimeoutMilliseconds;
+        _webSocketMaximumConnectionAgeMilliseconds = options.WebSocketMaximumConnectionAgeMilliseconds;
         _sessionAffinityFormat = options.SessionAffinityFormat;
         _maxEventCharacters = options.MaxEventCharacters;
         _maxErrorCharacters = options.MaxErrorCharacters;
@@ -235,19 +275,119 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             throw new ArgumentNullException(nameof(request));
         }
 
-        if (request.Parameters.Transport is ModelTransport.WebSocket or ModelTransport.CachedWebSocket)
+        ThrowIfDisposed();
+        var credential = await ResolveCredentialAsync(cancellationToken).ConfigureAwait(false);
+        var transport = request.Parameters.Transport;
+        if (transport == ModelTransport.ServerSentEvents
+            || transport == ModelTransport.Auto && _webSocketConnectionFactory is null)
         {
-            throw new NotSupportedException("This provider currently uses the Responses server-sent-event transport.");
+            await foreach (var streamEvent in StreamSseAsync(request, credential, null, cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                yield return streamEvent;
+            }
+
+            yield break;
         }
 
+        if (_webSocketConnectionFactory is null)
+        {
+            throw new NotSupportedException("This provider does not support the requested WebSocket transport.");
+        }
+
+        var cacheSessionId = CacheSessionId(request);
+        if (cacheSessionId is not null && IsWebSocketFallbackActive(cacheSessionId))
+        {
+            RecordWebSocketSseFallback(cacheSessionId);
+            var diagnostic = TransportDiagnostic(
+                transport,
+                "The session previously encountered a WebSocket transport failure and is using server-sent events.");
+            await foreach (var streamEvent in StreamSseAsync(request, credential, diagnostic, cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                yield return streamEvent;
+            }
+
+            yield break;
+        }
+
+        var webSocketStream = StreamWebSocketWithRecoveryAsync(request, credential, cancellationToken);
+        var enumerator = webSocketStream.GetAsyncEnumerator(cancellationToken);
+        var moved = false;
+        ModelStreamEvent? current = null;
+        Exception? failure = null;
+        try
+        {
+            moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
+            if (moved)
+            {
+                current = enumerator.Current;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await enumerator.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+
+        if (failure is not null || !moved || current is null)
+        {
+            await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+            failure ??= new InvalidDataException("The WebSocket stream ended before its first event.");
+            if (!CanFallbackToServerSentEvents(failure))
+            {
+                throw failure;
+            }
+
+            RecordWebSocketFailure(cacheSessionId, failure);
+            RecordWebSocketSseFallback(cacheSessionId);
+            var diagnostic = TransportDiagnostic(transport, BoundExceptionMessage(failure));
+            await foreach (var streamEvent in StreamSseAsync(request, credential, diagnostic, cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                yield return streamEvent;
+            }
+
+            yield break;
+        }
+
+        try
+        {
+            while (true)
+            {
+                yield return current;
+                if (current.IsTerminal)
+                {
+                    yield break;
+                }
+
+                if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
+                {
+                    throw new InvalidDataException("The WebSocket stream ended without a terminal response.");
+                }
+
+                current = enumerator.Current
+                          ?? throw new InvalidDataException("The WebSocket provider emitted a null event.");
+            }
+        }
+        finally
+        {
+            await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+        }
+    }
+
+    private async IAsyncEnumerable<ModelStreamEvent> StreamSseAsync(
+        ModelRequest request,
+        OpenAIRequestCredential credential,
+        ModelDiagnostic? transportDiagnostic,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, _endpoint);
-        var credential = _getCredentialAsync is null
-            ? new OpenAIRequestCredential(
-                _getApiKeyAsync is null
-                    ? _apiKey
-                    : await _getApiKeyAsync(cancellationToken).ConfigureAwait(false))
-            : await _getCredentialAsync(cancellationToken).ConfigureAwait(false)
-              ?? throw new InvalidOperationException("The credential provider returned null.");
         ApplyHeaders(httpRequest, credential, request);
         httpRequest.Content = new ByteArrayContent(SerializeRequest(request));
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json")
@@ -259,13 +399,24 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
+        await ProviderResponseObserverRunner.NotifyAsync(
+                _responseObserver,
+                ProviderResponseObservation.FromHttpResponse(
+                    _providerId,
+                    _apiId,
+                    request.Model,
+                    response),
+                _responseObserverTimeoutMilliseconds,
+                cancellationToken)
+            .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             var error = await ReadBoundedAsync(response.Content, _maxErrorCharacters, cancellationToken).ConfigureAwait(false);
+            var retry = ProviderHttpRetryMetadata.FromResponse(response, errorText: error);
             throw new ModelProviderException(
                 $"The Responses endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
-                IsTransient(response),
-                GetRetryAfter(response),
+                retry.IsTransient,
+                retry.RetryAfter,
                 (int)response.StatusCode);
         }
 
@@ -279,6 +430,11 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             GrammarInputProperties(request.Tools),
             _maxResponseCharacters,
             _maxToolCallsPerResponse);
+        if (transportDiagnostic is not null)
+        {
+            state.AddDiagnostic(transportDiagnostic);
+        }
+
         yield return ModelStreamEvent.Update(ModelStreamEventKind.Started, state.Partial());
 
         await foreach (var line in ReadBoundedLinesAsync(reader, _maxEventCharacters, cancellationToken))
@@ -307,6 +463,891 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         }
 
         yield return ModelStreamEvent.Terminal(state.Complete());
+    }
+
+    private async IAsyncEnumerable<ModelStreamEvent> StreamWebSocketWithRecoveryAsync(
+        ModelRequest request,
+        OpenAIRequestCredential credential,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var retriedConnectionLimit = false;
+        var retriedMissingContinuation = false;
+        var forceFullContext = false;
+        while (true)
+        {
+            var attempt = StreamWebSocketAttemptAsync(
+                request,
+                credential,
+                forceFullContext,
+                cancellationToken);
+            var enumerator = attempt.GetAsyncEnumerator(cancellationToken);
+            var moved = false;
+            ModelStreamEvent? current = null;
+            Exception? failure = null;
+            try
+            {
+                moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
+                if (moved)
+                {
+                    current = enumerator.Current;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+                throw;
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+
+            if (failure is OpenAIWebSocketProtocolException protocolFailure
+                && string.Equals(
+                    protocolFailure.Code,
+                    "previous_response_not_found",
+                    StringComparison.OrdinalIgnoreCase)
+                && !retriedMissingContinuation)
+            {
+                retriedMissingContinuation = true;
+                forceFullContext = true;
+                await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+                continue;
+            }
+
+            if (failure is OpenAIWebSocketProtocolException limitFailure
+                && string.Equals(
+                    limitFailure.Code,
+                    "websocket_connection_limit_reached",
+                    StringComparison.OrdinalIgnoreCase)
+                && !retriedConnectionLimit)
+            {
+                retriedConnectionLimit = true;
+                await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+                continue;
+            }
+
+            if (failure is not null)
+            {
+                await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+                throw failure;
+            }
+
+            if (!moved || current is null)
+            {
+                await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+                throw new InvalidDataException("The WebSocket attempt ended before its first event.");
+            }
+
+            try
+            {
+                while (true)
+                {
+                    yield return current;
+                    if (current.IsTerminal)
+                    {
+                        yield break;
+                    }
+
+                    if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        throw new InvalidDataException(
+                            "The WebSocket attempt ended without a terminal response.");
+                    }
+
+                    current = enumerator.Current
+                              ?? throw new InvalidDataException("The WebSocket attempt emitted a null event.");
+                }
+            }
+            finally
+            {
+                await DisposeIgnoringFailureAsync(enumerator).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async IAsyncEnumerable<ModelStreamEvent> StreamWebSocketAttemptAsync(
+        ModelRequest request,
+        OpenAIRequestCredential credential,
+        bool forceFullContext,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var cacheSessionId = CacheSessionId(request);
+        var accountId = AccountId(credential);
+        var lease = await AcquireWebSocketAsync(
+                request,
+                credential,
+                cacheSessionId,
+                accountId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var completed = false;
+        try
+        {
+            var body = SerializeRequest(request);
+            var bodySnapshot = RequestBodySnapshot.Create(body);
+            var useCachedContext = request.Parameters.Transport is ModelTransport.Auto or ModelTransport.CachedWebSocket;
+            RequestBodyDelta? delta = null;
+            if (useCachedContext && !forceFullContext && lease.Entry?.Continuation is { } continuation)
+            {
+                delta = bodySnapshot.TryCreateDelta(continuation);
+                if (delta is null)
+                {
+                    lease.Entry.Continuation = null;
+                }
+            }
+
+            var requestJson = bodySnapshot.CreateWebSocketRequest(delta);
+            if (Encoding.UTF8.GetByteCount(requestJson) > _maxRequestBytes)
+            {
+                throw new InvalidDataException("The WebSocket request exceeded the configured byte limit.");
+            }
+
+            var state = new ResponsesStreamState(
+                request.Model,
+                _providerId,
+                _apiId,
+                GrammarInputProperties(request.Tools),
+                _maxResponseCharacters,
+                _maxToolCallsPerResponse);
+            RecordWebSocketRequest(cacheSessionId, lease.Reused, delta is not null);
+            await AwaitWithCancellationAsync(
+                    lease.Connection.SendTextAsync(requestJson, cancellationToken).AsTask(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var started = false;
+            while (!state.IsTerminal)
+            {
+                var json = await ReceiveWebSocketEventAsync(lease.Connection, cancellationToken)
+                    .ConfigureAwait(false);
+                ThrowIfWebSocketProtocolError(json);
+                var updates = state.Apply(json);
+                if (!started && (updates.Count > 0 || state.IsTerminal))
+                {
+                    started = true;
+                    yield return ModelStreamEvent.Update(ModelStreamEventKind.Started, state.Partial());
+                }
+
+                foreach (var update in updates)
+                {
+                    yield return update;
+                }
+            }
+
+            var response = state.Complete();
+            if (!started)
+            {
+                yield return ModelStreamEvent.Update(ModelStreamEventKind.Started, state.Partial());
+            }
+
+            if (useCachedContext && lease.Entry is not null && response.ResponseId is { } responseId)
+            {
+                lease.Entry.Continuation = new WebSocketContinuation(
+                    bodySnapshot.Fingerprint,
+                    responseId,
+                    bodySnapshot.InputItems.Concat(ProjectResponseItems(request, response)).ToArray());
+            }
+
+            completed = true;
+            yield return ModelStreamEvent.Terminal(response);
+        }
+        finally
+        {
+            if (!completed && lease.Entry is not null)
+            {
+                lease.Entry.Continuation = null;
+            }
+
+            lease.Release(completed);
+        }
+    }
+
+    private async ValueTask<string> ReceiveWebSocketEventAsync(
+        IOpenAIWebSocketConnection connection,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = new CancellationTokenSource(_webSocketIdleTimeoutMilliseconds);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        try
+        {
+            return await AwaitWithCancellationAsync(
+                    connection.ReceiveTextAsync(_maxEventCharacters, linked.Token).AsTask(),
+                    linked.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (
+            timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"WebSocket idle timeout after {_webSocketIdleTimeoutMilliseconds}ms.",
+                exception);
+        }
+    }
+
+    private async ValueTask<WebSocketLease> AcquireWebSocketAsync(
+        ModelRequest request,
+        OpenAIRequestCredential credential,
+        string? sessionId,
+        string accountId,
+        CancellationToken cancellationToken)
+    {
+        CachedWebSocketConnection? reusable = null;
+        CachedWebSocketConnection? stale = null;
+        if (sessionId is not null)
+        {
+            lock (_webSocketGate)
+            {
+                if (_webSocketSessions.TryGetValue(sessionId, out var accounts)
+                    && accounts.TryGetValue(accountId, out var cached))
+                {
+                    if (!cached.Busy
+                        && (DateTimeOffset.UtcNow - cached.CreatedAt).TotalMilliseconds
+                        >= _webSocketMaximumConnectionAgeMilliseconds)
+                    {
+                        accounts.Remove(accountId);
+                        if (accounts.Count == 0)
+                        {
+                            _webSocketSessions.Remove(sessionId);
+                        }
+
+                        stale = cached;
+                    }
+                    else if (!cached.Busy && cached.Connection.IsOpen)
+                    {
+                        cached.Busy = true;
+                        cached.IdleTimer?.Dispose();
+                        cached.IdleTimer = null;
+                        reusable = cached;
+                    }
+                    else if (!cached.Busy && !cached.Connection.IsOpen)
+                    {
+                        accounts.Remove(accountId);
+                        if (accounts.Count == 0)
+                        {
+                            _webSocketSessions.Remove(sessionId);
+                        }
+
+                        stale = cached;
+                    }
+                }
+            }
+        }
+
+        stale?.Dispose();
+        if (reusable is not null)
+        {
+            return new WebSocketLease(
+                reusable.Connection,
+                reusable,
+                reused: true,
+                keep => ReleaseCachedWebSocket(sessionId!, accountId, reusable, keep));
+        }
+
+        var headers = BuildWebSocketHeaders(credential, request);
+        var endpoint = WebSocketEndpoint(_endpoint);
+        var connectRequest = new OpenAIWebSocketConnectRequest(
+            endpoint,
+            headers,
+            request.Parameters.WebSocketConnectTimeoutMilliseconds);
+        using var connectTimeout = connectRequest.TimeoutMilliseconds is { } connectMilliseconds
+            ? new CancellationTokenSource(connectMilliseconds)
+            : null;
+        using var connectCancellation = connectTimeout is null
+            ? null
+            : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connectTimeout.Token);
+        var connectToken = connectCancellation?.Token ?? cancellationToken;
+        var connectTask = _webSocketConnectionFactory!(connectRequest, connectToken).AsTask();
+        IOpenAIWebSocketConnection connection = null!;
+        try
+        {
+            connection = await AwaitWithCancellationAsync(
+                    connectTask,
+                    connectToken,
+                    lateResult => lateResult?.Dispose())
+                .ConfigureAwait(false)
+                         ?? throw new InvalidOperationException("The WebSocket connection factory returned null.");
+
+            if (connection is IOpenAIWebSocketResponseMetadata metadata)
+            {
+                await ProviderResponseObserverRunner.NotifyAsync(
+                        _responseObserver,
+                        ProviderResponseObservation.FromResponseMetadata(
+                            _providerId,
+                            _apiId,
+                            request.Model,
+                            metadata.HandshakeStatusCode,
+                            metadata.HandshakeHeaders),
+                        _responseObserverTimeoutMilliseconds,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException exception) when (
+            connectTimeout?.IsCancellationRequested == true && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"WebSocket connect timeout after {connectRequest.TimeoutMilliseconds}ms.",
+                exception);
+        }
+        catch
+        {
+            connection?.Dispose();
+            throw;
+        }
+
+        if (sessionId is null)
+        {
+            return new WebSocketLease(
+                connection,
+                entry: null,
+                reused: false,
+                _ => connection.Dispose());
+        }
+
+        CachedWebSocketConnection? entry = null;
+        lock (_webSocketGate)
+        {
+            if (!_webSocketSessions.TryGetValue(sessionId, out var accounts))
+            {
+                accounts = new Dictionary<string, CachedWebSocketConnection>(StringComparer.Ordinal);
+                _webSocketSessions[sessionId] = accounts;
+            }
+
+            if (!accounts.ContainsKey(accountId))
+            {
+                entry = new CachedWebSocketConnection(connection);
+                accounts[accountId] = entry;
+            }
+        }
+
+        if (entry is null)
+        {
+            return new WebSocketLease(
+                connection,
+                entry: null,
+                reused: false,
+                _ => connection.Dispose());
+        }
+
+        return new WebSocketLease(
+            connection,
+            entry,
+            reused: false,
+            keep => ReleaseCachedWebSocket(sessionId, accountId, entry, keep));
+    }
+
+    private void ReleaseCachedWebSocket(
+        string sessionId,
+        string accountId,
+        CachedWebSocketConnection entry,
+        bool keep)
+    {
+        var dispose = false;
+        lock (_webSocketGate)
+        {
+            if (!_webSocketSessions.TryGetValue(sessionId, out var accounts)
+                || !ReferenceEquals(accounts.GetValueOrDefault(accountId), entry))
+            {
+                dispose = true;
+            }
+            else if (!keep || !entry.Connection.IsOpen)
+            {
+                accounts.Remove(accountId);
+                if (accounts.Count == 0)
+                {
+                    _webSocketSessions.Remove(sessionId);
+                }
+
+                dispose = true;
+            }
+            else
+            {
+                entry.Busy = false;
+                entry.IdleTimer?.Dispose();
+                entry.IdleTimer = new Timer(
+                    _ => ExpireWebSocket(sessionId, accountId, entry),
+                    null,
+                    _webSocketSessionIdleTimeoutMilliseconds,
+                    Timeout.Infinite);
+            }
+        }
+
+        if (dispose)
+        {
+            entry.Dispose();
+        }
+    }
+
+    private void ExpireWebSocket(string sessionId, string accountId, CachedWebSocketConnection entry)
+    {
+        var dispose = false;
+        lock (_webSocketGate)
+        {
+            if (!entry.Busy
+                && _webSocketSessions.TryGetValue(sessionId, out var accounts)
+                && ReferenceEquals(accounts.GetValueOrDefault(accountId), entry))
+            {
+                accounts.Remove(accountId);
+                if (accounts.Count == 0)
+                {
+                    _webSocketSessions.Remove(sessionId);
+                }
+
+                dispose = true;
+            }
+        }
+
+        if (dispose)
+        {
+            entry.Dispose();
+        }
+    }
+
+    public OpenAIWebSocketStatistics? GetWebSocketStatistics(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new ArgumentException("A session identifier is required.", nameof(sessionId));
+        }
+
+        lock (_webSocketGate)
+        {
+            return _webSocketStatistics.TryGetValue(sessionId, out var value)
+                ? value.Snapshot(_webSocketFallbackSessions.Contains(sessionId))
+                : null;
+        }
+    }
+
+    public void ResetWebSocketStatistics(string? sessionId = null)
+    {
+        lock (_webSocketGate)
+        {
+            if (sessionId is null)
+            {
+                _webSocketStatistics.Clear();
+                _webSocketFallbackSessions.Clear();
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                throw new ArgumentException("A session identifier cannot be empty.", nameof(sessionId));
+            }
+
+            _webSocketStatistics.Remove(sessionId);
+            _webSocketFallbackSessions.Remove(sessionId);
+        }
+    }
+
+    public void CloseWebSocketSessions(string? sessionId = null)
+    {
+        List<CachedWebSocketConnection> entries;
+        lock (_webSocketGate)
+        {
+            if (sessionId is not null)
+            {
+                if (string.IsNullOrWhiteSpace(sessionId))
+                {
+                    throw new ArgumentException("A session identifier cannot be empty.", nameof(sessionId));
+                }
+
+                entries = _webSocketSessions.TryGetValue(sessionId, out var accounts)
+                    ? accounts.Values.ToList()
+                    : new List<CachedWebSocketConnection>();
+                _webSocketSessions.Remove(sessionId);
+                _webSocketFallbackSessions.Remove(sessionId);
+            }
+            else
+            {
+                entries = _webSocketSessions.Values.SelectMany(accounts => accounts.Values).ToList();
+                _webSocketSessions.Clear();
+                _webSocketFallbackSessions.Clear();
+            }
+        }
+
+        foreach (var entry in entries)
+        {
+            entry.Dispose();
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        CloseWebSocketSessions();
+    }
+
+    private async ValueTask<OpenAIRequestCredential> ResolveCredentialAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_getCredentialAsync is not null)
+        {
+            return await ProviderCallbackRunner.RunAsync(
+                       token => _getCredentialAsync(token),
+                       cancellationToken).ConfigureAwait(false)
+                   ?? throw new InvalidOperationException("The credential provider returned null.");
+        }
+
+        var apiKey = _getApiKeyAsync is null
+            ? _apiKey
+            : await ProviderCallbackRunner.RunAsync(
+                    token => _getApiKeyAsync(token),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        return new OpenAIRequestCredential(apiKey);
+    }
+
+    private IReadOnlyDictionary<string, string> BuildWebSocketHeaders(
+        OpenAIRequestCredential credential,
+        ModelRequest request)
+    {
+        using var message = new HttpRequestMessage(HttpMethod.Post, _endpoint);
+        ApplyHeaders(message, credential, request);
+        var headers = message.Headers.ToDictionary(
+            header => header.Key,
+            header => string.Join(",", header.Value),
+            StringComparer.OrdinalIgnoreCase);
+        headers.Remove("Accept");
+        headers.Remove("Content-Type");
+        headers.Remove("OpenAI-Beta");
+        headers["OpenAI-Beta"] = WebSocketBetaHeader;
+        var requestId = request.Parameters.CacheRetention == ModelCacheRetention.None
+            ? Guid.NewGuid().ToString("N")
+            : request.SessionId is { Length: > 0 } sessionId
+                ? ClampUnicode(sessionId, 64)
+                : Guid.NewGuid().ToString("N");
+        headers["session-id"] = requestId;
+        headers["x-client-request-id"] = requestId;
+        return new ReadOnlyDictionary<string, string>(headers);
+    }
+
+    private static Uri WebSocketEndpoint(Uri endpoint)
+    {
+        var builder = new UriBuilder(endpoint)
+        {
+            Scheme = endpoint.Scheme == Uri.UriSchemeHttps ? "wss" : "ws",
+            Port = endpoint.IsDefaultPort ? -1 : endpoint.Port,
+        };
+        return builder.Uri;
+    }
+
+    private static string AccountId(OpenAIRequestCredential credential)
+    {
+        if (credential.Headers.TryGetValue("chatgpt-account-id", out var accountId)
+            && !string.IsNullOrWhiteSpace(accountId))
+        {
+            return accountId;
+        }
+
+        using var sha = SHA256.Create();
+        var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(credential.ApiKey ?? string.Empty));
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static string? CacheSessionId(ModelRequest request) =>
+        request.Parameters.CacheRetention == ModelCacheRetention.None
+            ? null
+            : request.SessionId;
+
+    private IReadOnlyList<string> ProjectResponseItems(ModelRequest request, ModelResponse response)
+    {
+        var assistant = new AgentMessage(
+            AgentRole.Assistant,
+            response.Content,
+            DateTimeOffset.UtcNow,
+            model: request.Model,
+            stopReason: response.StopReason,
+            usage: response.Usage,
+            errorMessage: response.ErrorMessage,
+            provider: response.Provider,
+            api: response.Api,
+            responseModel: response.ResponseModel,
+            responseId: response.ResponseId,
+            rawStopReason: response.RawStopReason,
+            endTurn: response.EndTurn,
+            diagnostics: response.Diagnostics,
+            deferred: response.Deferred);
+        var normalized = ProviderTranscript.Normalize(
+            new[] { assistant },
+            _providerId,
+            _apiId,
+            request.Model,
+            (id, _, _, _) =>
+            {
+                var identity = NormalizeToolIdentity(id, sameProtocol: true, sameModel: true);
+                return identity.CallId + "|" + identity.ItemId;
+            });
+        return ProjectInput(
+                request,
+                normalized,
+                new ReadOnlyDictionary<string, ToolDefinition>(
+                    new Dictionary<string, ToolDefinition>(StringComparer.Ordinal)),
+                includeSystemPrompt: false)
+            .Select(item => JsonSerializer.Serialize(item))
+            .ToArray();
+    }
+
+    private static void ThrowIfWebSocketProtocolError(string json)
+    {
+        using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 128 });
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("type", out var type)
+            || type.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        var eventType = type.GetString();
+        var errorContainer = root;
+        if (string.Equals(eventType, "response.failed", StringComparison.Ordinal)
+            && root.TryGetProperty("response", out var failedResponse)
+            && failedResponse.ValueKind == JsonValueKind.Object)
+        {
+            errorContainer = failedResponse;
+        }
+        else if (!string.Equals(eventType, "error", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        string? code = null;
+        string? message = null;
+        if (errorContainer.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+        {
+            code = StringProperty(error, "code") ?? StringProperty(error, "type");
+            message = StringProperty(error, "message");
+        }
+
+        code ??= StringProperty(errorContainer, "code") ?? "unknown";
+        message ??= StringProperty(errorContainer, "message") ?? "The WebSocket service returned an error.";
+        throw new OpenAIWebSocketProtocolException(code, message);
+    }
+
+    private static bool CanFallbackToServerSentEvents(Exception exception)
+    {
+        if (exception is OpenAIWebSocketProtocolException protocol)
+        {
+            return string.Equals(
+                protocol.Code,
+                "websocket_connection_limit_reached",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        return exception is not InvalidDataException
+               && exception is not JsonException
+               && exception is not ArgumentException
+               && exception is not ModelProviderException;
+    }
+
+    private static string? StringProperty(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+
+    private bool IsWebSocketFallbackActive(string sessionId)
+    {
+        lock (_webSocketGate)
+        {
+            return _webSocketFallbackSessions.Contains(sessionId);
+        }
+    }
+
+    private void RecordWebSocketRequest(string? sessionId, bool reused, bool delta)
+    {
+        if (sessionId is null)
+        {
+            return;
+        }
+
+        lock (_webSocketGate)
+        {
+            var statistics = GetOrCreateWebSocketStatistics(sessionId);
+            statistics.Requests++;
+            if (reused)
+            {
+                statistics.ConnectionsReused++;
+            }
+            else
+            {
+                statistics.ConnectionsCreated++;
+            }
+
+            if (delta)
+            {
+                statistics.DeltaRequests++;
+            }
+            else
+            {
+                statistics.FullContextRequests++;
+            }
+        }
+    }
+
+    private void RecordWebSocketFailure(string? sessionId, Exception exception)
+    {
+        if (sessionId is null)
+        {
+            return;
+        }
+
+        lock (_webSocketGate)
+        {
+            _webSocketFallbackSessions.Add(sessionId);
+            var statistics = GetOrCreateWebSocketStatistics(sessionId);
+            statistics.Failures++;
+            statistics.LastError = BoundExceptionMessage(exception);
+        }
+    }
+
+    private void RecordWebSocketSseFallback(string? sessionId)
+    {
+        if (sessionId is null)
+        {
+            return;
+        }
+
+        lock (_webSocketGate)
+        {
+            GetOrCreateWebSocketStatistics(sessionId).SseFallbacks++;
+        }
+    }
+
+    private MutableWebSocketStatistics GetOrCreateWebSocketStatistics(string sessionId)
+    {
+        if (!_webSocketStatistics.TryGetValue(sessionId, out var value))
+        {
+            value = new MutableWebSocketStatistics();
+            _webSocketStatistics[sessionId] = value;
+        }
+
+        return value;
+    }
+
+    private static ModelDiagnostic TransportDiagnostic(ModelTransport transport, string error) =>
+        new(
+            "provider_transport_fallback",
+            "The WebSocket request failed before response output began; the request continued over server-sent events.",
+            ModelDiagnosticSeverity.Warning,
+            JsonSerializer.Serialize(new
+            {
+                configuredTransport = transport.ToString(),
+                fallbackTransport = ModelTransport.ServerSentEvents.ToString(),
+                phase = "before_response_output",
+                error,
+            }));
+
+    private static string BoundExceptionMessage(Exception exception)
+    {
+        var message = string.IsNullOrWhiteSpace(exception.Message)
+            ? exception.GetType().Name
+            : exception.Message;
+        return message.Length <= 4096 ? message : message.Substring(0, 4096);
+    }
+
+    private static async ValueTask DisposeIgnoringFailureAsync(IAsyncDisposable value)
+    {
+        try
+        {
+            await value.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+        }
+    }
+
+    private static async Task AwaitWithCancellationAsync(
+        Task operation,
+        CancellationToken cancellationToken)
+    {
+        if (operation.IsCompleted || !cancellationToken.CanBeCanceled)
+        {
+            await operation.ConfigureAwait(false);
+            return;
+        }
+
+        var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            () => canceled.TrySetResult(true));
+        if (await Task.WhenAny(operation, canceled.Task).ConfigureAwait(false) != operation)
+        {
+            ObserveLateCompletion(operation);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        await operation.ConfigureAwait(false);
+    }
+
+    private static async Task<T> AwaitWithCancellationAsync<T>(
+        Task<T> operation,
+        CancellationToken cancellationToken,
+        Action<T>? lateSuccess = null)
+    {
+        if (operation.IsCompleted || !cancellationToken.CanBeCanceled)
+        {
+            return await operation.ConfigureAwait(false);
+        }
+
+        var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(
+            () => canceled.TrySetResult(true));
+        if (await Task.WhenAny(operation, canceled.Task).ConfigureAwait(false) != operation)
+        {
+            ObserveLateCompletion(operation, lateSuccess);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return await operation.ConfigureAwait(false);
+    }
+
+    private static void ObserveLateCompletion(Task operation)
+    {
+        _ = operation.ContinueWith(
+            completed =>
+            {
+                _ = completed.Exception;
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static void ObserveLateCompletion<T>(Task<T> operation, Action<T>? lateSuccess)
+    {
+        _ = operation.ContinueWith(
+            completed =>
+            {
+                if (completed.Status == TaskStatus.RanToCompletion)
+                {
+                    try
+                    {
+                        lateSuccess?.Invoke(completed.Result);
+                    }
+                    catch
+                    {
+                    }
+                }
+                else if (completed.IsFaulted)
+                {
+                    _ = completed.Exception;
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(OpenAIResponsesProvider));
+        }
     }
 
     private static void ValidateOptions(OpenAIResponsesProviderOptions options)
@@ -340,17 +1381,28 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             || options.MaxErrorCharacters is < 1 or > 10_000_000
             || options.MaxRequestBytes is < 2 or > 100_000_000
             || options.MaxResponseCharacters is < 1 or > 100_000_000
-            || options.MaxToolCallsPerResponse is < 1 or > 10_000)
+            || options.MaxToolCallsPerResponse is < 1 or > 10_000
+            || options.ResponseObserverTimeoutMilliseconds is < 1 or > 30_000
+            || options.WebSocketIdleTimeoutMilliseconds is < 1 or > 86_400_000
+            || options.WebSocketSessionIdleTimeoutMilliseconds is < 1 or > 86_400_000
+            || options.WebSocketMaximumConnectionAgeMilliseconds is < 1 or > 86_400_000)
         {
             throw new ArgumentException("One or more provider bounds or compatibility settings are invalid.", nameof(options));
         }
 
-        if (options.Headers.Count > 64)
+        if (!options.SupportsWebSocketTransport && options.WebSocketConnectionFactory is not null)
         {
-            throw new ArgumentException("At most 64 custom headers may be configured.", nameof(options));
+            throw new ArgumentException(
+                "A WebSocket connection factory requires WebSocket transport support to be enabled.",
+                nameof(options));
         }
 
         ValidateCredential(options.ApiKey, nameof(options));
+        if (ProviderHeaderGuard.IsTransportControlledHeader(options.ApiKeyHeaderName))
+        {
+            throw new ArgumentException("The API key header is controlled by the transport.", nameof(options));
+        }
+
         ValidateHeader(options.ApiKeyHeaderName, "placeholder", nameof(options));
         if (options.DefaultInstructions is null
             || options.DefaultInstructions.Length > options.MaxRequestBytes
@@ -364,10 +1416,7 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         {
             throw new ArgumentException("Configure either a credential provider or an API-key provider, not both.", nameof(options));
         }
-        foreach (var header in options.Headers)
-        {
-            ValidateHeader(header.Key, header.Value, nameof(options));
-        }
+        ProviderHeaderGuard.ValidateMerge(options.Headers, nameof(options));
     }
 
     private void ApplyHeaders(
@@ -375,30 +1424,14 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         OpenAIRequestCredential credential,
         ModelRequest modelRequest)
     {
-        if (credential.Headers.Count > 64)
-        {
-            throw new InvalidOperationException("A request credential cannot carry more than 64 headers.");
-        }
-
         var apiKey = credential.ApiKey;
         ValidateCredential(apiKey, nameof(OpenAIResponsesProviderOptions.GetApiKeyAsync));
-        foreach (var header in _headers)
-        {
-            if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
-            {
-                throw new InvalidOperationException($"Header '{header.Key}' is not valid for an HTTP request.");
-            }
-        }
-
-        foreach (var header in credential.Headers)
-        {
-            ValidateHeader(header.Key, header.Value, nameof(OpenAIResponsesProviderOptions.GetCredentialAsync));
-            request.Headers.Remove(header.Key);
-            if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
-            {
-                throw new InvalidOperationException($"Credential header '{header.Key}' is not valid for an HTTP request.");
-            }
-        }
+        ProviderHeaderGuard.ValidateMerge(
+            credential.Headers,
+            nameof(OpenAIResponsesProviderOptions.GetCredentialAsync));
+        var suppressedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        ApplyHeaderLayer(request, _headers, suppressedHeaders, "provider");
+        ApplyHeaderLayer(request, credential.Headers, suppressedHeaders, "credential");
 
         var credentialHeader = _authenticationStyle == OpenAIAuthenticationStyle.Bearer
             ? "Authorization"
@@ -430,7 +1463,36 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         };
         foreach (var header in affinityHeaders)
         {
-            request.Headers.TryAddWithoutValidation(header.Item1, header.Item2);
+            if (!suppressedHeaders.Contains(header.Item1)
+                && !request.Headers.Contains(header.Item1)
+                && !request.Headers.TryAddWithoutValidation(header.Item1, header.Item2))
+            {
+                throw new InvalidOperationException($"Session header '{header.Item1}' is not valid for an HTTP request.");
+            }
+        }
+    }
+
+    private static void ApplyHeaderLayer(
+        HttpRequestMessage request,
+        IReadOnlyDictionary<string, string?> headers,
+        ISet<string> suppressedHeaders,
+        string layer)
+    {
+        foreach (var header in headers)
+        {
+            request.Headers.Remove(header.Key);
+            if (header.Value is null)
+            {
+                suppressedHeaders.Add(header.Key);
+                continue;
+            }
+
+            suppressedHeaders.Remove(header.Key);
+            if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
+            {
+                throw new InvalidOperationException(
+                    $"The {layer} header '{header.Key}' is not valid for an HTTP request.");
+            }
         }
     }
 
@@ -1107,46 +2169,6 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         }
     }
 
-    private static bool IsTransient(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("x-should-retry", out var values))
-        {
-            var directive = values.FirstOrDefault();
-            if (string.Equals(directive, "true", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (string.Equals(directive, "false", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        var status = (int)response.StatusCode;
-        return status is 408 or 409 or 429 || status >= 500;
-    }
-
-    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("retry-after-ms", out var values)
-            && double.TryParse(values.FirstOrDefault(), NumberStyles.Float, CultureInfo.InvariantCulture, out var milliseconds)
-            && !double.IsNaN(milliseconds)
-            && !double.IsInfinity(milliseconds))
-        {
-            return milliseconds >= TimeSpan.MaxValue.TotalMilliseconds
-                ? TimeSpan.MaxValue
-                : TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
-        }
-
-        if (response.Headers.RetryAfter?.Delta is { } delta)
-        {
-            return delta < TimeSpan.Zero ? TimeSpan.Zero : delta;
-        }
-
-        return null;
-    }
-
     private static async Task<string> ReadBoundedAsync(
         HttpContent content,
         int maximumCharacters,
@@ -1285,5 +2307,259 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         }
 
         return property;
+    }
+
+    private sealed class OpenAIWebSocketProtocolException : IOException
+    {
+        public OpenAIWebSocketProtocolException(string code, string message)
+            : base($"WebSocket protocol error {code}: {message}")
+        {
+            Code = code;
+        }
+
+        public string Code { get; }
+    }
+
+    private sealed class WebSocketLease
+    {
+        private readonly Action<bool> _release;
+        private int _released;
+
+        public WebSocketLease(
+            IOpenAIWebSocketConnection connection,
+            CachedWebSocketConnection? entry,
+            bool reused,
+            Action<bool> release)
+        {
+            Connection = connection;
+            Entry = entry;
+            Reused = reused;
+            _release = release;
+        }
+
+        public IOpenAIWebSocketConnection Connection { get; }
+
+        public CachedWebSocketConnection? Entry { get; }
+
+        public bool Reused { get; }
+
+        public void Release(bool keep)
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                _release(keep);
+            }
+        }
+    }
+
+    private sealed class CachedWebSocketConnection : IDisposable
+    {
+        private int _disposed;
+
+        public CachedWebSocketConnection(IOpenAIWebSocketConnection connection)
+        {
+            Connection = connection;
+            CreatedAt = DateTimeOffset.UtcNow;
+            Busy = true;
+        }
+
+        public IOpenAIWebSocketConnection Connection { get; }
+
+        public DateTimeOffset CreatedAt { get; }
+
+        public bool Busy { get; set; }
+
+        public Timer? IdleTimer { get; set; }
+
+        public WebSocketContinuation? Continuation { get; set; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            IdleTimer?.Dispose();
+            Connection.Dispose();
+        }
+    }
+
+    private sealed class WebSocketContinuation
+    {
+        public WebSocketContinuation(string fingerprint, string responseId, IReadOnlyList<string> baselineItems)
+        {
+            Fingerprint = fingerprint;
+            ResponseId = responseId;
+            BaselineItems = baselineItems;
+        }
+
+        public string Fingerprint { get; }
+
+        public string ResponseId { get; }
+
+        public IReadOnlyList<string> BaselineItems { get; }
+    }
+
+    private sealed class RequestBodyDelta
+    {
+        public RequestBodyDelta(string responseId, IReadOnlyList<string> items)
+        {
+            ResponseId = responseId;
+            Items = items;
+        }
+
+        public string ResponseId { get; }
+
+        public IReadOnlyList<string> Items { get; }
+    }
+
+    private sealed class RequestBodySnapshot
+    {
+        private readonly byte[] _body;
+
+        private RequestBodySnapshot(byte[] body, string fingerprint, IReadOnlyList<string> inputItems)
+        {
+            _body = body;
+            Fingerprint = fingerprint;
+            InputItems = inputItems;
+        }
+
+        public string Fingerprint { get; }
+
+        public IReadOnlyList<string> InputItems { get; }
+
+        public static RequestBodySnapshot Create(byte[] body)
+        {
+            using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 128 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("input", out var input)
+                || input.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidDataException("The Responses request did not contain an input array.");
+            }
+
+            var items = input.EnumerateArray().Select(item => item.GetRawText()).ToArray();
+            using var canonical = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(canonical))
+            {
+                writer.WriteStartObject();
+                foreach (var property in root.EnumerateObject())
+                {
+                    if (property.NameEquals("input") || property.NameEquals("previous_response_id"))
+                    {
+                        continue;
+                    }
+
+                    property.WriteTo(writer);
+                }
+
+                writer.WriteEndObject();
+            }
+
+            using var sha = SHA256.Create();
+            var fingerprint = Convert.ToBase64String(sha.ComputeHash(canonical.ToArray()));
+            return new RequestBodySnapshot(body.ToArray(), fingerprint, items);
+        }
+
+        public RequestBodyDelta? TryCreateDelta(WebSocketContinuation continuation)
+        {
+            if (!string.Equals(Fingerprint, continuation.Fingerprint, StringComparison.Ordinal)
+                || InputItems.Count < continuation.BaselineItems.Count)
+            {
+                return null;
+            }
+
+            for (var index = 0; index < continuation.BaselineItems.Count; index++)
+            {
+                if (!string.Equals(
+                    InputItems[index],
+                    continuation.BaselineItems[index],
+                    StringComparison.Ordinal))
+                {
+                    return null;
+                }
+            }
+
+            return new RequestBodyDelta(
+                continuation.ResponseId,
+                InputItems.Skip(continuation.BaselineItems.Count).ToArray());
+        }
+
+        public string CreateWebSocketRequest(RequestBodyDelta? delta)
+        {
+            using var document = JsonDocument.Parse(_body, new JsonDocumentOptions { MaxDepth = 128 });
+            using var output = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(output))
+            {
+                writer.WriteStartObject();
+                writer.WriteString("type", "response.create");
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (property.NameEquals("previous_response_id"))
+                    {
+                        continue;
+                    }
+
+                    if (delta is not null && property.NameEquals("input"))
+                    {
+                        writer.WritePropertyName("input");
+                        writer.WriteStartArray();
+                        foreach (var item in delta.Items)
+                        {
+                            using var itemDocument = JsonDocument.Parse(item, new JsonDocumentOptions { MaxDepth = 128 });
+                            itemDocument.RootElement.WriteTo(writer);
+                        }
+
+                        writer.WriteEndArray();
+                    }
+                    else
+                    {
+                        property.WriteTo(writer);
+                    }
+                }
+
+                if (delta is not null)
+                {
+                    writer.WriteString("previous_response_id", delta.ResponseId);
+                }
+
+                writer.WriteEndObject();
+            }
+
+            return Encoding.UTF8.GetString(output.ToArray());
+        }
+    }
+
+    private sealed class MutableWebSocketStatistics
+    {
+        public long Requests { get; set; }
+
+        public long ConnectionsCreated { get; set; }
+
+        public long ConnectionsReused { get; set; }
+
+        public long FullContextRequests { get; set; }
+
+        public long DeltaRequests { get; set; }
+
+        public long Failures { get; set; }
+
+        public long SseFallbacks { get; set; }
+
+        public string? LastError { get; set; }
+
+        public OpenAIWebSocketStatistics Snapshot(bool fallbackActive) =>
+            new(
+                Requests,
+                ConnectionsCreated,
+                ConnectionsReused,
+                FullContextRequests,
+                DeltaRequests,
+                Failures,
+                SseFallbacks,
+                fallbackActive,
+                LastError);
     }
 }

@@ -436,6 +436,18 @@ internal static class AgentValidator
         {
             throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Tool progress details are too large.");
         }
+
+        if (progress.Content.Count > limits.MaxContentPartsPerMessage)
+        {
+            throw new AgentLimitException(
+                nameof(limits.MaxContentPartsPerMessage),
+                "Tool progress contains too many content parts.");
+        }
+
+        foreach (var content in progress.Content)
+        {
+            ValidateContent(content, limits);
+        }
     }
 
     public static void ValidateRequest(

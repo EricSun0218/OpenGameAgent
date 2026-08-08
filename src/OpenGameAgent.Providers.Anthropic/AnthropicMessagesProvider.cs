@@ -1,12 +1,12 @@
 using System.Buffers;
 using System.Collections.ObjectModel;
-using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.ProviderTransport;
 
 namespace OpenGameAgent.Providers.Anthropic;
 
@@ -34,8 +34,13 @@ public sealed class AnthropicMessagesProviderOptions
 
     public AnthropicApiKeyProvider? GetApiKeyAsync { get; set; }
 
-    public IDictionary<string, string> Headers { get; } =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IDictionary<string, string?> Headers { get; } =
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+    public ProviderResponseObserver? ResponseObserver { get; set; }
+
+    public int ResponseObserverTimeoutMilliseconds { get; set; } =
+        ProviderResponseObserverRunner.DefaultTimeoutMilliseconds;
 
     public string ProviderId { get; set; } = "anthropic";
 
@@ -85,15 +90,19 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
     private const string FineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
     private const string InterleavedThinkingBeta = "interleaved-thinking-2025-05-14";
     private readonly AnthropicMessagesProviderOptions _options;
-    private readonly IReadOnlyDictionary<string, string> _headers;
+    private readonly IReadOnlyDictionary<string, string?> _headers;
+    private readonly ProviderResponseObserver? _responseObserver;
+    private readonly int _responseObserverTimeoutMilliseconds;
     private readonly IReadOnlyCollection<string> _supportedApis;
 
     public AnthropicMessagesProvider(AnthropicMessagesProviderOptions options)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         ValidateOptions(options);
-        _headers = new ReadOnlyDictionary<string, string>(
-            new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _headers = new ReadOnlyDictionary<string, string?>(
+            new Dictionary<string, string?>(options.Headers, StringComparer.OrdinalIgnoreCase));
+        _responseObserver = options.ResponseObserver;
+        _responseObserverTimeoutMilliseconds = options.ResponseObserverTimeoutMilliseconds;
         _supportedApis = Array.AsReadOnly(new[] { options.ApiId });
     }
 
@@ -119,7 +128,10 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
 
         var apiKey = _options.GetApiKeyAsync is null
             ? _options.ApiKey
-            : await _options.GetApiKeyAsync(cancellationToken).ConfigureAwait(false);
+            : await ProviderCallbackRunner.RunAsync(
+                    token => _options.GetApiKeyAsync(token),
+                    cancellationToken)
+                .ConfigureAwait(false);
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, _options.Endpoint);
         ApplyHeaders(httpRequest, apiKey, request);
         httpRequest.Content = new ByteArrayContent(SerializeRequest(request));
@@ -132,14 +144,25 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
             httpRequest,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);
+        await ProviderResponseObserverRunner.NotifyAsync(
+                _responseObserver,
+                ProviderResponseObservation.FromHttpResponse(
+                    _options.ProviderId,
+                    _options.ApiId,
+                    request.Model,
+                    response),
+                _responseObserverTimeoutMilliseconds,
+                cancellationToken)
+            .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             var error = await ReadBoundedAsync(response.Content, _options.MaxErrorCharacters, cancellationToken)
                 .ConfigureAwait(false);
+            var retry = ProviderHttpRetryMetadata.FromResponse(response, errorText: error);
             throw new ModelProviderException(
                 $"The Anthropic endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
-                IsTransient(response),
-                GetRetryAfter(response),
+                retry.IsTransient,
+                retry.RetryAfter,
                 (int)response.StatusCode);
         }
 
@@ -647,9 +670,18 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
     private void ApplyHeaders(HttpRequestMessage request, string? apiKey, ModelRequest modelRequest)
     {
         ValidateCredential(apiKey, nameof(AnthropicMessagesProviderOptions.GetApiKeyAsync));
+        var suppressed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var header in _headers)
         {
-            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            request.Headers.Remove(header.Key);
+            if (header.Value is null)
+            {
+                suppressed.Add(header.Key);
+            }
+            else
+            {
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
         }
 
         if (!request.Headers.Contains("anthropic-version"))
@@ -660,7 +692,9 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
         var oauth = apiKey?.Contains("sk-ant-oat", StringComparison.Ordinal) == true;
         if (!string.IsNullOrEmpty(apiKey))
         {
-            request.Headers.TryAddWithoutValidation(oauth ? "Authorization" : "x-api-key", oauth ? "Bearer " + apiKey : apiKey);
+            var credentialHeader = oauth ? "Authorization" : "x-api-key";
+            request.Headers.Remove(credentialHeader);
+            request.Headers.TryAddWithoutValidation(credentialHeader, oauth ? "Bearer " + apiKey : apiKey);
         }
 
         var beta = new List<string>();
@@ -678,7 +712,10 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
         {
             beta.Insert(0, "oauth-2025-04-20");
             beta.Insert(0, "claude-code-20250219");
-            request.Headers.TryAddWithoutValidation("x-app", "cli");
+            if (!suppressed.Contains("x-app") && !request.Headers.Contains("x-app"))
+            {
+                request.Headers.TryAddWithoutValidation("x-app", "cli");
+            }
         }
 
         if (beta.Count > 0 && !request.Headers.Contains("anthropic-beta"))
@@ -688,7 +725,9 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
 
         if (_options.SendSessionAffinityHeaders
             && modelRequest.Parameters.CacheRetention != ModelCacheRetention.None
-            && modelRequest.SessionId is { } sessionId)
+            && modelRequest.SessionId is { } sessionId
+            && !suppressed.Contains("x-session-affinity")
+            && !request.Headers.Contains("x-session-affinity"))
         {
             request.Headers.TryAddWithoutValidation("x-session-affinity", sessionId);
         }
@@ -753,21 +792,14 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
             || options.MaxErrorCharacters is < 1 or > 10_000_000
             || options.MaxRequestBytes is < 2 or > 100_000_000
             || options.MaxResponseCharacters is < 1 or > 100_000_000
-            || options.MaxToolCallsPerResponse is < 1 or > 10_000)
+            || options.MaxToolCallsPerResponse is < 1 or > 10_000
+            || options.ResponseObserverTimeoutMilliseconds is < 1 or > 30_000)
         {
             throw new ArgumentException("One or more Anthropic provider identifiers or bounds are invalid.", nameof(options));
         }
 
         ValidateCredential(options.ApiKey, nameof(options));
-        foreach (var header in options.Headers)
-        {
-            if (string.IsNullOrWhiteSpace(header.Key)
-                || header.Key.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0
-                || header.Value.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0)
-            {
-                throw new ArgumentException("An Anthropic header is invalid.", nameof(options));
-            }
-        }
+        ProviderHeaderGuard.ValidateMerge(options.Headers, nameof(options));
     }
 
     private static void ValidateCredential(string? value, string parameterName)
@@ -778,25 +810,6 @@ public sealed class AnthropicMessagesProvider : IModelProvider, IModelProviderCa
         {
             throw new ArgumentException("A credential is empty, too large, or contains invalid control characters.", parameterName);
         }
-    }
-
-    private static bool IsTransient(HttpResponseMessage response)
-    {
-        var status = (int)response.StatusCode;
-        return status is 408 or 409 or 429 || status >= 500;
-    }
-
-    private static TimeSpan? GetRetryAfter(HttpResponseMessage response)
-    {
-        if (response.Headers.TryGetValues("retry-after-ms", out var values)
-            && double.TryParse(values.FirstOrDefault(), NumberStyles.Float, CultureInfo.InvariantCulture, out var milliseconds)
-            && !double.IsNaN(milliseconds)
-            && !double.IsInfinity(milliseconds))
-        {
-            return TimeSpan.FromMilliseconds(Math.Max(0, milliseconds));
-        }
-
-        return response.Headers.RetryAfter?.Delta;
     }
 
     private static async Task<string> ReadBoundedAsync(

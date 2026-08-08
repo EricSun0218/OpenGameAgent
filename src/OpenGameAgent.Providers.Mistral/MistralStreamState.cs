@@ -112,12 +112,15 @@ internal sealed class MistralStreamState
         foreach (var block in _blocks.Where(value => value.Kind == BlockKind.Tool && !value.Ended))
         {
             block.Ended = true;
+            var contentIndex = _blocks.IndexOf(block);
+            var partial = Partial();
+            var toolCall = partial.Content[contentIndex] as ToolCallContent
+                           ?? throw new InvalidDataException("A completed Mistral tool block did not produce a tool call.");
             updates.Add(ModelStreamEvent.Update(
                 ModelStreamEventKind.ToolCallEnded,
-                Partial(),
-                contentIndex: _blocks.IndexOf(block),
-                toolCallId: block.Id,
-                toolName: block.Name));
+                partial,
+                contentIndex: contentIndex,
+                toolCall: toolCall));
         }
 
         return updates;
@@ -299,7 +302,8 @@ internal sealed class MistralStreamState
         updates.Add(ModelStreamEvent.Update(
             block.Kind == BlockKind.Reasoning ? ModelStreamEventKind.ReasoningEnded : ModelStreamEventKind.TextEnded,
             Partial(),
-            contentIndex: _blocks.IndexOf(block)));
+            contentIndex: _blocks.IndexOf(block),
+            content: block.Buffer.ToString()));
         _currentText = null;
     }
 
@@ -318,8 +322,16 @@ internal sealed class MistralStreamState
             }
             else
             {
-                var arguments = TryJsonObject(block.Buffer.ToString(), out var normalized) ? normalized : "{}";
-                if (final && !TryJsonObject(block.Buffer.ToString(), out arguments) && reason != ModelStopReason.Length)
+                var arguments = final
+                    ? TryJsonObject(block.Buffer.ToString(), out var normalized)
+                        ? normalized
+                        : reason == ModelStopReason.Length
+                            ? StreamingJson.ParseObject(block.Buffer.ToString())
+                            : "{}"
+                    : StreamingJson.ParseObject(block.Buffer.ToString());
+                if (final
+                    && reason != ModelStopReason.Length
+                    && !TryJsonObject(block.Buffer.ToString(), out arguments))
                 {
                     throw new InvalidDataException("A completed Mistral tool call did not contain a JSON object.");
                 }

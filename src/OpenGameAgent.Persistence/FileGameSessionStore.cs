@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent.Persistence;
 
@@ -81,6 +82,11 @@ public sealed class FileGameSessionStore : IGameSessionStore
                 throw new ArgumentException("A saved snapshot revision must advance by exactly one.", nameof(snapshot));
             }
 
+            if (current is not null)
+            {
+                snapshot.UsageLedger.EnsureExtends(current.UsageLedger);
+            }
+
             await _files.WriteAtomicAsync(path, Encode(snapshot), cancellationToken).ConfigureAwait(false);
             return new GameSessionSaveResult(saved: true, snapshot);
         }
@@ -92,7 +98,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
     private static SessionDocument Encode(GameSessionSnapshot snapshot) => new()
     {
-        FormatVersion = 2,
+        FormatVersion = 3,
         SessionId = snapshot.Key.SessionId,
         ActorId = snapshot.Key.ActorId,
         Revision = snapshot.Revision,
@@ -101,6 +107,12 @@ public sealed class FileGameSessionStore : IGameSessionStore
         PendingInputId = snapshot.PendingInputId,
         LastMoment = snapshot.LastMoment is null ? null : MomentDocument.Encode(snapshot.LastMoment.Value),
         ExtensionState = new Dictionary<string, string>(snapshot.ExtensionState, StringComparer.Ordinal),
+        UsageRecords = snapshot.UsageLedger.Records.Select(UsageRecordDocument.Encode).ToList(),
+        UsageRecentRecordCapacity = snapshot.UsageLedger.RecentRecordCapacity,
+        UsageTotalRecordCount = snapshot.UsageLedger.TotalRecordCount,
+        UsageTotals = snapshot.UsageLedger.TotalsByCause
+            .Select(pair => UsageTotalsDocument.Encode(pair.Key, pair.Value))
+            .ToList(),
     };
 
     private static void ValidateKey(GameSessionKey key)
@@ -126,7 +138,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
             return null;
         }
 
-        if (document.FormatVersion is not (1 or 2))
+        if (document.FormatVersion is not (1 or 2 or 3))
         {
             throw new PersistenceException($"Unsupported session format version '{document.FormatVersion}'.");
         }
@@ -140,7 +152,47 @@ public sealed class FileGameSessionStore : IGameSessionStore
                 document.ProcessedInputIds ?? new List<string>(),
                 document.LastMoment?.Decode(),
                 document.ExtensionState ?? new Dictionary<string, string>(StringComparer.Ordinal),
-                document.FormatVersion >= 2 ? document.PendingInputId : null));
+                document.FormatVersion >= 2 ? document.PendingInputId : null,
+                document.FormatVersion >= 3
+                    ? DecodeUsageLedger(document)
+                    : null));
+    }
+
+    private static GameSessionUsageLedger DecodeUsageLedger(SessionDocument document)
+    {
+        var records = (document.UsageRecords ?? new List<UsageRecordDocument>())
+            .Select(record => record.Decode())
+            .ToArray();
+        var capacity = document.UsageRecentRecordCapacity > 0
+            ? document.UsageRecentRecordCapacity
+            : GameSessionUsageLedger.DefaultRecentRecordCapacity;
+        if (document.UsageTotals is null && document.UsageTotalRecordCount == 0)
+        {
+            // Early v3 previews persisted only raw records. Fold them into the bounded representation.
+            return new GameSessionUsageLedger(records, capacity);
+        }
+
+        return GameSessionUsageLedger.Restore(
+            records,
+            DecodeUsageTotals(document.UsageTotals),
+            document.UsageTotalRecordCount,
+            capacity);
+    }
+
+    private static IReadOnlyDictionary<GameSessionUsageCause, GameSessionUsageTotals> DecodeUsageTotals(
+        IReadOnlyList<UsageTotalsDocument>? documents)
+    {
+        var totals = new Dictionary<GameSessionUsageCause, GameSessionUsageTotals>();
+        foreach (var document in documents ?? Array.Empty<UsageTotalsDocument>())
+        {
+            var cause = (GameSessionUsageCause)document.Cause;
+            if (!totals.TryAdd(cause, document.Decode()))
+            {
+                throw new ArgumentException($"Duplicate cumulative usage cause '{cause}'.", nameof(documents));
+            }
+        }
+
+        return totals;
     }
 
     private sealed class SessionDocument
@@ -162,6 +214,135 @@ public sealed class FileGameSessionStore : IGameSessionStore
         public MomentDocument? LastMoment { get; set; }
 
         public Dictionary<string, string>? ExtensionState { get; set; }
+
+        public List<UsageRecordDocument>? UsageRecords { get; set; }
+
+        public int UsageRecentRecordCapacity { get; set; }
+
+        public long UsageTotalRecordCount { get; set; }
+
+        public List<UsageTotalsDocument>? UsageTotals { get; set; }
+    }
+
+    private sealed class UsageRecordDocument
+    {
+        public string RecordId { get; set; } = string.Empty;
+
+        public int Cause { get; set; }
+
+        public long InputTokens { get; set; }
+
+        public long OutputTokens { get; set; }
+
+        public long CacheReadTokens { get; set; }
+
+        public long CacheWriteTokens { get; set; }
+
+        public long? ReasoningTokens { get; set; }
+
+        public long? CacheWriteOneHourTokens { get; set; }
+
+        public double InputCost { get; set; }
+
+        public double OutputCost { get; set; }
+
+        public double CacheReadCost { get; set; }
+
+        public double CacheWriteCost { get; set; }
+
+        public string? RunId { get; set; }
+
+        public string? InputId { get; set; }
+
+        public string? DetailsJson { get; set; }
+
+        public static UsageRecordDocument Encode(GameSessionUsageRecord record) => new()
+        {
+            RecordId = record.RecordId,
+            Cause = (int)record.Cause,
+            InputTokens = record.Usage.InputTokens,
+            OutputTokens = record.Usage.OutputTokens,
+            CacheReadTokens = record.Usage.CacheReadTokens,
+            CacheWriteTokens = record.Usage.CacheWriteTokens,
+            ReasoningTokens = record.Usage.ReasoningTokens,
+            CacheWriteOneHourTokens = record.Usage.CacheWriteOneHourTokens,
+            InputCost = record.Usage.Cost.Input,
+            OutputCost = record.Usage.Cost.Output,
+            CacheReadCost = record.Usage.Cost.CacheRead,
+            CacheWriteCost = record.Usage.Cost.CacheWrite,
+            RunId = record.RunId,
+            InputId = record.InputId,
+            DetailsJson = record.DetailsJson,
+        };
+
+        public GameSessionUsageRecord Decode() => new(
+            RecordId,
+            (GameSessionUsageCause)Cause,
+            new ModelUsage(
+                InputTokens,
+                OutputTokens,
+                CacheReadTokens,
+                CacheWriteTokens,
+                ReasoningTokens,
+                CacheWriteOneHourTokens,
+                new ModelCost(InputCost, OutputCost, CacheReadCost, CacheWriteCost)),
+            RunId,
+            InputId,
+            DetailsJson);
+    }
+
+    private sealed class UsageTotalsDocument
+    {
+        public int Cause { get; set; }
+
+        public long InputTokens { get; set; }
+
+        public long OutputTokens { get; set; }
+
+        public long CacheReadTokens { get; set; }
+
+        public long CacheWriteTokens { get; set; }
+
+        public long ReasoningTokens { get; set; }
+
+        public long CacheWriteOneHourTokens { get; set; }
+
+        public double InputCost { get; set; }
+
+        public double OutputCost { get; set; }
+
+        public double CacheReadCost { get; set; }
+
+        public double CacheWriteCost { get; set; }
+
+        public static UsageTotalsDocument Encode(
+            GameSessionUsageCause cause,
+            GameSessionUsageTotals totals) => new()
+            {
+                Cause = (int)cause,
+                InputTokens = totals.InputTokens,
+                OutputTokens = totals.OutputTokens,
+                CacheReadTokens = totals.CacheReadTokens,
+                CacheWriteTokens = totals.CacheWriteTokens,
+                ReasoningTokens = totals.ReasoningTokens,
+                CacheWriteOneHourTokens = totals.CacheWriteOneHourTokens,
+                InputCost = totals.InputCost,
+                OutputCost = totals.OutputCost,
+                CacheReadCost = totals.CacheReadCost,
+                CacheWriteCost = totals.CacheWriteCost,
+            };
+
+        public GameSessionUsageTotals Decode() => new(
+            InputTokens,
+            OutputTokens,
+            CacheReadTokens,
+            CacheWriteTokens,
+            ReasoningTokens,
+            CacheWriteOneHourTokens,
+            InputCost,
+            OutputCost,
+            CacheReadCost,
+            CacheWriteCost);
     }
 }
 

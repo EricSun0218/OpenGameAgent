@@ -697,7 +697,14 @@ public sealed class ServerTests
                     new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending));
                 yield return ModelStreamEvent.Update(
                     ModelStreamEventKind.ToolCallDelta,
-                    new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending),
+                    new ModelResponse(
+                        new AgentContent[]
+                        {
+                            new TextContent("prefix"),
+                            new ReasoningContent("plan"),
+                            new ToolCallContent("call-2", "move", "{}"),
+                        },
+                        ModelStopReason.Pending),
                     "{}",
                     contentIndex: 2,
                     toolCallId: "call-2",

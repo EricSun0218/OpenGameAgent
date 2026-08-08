@@ -8,6 +8,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | --- | --- |
 | Stream dialogue or reasoning | `Agent.Subscribe`, `AgentEvent`, `ModelStreamEvent` |
 | Multi-step plan and action loop | `Agent`, `AgentTool` |
+| Stream typed partial tool output or generated previews | `ToolExecutionContext.ReportProgressAsync`, `ToolProgress.Content` |
 | Interrupt or amend current work | `Agent.Steer`, `Agent.Abort` |
 | Queue the next interaction | `Agent.FollowUp` |
 | Change prompts or context per turn | `AgentHooks` |
@@ -49,6 +50,8 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Run many NPCs concurrently | `GameRuntimeLimits.MaxConcurrentActors`, `MultiActorScheduler` |
 | Correct or cancel an active NPC run | `GameAgentRuntime.TrySteer`, `GameAgentRuntime.TryAbort` |
 | Persist transcripts and deduplicate inputs | `IGameSessionStore` |
+| Keep an append-only branch/lane audit history | `IGameSessionHistoryRepository`, `GameSessionHistory` |
+| Fork, search, page, or project a session history | `GameSessionHistory`, `GameHistoryContextProjection` |
 | Compact a long transcript | `IGameTranscriptCompactor` |
 
 ## World actions and simulation
@@ -62,11 +65,13 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Apply custom semantic ranking | `IGameMemoryRanker`, `RankedGameMemoryStore` |
 | Add reusable behavior instructions | `IGameSkillSource`, `GameSkill` |
 | Load portable or game-filtered skills | `DirectoryGameSkillSource` (`SKILL.md` or `skill.json`) |
+| Load reusable prompt templates with bounded arguments | `FileGamePromptTemplateLoader`, `GamePromptTemplate` |
 | Trigger and save monthly/daily/turn events | `GameTimeScheduler`, `CaptureState` |
 | Send work between persistent actors | `IGameMailbox` |
 | Resume fixed multi-stage logic | `DurableGameWorkflow` |
 | Run durable dependency graphs with bounded parallel branches | `DurableGameWorkflowGraph` |
 | Generate images/audio/video | `IGameMediaGenerator`, `GameMediaGenerationTool` |
+| Route generation by provider/model and media capability | `GameMediaModelRegistry` |
 | Spill large tool output and retrieve it later | `ArtifactExtension`, `IGameAgentArtifactStore` |
 | Recall scoped memory through an extension | `GameMemoryExtension` |
 
@@ -78,7 +83,12 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Register and select local or remote models | `GameModelCatalog` |
 | Refresh a provider's model list safely | `GameModelProviderRegistration.RefreshModels`, `GameModelCatalog.RefreshAsync` |
 | Resolve API keys, OAuth-style tokens, or local/no-auth modes | `IGameProviderAuthentication`, `IGameCredentialStore` |
+| Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |
+| Register supported browser/device authorization flows | `BuiltInGameOAuthRegistration` |
+| Observe bounded provider response metadata | `ProviderResponseObserver` |
 | Fetch short-lived developer-hosted credentials | `DeveloperGatewayProvider`, `HttpDeveloperGatewayCredentialSource` |
+| Run the same provider behind a trusted remote service | `RemoteModelProvider`, `ModelProviderProxyServer` |
+| Connect to a compatible message-gateway service | `MessageGatewayProvider` |
 | Use external tool servers without loading every schema into context | `McpToolConnectorExtension` (default `OnDemand`) |
 | Expose every remote tool natively when the catalog is small | `GameMcpToolExposure.Direct` |
 
@@ -87,13 +97,15 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 In-memory implementations are useful for tests and short-lived sessions. The `OpenGameAgent.Persistence` package includes local-file stores for:
 
 - game sessions;
+- append-only session histories with branches, lanes, records, and usage statistics;
 - action journals;
 - workflow checkpoints;
 - memories;
 - mailboxes;
 - agent artifacts;
 - delegation records;
-- directory-backed skills.
+- directory-backed skills;
+- directory-backed prompt templates.
 
 File stores coordinate writers that use the same directory through cross-process leases, but they are not a distributed database. A multiplayer or multi-host service should implement the same interfaces using transactional shared storage and explicit actor ownership. Completed action, workflow, mailbox, and deduplication records are intentionally retained to preserve replay safety; long-running products should implement retention or archival in their game-owned stores rather than deleting evidence blindly.
 

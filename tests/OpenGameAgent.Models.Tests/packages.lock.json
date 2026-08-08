@@ -39,6 +39,45 @@
           "xunit.v3.mtp-v1": "[3.2.2]"
         }
       },
+      "AWSSDK.BedrockRuntime": {
+        "type": "Transitive",
+        "resolved": "4.0.101",
+        "contentHash": "vBUUBQOwhEd75Zy5b5pDE+Yp5kTSb7WkE8pfpKa/ePk6WV748zqTQnObdFYBfrI3ASyXwCVV4LFDVbkgDBzOeA==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.100.9, 5.0.0)"
+        }
+      },
+      "AWSSDK.Core": {
+        "type": "Transitive",
+        "resolved": "4.0.100.9",
+        "contentHash": "OPYy41jZjXwxxcYRotaq24HDrwUnVtBB/mvg1IwB9D1ICXAtHqMa1sp2hpmlVJCZwjlcrPcTCJIejInvV1vp5g=="
+      },
+      "Google.Apis": {
+        "type": "Transitive",
+        "resolved": "1.75.0",
+        "contentHash": "ZqODi2IvyTBezeGztemXv6U/+VinyqxxPiyoW2CZbzIrUp+a35Rt5tzUjXHPXK9nA1YQi/w8ABpYQpBm31ditw==",
+        "dependencies": {
+          "Google.Apis.Core": "1.75.0"
+        }
+      },
+      "Google.Apis.Auth": {
+        "type": "Transitive",
+        "resolved": "1.75.0",
+        "contentHash": "hzuGwUBIQYdFkChXm62E5Suxe+q5PHt2uE5EunGBco2j01uQJGlUgzNujZvGHMlAIEHaytzhdn3v3v52ZPgv2Q==",
+        "dependencies": {
+          "Google.Apis": "1.75.0",
+          "Google.Apis.Core": "1.75.0",
+          "System.Management": "7.0.2"
+        }
+      },
+      "Google.Apis.Core": {
+        "type": "Transitive",
+        "resolved": "1.75.0",
+        "contentHash": "7AuI44XP4LzMFiOjdk4GCtCxJTIWZcjrXLeGjLYYSpTHHbiPkvm76XNym7zPOnD90sIg+zdTulg+I6D5W5spTQ==",
+        "dependencies": {
+          "Newtonsoft.Json": "13.0.4"
+        }
+      },
       "Microsoft.ApplicationInsights": {
         "type": "Transitive",
         "resolved": "2.23.0",
@@ -112,10 +151,28 @@
           "System.Security.Principal.Windows": "5.0.0"
         }
       },
+      "Newtonsoft.Json": {
+        "type": "Transitive",
+        "resolved": "13.0.4",
+        "contentHash": "pdgNNMai3zv51W5aq268sujXUyx7SNdE2bj1wZcWjAQrKMFZV260lbqYop1d2GM67JI1huLRwxo9ZqnfF/lC6A=="
+      },
+      "System.CodeDom": {
+        "type": "Transitive",
+        "resolved": "7.0.0",
+        "contentHash": "GLltyqEsE5/3IE+zYRP5sNa1l44qKl9v+bfdMcwg+M9qnQf47wK3H0SUR/T+3N4JEQXF3vV4CSuuo0rsg+nq2A=="
+      },
       "System.Collections.Immutable": {
         "type": "Transitive",
         "resolved": "8.0.0",
         "contentHash": "AurL6Y5BA1WotzlEvVaIDpqzpIPvYnnldxru8oXJU2yFxFUy3+pNXjXd1ymO+RA0rq0+590Q8gaz2l3Sr7fmqg=="
+      },
+      "System.Management": {
+        "type": "Transitive",
+        "resolved": "7.0.2",
+        "contentHash": "/qEUN91mP/MUQmJnM5y5BdT7ZoPuVrtxnFlbJ8a3kBJGhe2wCzBfnPFtK2wTtEEcf3DMGR9J00GZZfg6HRI6yA==",
+        "dependencies": {
+          "System.CodeDom": "7.0.0"
+        }
       },
       "System.Reflection.Metadata": {
         "type": "Transitive",
@@ -209,6 +266,13 @@
           "System.Text.Json": "[8.0.6, )"
         }
       },
+      "opengameagent.extensions": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Models": "[0.3.0-alpha.1, )"
+        }
+      },
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
@@ -218,8 +282,61 @@
       "opengameagent.models": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.1, )"
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )"
         }
+      },
+      "opengameagent.providers.anthropic": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providers.bedrock": {
+        "type": "Project",
+        "dependencies": {
+          "AWSSDK.BedrockRuntime": "[4.0.101, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providers.google": {
+        "type": "Project",
+        "dependencies": {
+          "Google.Apis.Auth": "[1.75.0, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providers.mistral": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providers.openai": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providers.openaicompatible": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "System.Text.Json": "[8.0.6, )"
+        }
+      },
+      "opengameagent.providertransport": {
+        "type": "Project"
       }
     }
   }

@@ -21,9 +21,15 @@ public sealed class GameProviderDescriptor
     {
         ProviderId = GameModelDescriptor.RequireId(providerId, nameof(providerId));
         DisplayName = displayName is null ? ProviderId : GameModelDescriptor.RequireId(displayName, nameof(displayName));
-        if (endpoint is not null && (!endpoint.IsAbsoluteUri || endpoint.UserInfo.Length > 0))
+        if (endpoint is not null
+            && (!endpoint.IsAbsoluteUri
+                || endpoint.UserInfo.Length > 0
+                || endpoint.Fragment.Length > 0
+                || endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
         {
-            throw new ArgumentException("A provider endpoint must be absolute and cannot contain user information.", nameof(endpoint));
+            throw new ArgumentException(
+                "A provider endpoint must be an absolute HTTP or HTTPS URL without embedded credentials or a fragment.",
+                nameof(endpoint));
         }
 
         Endpoint = endpoint;
@@ -102,6 +108,17 @@ public delegate IAsyncEnumerable<ModelStreamEvent> GameModelStream(
     GameProviderAuthResolution? authentication,
     CancellationToken cancellationToken);
 
+public delegate IAsyncEnumerable<ModelStreamEvent> GameModelDeferredFetch(
+    DeferredModelHandle handle,
+    TimeSpan wait,
+    GameProviderAuthResolution? authentication,
+    CancellationToken cancellationToken);
+
+public delegate ValueTask GameModelDeferredCancel(
+    DeferredModelHandle handle,
+    GameProviderAuthResolution? authentication,
+    CancellationToken cancellationToken);
+
 public sealed class GameModelProviderRegistration
 {
     public GameModelProviderRegistration(
@@ -112,6 +129,8 @@ public sealed class GameModelProviderRegistration
         GameModelRefresh? refreshModels = null,
         GameModelAvailabilityFilter? filterModels = null,
         GameModelStream? stream = null,
+        GameModelDeferredFetch? fetchDeferred = null,
+        GameModelDeferredCancel? cancelDeferred = null,
         string catalogVersion = "1")
     {
         Descriptor = descriptor ?? throw new ArgumentNullException(nameof(descriptor));
@@ -126,6 +145,16 @@ public sealed class GameModelProviderRegistration
         RefreshModels = refreshModels;
         FilterModels = filterModels;
         Stream = stream ?? ((request, _, cancellationToken) => provider.StreamAsync(request, cancellationToken));
+        FetchDeferred = fetchDeferred
+                        ?? (provider is IDeferredModelProvider deferred
+                            ? (handle, wait, _, cancellationToken) =>
+                                deferred.FetchDeferredAsync(handle, wait, cancellationToken)
+                            : null);
+        CancelDeferred = cancelDeferred
+                         ?? (provider is IDeferredModelProvider deferredCancel
+                             ? (handle, _, cancellationToken) =>
+                                 deferredCancel.CancelDeferredAsync(handle, cancellationToken)
+                             : null);
         CatalogVersion = GameModelDescriptor.RequireId(catalogVersion, nameof(catalogVersion));
     }
 
@@ -142,6 +171,10 @@ public sealed class GameModelProviderRegistration
     public GameModelAvailabilityFilter? FilterModels { get; }
 
     public GameModelStream Stream { get; }
+
+    public GameModelDeferredFetch? FetchDeferred { get; }
+
+    public GameModelDeferredCancel? CancelDeferred { get; }
 
     public string CatalogVersion { get; }
 
@@ -440,35 +473,278 @@ public sealed class GameModelCatalog
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var status = await entry.Registration.Authentication.CheckAsync(cancellationToken).ConfigureAwait(false)
+        var status = await CancellableOperation.WaitAsync(
+                entry.Registration.Authentication.CheckAsync(cancellationToken),
+                cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The provider authentication check returned null.");
         if (!status.Configured)
         {
             return Array.Empty<GameModelDescriptor>();
         }
 
-        var auth = await entry.Registration.Authentication.ResolveAsync(cancellationToken).ConfigureAwait(false);
+        var auth = await CancellableOperation.WaitAsync(
+            entry.Registration.Authentication.ResolveAsync(cancellationToken),
+            cancellationToken).ConfigureAwait(false);
         var models = entry.Models;
         if (entry.Registration.FilterModels is null)
         {
             return models;
         }
 
-        models = await entry.Registration.FilterModels(models, auth, cancellationToken).ConfigureAwait(false)
+        models = await CancellableOperation.WaitAsync(
+                entry.Registration.FilterModels(models, auth, cancellationToken),
+                cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The provider model filter returned null.");
         return GameModelProviderRegistration.ValidateModels(
             entry.Registration.Descriptor.ProviderId,
             models);
     }
 
-    internal IModelProvider CreateDispatchProvider(string providerId) =>
+    public IModelProvider CreateProvider(string providerId) =>
         new CatalogDispatchProvider(this, GameModelDescriptor.RequireId(providerId, nameof(providerId)));
+
+    public async ValueTask<GameProviderAuthStatus> CheckAuthenticationAsync(
+        string providerId,
+        CancellationToken cancellationToken = default)
+    {
+        var registration = RequireRegistration(providerId);
+        try
+        {
+            return await CancellableOperation.WaitAsync(
+                       registration.Authentication.CheckAsync(cancellationToken),
+                       cancellationToken).ConfigureAwait(false)
+                   ?? throw new InvalidOperationException(
+                       $"Provider '{registration.Descriptor.ProviderId}' returned no authentication status.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Authentication check failed for provider '{registration.Descriptor.ProviderId}'.",
+                exception);
+        }
+    }
+
+    public async ValueTask<GameProviderAuthResolution?> ResolveAuthenticationAsync(
+        string providerId,
+        CancellationToken cancellationToken = default)
+    {
+        var registration = RequireRegistration(providerId);
+        try
+        {
+            return await CancellableOperation.WaitAsync(
+                registration.Authentication.ResolveAsync(cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Authentication resolution failed for provider '{registration.Descriptor.ProviderId}'.",
+                exception);
+        }
+    }
+
+    public async ValueTask<GameCredential> LoginAsync(
+        string providerId,
+        string scheme,
+        GameAuthInteraction interaction,
+        CancellationToken cancellationToken = default)
+    {
+        var registration = RequireRegistration(providerId);
+        var requestedScheme = GameModelDescriptor.RequireId(scheme, nameof(scheme));
+        if (interaction is null)
+        {
+            throw new ArgumentNullException(nameof(interaction));
+        }
+
+        try
+        {
+            return await CancellableOperation.WaitAsync(
+                       registration.Authentication.LoginAsync(
+                           requestedScheme,
+                           interaction,
+                           cancellationToken),
+                       cancellationToken).ConfigureAwait(false)
+                   ?? throw new InvalidOperationException(
+                       $"Provider '{registration.Descriptor.ProviderId}' returned no login credential.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Authentication login failed for provider '{registration.Descriptor.ProviderId}'.",
+                exception);
+        }
+    }
+
+    public async ValueTask LogoutAsync(
+        string providerId,
+        CancellationToken cancellationToken = default)
+    {
+        var registration = RequireRegistration(providerId);
+        try
+        {
+            await CancellableOperation.WaitAsync(
+                registration.Authentication.LogoutAsync(cancellationToken),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Authentication logout failed for provider '{registration.Descriptor.ProviderId}'.",
+                exception);
+        }
+    }
+
+    public IAsyncEnumerable<ModelStreamEvent> FetchDeferredAsync(
+        DeferredModelHandle handle,
+        TimeSpan wait,
+        CancellationToken cancellationToken = default) =>
+        FetchDeferredCoreAsync(
+            handle ?? throw new ArgumentNullException(nameof(handle)),
+            wait,
+            cancellationToken);
+
+    public async ValueTask CancelDeferredAsync(
+        DeferredModelHandle handle,
+        CancellationToken cancellationToken = default)
+    {
+        if (handle is null)
+        {
+            throw new ArgumentNullException(nameof(handle));
+        }
+
+        var registration = RequireDeferredRegistration(handle, requireCancel: true);
+        var authentication = await ResolveConfiguredAuthenticationAsync(registration, cancellationToken)
+            .ConfigureAwait(false);
+        await CancellableOperation.WaitAsync(
+            registration.CancelDeferred!(handle, authentication, cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async IAsyncEnumerable<ModelStreamEvent> FetchDeferredCoreAsync(
+        DeferredModelHandle handle,
+        TimeSpan wait,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var registration = RequireDeferredRegistration(handle, requireCancel: false);
+        var authentication = await ResolveConfiguredAuthenticationAsync(registration, cancellationToken)
+            .ConfigureAwait(false);
+        await foreach (var streamEvent in registration.FetchDeferred!(
+                           handle,
+                           wait,
+                           authentication,
+                           cancellationToken).WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            yield return streamEvent
+                ?? throw new InvalidOperationException("A deferred model provider emitted a null stream event.");
+        }
+    }
+
+    private GameModelProviderRegistration RequireRegistration(string providerId)
+    {
+        var id = GameModelDescriptor.RequireId(providerId, nameof(providerId));
+        lock (_gate)
+        {
+            return _providers.TryGetValue(id, out var entry)
+                ? entry.Registration
+                : throw new KeyNotFoundException($"Provider '{id}' is not registered.");
+        }
+    }
+
+    private GameModelProviderRegistration RequireDeferredRegistration(
+        DeferredModelHandle handle,
+        bool requireCancel)
+    {
+        lock (_gate)
+        {
+            if (!_providers.TryGetValue(handle.Provider, out var entry))
+            {
+                throw new ModelProviderException(
+                    $"Provider '{handle.Provider}' is no longer registered.",
+                    isTransient: false);
+            }
+
+            var model = entry.CurrentModels.FirstOrDefault(candidate =>
+                string.Equals(candidate.ModelId, handle.Model, StringComparison.Ordinal));
+            if (model is null)
+            {
+                throw new ModelProviderException(
+                    $"Model '{handle.Provider}/{handle.Model}' is no longer registered.",
+                    isTransient: false);
+            }
+
+            if (!string.Equals(model.Api, handle.Api, StringComparison.Ordinal))
+            {
+                throw new ModelProviderException(
+                    $"Deferred handle API '{handle.Api}' does not match model API '{model.Api}'.",
+                    isTransient: false);
+            }
+
+            var supported = requireCancel
+                ? entry.Registration.CancelDeferred is not null
+                : entry.Registration.FetchDeferred is not null;
+            if (!supported)
+            {
+                throw new ModelProviderException(
+                    requireCancel
+                        ? $"Provider '{handle.Provider}' cannot cancel deferred responses for API '{handle.Api}'."
+                        : $"Provider '{handle.Provider}' does not support deferred responses for API '{handle.Api}'.",
+                    isTransient: false);
+            }
+
+            return entry.Registration;
+        }
+    }
+
+    private static async ValueTask<GameProviderAuthStatus> ResolveAuthenticationStatusAsync(
+        GameModelProviderRegistration registration,
+        CancellationToken cancellationToken) =>
+        await CancellableOperation.WaitAsync(
+                registration.Authentication.CheckAsync(cancellationToken),
+                cancellationToken).ConfigureAwait(false)
+            ?? throw new ModelProviderException(
+                $"Provider '{registration.Descriptor.ProviderId}' returned no authentication status.",
+                isTransient: false);
+
+    private static async ValueTask<GameProviderAuthResolution?> ResolveConfiguredAuthenticationAsync(
+        GameModelProviderRegistration registration,
+        CancellationToken cancellationToken)
+    {
+        var status = await ResolveAuthenticationStatusAsync(registration, cancellationToken).ConfigureAwait(false);
+        if (!status.Configured)
+        {
+            throw new ModelProviderException(
+                status.Error ?? $"Provider '{registration.Descriptor.ProviderId}' is not configured.",
+                isTransient: false);
+        }
+
+        return await CancellableOperation.WaitAsync(
+            registration.Authentication.ResolveAsync(cancellationToken),
+            cancellationToken).ConfigureAwait(false);
+    }
 
     private async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
         string providerId,
         ModelRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         GameModelProviderRegistration registration;
         lock (_gate)
         {
@@ -489,10 +765,7 @@ public sealed class GameModelCatalog
             registration = entry.Registration;
         }
 
-        var status = await registration.Authentication.CheckAsync(cancellationToken).ConfigureAwait(false)
-            ?? throw new ModelProviderException(
-                $"Provider '{providerId}' returned no authentication status.",
-                isTransient: false);
+        var status = await ResolveAuthenticationStatusAsync(registration, cancellationToken).ConfigureAwait(false);
         if (!status.Configured)
         {
             throw new ModelProviderException(
@@ -500,7 +773,9 @@ public sealed class GameModelCatalog
                 isTransient: false);
         }
 
-        var authentication = await registration.Authentication.ResolveAsync(cancellationToken).ConfigureAwait(false);
+        var authentication = await CancellableOperation.WaitAsync(
+            registration.Authentication.ResolveAsync(cancellationToken),
+            cancellationToken).ConfigureAwait(false);
         await foreach (var streamEvent in registration.Stream(
                            request,
                            authentication,
@@ -541,7 +816,9 @@ public sealed class GameModelCatalog
         {
             await snapshot.RefreshGate.WaitAsync(snapshot.RefreshToken).ConfigureAwait(false);
             refreshGateAcquired = true;
-            var stored = await _store.LoadAsync(id, snapshot.RefreshToken).ConfigureAwait(false);
+            var stored = await CancellableOperation.WaitAsync(
+                _store.LoadAsync(id, snapshot.RefreshToken),
+                snapshot.RefreshToken).ConfigureAwait(false);
             var currentModels = snapshot.Models;
             if (stored is not null
                 && string.Equals(
@@ -569,22 +846,28 @@ public sealed class GameModelCatalog
                 }
             }
 
-            var status = await snapshot.Registration.Authentication.CheckAsync(snapshot.RefreshToken).ConfigureAwait(false)
+            var status = await CancellableOperation.WaitAsync(
+                    snapshot.Registration.Authentication.CheckAsync(snapshot.RefreshToken),
+                    snapshot.RefreshToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The provider authentication check returned null.");
             if (!status.Configured)
             {
                 return new GameModelRefreshResult(id, GameModelRefreshStatus.SkippedUnconfigured, currentModels.Count);
             }
 
-            var authentication = await snapshot.Registration.Authentication.ResolveAsync(snapshot.RefreshToken).ConfigureAwait(false);
-            var refreshed = await snapshot.Registration.RefreshModels(
-                new GameModelRefreshContext(
-                    snapshot.Registration.Descriptor,
-                    currentModels,
-                    authentication,
-                    allowNetwork,
-                    force),
-                snapshot.RefreshToken).ConfigureAwait(false)
+            var authentication = await CancellableOperation.WaitAsync(
+                snapshot.Registration.Authentication.ResolveAsync(snapshot.RefreshToken),
+                snapshot.RefreshToken).ConfigureAwait(false);
+            var refreshed = await CancellableOperation.WaitAsync(
+                    snapshot.Registration.RefreshModels(
+                        new GameModelRefreshContext(
+                            snapshot.Registration.Descriptor,
+                            currentModels,
+                            authentication,
+                            allowNetwork,
+                            force),
+                        snapshot.RefreshToken),
+                    snapshot.RefreshToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The provider model refresh returned null.");
             var dynamicModels = GameModelProviderRegistration.ValidateModels(id, refreshed);
             lock (_gate)
@@ -601,13 +884,15 @@ public sealed class GameModelCatalog
                 }
             }
 
-            var save = await _store.SaveAsync(
-                new GameStoredModelCatalog(
-                    id,
-                    snapshot.Registration.CatalogVersion,
-                    dynamicModels,
-                    _clock()),
-                stored?.Revision ?? 0,
+            var save = await CancellableOperation.WaitAsync(
+                _store.SaveAsync(
+                    new GameStoredModelCatalog(
+                        id,
+                        snapshot.Registration.CatalogVersion,
+                        dynamicModels,
+                        _clock()),
+                    stored?.Revision ?? 0,
+                    snapshot.RefreshToken),
                 snapshot.RefreshToken).ConfigureAwait(false);
             if (save.Status == GameModelCatalogSaveStatus.Conflict)
             {
@@ -681,6 +966,7 @@ public sealed class GameModelCatalog
             ids = (providerIds ?? _providers.Keys.ToArray())
                 .Select(id => GameModelDescriptor.RequireId(id, nameof(providerIds)))
                 .Distinct(StringComparer.Ordinal)
+                .Where(id => _providers.ContainsKey(id))
                 .OrderBy(id => id, StringComparer.Ordinal)
                 .ToArray();
         }
@@ -734,6 +1020,8 @@ public sealed class GameModelCatalog
         string.Equals(left.ProviderId, right.ProviderId, StringComparison.Ordinal)
         && string.Equals(left.ModelId, right.ModelId, StringComparison.Ordinal)
         && string.Equals(left.DisplayName, right.DisplayName, StringComparison.Ordinal)
+        && string.Equals(left.Api, right.Api, StringComparison.Ordinal)
+        && Equals(left.BaseUrl, right.BaseUrl)
         && left.ContextWindowTokens == right.ContextWindowTokens
         && left.MaximumOutputTokens == right.MaximumOutputTokens
         && left.InputCapabilities == right.InputCapabilities
@@ -742,13 +1030,33 @@ public sealed class GameModelCatalog
         && left.ReasoningLevelValues.Count == right.ReasoningLevelValues.Count
         && left.ReasoningLevelValues.All(pair => right.ReasoningLevelValues.TryGetValue(pair.Key, out var value)
             && string.Equals(pair.Value, value, StringComparison.Ordinal))
-        && left.Cost.InputPerMillionTokens == right.Cost.InputPerMillionTokens
-        && left.Cost.OutputPerMillionTokens == right.Cost.OutputPerMillionTokens
-        && left.Cost.CacheReadPerMillionTokens == right.Cost.CacheReadPerMillionTokens
-        && left.Cost.CacheWritePerMillionTokens == right.Cost.CacheWritePerMillionTokens
-        && left.Metadata.Count == right.Metadata.Count
-        && left.Metadata.All(pair => right.Metadata.TryGetValue(pair.Key, out var value)
-            && string.Equals(pair.Value, value, StringComparison.Ordinal));
+        && Equivalent(left.Cost, right.Cost)
+        && Equivalent(left.Metadata, right.Metadata)
+        && string.Equals(left.SamplingParametersJson, right.SamplingParametersJson, StringComparison.Ordinal)
+        && Equivalent(left.Headers, right.Headers)
+        && string.Equals(left.CompatibilityJson, right.CompatibilityJson, StringComparison.Ordinal);
+
+    private static bool Equivalent(GameModelCost left, GameModelCost right) =>
+        left.InputPerMillionTokens == right.InputPerMillionTokens
+        && left.OutputPerMillionTokens == right.OutputPerMillionTokens
+        && left.CacheReadPerMillionTokens == right.CacheReadPerMillionTokens
+        && left.CacheWritePerMillionTokens == right.CacheWritePerMillionTokens
+        && left.Tiers.Count == right.Tiers.Count
+        && left.Tiers.Zip(right.Tiers, Equivalent).All(equivalent => equivalent);
+
+    private static bool Equivalent(GameModelCostTier left, GameModelCostTier right) =>
+        left.InputTokensAbove == right.InputTokensAbove
+        && left.InputPerMillionTokens == right.InputPerMillionTokens
+        && left.OutputPerMillionTokens == right.OutputPerMillionTokens
+        && left.CacheReadPerMillionTokens == right.CacheReadPerMillionTokens
+        && left.CacheWritePerMillionTokens == right.CacheWritePerMillionTokens;
+
+    private static bool Equivalent<TValue>(
+        IReadOnlyDictionary<string, TValue> left,
+        IReadOnlyDictionary<string, TValue> right) =>
+        left.Count == right.Count
+        && left.All(pair => right.TryGetValue(pair.Key, out var value)
+            && EqualityComparer<TValue>.Default.Equals(pair.Value, value));
 
     private sealed class CatalogDispatchProvider : IModelProvider
     {

@@ -16,5 +16,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Anthropic\OpenGameAgent.Providers.Anthropic.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
   </ItemGroup>
 </Project>

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
-using System.Net.Http;
 using System.Threading;
 
 namespace OpenGameAgent.Kernel;
@@ -550,7 +549,9 @@ public sealed class ModelStreamEvent
         string? delta,
         int contentIndex,
         string? toolCallId,
-        string? toolName)
+        string? toolName,
+        ToolCallContent? toolCall,
+        string? content)
     {
         Kind = kind;
         Partial = partial;
@@ -559,6 +560,8 @@ public sealed class ModelStreamEvent
         ContentIndex = contentIndex;
         ToolCallId = toolCallId;
         ToolName = toolName;
+        ToolCall = toolCall;
+        Content = content;
     }
 
     public ModelStreamEventKind Kind { get; }
@@ -575,6 +578,10 @@ public sealed class ModelStreamEvent
 
     public string? ToolName { get; }
 
+    public ToolCallContent? ToolCall { get; }
+
+    public string? Content { get; }
+
     public bool IsTerminal => Kind == ModelStreamEventKind.Completed || Kind == ModelStreamEventKind.Failed;
 
     public static ModelStreamEvent Update(
@@ -583,7 +590,9 @@ public sealed class ModelStreamEvent
         string? delta = null,
         int contentIndex = 0,
         string? toolCallId = null,
-        string? toolName = null)
+        string? toolName = null,
+        ToolCallContent? toolCall = null,
+        string? content = null)
     {
         if (kind == ModelStreamEventKind.Completed || kind == ModelStreamEventKind.Failed)
         {
@@ -618,6 +627,96 @@ public sealed class ModelStreamEvent
             throw new ArgumentException("A delta stream event requires delta content.", nameof(delta));
         }
 
+        if (kind == ModelStreamEventKind.ToolCallEnded)
+        {
+            if (toolCall is null)
+            {
+                throw new ArgumentException("A tool-call end event requires the completed tool call.", nameof(toolCall));
+            }
+
+            if (toolCallId is not null && !string.Equals(toolCallId, toolCall.Id, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("The tool-call ID must match the completed tool call.", nameof(toolCallId));
+            }
+
+            if (toolName is not null && !string.Equals(toolName, toolCall.Name, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("The tool name must match the completed tool call.", nameof(toolName));
+            }
+
+            toolCallId = toolCall.Id;
+            toolName = toolCall.Name;
+        }
+        else if (toolCall is not null)
+        {
+            throw new ArgumentException("Only a tool-call end event can carry a completed tool call.", nameof(toolCall));
+        }
+
+        if (kind is ModelStreamEventKind.TextEnded or ModelStreamEventKind.ReasoningEnded)
+        {
+            if (content is null)
+            {
+                throw new ArgumentException("A text or reasoning end event requires the completed content.", nameof(content));
+            }
+        }
+        else if (content is not null)
+        {
+            throw new ArgumentException("Only a text or reasoning end event can carry completed content.", nameof(content));
+        }
+
+        var expectedContentKind = kind switch
+        {
+            ModelStreamEventKind.TextStarted or ModelStreamEventKind.TextDelta or ModelStreamEventKind.TextEnded =>
+                AgentContentKind.Text,
+            ModelStreamEventKind.ReasoningStarted or ModelStreamEventKind.ReasoningDelta or ModelStreamEventKind.ReasoningEnded =>
+                AgentContentKind.Reasoning,
+            ModelStreamEventKind.ToolCallStarted or ModelStreamEventKind.ToolCallDelta or ModelStreamEventKind.ToolCallEnded =>
+                AgentContentKind.ToolCall,
+            _ => (AgentContentKind?)null,
+        };
+        if (expectedContentKind is { } expected)
+        {
+            if (contentIndex >= partial.Content.Count || partial.Content[contentIndex].Kind != expected)
+            {
+                throw new ArgumentException(
+                    "A content stream event must reference the matching block in the partial response.",
+                    nameof(contentIndex));
+            }
+
+            if (partial.Content[contentIndex] is ToolCallContent partialCall)
+            {
+                if (toolCallId is not null && !string.Equals(toolCallId, partialCall.Id, StringComparison.Ordinal))
+                {
+                    throw new ArgumentException("The tool-call ID must match the partial response.", nameof(toolCallId));
+                }
+
+                if (toolName is not null && !string.Equals(toolName, partialCall.Name, StringComparison.Ordinal))
+                {
+                    throw new ArgumentException("The tool name must match the partial response.", nameof(toolName));
+                }
+
+                toolCallId ??= partialCall.Id;
+                toolName ??= partialCall.Name;
+
+                if (toolCall is not null && !EquivalentToolCall(toolCall, partialCall))
+                {
+                    throw new ArgumentException(
+                        "The completed tool call must match the partial response.",
+                        nameof(toolCall));
+                }
+            }
+            else if (partial.Content[contentIndex] is TextContent text && content is not null && content != text.Text)
+            {
+                throw new ArgumentException("The completed text must match the partial response.", nameof(content));
+            }
+            else if (partial.Content[contentIndex] is ReasoningContent reasoning
+                     && content is not null
+                     && content != reasoning.Text)
+            {
+                throw new ArgumentException("The completed reasoning must match the partial response.", nameof(content));
+            }
+        }
+
         return new ModelStreamEvent(
             kind,
             partial,
@@ -625,8 +724,17 @@ public sealed class ModelStreamEvent
             delta,
             contentIndex,
             toolCallId,
-            toolName);
+            toolName,
+            toolCall,
+            content);
     }
+
+    private static bool EquivalentToolCall(ToolCallContent left, ToolCallContent right) =>
+        string.Equals(left.Id, right.Id, StringComparison.Ordinal)
+        && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
+        && string.Equals(left.ArgumentsJson, right.ArgumentsJson, StringComparison.Ordinal)
+        && string.Equals(left.ThoughtSignature, right.ThoughtSignature, StringComparison.Ordinal)
+        && string.Equals(left.Namespace, right.Namespace, StringComparison.Ordinal);
 
     public static ModelStreamEvent Terminal(ModelResponse response)
     {
@@ -643,7 +751,7 @@ public sealed class ModelStreamEvent
         var kind = response.StopReason == ModelStopReason.Error || response.StopReason == ModelStopReason.Aborted
             ? ModelStreamEventKind.Failed
             : ModelStreamEventKind.Completed;
-        return new ModelStreamEvent(kind, null, response, null, 0, null, null);
+        return new ModelStreamEvent(kind, null, response, null, 0, null, null, null, null);
     }
 }
 
@@ -673,7 +781,7 @@ public interface IModelProviderCapabilities
     bool SupportsDeferredResponses { get; }
 }
 
-public sealed class ModelProviderException : HttpRequestException
+public sealed class ModelProviderException : Exception
 {
     public ModelProviderException(
         string message,
@@ -698,14 +806,33 @@ public sealed class ModelProviderException : HttpRequestException
         string message,
         IEnumerable<ModelDiagnostic>? diagnostics,
         Exception? innerException = null)
+        : this(message, diagnostics, false, null, null, innerException)
+    {
+    }
+
+    public ModelProviderException(
+        string message,
+        IEnumerable<ModelDiagnostic>? diagnostics,
+        bool isTransient,
+        TimeSpan? retryAfter = null,
+        int? statusCode = null,
+        Exception? innerException = null)
         : base(string.IsNullOrWhiteSpace(message) ? "The model provider failed." : message, innerException)
     {
+        if (retryAfter is { } delay && delay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(retryAfter));
+        }
+
         var copied = diagnostics?.ToArray() ?? Array.Empty<ModelDiagnostic>();
         if (copied.Any(diagnostic => diagnostic is null))
         {
             throw new ArgumentException("Provider failure diagnostics cannot contain null values.", nameof(diagnostics));
         }
 
+        IsTransient = isTransient;
+        RetryAfter = retryAfter;
+        StatusCode = statusCode;
         Diagnostics = Array.AsReadOnly(copied);
     }
 

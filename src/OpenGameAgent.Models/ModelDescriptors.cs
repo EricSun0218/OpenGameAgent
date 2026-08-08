@@ -163,7 +163,7 @@ public sealed class GameModelDescriptor
         string api = "custom",
         Uri? baseUrl = null,
         string? samplingParametersJson = null,
-        IReadOnlyDictionary<string, string>? headers = null,
+        IReadOnlyDictionary<string, string?>? headers = null,
         string? compatibilityJson = null)
     {
         ProviderId = RequireId(providerId, nameof(providerId));
@@ -173,9 +173,10 @@ public sealed class GameModelDescriptor
         if (baseUrl is not null
             && (!baseUrl.IsAbsoluteUri
                 || baseUrl.UserInfo.Length > 0
+                || baseUrl.Fragment.Length > 0
                 || (baseUrl.Scheme != Uri.UriSchemeHttp && baseUrl.Scheme != Uri.UriSchemeHttps)))
         {
-            throw new ArgumentException("A model base URL must be an absolute HTTP or HTTPS URL without embedded credentials.", nameof(baseUrl));
+            throw new ArgumentException("A model base URL must be an absolute HTTP or HTTPS URL without embedded credentials or a fragment.", nameof(baseUrl));
         }
 
         BaseUrl = baseUrl;
@@ -204,10 +205,6 @@ public sealed class GameModelDescriptor
         {
             levels = new[] { GameReasoningLevel.Off };
         }
-        else if (!levels.Contains(GameReasoningLevel.Off))
-        {
-            levels = new[] { GameReasoningLevel.Off }.Concat(levels).ToArray();
-        }
 
         if (levels.Any(level => level != GameReasoningLevel.Off)
             && !outputCapabilities.HasFlag(GameModelOutputCapabilities.Reasoning))
@@ -224,12 +221,11 @@ public sealed class GameModelDescriptor
         foreach (var pair in reasoningLevelValues ?? new Dictionary<GameReasoningLevel, string>())
         {
             if (!Enum.IsDefined(typeof(GameReasoningLevel), pair.Key)
-                || pair.Key == GameReasoningLevel.Off
                 || !levels.Contains(pair.Key)
                 || string.IsNullOrWhiteSpace(pair.Value)
                 || pair.Value.Length > 128)
             {
-                throw new ArgumentException("A reasoning-level value must target a supported non-off level and contain at most 128 characters.", nameof(reasoningLevelValues));
+                throw new ArgumentException("A reasoning-level value must target a supported level and contain at most 128 characters.", nameof(reasoningLevelValues));
             }
 
             values.Add(pair.Key, pair.Value);
@@ -241,7 +237,7 @@ public sealed class GameModelDescriptor
         SamplingParametersJson = samplingParametersJson is null
             ? null
             : RequireObjectJson(samplingParametersJson, nameof(samplingParametersJson));
-        Headers = CopyMetadata(headers);
+        Headers = CopyHeaders(headers);
         CompatibilityJson = compatibilityJson is null
             ? null
             : RequireObjectJson(compatibilityJson, nameof(compatibilityJson));
@@ -275,7 +271,7 @@ public sealed class GameModelDescriptor
 
     public string? SamplingParametersJson { get; }
 
-    public IReadOnlyDictionary<string, string> Headers { get; }
+    public IReadOnlyDictionary<string, string?> Headers { get; }
 
     public string? CompatibilityJson { get; }
 
@@ -308,7 +304,7 @@ public sealed class GameModelDescriptor
             }
         }
 
-        return GameReasoningLevel.Off;
+        throw new InvalidOperationException("The model does not expose any reasoning level.");
     }
 
     public bool Supports(
@@ -328,11 +324,6 @@ public sealed class GameModelDescriptor
             throw new ArgumentOutOfRangeException(nameof(level));
         }
 
-        if (level == GameReasoningLevel.Off)
-        {
-            return null;
-        }
-
         if (!ReasoningLevels.Contains(level))
         {
             throw new InvalidOperationException($"Reasoning level '{level}' is not supported by this model.");
@@ -345,6 +336,7 @@ public sealed class GameModelDescriptor
 
         return level switch
         {
+            GameReasoningLevel.Off => null,
             GameReasoningLevel.Minimal => "minimal",
             GameReasoningLevel.Low => "low",
             GameReasoningLevel.Medium => "medium",
@@ -383,6 +375,52 @@ public sealed class GameModelDescriptor
         }
 
         return new ReadOnlyDictionary<string, string>(copy);
+    }
+
+    private static IReadOnlyDictionary<string, string?> CopyHeaders(
+        IReadOnlyDictionary<string, string?>? headers)
+    {
+        if (headers is { Count: > 64 })
+        {
+            throw new ArgumentException("Model headers cannot contain more than 64 entries.", nameof(headers));
+        }
+
+        var copy = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in headers ?? new Dictionary<string, string?>())
+        {
+            if (!IsHeaderName(pair.Key)
+                || pair.Value is { Length: > 16_384 }
+                || pair.Value?.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0
+                || !copy.TryAdd(pair.Key, pair.Value))
+            {
+                throw new ArgumentException(
+                    "Model headers contain an invalid or case-insensitively duplicate entry.",
+                    nameof(headers));
+            }
+        }
+
+        return new ReadOnlyDictionary<string, string?>(copy);
+    }
+
+    private static bool IsHeaderName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 256)
+        {
+            return false;
+        }
+
+        foreach (var character in value)
+        {
+            if (!(character is >= 'a' and <= 'z'
+                  || character is >= 'A' and <= 'Z'
+                  || character is >= '0' and <= '9'
+                  || character is '!' or '#' or '$' or '%' or '&' or '\'' or '*' or '+' or '-' or '.' or '^' or '_' or '`' or '|' or '~'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string RequireObjectJson(string value, string parameterName)

@@ -76,20 +76,29 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 
 | Area | Capability |
 | --- | --- |
-| Agent kernel | Streaming typed messages, tool loop, progress events, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
+| Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
 | Tool execution | Bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
 | World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes |
-| Models and auth | Capability/context/reasoning/cost catalog, dynamic model refresh, static/environment/stored/local auth, developer-hosted short-lived credential gateway |
+| Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
-| Providers | Streaming OpenAI-compatible text/tool API; generic HTTP image/audio/video API; retry and fallback decorators |
-| Persistence | Crash-tolerant, cross-process-coordinated local files for sessions, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, and recursive hot-reloaded skills |
+| Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, remote gateway, and message-gateway transports; retry/fallback decorators |
+| Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, and a dedicated OpenRouter image adapter with progressive previews |
+| Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service and engine client |
 | Engines | Godot 4.7 .NET and Unity 6 packages, both exercised in real Windows editors |
 
 Run inputs, model content, tool catalogs, loops, queues, progress, and concurrency are bounded by explicit limits. Context admission runs before every model request, model and tool calls have deadlines, and large tool results can be retained as artifacts instead of repeatedly filling the prompt. Game-owned stores and rankers can replace the included in-memory or local-file implementations.
+
+### Model access without hand-wiring every provider
+
+`OpenGameAgent.Models.BuiltIn` turns the bundled model directory into an executable runtime. It currently dispatches nine wire APIs across 27 provider definitions and hundreds of text/tool-capable models, applying provider-specific request formats, reasoning settings, compatibility flags, cost metadata, authentication, cancellation, and bounded response handling. The lower provider packages remain independently usable when a game wants an explicit model and endpoint instead of a directory.
+
+`OpenGameAgent.Models.Auth.BuiltIn` adds opt-in browser or device authorization flows for supported subscription providers. Public client registrations are never embedded in the framework: flows that require a client ID remain disabled until the game developer supplies one. `OpenGameAgent.ProviderTransport` exposes only allowlisted, bounded response metadata to observers and never passes credentials or arbitrary response headers to tracing code.
+
+Image, audio, and video generation use a separate model registry because generation jobs, previews, polling, and outputs are not chat completions. The framework ships the neutral registry, a generic HTTP job adapter, and a dedicated image provider; games can register local generators or additional APIs without changing the agent kernel.
 
 ## Minimal kernel
 

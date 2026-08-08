@@ -5,10 +5,10 @@ The fastest path is to run the buildable console example, then replace its conte
 ## Requirements
 
 - .NET SDK 8.0
-- an OpenAI-compatible chat-completions endpoint with streaming tool calls
+- for the console example, an OpenAI-compatible chat-completions endpoint with streaming tool calls
 - a model that supports the behavior your game exposes
 
-No model is installed by this repository. The endpoint may be a cloud service or a local server.
+No model is installed by this repository. The endpoint may be a cloud service or a local server. Native provider packages and the bundled multi-provider directory are covered later in this guide.
 
 ## Run the example
 
@@ -172,7 +172,24 @@ Use `ArtifactExtension` when tools can return large text or JSON. Results above 
 
 `OpenGameAgent.Models` describes input/output capabilities, context and output limits, reasoning levels, availability, and cost separately from the core provider interface. A `GameModelCatalog` can combine static and dynamically refreshed local or remote providers and resolve a compatible model for a run.
 
+Install `OpenGameAgent.Models.BuiltIn` when the game should use the bundled provider/model directory instead of constructing one low-level adapter itself. Configure a credential first; the example below reads `OPENAI_API_KEY` from the environment by default:
+
+```csharp
+using OpenGameAgent.Models.BuiltIn;
+
+var modelRuntime = new BuiltInGameModelRuntime(
+    new BuiltInGameModelRuntimeOptions(httpClient));
+var available = await modelRuntime.Catalog.GetAvailableModelsAsync("openai");
+var selected = available.First();
+var provider = modelRuntime.CreateProvider("openai");
+var agent = new Agent(new AgentOptions(provider, selected.ModelId));
+```
+
+Availability checks use the configured authentication chain, so a provider with no usable credentials is not presented as ready. A game may select by required input/output capability and reasoning level rather than taking the first result. Direct provider packages remain appropriate when a title intentionally supports only one endpoint.
+
 Authentication is replaceable: static credentials, environment resolution, game-owned credential stores, or local/no-auth providers can share the same catalog. If the developer pays for inference, use `DeveloperGatewayProvider` to obtain short-lived scoped access from the developer's authenticated gateway. Never ship a permanent upstream provider key in a client build.
+
+`OpenGameAgent.Models.Auth.BuiltIn` registers optional browser and device flows against the same credential store. Client IDs are developer configuration, not framework defaults; a flow that requires one stays disabled until it is explicitly supplied. Use an encrypted platform credential store in a shipped product—the included in-memory store is for composition and tests, not durable secret protection.
 
 ## Steer or abort an active actor
 

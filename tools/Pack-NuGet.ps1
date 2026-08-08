@@ -7,31 +7,23 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'Release.Common.ps1')
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $outputPath = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $OutputDirectory))
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 
-if (-not [string]::IsNullOrWhiteSpace($PackageVersion) -and
-    $PackageVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
-    throw 'PackageVersion must be valid SemVer.'
+if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
+    $null = Get-ReleaseVersionInfo -Version $PackageVersion
 }
 
-$projects = @(
-    'src/OpenGameAgent.Kernel/OpenGameAgent.Kernel.csproj',
-    'src/OpenGameAgent/OpenGameAgent.csproj',
-    'src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj',
-    'src/OpenGameAgent.Providers.OpenAICompatible/OpenGameAgent.Providers.OpenAICompatible.csproj',
-    'src/OpenGameAgent.Providers.MediaHttp/OpenGameAgent.Providers.MediaHttp.csproj',
-    'src/OpenGameAgent.Client/OpenGameAgent.Client.csproj',
-    'src/OpenGameAgent.Extensions/OpenGameAgent.Extensions.csproj',
-    'src/OpenGameAgent.Models/OpenGameAgent.Models.csproj',
-    'src/OpenGameAgent.Connectors.Mcp/OpenGameAgent.Connectors.Mcp.csproj'
-)
+$packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
+Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
 
-foreach ($project in $projects) {
+foreach ($package in $packages) {
     $arguments = @(
         'pack',
-        (Join-Path $repositoryRoot $project),
+        $package.FullProjectPath,
         '-c', $Configuration,
         '--no-build',
         '--no-restore',
@@ -44,7 +36,7 @@ foreach ($project in $projects) {
 
     & dotnet @arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Packing failed for '$project'."
+        throw "Packing failed for '$($package.project)'."
     }
 }
 

@@ -15,6 +15,7 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\src\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
     <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAI\OpenGameAgent.Providers.OpenAI.csproj" />
   </ItemGroup>
 </Project>

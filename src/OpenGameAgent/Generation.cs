@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
@@ -60,7 +61,11 @@ public sealed class GameMediaGenerationRequest
 
 public sealed class GameMediaGenerationProgress
 {
-    public GameMediaGenerationProgress(string stage, double? fraction = null, string? detailsJson = null)
+    public GameMediaGenerationProgress(
+        string stage,
+        double? fraction = null,
+        string? detailsJson = null,
+        ResourceContent? preview = null)
     {
         if (fraction is < 0 or > 1 || double.IsNaN(fraction ?? 0) || double.IsInfinity(fraction ?? 0))
         {
@@ -70,6 +75,7 @@ public sealed class GameMediaGenerationProgress
         Stage = GameJson.RequireId(stage, nameof(stage));
         Fraction = fraction;
         DetailsJson = detailsJson is null ? null : GameJson.RequireValid(detailsJson, nameof(detailsJson));
+        Preview = preview;
     }
 
     public string Stage { get; }
@@ -77,6 +83,8 @@ public sealed class GameMediaGenerationProgress
     public double? Fraction { get; }
 
     public string? DetailsJson { get; }
+
+    public ResourceContent? Preview { get; }
 }
 
 public sealed class GameMediaGenerationResult
@@ -169,12 +177,20 @@ public static class GameMediaGenerationTool
                         }
 
                         await execution.ReportProgressAsync(
-                            new ToolProgress(progress.Stage, progress.Fraction, progress.DetailsJson),
+                            new ToolProgress(
+                                progress.Stage,
+                                progress.Fraction,
+                                progress.DetailsJson,
+                                progress.Preview is null
+                                    ? null
+                                    : new[] { ToAgentContent(progress.Preview, request.Kind) }),
                             token).ConfigureAwait(false);
                     },
                     cancellationToken).ConfigureAwait(false)
                     ?? throw new InvalidOperationException("The media generator returned null.");
-                var content = result.Outputs.Cast<AgentContent>().ToList();
+                var content = result.Outputs
+                    .Select(output => ToAgentContent(output, request.Kind))
+                    .ToList();
                 content.Add(new JsonContent(JsonSerializer.Serialize(new
                 {
                     requestId = request.RequestId,
@@ -186,5 +202,60 @@ public static class GameMediaGenerationTool
             ToolRisk.NonIdempotentWrite,
             ToolExecutionMode.SafeParallel,
             conflictKey: _ => input.ActorId + ":media");
+    }
+
+    private static AgentContent ToAgentContent(ResourceContent resource, GameMediaKind kind)
+    {
+        if (resource is null)
+        {
+            throw new ArgumentNullException(nameof(resource));
+        }
+
+        var expectedPrefix = kind switch
+        {
+            GameMediaKind.Image => "image/",
+            GameMediaKind.Audio => "audio/",
+            GameMediaKind.Video => "video/",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+        if (!resource.MediaType.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The media generator returned content of the wrong media kind.");
+        }
+
+        var prefix = "data:" + resource.MediaType + ";base64,";
+        if (!resource.Uri.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return resource;
+        }
+
+        var data = resource.Uri.Substring(prefix.Length);
+        if (data.Length == 0 || data.Any(char.IsWhiteSpace))
+        {
+            throw new InvalidDataException("The media generator returned invalid inline base64 content.");
+        }
+
+        var maximumBytes = checked((data.Length / 4 + 1) * 3);
+        var rented = ArrayPool<byte>.Shared.Rent(maximumBytes);
+        try
+        {
+            if (!Convert.TryFromBase64String(data, rented, out _))
+            {
+                throw new InvalidDataException("The media generator returned invalid inline base64 content.");
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+
+        var mediaKind = kind switch
+        {
+            GameMediaKind.Image => AgentMediaKind.Image,
+            GameMediaKind.Audio => AgentMediaKind.Audio,
+            GameMediaKind.Video => AgentMediaKind.Video,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+        return new BinaryContent(mediaKind, data, resource.MediaType, resource.Name);
     }
 }

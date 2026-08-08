@@ -22,6 +22,7 @@ internal sealed class ResponsesStreamState
     private ModelStopReason _stopReason = ModelStopReason.Pending;
     private string? _errorMessage;
     private ModelUsage _usage = new();
+    private readonly List<ModelDiagnostic> _diagnostics = new();
 
     public ResponsesStreamState(
         string requestModel,
@@ -118,6 +119,16 @@ internal sealed class ResponsesStreamState
 
     public ModelResponse Partial() => BuildResponse(ModelStopReason.Pending, null);
 
+    public void AddDiagnostic(ModelDiagnostic diagnostic)
+    {
+        if (diagnostic is null)
+        {
+            throw new ArgumentNullException(nameof(diagnostic));
+        }
+
+        _diagnostics.Add(diagnostic);
+    }
+
     public bool IsTerminal => _terminal;
 
     public ModelResponse Complete()
@@ -150,30 +161,7 @@ internal sealed class ResponsesStreamState
                     break;
                 case SlotKind.FunctionTool:
                 case SlotKind.CustomTool:
-                    if (!slot.Ended && reason == ModelStopReason.Pending)
-                    {
-                        break;
-                    }
-
-                    var arguments = slot.Buffer.Length == 0 ? "{}" : slot.Buffer.ToString();
-                    if (!IsJsonObject(arguments))
-                    {
-                        if (reason == ModelStopReason.Length)
-                        {
-                            arguments = "{}";
-                        }
-                        else
-                        {
-                            throw new InvalidDataException("A completed Responses tool call did not contain a JSON object.");
-                        }
-                    }
-
-                    content.Add(new ToolCallContent(
-                        slot.CallId + "|" + slot.ItemId,
-                        slot.Name!,
-                        arguments,
-                        slot.ThoughtSignature,
-                        slot.Namespace));
+                    content.Add(CreateToolCall(slot, reason));
                     break;
             }
         }
@@ -188,7 +176,8 @@ internal sealed class ResponsesStreamState
             _responseModel ?? _requestModel,
             _responseId,
             _rawStopReason,
-            endTurn: _endTurn ?? (_slots.Values.Any(slot => slot.Phase == "final_answer") ? true : null));
+            endTurn: _endTurn ?? (_slots.Values.Any(slot => slot.Phase == "final_answer") ? true : null),
+            diagnostics: _diagnostics);
     }
 
     private void CreateSlot(int outputIndex, JsonElement item, ICollection<ModelStreamEvent> updates)
@@ -234,7 +223,7 @@ internal sealed class ResponsesStreamState
             kind,
             Partial(),
             contentIndex: ContentIndex(outputIndex),
-            toolCallId: slot.CallId,
+            toolCallId: slot.Kind is SlotKind.FunctionTool or SlotKind.CustomTool ? ToolCallId(slot) : null,
             toolName: slot.Name));
     }
 
@@ -317,13 +306,43 @@ internal sealed class ResponsesStreamState
             SlotKind.Text => ModelStreamEventKind.TextEnded,
             _ => ModelStreamEventKind.ToolCallEnded,
         };
+        var contentIndex = ContentIndex(outputIndex);
+        var partial = Partial();
+        var toolCall = kind == ModelStreamEventKind.ToolCallEnded
+            ? CreateToolCall(slot, ModelStopReason.Pending)
+            : null;
         updates.Add(ModelStreamEvent.Update(
             kind,
-            Partial(),
-            contentIndex: ContentIndex(outputIndex),
-            toolCallId: slot.CallId,
-            toolName: slot.Name));
+            partial,
+            contentIndex: contentIndex,
+            toolCall: toolCall,
+            content: kind is ModelStreamEventKind.TextEnded or ModelStreamEventKind.ReasoningEnded
+                ? slot.Buffer.ToString()
+                : null));
     }
+
+    private static ToolCallContent CreateToolCall(OutputSlot slot, ModelStopReason reason)
+    {
+        var arguments = slot.Buffer.Length == 0 ? "{}" : slot.Buffer.ToString();
+        if (reason is ModelStopReason.Pending or ModelStopReason.Length)
+        {
+            arguments = StreamingJson.ParseObject(arguments);
+        }
+
+        if (!IsJsonObject(arguments))
+        {
+            throw new InvalidDataException("A completed Responses tool call did not contain a JSON object.");
+        }
+
+        return new ToolCallContent(
+            ToolCallId(slot),
+            slot.Name!,
+            arguments,
+            slot.ThoughtSignature,
+            slot.Namespace);
+    }
+
+    private static string ToolCallId(OutputSlot slot) => slot.CallId + "|" + slot.ItemId;
 
     private void ApplyTextDelta(
         JsonElement root,
@@ -360,7 +379,7 @@ internal sealed class ResponsesStreamState
             Partial(),
             delta,
             ContentIndex(outputIndex),
-            slot.CallId,
+            ToolCallId(slot),
             slot.Name));
     }
 
@@ -384,7 +403,7 @@ internal sealed class ResponsesStreamState
                 Partial(),
                 delta,
                 ContentIndex(outputIndex),
-                slot.CallId,
+                ToolCallId(slot),
                 slot.Name));
         }
     }
@@ -452,7 +471,7 @@ internal sealed class ResponsesStreamState
                 Partial(),
                 jsonDelta,
                 ContentIndex(slot.OutputIndex),
-                slot.CallId,
+                ToolCallId(slot),
                 slot.Name));
         }
     }
