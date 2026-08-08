@@ -1086,6 +1086,26 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task StructuredProviderFailurePreservesDiagnostics()
+    {
+        var diagnostic = new ModelDiagnostic(
+            "provider_failure",
+            "Structured provider metadata is available.",
+            ModelDiagnosticSeverity.Error,
+            "{\"requestId\":\"request-1\"}");
+        var provider = new ScriptedProvider((_, _, _) =>
+            throw new ModelProviderException("offline", new[] { diagnostic }));
+        var agent = new Agent(new AgentOptions(provider, "test"));
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.ProviderError, result.Status);
+        var failure = agent.State.Messages[^1];
+        Assert.Equal("provider_failure", Assert.Single(failure.Diagnostics).Code);
+        Assert.Equal("{\"requestId\":\"request-1\"}", failure.Diagnostics[0].DataJson);
+    }
+
+    [Fact]
     public async Task SubscriberFailureDoesNotHideThePrimaryRunFailure()
     {
         var provider = new ScriptedProvider((_, _, _) => throw new InvalidOperationException("provider failed"));

@@ -35,6 +35,8 @@ public sealed class AgentLimits
 
     public int MaxResourceUriCharacters { get; set; } = 16_384;
 
+    public int MaxBinaryDataCharactersPerPart { get; set; } = 16_000_000;
+
     public int MaxToolCallsPerTurn { get; set; } = 32;
 
     public int MaxTools { get; set; } = 256;
@@ -52,6 +54,10 @@ public sealed class AgentLimits
     public int MaxMetadataKeyCharacters { get; set; } = 256;
 
     public int MaxMetadataValueCharacters { get; set; } = 16_384;
+
+    public int MaxDiagnosticsPerMessage { get; set; } = 64;
+
+    public int MaxAddedToolNamesPerResult { get; set; } = 256;
 
     public int MaxQueuedMessages { get; set; } = 64;
 
@@ -84,6 +90,7 @@ public sealed class AgentLimits
         RequireRange(MaxTextCharactersPerPart, 1, 100_000_000, nameof(MaxTextCharactersPerPart));
         RequireRange(MaxJsonCharactersPerPart, 1, 100_000_000, nameof(MaxJsonCharactersPerPart));
         RequireRange(MaxResourceUriCharacters, 1, 1_000_000, nameof(MaxResourceUriCharacters));
+        RequireRange(MaxBinaryDataCharactersPerPart, 1, 100_000_000, nameof(MaxBinaryDataCharactersPerPart));
         RequireRange(MaxToolCallsPerTurn, 1, 10_000, nameof(MaxToolCallsPerTurn));
         RequireRange(MaxTools, 0, 100_000, nameof(MaxTools));
         RequireRange(MaxToolNameCharacters, 1, 4096, nameof(MaxToolNameCharacters));
@@ -93,6 +100,8 @@ public sealed class AgentLimits
         RequireRange(MaxMetadataEntriesPerMessage, 0, 100_000, nameof(MaxMetadataEntriesPerMessage));
         RequireRange(MaxMetadataKeyCharacters, 1, 100_000, nameof(MaxMetadataKeyCharacters));
         RequireRange(MaxMetadataValueCharacters, 0, 100_000_000, nameof(MaxMetadataValueCharacters));
+        RequireRange(MaxDiagnosticsPerMessage, 0, 10_000, nameof(MaxDiagnosticsPerMessage));
+        RequireRange(MaxAddedToolNamesPerResult, 0, 100_000, nameof(MaxAddedToolNamesPerResult));
         RequireRange(MaxQueuedMessages, 1, 100_000, nameof(MaxQueuedMessages));
         RequireRange(MaxConcurrentTools, 1, 1024, nameof(MaxConcurrentTools));
         RequireRange(ToolTimeoutMilliseconds, 1, 86_400_000, nameof(ToolTimeoutMilliseconds));

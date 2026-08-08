@@ -28,7 +28,16 @@ public sealed class AgentMessage
         string? model = null,
         ModelStopReason? stopReason = null,
         ModelUsage? usage = null,
-        string? errorMessage = null)
+        string? errorMessage = null,
+        string? provider = null,
+        string? api = null,
+        string? responseModel = null,
+        string? responseId = null,
+        string? rawStopReason = null,
+        bool? endTurn = null,
+        IEnumerable<ModelDiagnostic>? diagnostics = null,
+        DeferredModelHandle? deferred = null,
+        IEnumerable<string>? addedToolNames = null)
     {
         if (!Enum.IsDefined(typeof(AgentRole), role))
         {
@@ -55,12 +64,28 @@ public sealed class AgentMessage
             throw new ArgumentException("A tool result message requires a tool call ID and tool name.");
         }
 
-        if (role != AgentRole.Tool && (toolCallId is not null || toolName is not null || isError || detailsJson is not null))
+        if (role != AgentRole.Tool
+            && (toolCallId is not null
+                || toolName is not null
+                || isError
+                || detailsJson is not null
+                || addedToolNames is not null))
         {
             throw new ArgumentException("Only a tool result message can carry tool-result fields.");
         }
 
-        if (role != AgentRole.Assistant && (model is not null || stopReason is not null || errorMessage is not null))
+        if (role != AgentRole.Assistant
+            && (model is not null
+                || stopReason is not null
+                || errorMessage is not null
+                || provider is not null
+                || api is not null
+                || responseModel is not null
+                || responseId is not null
+                || rawStopReason is not null
+                || endTurn is not null
+                || diagnostics is not null
+                || deferred is not null))
         {
             throw new ArgumentException("Only an assistant message can carry model response fields.");
         }
@@ -82,6 +107,16 @@ public sealed class AgentMessage
         if (role is not AgentRole.Assistant and not AgentRole.Tool && usage is not null)
         {
             throw new ArgumentException("Only an assistant or tool result message can carry usage.", nameof(usage));
+        }
+
+        if (role == AgentRole.Assistant && stopReason == ModelStopReason.Deferred && deferred is null)
+        {
+            throw new ArgumentException("A deferred assistant message requires a deferred handle.", nameof(deferred));
+        }
+
+        if (role == AgentRole.Assistant && stopReason != ModelStopReason.Deferred && deferred is not null)
+        {
+            throw new ArgumentException("Only a deferred assistant message can carry a deferred handle.", nameof(deferred));
         }
 
         var copiedContent = content?.ToArray() ?? throw new ArgumentNullException(nameof(content));
@@ -115,10 +150,32 @@ public sealed class AgentMessage
         }
 
         Metadata = new ReadOnlyDictionary<string, string>(copiedMetadata);
+        var copiedDiagnostics = diagnostics?.ToArray() ?? Array.Empty<ModelDiagnostic>();
+        if (copiedDiagnostics.Any(diagnostic => diagnostic is null))
+        {
+            throw new ArgumentException("Message diagnostics cannot contain null values.", nameof(diagnostics));
+        }
+
+        var copiedAddedTools = addedToolNames?.ToArray() ?? Array.Empty<string>();
+        if (copiedAddedTools.Any(string.IsNullOrWhiteSpace)
+            || copiedAddedTools.Distinct(StringComparer.Ordinal).Count() != copiedAddedTools.Length)
+        {
+            throw new ArgumentException("Added tool names must be non-empty and unique.", nameof(addedToolNames));
+        }
+
         Model = model;
         StopReason = stopReason;
         Usage = usage;
         ErrorMessage = errorMessage;
+        Provider = provider;
+        Api = api;
+        ResponseModel = responseModel;
+        ResponseId = responseId;
+        RawStopReason = rawStopReason;
+        EndTurn = endTurn;
+        Diagnostics = Array.AsReadOnly(copiedDiagnostics);
+        Deferred = deferred;
+        AddedToolNames = Array.AsReadOnly(copiedAddedTools);
     }
 
     public AgentRole Role { get; }
@@ -146,6 +203,24 @@ public sealed class AgentMessage
     public ModelUsage? Usage { get; }
 
     public string? ErrorMessage { get; }
+
+    public string? Provider { get; }
+
+    public string? Api { get; }
+
+    public string? ResponseModel { get; }
+
+    public string? ResponseId { get; }
+
+    public string? RawStopReason { get; }
+
+    public bool? EndTurn { get; }
+
+    public IReadOnlyList<ModelDiagnostic> Diagnostics { get; }
+
+    public DeferredModelHandle? Deferred { get; }
+
+    public IReadOnlyList<string> AddedToolNames { get; }
 
     public static AgentMessage User(
         string text,
@@ -190,6 +265,7 @@ public sealed class AgentMessage
             toolName: call.Name,
             isError: result.IsError,
             detailsJson: result.DetailsJson,
-            usage: result.Usage);
+            usage: result.Usage,
+            addedToolNames: result.AddedToolNames);
     }
 }

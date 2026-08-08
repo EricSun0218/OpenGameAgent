@@ -15,14 +15,104 @@ public enum ModelStopReason
     Length,
     Error,
     Aborted,
+    Deferred,
+}
+
+public enum ModelTransport
+{
+    Auto,
+    ServerSentEvents,
+    WebSocket,
+    CachedWebSocket,
+}
+
+public enum ModelCacheRetention
+{
+    None,
+    Short,
+    Long,
+}
+
+public enum ModelDeferredWindow
+{
+    FifteenMinutes,
+    OneHour,
+    TwentyFourHours,
+}
+
+public sealed class ModelCost
+{
+    public ModelCost(
+        double input = 0,
+        double output = 0,
+        double cacheRead = 0,
+        double cacheWrite = 0)
+    {
+        Input = RequireAmount(input, nameof(input));
+        Output = RequireAmount(output, nameof(output));
+        CacheRead = RequireAmount(cacheRead, nameof(cacheRead));
+        CacheWrite = RequireAmount(cacheWrite, nameof(cacheWrite));
+    }
+
+    public double Input { get; }
+
+    public double Output { get; }
+
+    public double CacheRead { get; }
+
+    public double CacheWrite { get; }
+
+    public double Total => Input + Output + CacheRead + CacheWrite;
+
+    internal static ModelCost Aggregate(IEnumerable<ModelCost> values)
+    {
+        var input = 0d;
+        var output = 0d;
+        var cacheRead = 0d;
+        var cacheWrite = 0d;
+        foreach (var value in values)
+        {
+            input += value.Input;
+            output += value.Output;
+            cacheRead += value.CacheRead;
+            cacheWrite += value.CacheWrite;
+        }
+
+        return new ModelCost(input, output, cacheRead, cacheWrite);
+    }
+
+    private static double RequireAmount(double value, string name)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value) || value < 0)
+        {
+            throw new ArgumentOutOfRangeException(name, "Model costs must be finite and non-negative.");
+        }
+
+        return value;
+    }
 }
 
 public sealed class ModelUsage
 {
     private const long MaximumCombinedTokens = 10_000_000_000;
 
-    public ModelUsage(long inputTokens = 0, long outputTokens = 0, long cacheReadTokens = 0, long cacheWriteTokens = 0)
-        : this(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, enforceSingleReportLimit: true)
+    public ModelUsage(
+        long inputTokens = 0,
+        long outputTokens = 0,
+        long cacheReadTokens = 0,
+        long cacheWriteTokens = 0,
+        long? reasoningTokens = null,
+        long? cacheWriteOneHourTokens = null,
+        ModelCost? cost = null)
+        : this(
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            reasoningTokens,
+            cacheWriteOneHourTokens,
+            cost,
+            enforceSingleReportLimit: true)
     {
     }
 
@@ -31,11 +121,26 @@ public sealed class ModelUsage
         long outputTokens,
         long cacheReadTokens,
         long cacheWriteTokens,
+        long? reasoningTokens,
+        long? cacheWriteOneHourTokens,
+        ModelCost? cost,
         bool enforceSingleReportLimit)
     {
         if (inputTokens < 0 || outputTokens < 0 || cacheReadTokens < 0 || cacheWriteTokens < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(inputTokens), "Token counts cannot be negative.");
+        }
+
+        if (reasoningTokens is < 0 || reasoningTokens > outputTokens)
+        {
+            throw new ArgumentOutOfRangeException(nameof(reasoningTokens), "Reasoning tokens must be a subset of output tokens.");
+        }
+
+        if (cacheWriteOneHourTokens is < 0 || cacheWriteOneHourTokens > cacheWriteTokens)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cacheWriteOneHourTokens),
+                "One-hour cache writes must be a subset of cache-write tokens.");
         }
 
         try
@@ -55,6 +160,9 @@ public sealed class ModelUsage
         OutputTokens = outputTokens;
         CacheReadTokens = cacheReadTokens;
         CacheWriteTokens = cacheWriteTokens;
+        ReasoningTokens = reasoningTokens;
+        CacheWriteOneHourTokens = cacheWriteOneHourTokens;
+        Cost = cost ?? new ModelCost();
     }
 
     public long InputTokens { get; }
@@ -65,6 +173,12 @@ public sealed class ModelUsage
 
     public long CacheWriteTokens { get; }
 
+    public long? ReasoningTokens { get; }
+
+    public long? CacheWriteOneHourTokens { get; }
+
+    public ModelCost Cost { get; }
+
     public long TotalTokens => checked(InputTokens + OutputTokens + CacheReadTokens + CacheWriteTokens);
 
     internal static ModelUsage Aggregate(IEnumerable<ModelUsage> values)
@@ -73,15 +187,41 @@ public sealed class ModelUsage
         var output = 0L;
         var cacheRead = 0L;
         var cacheWrite = 0L;
+        var reasoning = 0L;
+        var cacheWriteOneHour = 0L;
+        var hasReasoning = false;
+        var hasCacheWriteOneHour = false;
+        var costs = new List<ModelCost>();
         foreach (var value in values)
         {
             input = checked(input + value.InputTokens);
             output = checked(output + value.OutputTokens);
             cacheRead = checked(cacheRead + value.CacheReadTokens);
             cacheWrite = checked(cacheWrite + value.CacheWriteTokens);
+            if (value.ReasoningTokens is { } reasoningValue)
+            {
+                reasoning = checked(reasoning + reasoningValue);
+                hasReasoning = true;
+            }
+
+            if (value.CacheWriteOneHourTokens is { } longWriteValue)
+            {
+                cacheWriteOneHour = checked(cacheWriteOneHour + longWriteValue);
+                hasCacheWriteOneHour = true;
+            }
+
+            costs.Add(value.Cost);
         }
 
-        return new ModelUsage(input, output, cacheRead, cacheWrite, enforceSingleReportLimit: false);
+        return new ModelUsage(
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+            hasReasoning ? reasoning : null,
+            hasCacheWriteOneHour ? cacheWriteOneHour : null,
+            ModelCost.Aggregate(costs),
+            enforceSingleReportLimit: false);
     }
 }
 
@@ -93,6 +233,23 @@ public sealed class ModelParameters
 
     public string? ReasoningLevel { get; set; }
 
+    public IReadOnlyDictionary<string, int> ReasoningBudgets { get; set; } =
+        new ReadOnlyDictionary<string, int>(new Dictionary<string, int>());
+
+    public string? SamplingParametersJson { get; set; }
+
+    public ModelTransport Transport { get; set; } = ModelTransport.Auto;
+
+    public ModelCacheRetention CacheRetention { get; set; } = ModelCacheRetention.Short;
+
+    public int? WebSocketConnectTimeoutMilliseconds { get; set; }
+
+    public bool Deferred { get; set; }
+
+    public ModelDeferredWindow? DeferredWindow { get; set; }
+
+    public string? MetadataJson { get; set; }
+
     public IReadOnlyDictionary<string, string> Extensions { get; set; } =
         new ReadOnlyDictionary<string, string>(new Dictionary<string, string>());
 
@@ -103,6 +260,19 @@ public sealed class ModelParameters
             Temperature = Temperature,
             MaxOutputTokens = MaxOutputTokens,
             ReasoningLevel = ReasoningLevel,
+            ReasoningBudgets = new ReadOnlyDictionary<string, int>(
+                new Dictionary<string, int>(ReasoningBudgets ?? new Dictionary<string, int>(), StringComparer.Ordinal)),
+            SamplingParametersJson = SamplingParametersJson is null
+                ? null
+                : JsonValue.RequireObject(SamplingParametersJson, nameof(SamplingParametersJson)),
+            Transport = Transport,
+            CacheRetention = CacheRetention,
+            WebSocketConnectTimeoutMilliseconds = WebSocketConnectTimeoutMilliseconds,
+            Deferred = Deferred,
+            DeferredWindow = DeferredWindow,
+            MetadataJson = MetadataJson is null
+                ? null
+                : JsonValue.RequireObject(MetadataJson, nameof(MetadataJson)),
             Extensions = new ReadOnlyDictionary<string, string>(
                 new Dictionary<string, string>(Extensions ?? new Dictionary<string, string>(), StringComparer.Ordinal)),
         };
@@ -161,13 +331,111 @@ public sealed class ModelRequest
     public int Turn { get; }
 }
 
+public enum ModelDiagnosticSeverity
+{
+    Information,
+    Warning,
+    Error,
+}
+
+public sealed class ModelDiagnostic
+{
+    public ModelDiagnostic(
+        string code,
+        string message,
+        ModelDiagnosticSeverity severity = ModelDiagnosticSeverity.Information,
+        string? dataJson = null)
+    {
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            throw new ArgumentException("A diagnostic code is required.", nameof(code));
+        }
+
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            throw new ArgumentException("A diagnostic message is required.", nameof(message));
+        }
+
+        if (!Enum.IsDefined(typeof(ModelDiagnosticSeverity), severity))
+        {
+            throw new ArgumentOutOfRangeException(nameof(severity));
+        }
+
+        Code = code;
+        Message = message;
+        Severity = severity;
+        DataJson = dataJson is null ? null : JsonValue.RequireValid(dataJson, nameof(dataJson));
+    }
+
+    public string Code { get; }
+
+    public string Message { get; }
+
+    public ModelDiagnosticSeverity Severity { get; }
+
+    public string? DataJson { get; }
+}
+
+public sealed class DeferredModelHandle
+{
+    public DeferredModelHandle(
+        string provider,
+        string model,
+        string api,
+        string id,
+        DateTimeOffset? expiresAt = null,
+        int? pollAfterMilliseconds = null,
+        string? dataJson = null)
+    {
+        Provider = RequireIdentifier(provider, nameof(provider));
+        Model = RequireIdentifier(model, nameof(model));
+        Api = RequireIdentifier(api, nameof(api));
+        Id = RequireIdentifier(id, nameof(id));
+        if (pollAfterMilliseconds is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pollAfterMilliseconds));
+        }
+
+        ExpiresAt = expiresAt;
+        PollAfterMilliseconds = pollAfterMilliseconds;
+        DataJson = dataJson is null ? null : JsonValue.RequireValid(dataJson, nameof(dataJson));
+    }
+
+    public string Provider { get; }
+
+    public string Model { get; }
+
+    public string Api { get; }
+
+    public string Id { get; }
+
+    public DateTimeOffset? ExpiresAt { get; }
+
+    public int? PollAfterMilliseconds { get; }
+
+    public string? DataJson { get; }
+
+    private static string RequireIdentifier(string value, string name) =>
+        string.IsNullOrWhiteSpace(value)
+            ? throw new ArgumentException("A non-empty identifier is required.", name)
+            : value;
+}
+
 public sealed class ModelResponse
 {
     public ModelResponse(
         IEnumerable<AgentContent> content,
         ModelStopReason stopReason,
         ModelUsage? usage = null,
-        string? errorMessage = null)
+        string? errorMessage = null,
+        string? provider = null,
+        string? api = null,
+        string? responseModel = null,
+        string? responseId = null,
+        string? rawStopReason = null,
+        bool? endTurn = null,
+        IEnumerable<ModelDiagnostic>? diagnostics = null,
+        DeferredModelHandle? deferred = null)
     {
         if (!Enum.IsDefined(typeof(ModelStopReason), stopReason))
         {
@@ -202,10 +470,34 @@ public sealed class ModelResponse
             throw new ArgumentException("Only an error or aborted response can carry an error message.", nameof(errorMessage));
         }
 
+        if (stopReason == ModelStopReason.Deferred && deferred is null)
+        {
+            throw new ArgumentException("A deferred response requires a deferred handle.", nameof(deferred));
+        }
+
+        if (stopReason != ModelStopReason.Deferred && deferred is not null)
+        {
+            throw new ArgumentException("Only a deferred response can carry a deferred handle.", nameof(deferred));
+        }
+
+        var copiedDiagnostics = diagnostics?.ToArray() ?? Array.Empty<ModelDiagnostic>();
+        if (copiedDiagnostics.Any(diagnostic => diagnostic is null))
+        {
+            throw new ArgumentException("Response diagnostics cannot contain null values.", nameof(diagnostics));
+        }
+
         Content = Array.AsReadOnly(copied);
         StopReason = stopReason;
         Usage = usage ?? new ModelUsage();
         ErrorMessage = errorMessage;
+        Provider = provider;
+        Api = api;
+        ResponseModel = responseModel;
+        ResponseId = responseId;
+        RawStopReason = rawStopReason;
+        EndTurn = endTurn;
+        Diagnostics = Array.AsReadOnly(copiedDiagnostics);
+        Deferred = deferred;
     }
 
     public IReadOnlyList<AgentContent> Content { get; }
@@ -215,6 +507,22 @@ public sealed class ModelResponse
     public ModelUsage Usage { get; }
 
     public string? ErrorMessage { get; }
+
+    public string? Provider { get; }
+
+    public string? Api { get; }
+
+    public string? ResponseModel { get; }
+
+    public string? ResponseId { get; }
+
+    public string? RawStopReason { get; }
+
+    public bool? EndTurn { get; }
+
+    public IReadOnlyList<ModelDiagnostic> Diagnostics { get; }
+
+    public DeferredModelHandle? Deferred { get; }
 }
 
 public enum ModelStreamEventKind
@@ -344,6 +652,27 @@ public interface IModelProvider
     IAsyncEnumerable<ModelStreamEvent> StreamAsync(ModelRequest request, CancellationToken cancellationToken);
 }
 
+public interface IDeferredModelProvider : IModelProvider
+{
+    IAsyncEnumerable<ModelStreamEvent> FetchDeferredAsync(
+        DeferredModelHandle handle,
+        TimeSpan wait,
+        CancellationToken cancellationToken);
+
+    ValueTask CancelDeferredAsync(
+        DeferredModelHandle handle,
+        CancellationToken cancellationToken);
+}
+
+public interface IModelProviderCapabilities
+{
+    IReadOnlyCollection<string> SupportedApis { get; }
+
+    bool SupportsNativeDeferredTools { get; }
+
+    bool SupportsDeferredResponses { get; }
+}
+
 public sealed class ModelProviderException : HttpRequestException
 {
     public ModelProviderException(
@@ -362,6 +691,22 @@ public sealed class ModelProviderException : HttpRequestException
         IsTransient = isTransient;
         RetryAfter = retryAfter;
         StatusCode = statusCode;
+        Diagnostics = Array.Empty<ModelDiagnostic>();
+    }
+
+    public ModelProviderException(
+        string message,
+        IEnumerable<ModelDiagnostic>? diagnostics,
+        Exception? innerException = null)
+        : base(string.IsNullOrWhiteSpace(message) ? "The model provider failed." : message, innerException)
+    {
+        var copied = diagnostics?.ToArray() ?? Array.Empty<ModelDiagnostic>();
+        if (copied.Any(diagnostic => diagnostic is null))
+        {
+            throw new ArgumentException("Provider failure diagnostics cannot contain null values.", nameof(diagnostics));
+        }
+
+        Diagnostics = Array.AsReadOnly(copied);
     }
 
     public bool IsTransient { get; }
@@ -369,4 +714,6 @@ public sealed class ModelProviderException : HttpRequestException
     public TimeSpan? RetryAfter { get; }
 
     public int? StatusCode { get; }
+
+    public IReadOnlyList<ModelDiagnostic> Diagnostics { get; }
 }

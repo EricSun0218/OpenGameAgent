@@ -257,10 +257,15 @@ public sealed class GameModelResolution
         }
 
         const decimal scale = 1_000_000m;
-        return usage.InputTokens / scale * Model.Cost.InputPerMillionTokens
-            + usage.OutputTokens / scale * Model.Cost.OutputPerMillionTokens
-            + usage.CacheReadTokens / scale * Model.Cost.CacheReadPerMillionTokens
-            + usage.CacheWriteTokens / scale * Model.Cost.CacheWritePerMillionTokens;
+        var inputVolume = checked(usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens);
+        var rates = Model.Cost.RatesForInput(inputVolume);
+        var longCacheWrite = usage.CacheWriteOneHourTokens ?? 0;
+        var shortCacheWrite = usage.CacheWriteTokens - longCacheWrite;
+        return usage.InputTokens / scale * rates.InputPerMillionTokens
+            + usage.OutputTokens / scale * rates.OutputPerMillionTokens
+            + usage.CacheReadTokens / scale * rates.CacheReadPerMillionTokens
+            + shortCacheWrite / scale * rates.CacheWritePerMillionTokens
+            + longCacheWrite / scale * rates.InputPerMillionTokens * 2;
     }
 }
 

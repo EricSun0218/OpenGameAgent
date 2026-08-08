@@ -8,8 +8,23 @@ public enum AgentContentKind
     Text,
     Json,
     Resource,
+    Binary,
     Reasoning,
     ToolCall,
+}
+
+public enum AgentTextPhase
+{
+    Commentary,
+    FinalAnswer,
+}
+
+public enum AgentMediaKind
+{
+    Image,
+    Audio,
+    Video,
+    File,
 }
 
 public abstract class AgentContent
@@ -24,13 +39,24 @@ public abstract class AgentContent
 
 public sealed class TextContent : AgentContent
 {
-    public TextContent(string text)
+    public TextContent(string text, string? signature = null, AgentTextPhase? phase = null)
         : base(AgentContentKind.Text)
     {
         Text = text ?? throw new ArgumentNullException(nameof(text));
+        if (phase is { } value && !Enum.IsDefined(typeof(AgentTextPhase), value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(phase));
+        }
+
+        Signature = signature;
+        Phase = phase;
     }
 
     public string Text { get; }
+
+    public string? Signature { get; }
+
+    public AgentTextPhase? Phase { get; }
 }
 
 public sealed class JsonContent : AgentContent
@@ -73,23 +99,70 @@ public sealed class ResourceContent : AgentContent
     public string? Name { get; }
 }
 
+public sealed class BinaryContent : AgentContent
+{
+    public BinaryContent(
+        AgentMediaKind mediaKind,
+        string data,
+        string mediaType,
+        string? name = null)
+        : base(AgentContentKind.Binary)
+    {
+        if (!Enum.IsDefined(typeof(AgentMediaKind), mediaKind))
+        {
+            throw new ArgumentOutOfRangeException(nameof(mediaKind));
+        }
+
+        if (string.IsNullOrWhiteSpace(data))
+        {
+            throw new ArgumentException("Base64-encoded media data is required.", nameof(data));
+        }
+
+        if (string.IsNullOrWhiteSpace(mediaType))
+        {
+            throw new ArgumentException("A media type is required.", nameof(mediaType));
+        }
+
+        MediaKind = mediaKind;
+        Data = data;
+        MediaType = mediaType;
+        Name = name;
+    }
+
+    public AgentMediaKind MediaKind { get; }
+
+    public string Data { get; }
+
+    public string MediaType { get; }
+
+    public string? Name { get; }
+}
+
 public sealed class ReasoningContent : AgentContent
 {
-    public ReasoningContent(string text, string? signature = null)
+    public ReasoningContent(string text, string? signature = null, bool redacted = false)
         : base(AgentContentKind.Reasoning)
     {
         Text = text ?? throw new ArgumentNullException(nameof(text));
         Signature = signature;
+        Redacted = redacted;
     }
 
     public string Text { get; }
 
     public string? Signature { get; }
+
+    public bool Redacted { get; }
 }
 
 public sealed class ToolCallContent : AgentContent
 {
-    public ToolCallContent(string id, string name, string argumentsJson)
+    public ToolCallContent(
+        string id,
+        string name,
+        string argumentsJson,
+        string? thoughtSignature = null,
+        string? toolNamespace = null)
         : base(AgentContentKind.ToolCall)
     {
         if (string.IsNullOrWhiteSpace(id))
@@ -105,6 +178,8 @@ public sealed class ToolCallContent : AgentContent
         Id = id;
         Name = name;
         ArgumentsJson = JsonValue.RequireObject(argumentsJson, nameof(argumentsJson));
+        ThoughtSignature = thoughtSignature;
+        Namespace = toolNamespace;
     }
 
     public string Id { get; }
@@ -112,6 +187,10 @@ public sealed class ToolCallContent : AgentContent
     public string Name { get; }
 
     public string ArgumentsJson { get; }
+
+    public string? ThoughtSignature { get; }
+
+    public string? Namespace { get; }
 }
 
 internal static class JsonValue

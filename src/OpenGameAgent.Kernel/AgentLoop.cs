@@ -633,7 +633,8 @@ public static class AgentLoop
                 request.Model,
                 options.Clock,
                 limits,
-                emit).ConfigureAwait(false);
+                emit,
+                (exception as ModelProviderException)?.Diagnostics).ConfigureAwait(false);
             return new AssistantStreamResult(syntheticResponse, request.Model);
         }
         finally
@@ -733,7 +734,8 @@ public static class AgentLoop
         string model,
         Func<DateTimeOffset> clock,
         AgentLimits limits,
-        Func<AgentEvent, ValueTask> emit)
+        Func<AgentEvent, ValueTask> emit,
+        IReadOnlyList<ModelDiagnostic>? failureDiagnostics = null)
     {
         var safeError = string.IsNullOrWhiteSpace(error)
             ? reason == ModelStopReason.Aborted ? "The model request was aborted." : "The model request failed."
@@ -745,7 +747,24 @@ public static class AgentLoop
 
         var safeContent = partial?.Content.Where(part => part is not ToolCallContent).ToArray()
             ?? Array.Empty<AgentContent>();
-        var response = new ModelResponse(safeContent, reason, partial?.Usage, safeError);
+        var diagnostics = partial?.Diagnostics.ToList() ?? new List<ModelDiagnostic>();
+        if (failureDiagnostics is not null)
+        {
+            diagnostics.AddRange(failureDiagnostics);
+        }
+
+        var response = new ModelResponse(
+            safeContent,
+            reason,
+            partial?.Usage,
+            safeError,
+            partial?.Provider,
+            partial?.Api,
+            partial?.ResponseModel,
+            partial?.ResponseId,
+            partial?.RawStopReason,
+            partial?.EndTurn,
+            diagnostics);
         AgentValidator.ValidateResponse(response, limits);
         var terminal = ModelStreamEvent.Terminal(response);
         var message = ToAssistantMessage(response, clock(), model);
@@ -1331,7 +1350,15 @@ public static class AgentLoop
             model: model,
             stopReason: response.StopReason,
             usage: response.Usage,
-            errorMessage: response.ErrorMessage);
+            errorMessage: response.ErrorMessage,
+            provider: response.Provider,
+            api: response.Api,
+            responseModel: response.ResponseModel,
+            responseId: response.ResponseId,
+            rawStopReason: response.RawStopReason,
+            endTurn: response.EndTurn,
+            diagnostics: response.Diagnostics,
+            deferred: response.Deferred);
 
     private static async Task EmitMessageAsync(
         AgentMessage message,
