@@ -35,6 +35,8 @@ public sealed class AgentLimits
 
     public int MaxResourceUriCharacters { get; set; } = 16_384;
 
+    public int MaxBinaryDataCharactersPerPart { get; set; } = 16_000_000;
+
     public int MaxToolCallsPerTurn { get; set; } = 32;
 
     public int MaxTools { get; set; } = 256;
@@ -52,6 +54,10 @@ public sealed class AgentLimits
     public int MaxMetadataKeyCharacters { get; set; } = 256;
 
     public int MaxMetadataValueCharacters { get; set; } = 16_384;
+
+    public int MaxDiagnosticsPerMessage { get; set; } = 64;
+
+    public int MaxAddedToolNamesPerResult { get; set; } = 256;
 
     public int MaxQueuedMessages { get; set; } = 64;
 
@@ -84,6 +90,7 @@ public sealed class AgentLimits
         RequireRange(MaxTextCharactersPerPart, 1, 100_000_000, nameof(MaxTextCharactersPerPart));
         RequireRange(MaxJsonCharactersPerPart, 1, 100_000_000, nameof(MaxJsonCharactersPerPart));
         RequireRange(MaxResourceUriCharacters, 1, 1_000_000, nameof(MaxResourceUriCharacters));
+        RequireRange(MaxBinaryDataCharactersPerPart, 1, 100_000_000, nameof(MaxBinaryDataCharactersPerPart));
         RequireRange(MaxToolCallsPerTurn, 1, 10_000, nameof(MaxToolCallsPerTurn));
         RequireRange(MaxTools, 0, 100_000, nameof(MaxTools));
         RequireRange(MaxToolNameCharacters, 1, 4096, nameof(MaxToolNameCharacters));
@@ -93,6 +100,8 @@ public sealed class AgentLimits
         RequireRange(MaxMetadataEntriesPerMessage, 0, 100_000, nameof(MaxMetadataEntriesPerMessage));
         RequireRange(MaxMetadataKeyCharacters, 1, 100_000, nameof(MaxMetadataKeyCharacters));
         RequireRange(MaxMetadataValueCharacters, 0, 100_000_000, nameof(MaxMetadataValueCharacters));
+        RequireRange(MaxDiagnosticsPerMessage, 0, 10_000, nameof(MaxDiagnosticsPerMessage));
+        RequireRange(MaxAddedToolNamesPerResult, 0, 100_000, nameof(MaxAddedToolNamesPerResult));
         RequireRange(MaxQueuedMessages, 1, 100_000, nameof(MaxQueuedMessages));
         RequireRange(MaxConcurrentTools, 1, 1024, nameof(MaxConcurrentTools));
         RequireRange(ToolTimeoutMilliseconds, 1, 86_400_000, nameof(ToolTimeoutMilliseconds));
@@ -188,6 +197,72 @@ public sealed class NextTurnUpdate
     public ModelParameters? Parameters { get; set; }
 }
 
+public sealed class BeforeToolCallContext
+{
+    public BeforeToolCallContext(
+        string runId,
+        int turn,
+        AgentMessage assistantMessage,
+        ToolCallContent toolCall,
+        System.Text.Json.JsonElement arguments,
+        AgentContext context)
+    {
+        RunId = runId;
+        Turn = turn;
+        AssistantMessage = assistantMessage ?? throw new ArgumentNullException(nameof(assistantMessage));
+        ToolCall = toolCall ?? throw new ArgumentNullException(nameof(toolCall));
+        Arguments = arguments.Clone();
+        Context = context ?? throw new ArgumentNullException(nameof(context));
+    }
+
+    public string RunId { get; }
+
+    public int Turn { get; }
+
+    public AgentMessage AssistantMessage { get; }
+
+    public ToolCallContent ToolCall { get; }
+
+    public System.Text.Json.JsonElement Arguments { get; }
+
+    public AgentContext Context { get; }
+}
+
+public sealed class AfterToolCallContext
+{
+    public AfterToolCallContext(
+        string runId,
+        int turn,
+        AgentMessage assistantMessage,
+        ToolCallContent toolCall,
+        System.Text.Json.JsonElement arguments,
+        ToolResult result,
+        AgentContext context)
+    {
+        RunId = runId;
+        Turn = turn;
+        AssistantMessage = assistantMessage ?? throw new ArgumentNullException(nameof(assistantMessage));
+        ToolCall = toolCall ?? throw new ArgumentNullException(nameof(toolCall));
+        Arguments = arguments.Clone();
+        Result = result ?? throw new ArgumentNullException(nameof(result));
+        Context = context ?? throw new ArgumentNullException(nameof(context));
+    }
+
+    public string RunId { get; }
+
+    public int Turn { get; }
+
+    public AgentMessage AssistantMessage { get; }
+
+    public ToolCallContent ToolCall { get; }
+
+    public System.Text.Json.JsonElement Arguments { get; }
+
+    public ToolResult Result { get; }
+
+    public AgentContext Context { get; }
+}
+
 public sealed class AgentHooks
 {
     public Func<IReadOnlyList<AgentMessage>, CancellationToken, ValueTask<IReadOnlyList<AgentMessage>>>? TransformContextAsync { get; set; }
@@ -198,9 +273,9 @@ public sealed class AgentHooks
 
     public Func<AfterTurnContext, CancellationToken, ValueTask<NextTurnUpdate?>>? PrepareNextTurnAsync { get; set; }
 
-    public Func<ToolCallContent, AgentContext, CancellationToken, ValueTask<ToolCallDecision?>>? BeforeToolCallAsync { get; set; }
+    public Func<BeforeToolCallContext, CancellationToken, ValueTask<ToolCallDecision?>>? BeforeToolCallAsync { get; set; }
 
-    public Func<ToolCallContent, ToolResult, AgentContext, CancellationToken, ValueTask<ToolResult?>>? AfterToolCallAsync { get; set; }
+    public Func<AfterToolCallContext, CancellationToken, ValueTask<ToolResult?>>? AfterToolCallAsync { get; set; }
 }
 
 public sealed class AgentOptions
@@ -248,6 +323,7 @@ public sealed class AgentState
         string systemPrompt,
         IModelProvider provider,
         string model,
+        string? sessionId,
         ModelParameters parameters,
         IReadOnlyList<AgentTool> tools,
         IReadOnlyList<AgentMessage> messages,
@@ -260,6 +336,7 @@ public sealed class AgentState
         SystemPrompt = systemPrompt;
         Provider = provider ?? throw new ArgumentNullException(nameof(provider));
         Model = model;
+        SessionId = sessionId;
         Parameters = parameters?.Copy() ?? throw new ArgumentNullException(nameof(parameters));
         Tools = Array.AsReadOnly(tools.ToArray());
         Messages = Array.AsReadOnly(messages.ToArray());
@@ -275,6 +352,8 @@ public sealed class AgentState
     public IModelProvider Provider { get; }
 
     public string Model { get; }
+
+    public string? SessionId { get; }
 
     public ModelParameters Parameters { get; }
 

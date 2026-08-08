@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenGameAgent.Kernel;
@@ -1072,9 +1073,9 @@ internal static class AgentHookComposer
                 }
             : null,
             BeforeToolCallAsync = hooks.Any(hook => hook.BeforeToolCallAsync is not null)
-                ? async (call, context, cancellationToken) =>
+                ? async (hookContext, cancellationToken) =>
                 {
-                    var current = call;
+                    var current = hookContext.ToolCall;
                     var replaced = false;
                     foreach (var hook in hooks)
                     {
@@ -1083,7 +1084,16 @@ internal static class AgentHookComposer
                             continue;
                         }
 
-                        var decision = await hook.BeforeToolCallAsync(current, context, cancellationToken).ConfigureAwait(false);
+                        using var argumentsDocument = JsonDocument.Parse(current.ArgumentsJson);
+                        var decision = await hook.BeforeToolCallAsync(
+                            new BeforeToolCallContext(
+                                hookContext.RunId,
+                                hookContext.Turn,
+                                hookContext.AssistantMessage,
+                                current,
+                                argumentsDocument.RootElement,
+                                hookContext.Context),
+                            cancellationToken).ConfigureAwait(false);
                         if (decision?.Blocked == true)
                         {
                             return decision;
@@ -1091,7 +1101,7 @@ internal static class AgentHookComposer
 
                         if (decision?.ReplacementArgumentsJson is not null)
                         {
-                            var tool = context.Tools.FirstOrDefault(candidate =>
+                            var tool = hookContext.Context.Tools.FirstOrDefault(candidate =>
                                 string.Equals(candidate.Definition.Name, current.Name, StringComparison.Ordinal))
                                 ?? throw new InvalidOperationException($"Tool '{current.Name}' is not available during hook composition.");
                             var validationError = tool.ValidateArguments(decision.ReplacementArgumentsJson);
@@ -1109,14 +1119,23 @@ internal static class AgentHookComposer
                 }
             : null,
             AfterToolCallAsync = hooks.Any(hook => hook.AfterToolCallAsync is not null)
-                ? async (call, result, context, cancellationToken) =>
+                ? async (hookContext, cancellationToken) =>
                 {
-                    var current = result;
+                    var current = hookContext.Result;
                     foreach (var hook in hooks)
                     {
                         if (hook.AfterToolCallAsync is not null)
                         {
-                            current = await hook.AfterToolCallAsync(call, current, context, cancellationToken).ConfigureAwait(false)
+                            current = await hook.AfterToolCallAsync(
+                                    new AfterToolCallContext(
+                                        hookContext.RunId,
+                                        hookContext.Turn,
+                                        hookContext.AssistantMessage,
+                                        hookContext.ToolCall,
+                                        hookContext.Arguments,
+                                        current,
+                                        hookContext.Context),
+                                    cancellationToken).ConfigureAwait(false)
                                 ?? throw new InvalidOperationException("An extension tool result transform returned null.");
                         }
                     }

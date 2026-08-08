@@ -743,6 +743,9 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var maximumOutputTokens = selection?.MaximumOutputTokens ?? 0;
             var systemPrompt = ComposeSystemPrompt(context, skills);
             var agentLimits = CopyAgentLimits(_agentLimits);
+            var usageAccounting = new RunUsageAccounting(input.InputId, agentLimits.MaxTotalTokens);
+            var legacyUsageRecords = CreateLegacyUsageRecords(loaded);
+            var baseUsageLedger = loaded.UsageLedger.Append(legacyUsageRecords);
             IReadOnlyList<AgentMessage> initialMessages = loaded.Messages;
             var minimumMessageReserve = resumingCheckpoint ? 1 : 2;
             var preferredMessageReserve = activeTools.Count == 0
@@ -751,18 +754,43 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var additionalMessages = resumingCheckpoint
                 ? Array.Empty<AgentMessage>()
                 : new[] { CreateInputMessage(input) };
-            initialMessages = await FitTranscriptAsync(
-                loaded.Key,
-                initialMessages,
-                Math.Max(1, agentLimits.MaxMessages - preferredMessageReserve),
-                additionalMessages,
-                model,
-                systemPrompt,
-                activeTools.Select(tool => tool.Definition).ToArray(),
-                parameters,
-                contextWindowTokens,
-                maximumOutputTokens,
-                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                initialMessages = await FitTranscriptAsync(
+                    loaded.Key,
+                    initialMessages,
+                    Math.Max(1, agentLimits.MaxMessages - preferredMessageReserve),
+                    additionalMessages,
+                    model,
+                    systemPrompt,
+                    activeTools.Select(tool => tool.Definition).ToArray(),
+                    parameters,
+                    contextWindowTokens,
+                    maximumOutputTokens,
+                    usageAccounting,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (GameTranscriptCompactionException exception)
+            {
+                var usageRecords = usageAccounting.RecordsBetween(0, usageAccounting.Count);
+                GameSessionSnapshot settled;
+                using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
+                {
+                    settled = await SaveUsageOnlyAsync(
+                        loaded,
+                        legacyUsageRecords.Concat(usageRecords).ToArray(),
+                        baseUsageLedger.Append(usageRecords),
+                        settlementCancellation.Token).ConfigureAwait(false);
+                }
+
+                var failed = new GameAgentRunResult(
+                    GameAgentRunStatus.Failed,
+                    route,
+                    settled.Revision,
+                    error: exception.Message);
+                await PublishCompletedAsync(failed, extensionContext, CancellationToken.None).ConfigureAwait(false);
+                return failed;
+            }
 
             if (resumingCheckpoint)
             {
@@ -781,7 +809,32 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             }
 
             var commitBase = loaded;
+            var committedUsageRecordCount = 0;
             GameSessionSaveResult? checkpointConflict = null;
+            IReadOnlyList<GameSessionUsageRecord>? checkpointConflictUsageRecords = null;
+            GameSessionUsageLedger? checkpointConflictUsageLedger = null;
+            var recoverySafety = new GameModelRecoverySafety(resumingCheckpoint);
+            Func<IModelProvider, IModelProvider>? wrapRecoveryProvider = null;
+            if (_transcriptCompactor is not null && contextWindowTokens > 0)
+            {
+                wrapRecoveryProvider = candidate => new ContextOverflowRecoveryModelProvider(
+                        candidate,
+                        recoverySafety,
+                        contextWindowTokens,
+                        (request, token) => CompactOverflowRequestAsync(
+                            loaded.Key,
+                            request,
+                            contextWindowTokens,
+                            maximumOutputTokens,
+                            usageAccounting,
+                            token),
+                        usageAccounting.RecordRecoveryAttemptAndSuppress,
+                        usageAccounting.Record,
+                        usageAccounting.Record,
+                        usageAccounting.ClearAssistantSuppression);
+                provider = wrapRecoveryProvider(provider);
+            }
+
             var runHooks = CreateRunHooks(
                 route.Route,
                 input,
@@ -789,7 +842,25 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 model,
                 parameters,
                 contextWindowTokens,
-                maximumOutputTokens);
+                maximumOutputTokens,
+                usageAccounting);
+            if (wrapRecoveryProvider is not null)
+            {
+                var configured = runHooks.PrepareNextTurnAsync;
+                runHooks.PrepareNextTurnAsync = async (turnContext, token) =>
+                {
+                    var update = configured is null
+                        ? null
+                        : await configured(turnContext, token).ConfigureAwait(false);
+                    if (update?.Provider is not null)
+                    {
+                        update.Provider = wrapRecoveryProvider(update.Provider);
+                    }
+
+                    return update;
+                };
+            }
+
             if (_persistToolTurnCheckpoints && route.Route == GameRouteKind.Agent)
             {
                 var configured = runHooks.PrepareNextTurnAsync;
@@ -802,6 +873,10 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                             : await configured(turnContext, token).ConfigureAwait(false);
                     }
 
+                    var usageEndIndex = usageAccounting.Count;
+                    var usageRecords = usageAccounting.RecordsBetween(
+                        committedUsageRecordCount,
+                        usageEndIndex);
                     var checkpoint = new GameSessionSnapshot(
                         commitBase.Key,
                         checked(commitBase.Revision + 1),
@@ -809,7 +884,10 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                         commitBase.ProcessedInputIds,
                         commitBase.LastMoment,
                         extensionState.SnapshotAll(),
-                        input.InputId);
+                        input.InputId,
+                        (commitBase.Revision == loaded.Revision
+                            ? baseUsageLedger
+                            : commitBase.UsageLedger).Append(usageRecords));
                     var checkpointSave = await _sessionStore.SaveAsync(
                         checkpoint,
                         commitBase.Revision,
@@ -819,11 +897,16 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                     if (!checkpointSave.Saved)
                     {
                         checkpointConflict = checkpointSave;
+                        checkpointConflictUsageRecords = commitBase.Revision == loaded.Revision
+                            ? legacyUsageRecords.Concat(usageRecords).ToArray()
+                            : usageRecords;
+                        checkpointConflictUsageLedger = checkpoint.UsageLedger;
                         throw new InvalidOperationException(
                             "The session changed while a tool turn was being checkpointed.");
                     }
 
                     commitBase = checkpointSave.Current;
+                    committedUsageRecordCount = usageEndIndex;
                     return configured is null
                         ? null
                         : await configured(turnContext, token).ConfigureAwait(false);
@@ -852,6 +935,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var agent = new Agent(options);
             using var subscription = agent.Subscribe(async (agentEvent, token) =>
             {
+                recoverySafety.Record(agentEvent);
+                usageAccounting.Record(agentEvent);
                 if (observer is not null)
                 {
                     await observer(input, agentEvent, token).ConfigureAwait(false);
@@ -878,10 +963,22 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
             if (checkpointConflict is not null)
             {
+                GameSessionSnapshot settledConflict;
+                using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
+                {
+                    settledConflict = await SettleUsageAfterConflictAsync(
+                        checkpointConflict.Current,
+                        checkpointConflictUsageRecords
+                            ?? throw new InvalidOperationException("Checkpoint usage settlement state is missing."),
+                        checkpointConflictUsageLedger
+                            ?? throw new InvalidOperationException("Checkpoint usage ledger state is missing."),
+                        settlementCancellation.Token).ConfigureAwait(false);
+                }
+
                 var conflict = new GameAgentRunResult(
                     GameAgentRunStatus.SessionConflict,
                     route,
-                    checkpointConflict.Current.Revision,
+                    settledConflict.Revision,
                     run,
                     "The session changed while this input was running. Committed game actions must be reconciled before retrying.");
                 await PublishCompletedAsync(conflict, extensionContext, CancellationToken.None).ConfigureAwait(false);
@@ -889,34 +986,55 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             }
 
             GameSessionSaveResult save;
+            GameSessionSnapshot? settledSaveConflict = null;
             using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
             {
+                var finalUsageRecords = usageAccounting.RecordsBetween(
+                    committedUsageRecordCount,
+                    usageAccounting.Count);
+                var usageLedger = (commitBase.Revision == loaded.Revision
+                    ? baseUsageLedger
+                    : commitBase.UsageLedger).Append(finalUsageRecords);
                 save = await SaveAsync(
                     input,
                     commitBase,
                     agent.State.Messages,
                     extensionState,
                     extensionContext,
+                    usageLedger,
                     settlementCancellation.Token).ConfigureAwait(false);
+                if (!save.Saved)
+                {
+                    settledSaveConflict = await SettleUsageAfterConflictAsync(
+                        save.Current,
+                        commitBase.Revision == loaded.Revision
+                            ? legacyUsageRecords.Concat(finalUsageRecords).ToArray()
+                            : finalUsageRecords,
+                        usageLedger,
+                        settlementCancellation.Token).ConfigureAwait(false);
+                }
             }
             if (!save.Saved)
             {
                 var conflict = new GameAgentRunResult(
                     GameAgentRunStatus.SessionConflict,
                     route,
-                    save.Current.Revision,
+                    settledSaveConflict!.Revision,
                     run,
                     "The session changed while this input was running. Committed game actions must be reconciled before retrying.");
                 await PublishCompletedAsync(conflict, extensionContext, CancellationToken.None).ConfigureAwait(false);
                 return conflict;
             }
 
+            var usageExceeded = usageAccounting.Exceeded;
             var completed = new GameAgentRunResult(
-                run.Succeeded ? GameAgentRunStatus.Completed : GameAgentRunStatus.Failed,
+                run.Succeeded && !usageExceeded ? GameAgentRunStatus.Completed : GameAgentRunStatus.Failed,
                 route,
                 save.Current.Revision,
                 run,
-                run.Error);
+                usageExceeded
+                    ? $"The run exceeded the maximum of {agentLimits.MaxTotalTokens} total tokens, including transcript compaction."
+                    : run.Error);
             await PublishCompletedAsync(completed, extensionContext, CancellationToken.None).ConfigureAwait(false);
             return completed;
         }
@@ -1016,6 +1134,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 messages,
                 extensionState,
                 extensionContext,
+                loaded.UsageLedger.Append(CreateLegacyUsageRecords(loaded)),
                 settlementCancellation.Token).ConfigureAwait(false);
         }
         return !save.Saved
@@ -1033,6 +1152,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         IReadOnlyList<AgentMessage> messages,
         GameAgentSessionState extensionState,
         GameAgentExtensionRunContext extensionContext,
+        GameSessionUsageLedger usageLedger,
         CancellationToken cancellationToken)
     {
         await _extensions.PublishAsync(
@@ -1052,7 +1172,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             processed,
             input.Moment,
             extensionState.SnapshotAll(),
-            pendingInputId: null);
+            pendingInputId: null,
+            usageLedger);
         var save = await _sessionStore.SaveAsync(snapshot, loaded.Revision, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The game session store returned null.");
         ValidateSaveResult(loaded, snapshot, save);
@@ -1067,6 +1188,90 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
 
         return save;
+    }
+
+    private async ValueTask<GameSessionSnapshot> SaveUsageOnlyAsync(
+        GameSessionSnapshot current,
+        IReadOnlyList<GameSessionUsageRecord> usageRecords,
+        GameSessionUsageLedger attemptedLedger,
+        CancellationToken cancellationToken)
+    {
+        if (UsageLedgerEquals(current.UsageLedger, attemptedLedger))
+        {
+            return current;
+        }
+
+        var candidate = new GameSessionSnapshot(
+            current.Key,
+            checked(current.Revision + 1),
+            current.Messages,
+            current.ProcessedInputIds,
+            current.LastMoment,
+            current.ExtensionState,
+            current.PendingInputId,
+            attemptedLedger);
+        var save = await _sessionStore.SaveAsync(
+            candidate,
+            current.Revision,
+            cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The game session store returned null.");
+        ValidateSaveResult(current, candidate, save);
+        return save.Saved
+            ? save.Current
+            : await SettleUsageAfterConflictAsync(
+                save.Current,
+                usageRecords,
+                attemptedLedger,
+                cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<GameSessionSnapshot> SettleUsageAfterConflictAsync(
+        GameSessionSnapshot current,
+        IReadOnlyList<GameSessionUsageRecord> usageRecords,
+        GameSessionUsageLedger attemptedLedger,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 8;
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (UsageLedgerEquals(current.UsageLedger, attemptedLedger))
+            {
+                return current;
+            }
+
+            var merged = current.UsageLedger.Append(usageRecords);
+            if (ReferenceEquals(merged, current.UsageLedger))
+            {
+                return current;
+            }
+
+            var candidate = new GameSessionSnapshot(
+                current.Key,
+                checked(current.Revision + 1),
+                current.Messages,
+                current.ProcessedInputIds,
+                current.LastMoment,
+                current.ExtensionState,
+                current.PendingInputId,
+                merged);
+            var save = await _sessionStore.SaveAsync(
+                candidate,
+                current.Revision,
+                cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The game session store returned null.");
+            ValidateSaveResult(current, candidate, save);
+            if (save.Saved)
+            {
+                return save.Current;
+            }
+
+            attemptedLedger = merged;
+            current = save.Current;
+        }
+
+        throw new InvalidOperationException(
+            $"The session usage ledger could not be settled after {maximumAttempts} compare-and-swap attempts.");
     }
 
     private static void ValidateSaveResult(
@@ -1099,7 +1304,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             || !left.ProcessedInputIds.SequenceEqual(right.ProcessedInputIds, StringComparer.Ordinal)
             || !left.ExtensionState.OrderBy(pair => pair.Key, StringComparer.Ordinal)
                 .SequenceEqual(right.ExtensionState.OrderBy(pair => pair.Key, StringComparer.Ordinal))
-            || left.Messages.Count != right.Messages.Count)
+            || left.Messages.Count != right.Messages.Count
+            || !UsageLedgerEquals(left.UsageLedger, right.UsageLedger))
         {
             return false;
         }
@@ -1113,6 +1319,42 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
 
         return true;
+    }
+
+    private static bool UsageLedgerEquals(GameSessionUsageLedger left, GameSessionUsageLedger right) =>
+        left.Records.Count == right.Records.Count
+        && left.TotalRecordCount == right.TotalRecordCount
+        && left.RecentRecordCapacity == right.RecentRecordCapacity
+        && left.TotalsByCause.Count == right.TotalsByCause.Count
+        && left.TotalsByCause.All(pair =>
+            right.TotalsByCause.TryGetValue(pair.Key, out var total)
+            && GameSessionUsageTotals.ValueEquals(pair.Value, total))
+        && left.Records.Zip(right.Records, GameSessionUsageRecord.ValueEquals).All(equal => equal);
+
+    private static IReadOnlyList<GameSessionUsageRecord> CreateLegacyUsageRecords(GameSessionSnapshot session)
+    {
+        if (session.UsageLedger.TotalRecordCount != 0)
+        {
+            return Array.Empty<GameSessionUsageRecord>();
+        }
+
+        var records = session.Messages
+            .Select((message, index) => new { Message = message, Index = index })
+            .Where(item => item.Message.Usage is not null
+                && (item.Message.Usage.TotalTokens > 0 || item.Message.Usage.Cost.Total > 0)
+                && item.Message.Role is AgentRole.Assistant or AgentRole.Tool)
+            .Select(item => new GameSessionUsageRecord(
+                $"legacy-message-{item.Index}",
+                item.Message.Role == AgentRole.Assistant
+                    ? GameSessionUsageCause.Assistant
+                    : GameSessionUsageCause.Tool,
+                item.Message.Usage!,
+                inputId: item.Message.Metadata.TryGetValue("game.input_id", out var inputId)
+                    && !string.IsNullOrWhiteSpace(inputId)
+                        ? inputId
+                        : null))
+            .ToArray();
+        return Array.AsReadOnly(records);
     }
 
     private string ComposeSystemPrompt(
@@ -1227,7 +1469,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         string model,
         ModelParameters parameters,
         int contextWindowTokens,
-        int maximumOutputTokens)
+        int maximumOutputTokens,
+        RunUsageAccounting usageAccounting)
     {
         var hooks = CopyHooks(_agentHooks);
         if (route == GameRouteKind.QuickResponse)
@@ -1277,6 +1520,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                         nextParameters,
                         contextWindowTokens,
                         maximumOutputTokens,
+                        usageAccounting,
                         cancellationToken).ConfigureAwait(false);
                     return new NextTurnUpdate
                     {
@@ -1295,6 +1539,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                     nextParameters,
                     contextWindowTokens,
                     maximumOutputTokens,
+                    usageAccounting,
                     cancellationToken).ConfigureAwait(false);
                 return new NextTurnUpdate
                 {
@@ -1333,6 +1578,42 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             };
         }
 
+        var configuredBeforeModelRequest = hooks.BeforeModelRequestAsync;
+        hooks.BeforeModelRequestAsync = async (request, cancellationToken) =>
+        {
+            if (usageAccounting.Exceeded)
+            {
+                throw usageAccounting.CreateLimitException();
+            }
+
+            return configuredBeforeModelRequest is null
+                ? request
+                : await configuredBeforeModelRequest(request, cancellationToken).ConfigureAwait(false);
+        };
+
+        var configuredBeforeToolCall = hooks.BeforeToolCallAsync;
+        hooks.BeforeToolCallAsync = async (context, cancellationToken) =>
+        {
+            if (usageAccounting.Exceeded)
+            {
+                return ToolCallDecision.Block(
+                    usageAccounting.CreateLimitException().Message,
+                    terminate: true);
+            }
+
+            return configuredBeforeToolCall is null
+                ? null
+                : await configuredBeforeToolCall(context, cancellationToken).ConfigureAwait(false);
+        };
+
+        var configuredShouldStop = hooks.ShouldStopAfterTurnAsync;
+        hooks.ShouldStopAfterTurnAsync = async (context, cancellationToken) =>
+        {
+            var configuredStop = configuredShouldStop is not null
+                && await configuredShouldStop(context, cancellationToken).ConfigureAwait(false);
+            return configuredStop || usageAccounting.Exceeded;
+        };
+
         return hooks;
     }
 
@@ -1344,6 +1625,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         ModelParameters parameters,
         int contextWindowTokens,
         int maximumOutputTokens,
+        RunUsageAccounting usageAccounting,
         CancellationToken cancellationToken)
     {
         var baseContext = _contextProvider is null
@@ -1398,6 +1680,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             parameters,
             contextWindowTokens,
             maximumOutputTokens,
+            usageAccounting,
             cancellationToken).ConfigureAwait(false);
         return new AgentContext(systemPrompt, compacted, tools);
     }
@@ -1413,6 +1696,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         ModelParameters parameters,
         int contextWindowTokens,
         int maximumOutputTokens,
+        RunUsageAccounting usageAccounting,
         CancellationToken cancellationToken)
     {
         var tokenTarget = GetTranscriptTokenTarget(
@@ -1429,15 +1713,26 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         IReadOnlyList<AgentMessage> fitted = messages;
         if ((messageCompactionRequired || tokenCompactionRequired) && _transcriptCompactor is not null)
         {
-            fitted = await _transcriptCompactor.CompactAsync(
-                new GameTranscriptCompactionContext(
-                    session,
-                    messages,
-                    targetMessageCount,
-                    tokenTarget,
-                    tokenTarget is null ? null : _transcriptTokenEstimator),
-                cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("The transcript compactor returned null.");
+            try
+            {
+                var compaction = await _transcriptCompactor.CompactAsync(
+                    new GameTranscriptCompactionContext(
+                        session,
+                        messages,
+                        targetMessageCount,
+                        tokenTarget,
+                        tokenTarget is null ? null : _transcriptTokenEstimator,
+                        usageAccounting.RemainingTokens),
+                    cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The transcript compactor returned null.");
+                usageAccounting.Record(compaction);
+                fitted = compaction.Messages;
+            }
+            catch (GameTranscriptCompactionException exception)
+            {
+                usageAccounting.Record(exception);
+                throw;
+            }
         }
 
         if (fitted.Count > targetMessageCount)
@@ -1466,6 +1761,112 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
 
         return fitted;
+    }
+
+    private async ValueTask<GameModelRecoveryCompaction?> CompactOverflowRequestAsync(
+        GameSessionKey session,
+        ModelRequest request,
+        int contextWindowTokens,
+        int maximumOutputTokens,
+        RunUsageAccounting usageAccounting,
+        CancellationToken cancellationToken)
+    {
+        if (_transcriptCompactor is null || usageAccounting.Exceeded)
+        {
+            return null;
+        }
+
+        var protectedStart = -1;
+        for (var index = request.Messages.Count - 1; index >= 0; index--)
+        {
+            if (request.Messages[index].Role == AgentRole.User)
+            {
+                protectedStart = index;
+                break;
+            }
+        }
+
+        if (protectedStart < 2)
+        {
+            return null;
+        }
+
+        var history = request.Messages.Take(protectedStart).ToArray();
+        var protectedTail = request.Messages.Skip(protectedStart).ToArray();
+        GameTranscriptStructure.ValidateToolExchanges(history);
+        var available = GetAvailableInputTokens(
+            request.Parameters,
+            contextWindowTokens,
+            maximumOutputTokens);
+        var safetyMargin = Math.Max(256L, contextWindowTokens / 20L);
+        var recoveryAvailable = available - safetyMargin;
+        if (recoveryAvailable <= 0)
+        {
+            return null;
+        }
+
+        var fixedTokens = EstimateRequestTokens(
+            request.Model,
+            request.SystemPrompt,
+            protectedTail,
+            request.Tools);
+        var historyTarget = recoveryAvailable - fixedTokens;
+        if (historyTarget <= 0)
+        {
+            return null;
+        }
+
+        var summaryUsageBudget = usageAccounting.RemainingTokens;
+        if (summaryUsageBudget <= 0)
+        {
+            return null;
+        }
+
+        var compaction = await _transcriptCompactor.CompactAsync(
+            new GameTranscriptCompactionContext(
+                session,
+                history,
+                Math.Max(1, history.Length - 1),
+                historyTarget,
+                _transcriptTokenEstimator,
+                summaryUsageBudget),
+            cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The transcript compactor returned null.");
+        if (compaction.Usage.TotalTokens > usageAccounting.RemainingTokens)
+        {
+            throw new GameTranscriptCompactionException(
+                "recovery_usage_limit_exceeded",
+                "The failed provider attempt and recovery compaction exhausted the run token budget.",
+                compaction.Usage,
+                compaction.Details);
+        }
+
+        var recoveredMessages = compaction.Messages.Concat(protectedTail).ToArray();
+        AgentValidation.ValidateTranscript(recoveredMessages, _agentLimits);
+        if (EstimateRequestTokens(
+                request.Model,
+                request.SystemPrompt,
+                recoveredMessages,
+                request.Tools) > recoveryAvailable)
+        {
+            throw new GameTranscriptCompactionException(
+                "recovery_target_exceeded",
+                "The recovered transcript still exceeds the conservative context-window target.",
+                compaction.Usage,
+                compaction.Details);
+        }
+
+        return new GameModelRecoveryCompaction(
+            new ModelRequest(
+                request.Model,
+                request.SystemPrompt,
+                recoveredMessages,
+                request.Tools,
+                request.Parameters,
+                request.SessionId,
+                request.RunId,
+                request.Turn),
+            compaction);
     }
 
     private long? GetTranscriptTokenTarget(
@@ -1534,6 +1935,192 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         estimate is >= 0 and <= 10_000_000_000
             ? estimate
             : throw new InvalidOperationException($"The {kind} token estimator returned an invalid value.");
+
+    private sealed class RunUsageAccounting
+    {
+        private readonly object _gate = new();
+        private readonly string _attemptId = Guid.NewGuid().ToString("N");
+        private readonly string _inputId;
+        private readonly long _maximumTokens;
+        private readonly List<GameSessionUsageRecord> _records = new();
+        private readonly HashSet<string> _suppressedAssistantRuns = new(StringComparer.Ordinal);
+        private long _totalTokens;
+        private int _sequence;
+
+        public RunUsageAccounting(string inputId, long maximumTokens)
+        {
+            _inputId = GameJson.RequireId(inputId, nameof(inputId));
+            _maximumTokens = maximumTokens;
+        }
+
+        public bool Exceeded
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _totalTokens > _maximumTokens;
+                }
+            }
+        }
+
+        public int Count
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _records.Count;
+                }
+            }
+        }
+
+        public long RemainingTokens
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return Math.Max(0, _maximumTokens - _totalTokens);
+                }
+            }
+        }
+
+        public void Record(GameTranscriptCompactionResult result)
+        {
+            if (result is null)
+            {
+                throw new ArgumentNullException(nameof(result));
+            }
+
+            Add(
+                GameSessionUsageCause.Compaction,
+                result.Usage,
+                _attemptId,
+                JsonSerializer.Serialize(result.Details));
+        }
+
+        public void Record(GameTranscriptCompactionException exception)
+        {
+            if (exception is null)
+            {
+                throw new ArgumentNullException(nameof(exception));
+            }
+
+            if (exception.Usage.TotalTokens == 0 && exception.Usage.Cost.Total == 0)
+            {
+                return;
+            }
+
+            Add(
+                GameSessionUsageCause.Compaction,
+                exception.Usage,
+                _attemptId,
+                JsonSerializer.Serialize(exception.Details));
+        }
+
+        public void Record(AgentEvent agentEvent)
+        {
+            if (agentEvent is null)
+            {
+                throw new ArgumentNullException(nameof(agentEvent));
+            }
+
+            if (agentEvent.Kind == AgentEventKind.MessageEnded
+                && agentEvent.Message?.Role == AgentRole.Assistant
+                && agentEvent.Message.Usage is not null)
+            {
+                lock (_gate)
+                {
+                    if (_suppressedAssistantRuns.Remove(agentEvent.RunId))
+                    {
+                        return;
+                    }
+                }
+
+                Add(GameSessionUsageCause.Assistant, agentEvent.Message.Usage, agentEvent.RunId, detailsJson: null);
+            }
+            else if (agentEvent.Kind == AgentEventKind.ToolEnded
+                && agentEvent.ToolResult?.Usage is not null)
+            {
+                Add(GameSessionUsageCause.Tool, agentEvent.ToolResult.Usage, agentEvent.RunId, detailsJson: null);
+            }
+        }
+
+        public void ClearAssistantSuppression(string runId)
+        {
+            runId = GameJson.RequireId(runId, nameof(runId));
+            lock (_gate)
+            {
+                _suppressedAssistantRuns.Remove(runId);
+            }
+        }
+
+        public void RecordRecoveryAttemptAndSuppress(ModelUsage usage, string runId, string kind)
+        {
+            if (usage is null)
+            {
+                throw new ArgumentNullException(nameof(usage));
+            }
+
+            runId = GameJson.RequireId(runId, nameof(runId));
+            lock (_gate)
+            {
+                if (!_suppressedAssistantRuns.Add(runId))
+                {
+                    throw new InvalidOperationException("An assistant usage suppression is already active for this run.");
+                }
+
+                Add(
+                    GameSessionUsageCause.Assistant,
+                    usage,
+                    runId,
+                    JsonSerializer.Serialize(new
+                    {
+                        category = "context_overflow_recovery",
+                        attempt = 1,
+                        outcome = kind,
+                    }));
+            }
+        }
+
+        public IReadOnlyList<GameSessionUsageRecord> RecordsBetween(int startIndex, int endIndex)
+        {
+            lock (_gate)
+            {
+                if (startIndex < 0 || endIndex < startIndex || endIndex > _records.Count)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(startIndex));
+                }
+
+                return Array.AsReadOnly(_records.Skip(startIndex).Take(endIndex - startIndex).ToArray());
+            }
+        }
+
+        public GameRuntimeLimitException CreateLimitException() => new(
+            nameof(AgentLimits.MaxTotalTokens),
+            $"The run exceeded the maximum of {_maximumTokens} total tokens, including transcript compaction.");
+
+        private void Add(
+            GameSessionUsageCause cause,
+            ModelUsage usage,
+            string runId,
+            string? detailsJson)
+        {
+            lock (_gate)
+            {
+                var sequence = checked(_sequence++);
+                _records.Add(new GameSessionUsageRecord(
+                    $"{_attemptId}-{sequence}",
+                    cause,
+                    usage,
+                    runId,
+                    _inputId,
+                    detailsJson));
+                _totalTokens = checked(_totalTokens + usage.TotalTokens);
+            }
+        }
+    }
 
     private static AgentHooks CopyHooks(AgentHooks value) => new()
     {

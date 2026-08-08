@@ -296,6 +296,7 @@ public static class AgentLoop
                     else
                     {
                         batch = await ExecuteToolCallsAsync(
+                            assistantMessage,
                             calls,
                             runId,
                             turns,
@@ -633,7 +634,8 @@ public static class AgentLoop
                 request.Model,
                 options.Clock,
                 limits,
-                emit).ConfigureAwait(false);
+                emit,
+                (exception as ModelProviderException)?.Diagnostics).ConfigureAwait(false);
             return new AssistantStreamResult(syntheticResponse, request.Model);
         }
         finally
@@ -733,7 +735,8 @@ public static class AgentLoop
         string model,
         Func<DateTimeOffset> clock,
         AgentLimits limits,
-        Func<AgentEvent, ValueTask> emit)
+        Func<AgentEvent, ValueTask> emit,
+        IReadOnlyList<ModelDiagnostic>? failureDiagnostics = null)
     {
         var safeError = string.IsNullOrWhiteSpace(error)
             ? reason == ModelStopReason.Aborted ? "The model request was aborted." : "The model request failed."
@@ -745,7 +748,24 @@ public static class AgentLoop
 
         var safeContent = partial?.Content.Where(part => part is not ToolCallContent).ToArray()
             ?? Array.Empty<AgentContent>();
-        var response = new ModelResponse(safeContent, reason, partial?.Usage, safeError);
+        var diagnostics = partial?.Diagnostics.ToList() ?? new List<ModelDiagnostic>();
+        if (failureDiagnostics is not null)
+        {
+            diagnostics.AddRange(failureDiagnostics);
+        }
+
+        var response = new ModelResponse(
+            safeContent,
+            reason,
+            partial?.Usage,
+            safeError,
+            partial?.Provider,
+            partial?.Api,
+            partial?.ResponseModel,
+            partial?.ResponseId,
+            partial?.RawStopReason,
+            partial?.EndTurn,
+            diagnostics);
         AgentValidator.ValidateResponse(response, limits);
         var terminal = ModelStreamEvent.Terminal(response);
         var message = ToAssistantMessage(response, clock(), model);
@@ -798,6 +818,7 @@ public static class AgentLoop
     }
 
     private static async Task<ToolBatchOutcome> ExecuteToolCallsAsync(
+        AgentMessage assistantMessage,
         IReadOnlyList<ToolCallContent> calls,
         string runId,
         int turn,
@@ -824,7 +845,15 @@ public static class AgentLoop
             {
                 try
                 {
-                    preparation = await PrepareToolCallAsync(call, current, options, limits, cancellationToken).ConfigureAwait(false);
+                    preparation = await PrepareToolCallAsync(
+                        assistantMessage,
+                        call,
+                        runId,
+                        turn,
+                        current,
+                        options,
+                        limits,
+                        cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -899,6 +928,7 @@ public static class AgentLoop
 
                     var outcome = await ExecutePreparedToolCallAsync(
                         item,
+                        assistantMessage,
                         runId,
                         turn,
                         current.Snapshot(),
@@ -970,6 +1000,7 @@ public static class AgentLoop
                 {
                     outcome = await ExecutePreparedToolCallAsync(
                         item,
+                        assistantMessage,
                         runId,
                         turn,
                         current.Snapshot(),
@@ -1004,7 +1035,10 @@ public static class AgentLoop
     }
 
     private static async Task<ToolPreparation> PrepareToolCallAsync(
+        AgentMessage assistantMessage,
         ToolCallContent originalCall,
+        string runId,
+        int turn,
         MutableLoopContext current,
         AgentLoopOptions options,
         AgentLimits limits,
@@ -1041,7 +1075,15 @@ public static class AgentLoop
 
             if (options.Hooks.BeforeToolCallAsync is not null)
             {
-                var decision = await options.Hooks.BeforeToolCallAsync(call, current.Snapshot(), cancellationToken).ConfigureAwait(false);
+                var decision = await options.Hooks.BeforeToolCallAsync(
+                    new BeforeToolCallContext(
+                        runId,
+                        turn,
+                        assistantMessage,
+                        call,
+                        arguments,
+                        current.Snapshot()),
+                    cancellationToken).ConfigureAwait(false);
                 if (decision?.Blocked == true)
                 {
                     return ToolPreparation.Failed(CreateToolError(
@@ -1090,6 +1132,7 @@ public static class AgentLoop
 
     private static async Task<ToolCallOutcome> ExecutePreparedToolCallAsync(
         PreparedToolCall prepared,
+        AgentMessage assistantMessage,
         string runId,
         int turn,
         AgentContext context,
@@ -1213,7 +1256,16 @@ public static class AgentLoop
         {
             if (options.Hooks.AfterToolCallAsync is not null)
             {
-                result = await options.Hooks.AfterToolCallAsync(prepared.Call, result, context, cancellationToken).ConfigureAwait(false)
+                result = await options.Hooks.AfterToolCallAsync(
+                        new AfterToolCallContext(
+                            runId,
+                            turn,
+                            assistantMessage,
+                            prepared.Call,
+                            prepared.Arguments,
+                            result,
+                            context),
+                        cancellationToken).ConfigureAwait(false)
                     ?? result;
                 uncertainSideEffect |= result.OutcomeUncertain;
             }
@@ -1331,7 +1383,15 @@ public static class AgentLoop
             model: model,
             stopReason: response.StopReason,
             usage: response.Usage,
-            errorMessage: response.ErrorMessage);
+            errorMessage: response.ErrorMessage,
+            provider: response.Provider,
+            api: response.Api,
+            responseModel: response.ResponseModel,
+            responseId: response.ResponseId,
+            rawStopReason: response.RawStopReason,
+            endTurn: response.EndTurn,
+            diagnostics: response.Diagnostics,
+            deferred: response.Deferred);
 
     private static async Task EmitMessageAsync(
         AgentMessage message,

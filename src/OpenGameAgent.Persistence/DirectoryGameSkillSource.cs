@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -19,13 +20,48 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
     private readonly int _maximumManifestCharacters;
     private readonly int _maximumInstructionsCharacters;
     private readonly int _maximumScannedDirectories;
+    private readonly int _maximumIgnoreCharacters;
+    private readonly int _maximumDiagnostics;
+    private readonly int _maximumDiagnosticCharacters;
+    private readonly bool _continueOnError;
+    private readonly bool _honorIgnoreFiles;
+    private readonly string _source;
+    private readonly string? _sourceScope;
+    private IReadOnlyList<GameResourceDiagnostic> _diagnostics = Array.Empty<GameResourceDiagnostic>();
+
+    public DirectoryGameSkillSource(
+        string directory,
+        int maximumSkills,
+        int maximumManifestCharacters,
+        int maximumInstructionsCharacters,
+        int maximumScannedDirectories)
+        : this(
+            directory,
+            maximumSkills,
+            maximumManifestCharacters,
+            maximumInstructionsCharacters,
+            maximumScannedDirectories,
+            maximumIgnoreCharacters: 100_000,
+            continueOnError: false,
+            honorIgnoreFiles: true,
+            source: "local",
+            sourceScope: null)
+    {
+    }
 
     public DirectoryGameSkillSource(
         string directory,
         int maximumSkills = 1_000,
         int maximumManifestCharacters = 100_000,
         int maximumInstructionsCharacters = 1_000_000,
-        int maximumScannedDirectories = 10_000)
+        int maximumScannedDirectories = 10_000,
+        int maximumIgnoreCharacters = 100_000,
+        bool continueOnError = false,
+        bool honorIgnoreFiles = true,
+        string source = "local",
+        string? sourceScope = null,
+        int maximumDiagnostics = 1_024,
+        int maximumDiagnosticCharacters = 64_000)
     {
         if (string.IsNullOrWhiteSpace(directory))
         {
@@ -52,8 +88,23 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             throw new ArgumentOutOfRangeException(nameof(maximumScannedDirectories));
         }
 
+        if (maximumIgnoreCharacters < 0 || maximumIgnoreCharacters > 100_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumIgnoreCharacters));
+        }
+
+        if (maximumDiagnostics < 0 || maximumDiagnostics > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumDiagnostics));
+        }
+
+        if (maximumDiagnosticCharacters <= 0 || maximumDiagnosticCharacters > 10_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumDiagnosticCharacters));
+        }
+
         _root = Path.GetFullPath(directory);
-        if (!Directory.Exists(_root))
+        if (!Directory.Exists(_root) && !continueOnError)
         {
             throw new DirectoryNotFoundException($"Skill directory '{_root}' does not exist.");
         }
@@ -62,7 +113,39 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         _maximumManifestCharacters = maximumManifestCharacters;
         _maximumInstructionsCharacters = maximumInstructionsCharacters;
         _maximumScannedDirectories = maximumScannedDirectories;
-        _ = LoadManifests();
+        _maximumIgnoreCharacters = maximumIgnoreCharacters;
+        _maximumDiagnostics = maximumDiagnostics;
+        _maximumDiagnosticCharacters = maximumDiagnosticCharacters;
+        _continueOnError = continueOnError;
+        _honorIgnoreFiles = honorIgnoreFiles;
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            throw new ArgumentException("A resource source is required.", nameof(source));
+        }
+
+        _source = source;
+        _sourceScope = sourceScope;
+        var scan = LoadManifests();
+        SetDiagnostics(scan.Diagnostics);
+    }
+
+    public IReadOnlyList<GameResourceDiagnostic> Diagnostics => Volatile.Read(ref _diagnostics);
+
+    public GameSkillDiscoveryResult Discover()
+    {
+        var scan = LoadManifests();
+        var diagnostics = NewDiagnostics(scan.Diagnostics);
+        var skills = new List<GameSkill>();
+        foreach (var manifest in scan.Manifests)
+        {
+            if (TryLoadSkill(manifest, diagnostics, out var skill))
+            {
+                skills.Add(skill!);
+            }
+        }
+
+        SetDiagnostics(diagnostics.Items);
+        return new GameSkillDiscoveryResult(skills, diagnostics.Items);
     }
 
     public ValueTask<IReadOnlyList<GameSkill>> SelectAsync(
@@ -76,42 +159,139 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         }
 
         var tools = new HashSet<string>(query.AvailableTools, StringComparer.Ordinal);
-        var selected = LoadManifests()
+        var scan = LoadManifests();
+        var diagnostics = NewDiagnostics(scan.Diagnostics);
+        var candidates = scan.Manifests
+            .Where(manifest => !manifest.Document.DisableModelInvocation)
             .Where(manifest => manifest.Document.InputTypes is null
                 || manifest.Document.InputTypes.Count == 0
                 || manifest.Document.InputTypes.Contains(query.Input.Type, StringComparer.Ordinal))
             .Where(manifest => (manifest.Document.ToolNames ?? new List<string>()).All(tools.Contains))
             .OrderByDescending(manifest => manifest.Document.Priority)
-            .ThenBy(manifest => manifest.Document.Id, StringComparer.Ordinal)
-            .Take(query.Limit)
-            .Select(LoadSkill)
-            .ToArray();
-        return new ValueTask<IReadOnlyList<GameSkill>>(selected);
+            .ThenBy(manifest => manifest.Document.Id, StringComparer.Ordinal);
+        var selected = new List<GameSkill>();
+        foreach (var manifest in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (selected.Count >= query.Limit)
+            {
+                break;
+            }
+
+            if (TryLoadSkill(manifest, diagnostics, out var skill))
+            {
+                selected.Add(skill!);
+            }
+        }
+
+        SetDiagnostics(diagnostics.Items);
+        return new ValueTask<IReadOnlyList<GameSkill>>(Array.AsReadOnly(selected.ToArray()));
     }
 
-    private IReadOnlyList<Manifest> LoadManifests()
+    private ManifestScan LoadManifests()
     {
-        var manifests = EnumerateSkillDescriptors(_maximumScannedDirectories)
+        var diagnostics = NewDiagnostics();
+        var descriptors = EnumerateSkillDescriptors(diagnostics)
             .OrderBy(path => path, StringComparer.Ordinal)
             .Take(_maximumSkills + 1)
             .ToArray();
-        if (manifests.Length > _maximumSkills)
+        if (descriptors.Length > _maximumSkills)
         {
-            throw new GameRuntimeLimitException(nameof(_maximumSkills), "The directory contains too many skills.");
+            var exception = new GameRuntimeLimitException(
+                "maximumSkills",
+                "The directory contains too many skills.");
+            if (!_continueOnError)
+            {
+                throw exception;
+            }
+
+            diagnostics.Add(Warning(GameResourceDiagnosticCodes.LimitExceeded, exception.Message, _root));
+            descriptors = descriptors.Take(_maximumSkills).ToArray();
         }
 
-        var loaded = manifests.Select(path => LoadManifest(
-            path,
-            _maximumManifestCharacters,
-            _maximumInstructionsCharacters)).ToArray();
-        var duplicate = loaded.GroupBy(item => item.Document.Id, StringComparer.Ordinal)
-            .FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null)
+        var loaded = new List<Manifest>();
+        foreach (var path in descriptors)
         {
-            throw new PersistenceException($"Duplicate skill ID '{duplicate.Key}'.");
+            try
+            {
+                var manifest = LoadManifest(path, _maximumManifestCharacters, _maximumInstructionsCharacters);
+                loaded.Add(manifest);
+                if (manifest.IsMarkdown)
+                {
+                    var parentName = new DirectoryInfo(Path.GetDirectoryName(path)!).Name;
+                    if (!string.Equals(manifest.Document.Name, parentName, StringComparison.Ordinal))
+                    {
+                        diagnostics.Add(Warning(
+                            GameResourceDiagnosticCodes.InvalidMetadata,
+                            $"Skill name '{manifest.Document.Name}' does not match parent directory '{parentName}'.",
+                            path));
+                    }
+                }
+            }
+            catch (Exception exception) when (IsResourceFailure(exception))
+            {
+                if (!_continueOnError && !IsLooseRootMarkdown(path))
+                {
+                    throw;
+                }
+
+                diagnostics.Add(Warning(
+                    IsLooseRootMarkdown(path)
+                        ? GameResourceDiagnosticCodes.InvalidMetadata
+                        : DiagnosticCode(exception),
+                    exception.Message,
+                    path));
+            }
         }
 
-        return loaded;
+        var deduplicated = new List<Manifest>();
+        foreach (var group in loaded.GroupBy(item => item.Document.Id, StringComparer.Ordinal))
+        {
+            var ordered = group.OrderBy(item => item.DescriptorPath, StringComparer.Ordinal).ToArray();
+            deduplicated.Add(ordered[0]);
+            if (ordered.Length <= 1)
+            {
+                continue;
+            }
+
+            var message = $"Duplicate skill ID '{group.Key}'.";
+            if (!_continueOnError)
+            {
+                throw new PersistenceException(message);
+            }
+
+            foreach (var duplicate in ordered.Skip(1))
+            {
+                diagnostics.Add(Warning(GameResourceDiagnosticCodes.InvalidMetadata, message, duplicate.DescriptorPath));
+            }
+        }
+
+        return new ManifestScan(
+            deduplicated.OrderBy(value => value.DescriptorPath, StringComparer.Ordinal).ToArray(),
+            diagnostics.Items);
+    }
+
+    private bool TryLoadSkill(
+        Manifest manifest,
+        GameResourceDiagnosticBuffer diagnostics,
+        out GameSkill? skill)
+    {
+        try
+        {
+            skill = LoadSkill(manifest);
+            return true;
+        }
+        catch (Exception exception) when (IsResourceFailure(exception))
+        {
+            if (!_continueOnError)
+            {
+                throw;
+            }
+
+            diagnostics.Add(Warning(DiagnosticCode(exception), exception.Message, manifest.InstructionsPath));
+            skill = null;
+            return false;
+        }
     }
 
     private GameSkill LoadSkill(Manifest manifest)
@@ -121,7 +301,9 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
                 manifest.InstructionsPath,
                 _maximumManifestCharacters,
                 _maximumInstructionsCharacters)
-            : ReadBounded(manifest.InstructionsPath, _maximumInstructionsCharacters);
+            : GameResourceFileSupport.ReadBounded(
+                manifest.InstructionsPath,
+                _maximumInstructionsCharacters);
         return new GameSkill(
             manifest.Document.Id,
             manifest.Document.Name,
@@ -130,7 +312,13 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             manifest.Document.InputTypes,
             manifest.Document.ToolNames,
             manifest.Document.Priority,
-            manifest.Document.Metadata);
+            manifest.Document.Metadata,
+            manifest.Document.DisableModelInvocation,
+            GameResourceFileSupport.SourceInfo(
+                _source,
+                _sourceScope,
+                _root,
+                manifest.DescriptorPath));
     }
 
     private static Manifest LoadManifest(
@@ -138,16 +326,14 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         int maximumManifestCharacters,
         int maximumInstructionsCharacters)
     {
-        return string.Equals(Path.GetFileName(manifestPath), "SKILL.md", StringComparison.OrdinalIgnoreCase)
+        return manifestPath.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
             ? LoadMarkdownSkill(manifestPath, maximumManifestCharacters, maximumInstructionsCharacters)
             : LoadJsonManifest(manifestPath, maximumManifestCharacters);
     }
 
-    private static Manifest LoadJsonManifest(
-        string manifestPath,
-        int maximumManifestCharacters)
+    private static Manifest LoadJsonManifest(string manifestPath, int maximumManifestCharacters)
     {
-        var manifestText = ReadBounded(manifestPath, maximumManifestCharacters);
+        var manifestText = GameResourceFileSupport.ReadBounded(manifestPath, maximumManifestCharacters);
         ManifestDocument manifest;
         try
         {
@@ -193,7 +379,7 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             throw new PersistenceException($"Skill file '{instructionsPath}' cannot be a symbolic link or reparse point.");
         }
 
-        return new Manifest(manifest, instructionsPath);
+        return new Manifest(manifest, manifestPath, instructionsPath);
     }
 
     private static void EnsureManifestIsUnambiguous(JsonElement value, string path)
@@ -225,47 +411,29 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         int maximumManifestCharacters,
         int maximumInstructionsCharacters)
     {
-        _ = maximumInstructionsCharacters;
-        var attributes = File.GetAttributes(path);
-        if ((attributes & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new PersistenceException($"Skill file '{path}' cannot be a symbolic link or reparse point.");
-        }
-
-        using var reader = new StreamReader(path);
-        if (!string.Equals(reader.ReadLine(), "---", StringComparison.Ordinal))
+        var maximumFileCharacters = checked(maximumManifestCharacters + maximumInstructionsCharacters + 16);
+        var frontMatter = GameResourceFileSupport.ParseFrontMatter(
+            GameResourceFileSupport.ReadBounded(path, maximumFileCharacters),
+            path);
+        if (!frontMatter.HasFrontMatter)
         {
             throw new PersistenceException($"Skill file '{path}' requires YAML front matter.");
         }
 
-        var metadata = new System.Text.StringBuilder();
-        while (true)
+        if (frontMatter.MetadataCharacters > maximumManifestCharacters)
         {
-            var line = reader.ReadLine();
-            if (line is null)
-            {
-                throw new PersistenceException($"Skill file '{path}' has unterminated YAML front matter.");
-            }
-
-            if (string.Equals(line, "---", StringComparison.Ordinal))
-            {
-                break;
-            }
-
-            if (metadata.Length + line.Length + 1 > maximumManifestCharacters)
-            {
-                throw new GameRuntimeLimitException(nameof(maximumManifestCharacters), $"Skill metadata in '{path}' exceeds its configured character limit.");
-            }
-
-            metadata.AppendLine(line);
+            throw new GameRuntimeLimitException(
+                nameof(maximumManifestCharacters),
+                $"Skill metadata in '{path}' exceeds its configured character limit.");
         }
 
-        var values = ParseScalarFrontMatter(metadata.ToString(), path);
         var directoryName = new DirectoryInfo(Path.GetDirectoryName(path)!).Name;
-        var name = values.TryGetValue("name", out var configuredName) && !string.IsNullOrWhiteSpace(configuredName)
+        var name = frontMatter.Values.TryGetValue("name", out var configuredName)
+                   && !string.IsNullOrWhiteSpace(configuredName)
             ? configuredName
             : directoryName;
-        if (!values.TryGetValue("description", out var description) || string.IsNullOrWhiteSpace(description))
+        if (!frontMatter.Values.TryGetValue("description", out var description)
+            || string.IsNullOrWhiteSpace(description))
         {
             throw new PersistenceException($"Skill file '{path}' requires a description.");
         }
@@ -276,13 +444,22 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             throw new PersistenceException($"Skill file '{path}' has a description longer than 1024 characters.");
         }
 
+        var disableModelInvocation = false;
+        if (frontMatter.Values.TryGetValue("disable-model-invocation", out var configuredDisable)
+            && !bool.TryParse(configuredDisable, out disableModelInvocation))
+        {
+            throw new PersistenceException(
+                $"Skill file '{path}' requires disable-model-invocation to be true or false.");
+        }
+
         var document = new ManifestDocument
         {
             Id = name,
             Name = name,
             Description = description,
+            DisableModelInvocation = disableModelInvocation,
         };
-        return new Manifest(document, path, isMarkdown: true);
+        return new Manifest(document, path, path, isMarkdown: true);
     }
 
     private static string ReadMarkdownInstructions(
@@ -291,62 +468,43 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         int maximumInstructionsCharacters)
     {
         var maximumFileCharacters = checked(maximumManifestCharacters + maximumInstructionsCharacters + 16);
-        var text = ReadBounded(path, maximumFileCharacters)
-            .Replace("\r\n", "\n", StringComparison.Ordinal)
-            .Replace('\r', '\n');
-        var end = text.IndexOf("\n---\n", 4, StringComparison.Ordinal);
-        if (!text.StartsWith("---\n", StringComparison.Ordinal) || end < 0)
+        var frontMatter = GameResourceFileSupport.ParseFrontMatter(
+            GameResourceFileSupport.ReadBounded(path, maximumFileCharacters),
+            path);
+        if (!frontMatter.HasFrontMatter)
         {
             throw new PersistenceException($"Skill file '{path}' has invalid YAML front matter.");
         }
 
-        var instructions = text.Substring(end + 5).Trim();
-        if (instructions.Length > maximumInstructionsCharacters)
+        if (frontMatter.MetadataCharacters > maximumManifestCharacters)
         {
-            throw new GameRuntimeLimitException(nameof(maximumInstructionsCharacters), $"Skill instructions in '{path}' exceed their configured character limit.");
+            throw new GameRuntimeLimitException(
+                nameof(maximumManifestCharacters),
+                $"Skill metadata in '{path}' exceeds its configured character limit.");
         }
 
-        return instructions;
-    }
-
-    private static IReadOnlyDictionary<string, string> ParseScalarFrontMatter(string text, string path)
-    {
-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var rawLine in text.Split('\n'))
+        if (frontMatter.Body.Length > maximumInstructionsCharacters)
         {
-            var line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith('#'))
-            {
-                continue;
-            }
-
-            var separator = line.IndexOf(':');
-            if (separator <= 0)
-            {
-                throw new PersistenceException($"Skill file '{path}' contains unsupported YAML metadata.");
-            }
-
-            var key = line.Substring(0, separator).Trim();
-            var value = line.Substring(separator + 1).Trim();
-            if (value.Length >= 2
-                && ((value.StartsWith('"') && value.EndsWith('"'))
-                || (value.StartsWith('\'') && value.EndsWith('\'')))
-               )
-            {
-                value = value.Substring(1, value.Length - 2);
-            }
-
-            if (!values.TryAdd(key, value))
-            {
-                throw new PersistenceException($"Skill file '{path}' contains duplicate YAML metadata '{key}'.");
-            }
+            throw new GameRuntimeLimitException(
+                nameof(maximumInstructionsCharacters),
+                $"Skill instructions in '{path}' exceed their configured character limit.");
         }
 
-        return values;
+        return frontMatter.Body;
     }
 
-    private IEnumerable<string> EnumerateSkillDescriptors(int maximumScannedDirectories)
+    private IEnumerable<string> EnumerateSkillDescriptors(GameResourceDiagnosticBuffer diagnostics)
     {
+        if (!Directory.Exists(_root))
+        {
+            yield break;
+        }
+
+        var ignore = new GameIgnoreMatcher(
+            _root,
+            _maximumIgnoreCharacters,
+            _source,
+            _sourceScope);
         var pending = new Stack<string>();
         pending.Push(_root);
         var scanned = 0;
@@ -354,54 +512,194 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         {
             var directory = pending.Pop();
             scanned++;
-            if (scanned > maximumScannedDirectories)
+            if (scanned > _maximumScannedDirectories)
             {
-                throw new GameRuntimeLimitException(
-                    nameof(maximumScannedDirectories),
+                var exception = new GameRuntimeLimitException(
+                    "maximumScannedDirectories",
                     "The skill directory tree exceeds its configured scan limit.");
+                if (!_continueOnError)
+                {
+                    throw exception;
+                }
+
+                diagnostics.Add(Warning(GameResourceDiagnosticCodes.LimitExceeded, exception.Message, directory));
+                yield break;
             }
 
-            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            FileAttributes attributes;
+            try
             {
+                attributes = File.GetAttributes(directory);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (!_continueOnError)
+                {
+                    throw;
+                }
+
+                diagnostics.Add(Warning(GameResourceDiagnosticCodes.FileInfoFailed, exception.Message, directory));
                 continue;
+            }
+
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                diagnostics.Add(Warning(
+                    GameResourceDiagnosticCodes.UnsupportedEntry,
+                    $"Skill directory '{directory}' is a symbolic link or reparse point and was skipped.",
+                    directory));
+                continue;
+            }
+
+            if (_honorIgnoreFiles)
+            {
+                ignore.AddRules(directory, diagnostics);
             }
 
             var json = Path.Combine(directory, "skill.json");
             var markdown = Path.Combine(directory, "SKILL.md");
-            if (File.Exists(json))
+            if (File.Exists(json) && !ignore.IsIgnored(json, isDirectory: false))
             {
                 yield return json;
                 continue;
             }
 
-            if (File.Exists(markdown))
+            if (File.Exists(markdown) && !ignore.IsIgnored(markdown, isDirectory: false))
             {
                 yield return markdown;
                 continue;
             }
 
-            var children = Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly)
-                .Where(path =>
+            string[] children;
+            string[] files;
+            try
+            {
+                children = Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly)
+                    .OrderByDescending(path => path, StringComparer.Ordinal)
+                    .ToArray();
+                files = string.Equals(directory, _root, StringComparison.Ordinal)
+                    ? Directory.EnumerateFiles(directory, "*.md", SearchOption.TopDirectoryOnly)
+                        .OrderBy(path => path, StringComparer.Ordinal)
+                        .ToArray()
+                    : Array.Empty<string>();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (!_continueOnError)
                 {
-                    var name = Path.GetFileName(path);
-                    return !name.StartsWith('.')
-                        && !string.Equals(name, "node_modules", StringComparison.OrdinalIgnoreCase)
-                        && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0;
-                })
-                .OrderByDescending(path => path, StringComparer.Ordinal)
-                .ToArray();
+                    throw;
+                }
+
+                diagnostics.Add(Warning(GameResourceDiagnosticCodes.ListFailed, exception.Message, directory));
+                continue;
+            }
+
+            foreach (var file in files)
+            {
+                if (Path.GetFileName(file).StartsWith(".", StringComparison.Ordinal)
+                    || ignore.IsIgnored(file, isDirectory: false))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        diagnostics.Add(Warning(
+                            GameResourceDiagnosticCodes.UnsupportedEntry,
+                            $"Skill file '{file}' is a symbolic link or reparse point and was skipped.",
+                            file));
+                        continue;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    if (!_continueOnError)
+                    {
+                        throw;
+                    }
+
+                    diagnostics.Add(Warning(GameResourceDiagnosticCodes.FileInfoFailed, exception.Message, file));
+                    continue;
+                }
+
+                yield return file;
+            }
+
             foreach (var child in children)
             {
+                var name = Path.GetFileName(child);
+                if (name.StartsWith(".", StringComparison.Ordinal)
+                    || string.Equals(name, "node_modules", StringComparison.OrdinalIgnoreCase)
+                    || ignore.IsIgnored(child, isDirectory: true))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0)
+                    {
+                        diagnostics.Add(Warning(
+                            GameResourceDiagnosticCodes.UnsupportedEntry,
+                            $"Skill directory '{child}' is a symbolic link or reparse point and was skipped.",
+                            child));
+                        continue;
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    if (!_continueOnError)
+                    {
+                        throw;
+                    }
+
+                    diagnostics.Add(Warning(GameResourceDiagnosticCodes.FileInfoFailed, exception.Message, child));
+                    continue;
+                }
+
                 pending.Push(child);
             }
         }
     }
 
+    private GameResourceDiagnostic Warning(string code, string message, string path) =>
+        GameResourceFileSupport.Warning(code, message, path, _source, _sourceScope, _root);
+
+    private bool IsLooseRootMarkdown(string path) =>
+        string.Equals(Path.GetDirectoryName(path), _root, StringComparison.Ordinal)
+        && path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(Path.GetFileName(path), "SKILL.md", StringComparison.OrdinalIgnoreCase);
+
+    private void SetDiagnostics(IEnumerable<GameResourceDiagnostic> diagnostics) =>
+        Volatile.Write(ref _diagnostics, Array.AsReadOnly(diagnostics.ToArray()));
+
+    private GameResourceDiagnosticBuffer NewDiagnostics(
+        IEnumerable<GameResourceDiagnostic>? initial = null) =>
+        new(_maximumDiagnostics, _maximumDiagnosticCharacters, initial);
+
+    private static bool IsResourceFailure(Exception exception) =>
+        exception is IOException
+        or UnauthorizedAccessException
+        or PersistenceException
+        or GameRuntimeLimitException
+        or OverflowException;
+
+    private static string DiagnosticCode(Exception exception) => exception switch
+    {
+        GameRuntimeLimitException => GameResourceDiagnosticCodes.LimitExceeded,
+        IOException or UnauthorizedAccessException => GameResourceDiagnosticCodes.ReadFailed,
+        _ when exception.Message.Contains("YAML", StringComparison.OrdinalIgnoreCase)
+            || exception.Message.Contains("JSON", StringComparison.OrdinalIgnoreCase) => GameResourceDiagnosticCodes.ParseFailed,
+        _ => GameResourceDiagnosticCodes.InvalidMetadata,
+    };
+
     private static void ValidatePortableSkillName(string name, string path)
     {
         if (name.Length > 64
-            || name.StartsWith('-')
-            || name.EndsWith('-')
+            || name.StartsWith("-", StringComparison.Ordinal)
+            || name.EndsWith("-", StringComparison.Ordinal)
             || name.Contains("--", StringComparison.Ordinal)
             || name.Any(character =>
                 character is not (>= 'a' and <= 'z')
@@ -421,31 +719,6 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         }
     }
 
-    private static string ReadBounded(string path, int maximumCharacters)
-    {
-        var attributes = File.GetAttributes(path);
-        if ((attributes & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new PersistenceException($"Skill file '{path}' cannot be a symbolic link or reparse point.");
-        }
-
-        using var reader = new StreamReader(path);
-        var buffer = new char[Math.Min(4096, Math.Max(1, maximumCharacters + 1))];
-        var result = new System.Text.StringBuilder();
-        while (result.Length <= maximumCharacters)
-        {
-            var read = reader.Read(buffer, 0, Math.Min(buffer.Length, maximumCharacters + 1 - result.Length));
-            if (read == 0)
-            {
-                return result.ToString();
-            }
-
-            result.Append(buffer, 0, read);
-        }
-
-        throw new GameRuntimeLimitException(nameof(maximumCharacters), $"File '{path}' exceeds its configured character limit.");
-    }
-
     private sealed class ManifestDocument
     {
         public string Id { get; set; } = string.Empty;
@@ -463,21 +736,45 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
         public int Priority { get; set; }
 
         public Dictionary<string, string>? Metadata { get; set; }
+
+        public bool DisableModelInvocation { get; set; }
     }
 
     private sealed class Manifest
     {
-        public Manifest(ManifestDocument document, string instructionsPath, bool isMarkdown = false)
+        public Manifest(
+            ManifestDocument document,
+            string descriptorPath,
+            string instructionsPath,
+            bool isMarkdown = false)
         {
             Document = document;
+            DescriptorPath = descriptorPath;
             InstructionsPath = instructionsPath;
             IsMarkdown = isMarkdown;
         }
 
         public ManifestDocument Document { get; }
 
+        public string DescriptorPath { get; }
+
         public string InstructionsPath { get; }
 
         public bool IsMarkdown { get; }
+    }
+
+    private sealed class ManifestScan
+    {
+        public ManifestScan(
+            IReadOnlyList<Manifest> manifests,
+            IReadOnlyList<GameResourceDiagnostic> diagnostics)
+        {
+            Manifests = manifests;
+            Diagnostics = diagnostics;
+        }
+
+        public IReadOnlyList<Manifest> Manifests { get; }
+
+        public IReadOnlyList<GameResourceDiagnostic> Diagnostics { get; }
     }
 }

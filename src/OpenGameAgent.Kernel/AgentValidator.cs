@@ -45,6 +45,62 @@ internal static class AgentValidator
             throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "The reasoning level is too large.");
         }
 
+        if (!Enum.IsDefined(typeof(ModelTransport), parameters.Transport)
+            || !Enum.IsDefined(typeof(ModelCacheRetention), parameters.CacheRetention))
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters), "The model transport or cache-retention setting is invalid.");
+        }
+
+        if (parameters.DeferredWindow is { } deferredWindow
+            && !Enum.IsDefined(typeof(ModelDeferredWindow), deferredWindow))
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters), "The deferred-response window is invalid.");
+        }
+
+        if (!parameters.Deferred && parameters.DeferredWindow is not null)
+        {
+            throw new ArgumentException("A deferred-response window requires Deferred to be enabled.", nameof(parameters));
+        }
+
+        if (parameters.WebSocketConnectTimeoutMilliseconds is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(parameters), "The WebSocket connect timeout must be positive.");
+        }
+
+        if (parameters.SamplingParametersJson is { } sampling)
+        {
+            var validSampling = JsonValue.RequireObject(sampling, nameof(parameters.SamplingParametersJson));
+            if (validSampling.Length > limits.MaxJsonCharactersPerPart)
+            {
+                throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Sampling parameters are too large.");
+            }
+        }
+
+        if (parameters.MetadataJson is { } metadata)
+        {
+            var validMetadata = JsonValue.RequireObject(metadata, nameof(parameters.MetadataJson));
+            if (validMetadata.Length > limits.MaxJsonCharactersPerPart)
+            {
+                throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Model metadata is too large.");
+            }
+        }
+
+        var reasoningBudgets = parameters.ReasoningBudgets ?? new Dictionary<string, int>();
+        if (reasoningBudgets.Count > 64)
+        {
+            throw new AgentLimitException(nameof(limits.MaxMetadataEntriesPerMessage), "Too many reasoning budgets are configured.");
+        }
+
+        foreach (var budget in reasoningBudgets)
+        {
+            if (string.IsNullOrWhiteSpace(budget.Key)
+                || budget.Key.Length > limits.MaxMetadataKeyCharacters
+                || budget.Value <= 0)
+            {
+                throw new ArgumentException("Reasoning budgets require bounded names and positive token counts.", nameof(parameters));
+            }
+        }
+
         var extensions = parameters.Extensions ?? new Dictionary<string, string>();
         if (extensions.Count > limits.MaxMetadataEntriesPerMessage)
         {
@@ -132,6 +188,8 @@ internal static class AgentValidator
                 throw new AgentLimitException(nameof(limits.MaxToolSchemaCharacters), $"Tool schema '{definition.Name}' is too large.");
             }
 
+            ValidateConstrainedSampling(definition, limits);
+
             if (!names.Add(definition.Name))
             {
                 throw new ArgumentException($"Duplicate tool name '{definition.Name}'.", nameof(context));
@@ -213,6 +271,38 @@ internal static class AgentValidator
             throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A message error is too large.");
         }
 
+        if (message.Diagnostics.Count > limits.MaxDiagnosticsPerMessage)
+        {
+            throw new AgentLimitException(nameof(limits.MaxDiagnosticsPerMessage), "A message contains too many diagnostics.");
+        }
+
+        foreach (var diagnostic in message.Diagnostics)
+        {
+            ValidateDiagnostic(diagnostic, limits);
+        }
+
+        if (message.AddedToolNames.Count > limits.MaxAddedToolNamesPerResult)
+        {
+            throw new AgentLimitException(nameof(limits.MaxAddedToolNamesPerResult), "A tool result exposes too many new tool names.");
+        }
+
+        foreach (var name in message.AddedToolNames)
+        {
+            if (name.Length > limits.MaxToolNameCharacters)
+            {
+                throw new AgentLimitException(nameof(limits.MaxToolNameCharacters), "An added tool name is too large.");
+            }
+        }
+
+        ValidateResponseIdentity(
+            message.Provider,
+            message.Api,
+            message.ResponseModel,
+            message.ResponseId,
+            message.RawStopReason,
+            message.Deferred,
+            limits);
+
 
     }
 
@@ -253,6 +343,25 @@ internal static class AgentValidator
         {
             throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "The model response error is too large.");
         }
+
+        if (response.Diagnostics.Count > limits.MaxDiagnosticsPerMessage)
+        {
+            throw new AgentLimitException(nameof(limits.MaxDiagnosticsPerMessage), "The model response contains too many diagnostics.");
+        }
+
+        foreach (var diagnostic in response.Diagnostics)
+        {
+            ValidateDiagnostic(diagnostic, limits);
+        }
+
+        ValidateResponseIdentity(
+            response.Provider,
+            response.Api,
+            response.ResponseModel,
+            response.ResponseId,
+            response.RawStopReason,
+            response.Deferred,
+            limits);
 
 
 
@@ -295,6 +404,19 @@ internal static class AgentValidator
             throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Tool result details are too large.");
         }
 
+        if (result.AddedToolNames.Count > limits.MaxAddedToolNamesPerResult)
+        {
+            throw new AgentLimitException(nameof(limits.MaxAddedToolNamesPerResult), "A tool result exposes too many new tool names.");
+        }
+
+        foreach (var name in result.AddedToolNames)
+        {
+            if (name.Length > limits.MaxToolNameCharacters)
+            {
+                throw new AgentLimitException(nameof(limits.MaxToolNameCharacters), "An added tool name is too large.");
+            }
+        }
+
 
     }
 
@@ -313,6 +435,18 @@ internal static class AgentValidator
         if ((progress.DetailsJson?.Length ?? 0) > limits.MaxJsonCharactersPerPart)
         {
             throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Tool progress details are too large.");
+        }
+
+        if (progress.Content.Count > limits.MaxContentPartsPerMessage)
+        {
+            throw new AgentLimitException(
+                nameof(limits.MaxContentPartsPerMessage),
+                "Tool progress contains too many content parts.");
+        }
+
+        foreach (var content in progress.Content)
+        {
+            ValidateContent(content, limits);
         }
     }
 
@@ -360,6 +494,8 @@ internal static class AgentValidator
                 throw new AgentLimitException(nameof(limits.MaxTools), "A provider tool definition exceeds configured limits.");
             }
 
+            ValidateConstrainedSampling(tool, limits);
+
             if (!names.Add(tool.Name))
             {
                 throw new ArgumentException($"Duplicate provider tool name '{tool.Name}'.", nameof(request));
@@ -375,6 +511,8 @@ internal static class AgentValidator
                 throw new ArgumentException("Content cannot be null.", nameof(content));
             case TextContent text when text.Text.Length > limits.MaxTextCharactersPerPart:
                 throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A text content part is too large.");
+            case TextContent text when (text.Signature?.Length ?? 0) > limits.MaxTextCharactersPerPart:
+                throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A text signature is too large.");
             case ReasoningContent reasoning when reasoning.Text.Length > limits.MaxTextCharactersPerPart:
                 throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A reasoning content part is too large.");
             case ReasoningContent reasoning when (reasoning.Signature?.Length ?? 0) > limits.MaxTextCharactersPerPart:
@@ -387,16 +525,98 @@ internal static class AgentValidator
                 throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "A resource media type is too large.");
             case ResourceContent resource when (resource.Name?.Length ?? 0) > limits.MaxTextCharactersPerPart:
                 throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A resource name is too large.");
+            case BinaryContent binary when binary.Data.Length > limits.MaxBinaryDataCharactersPerPart:
+                throw new AgentLimitException(nameof(limits.MaxBinaryDataCharactersPerPart), "An inline media part is too large.");
+            case BinaryContent binary when binary.MediaType.Length > limits.MaxMetadataValueCharacters:
+                throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "An inline media type is too large.");
+            case BinaryContent binary when (binary.Name?.Length ?? 0) > limits.MaxTextCharactersPerPart:
+                throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "An inline media name is too large.");
             case ToolCallContent call when call.Id.Length > limits.MaxToolCallIdCharacters:
                 throw new AgentLimitException(nameof(limits.MaxToolCallIdCharacters), "A tool call ID is too large.");
             case ToolCallContent call when call.Name.Length > limits.MaxToolNameCharacters:
                 throw new AgentLimitException(nameof(limits.MaxToolNameCharacters), "A tool call name is too large.");
             case ToolCallContent call when call.ArgumentsJson.Length > limits.MaxJsonCharactersPerPart:
                 throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Tool call arguments are too large.");
-            case TextContent or ReasoningContent or JsonContent or ResourceContent or ToolCallContent:
+            case ToolCallContent call when (call.ThoughtSignature?.Length ?? 0) > limits.MaxTextCharactersPerPart:
+                throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A tool-call thought signature is too large.");
+            case ToolCallContent call when (call.Namespace?.Length ?? 0) > limits.MaxToolNameCharacters:
+                throw new AgentLimitException(nameof(limits.MaxToolNameCharacters), "A tool-call namespace is too large.");
+            case TextContent or ReasoningContent or JsonContent or ResourceContent or BinaryContent or ToolCallContent:
                 break;
             default:
                 throw new ArgumentException($"Unsupported content type '{content.GetType().FullName}'.", nameof(content));
+        }
+    }
+
+    private static void ValidateDiagnostic(ModelDiagnostic diagnostic, AgentLimits limits)
+    {
+        if (diagnostic.Code.Length > limits.MaxMetadataKeyCharacters
+            || diagnostic.Message.Length > limits.MaxTextCharactersPerPart)
+        {
+            throw new AgentLimitException(nameof(limits.MaxDiagnosticsPerMessage), "A model diagnostic is too large.");
+        }
+
+        if ((diagnostic.DataJson?.Length ?? 0) > limits.MaxJsonCharactersPerPart)
+        {
+            throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Model diagnostic data is too large.");
+        }
+    }
+
+    private static void ValidateConstrainedSampling(ToolDefinition definition, AgentLimits limits)
+    {
+        var constrained = definition.ConstrainedSampling;
+        if (constrained is null)
+        {
+            return;
+        }
+
+        if (!Enum.IsDefined(typeof(ToolConstrainedSamplingKind), constrained.Kind)
+            || (constrained.Strictness is { } strictness
+                && !Enum.IsDefined(typeof(ToolSchemaStrictness), strictness)))
+        {
+            throw new ArgumentException("A tool has invalid constrained-sampling settings.", nameof(definition));
+        }
+
+        if ((constrained.OpenAiLark?.Length ?? 0) > limits.MaxToolSchemaCharacters
+            || (constrained.OpenAiRegex?.Length ?? 0) > limits.MaxToolSchemaCharacters)
+        {
+            throw new AgentLimitException(nameof(limits.MaxToolSchemaCharacters), "A constrained-sampling grammar is too large.");
+        }
+    }
+
+    private static void ValidateResponseIdentity(
+        string? provider,
+        string? api,
+        string? responseModel,
+        string? responseId,
+        string? rawStopReason,
+        DeferredModelHandle? deferred,
+        AgentLimits limits)
+    {
+        foreach (var value in new[] { provider, api, responseModel, responseId, rawStopReason })
+        {
+            if ((value?.Length ?? 0) > limits.MaxMetadataValueCharacters)
+            {
+                throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "Model response identity is too large.");
+            }
+        }
+
+        if (deferred is null)
+        {
+            return;
+        }
+
+        foreach (var value in new[] { deferred.Provider, deferred.Model, deferred.Api, deferred.Id })
+        {
+            if (value.Length > limits.MaxMetadataValueCharacters)
+            {
+                throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "A deferred response handle is too large.");
+            }
+        }
+
+        if ((deferred.DataJson?.Length ?? 0) > limits.MaxJsonCharactersPerPart)
+        {
+            throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Deferred response data is too large.");
         }
     }
 

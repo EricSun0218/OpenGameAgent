@@ -1458,7 +1458,11 @@ public sealed class RuntimeTests
         var result = await agent.RunAsync(AgentMessage.UserJson("{}"), TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
-        Assert.Equal(0.5, Assert.Single(progress).Fraction);
+        var update = Assert.Single(progress);
+        Assert.Equal(0.5, update.Fraction);
+        Assert.Equal(
+            "cHJldmlldw==",
+            Assert.Single(update.Content.OfType<BinaryContent>()).Data);
         var toolMessage = Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool);
         var resource = Assert.Single(toolMessage.Content.OfType<ResourceContent>());
         Assert.Equal("image/png", resource.MediaType);
@@ -1482,16 +1486,16 @@ public sealed class RuntimeTests
             Assistant("latest answer"),
         };
         var compactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
-            new ValueTask<string>("summary:" + removed.Count));
+            new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("summary:" + removed.Count)));
 
         var compacted = await compactor.CompactAsync(
             new GameTranscriptCompactionContext(new GameSessionKey("session", "actor"), messages, 7),
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(7, compacted.Count);
-        Assert.Equal("transcript_summary", compacted[0].CustomRole);
-        Assert.Contains(compacted, message => message.Content.OfType<ToolCallContent>().Any(item => item.Id == "call"));
-        Assert.Contains(compacted, message => message.Role == AgentRole.Tool && message.ToolCallId == "call");
+        Assert.Equal(7, compacted.Messages.Count);
+        Assert.Equal("transcript_summary", compacted.Messages[0].CustomRole);
+        Assert.Contains(compacted.Messages, message => message.Content.OfType<ToolCallContent>().Any(item => item.Id == "call"));
+        Assert.Contains(compacted.Messages, message => message.Role == AgentRole.Tool && message.ToolCallId == "call");
     }
 
     [Fact]
@@ -1509,7 +1513,7 @@ public sealed class RuntimeTests
         var compactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
         {
             summarized = removed;
-            return new ValueTask<string>("complete summary");
+            return new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("complete summary"));
         });
 
         var compacted = await compactor.CompactAsync(
@@ -1517,7 +1521,7 @@ public sealed class RuntimeTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(messages, summarized);
-        var summary = Assert.Single(compacted);
+        var summary = Assert.Single(compacted.Messages);
         Assert.Equal("transcript_summary", summary.CustomRole);
         Assert.Equal("complete summary", Assert.IsType<TextContent>(Assert.Single(summary.Content)).Text);
     }
@@ -1533,7 +1537,7 @@ public sealed class RuntimeTests
             Assistant("recent answer"),
         };
         var compactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
-            new ValueTask<string>("short summary:" + removed.Count));
+            new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("short summary:" + removed.Count)));
 
         var compacted = await compactor.CompactAsync(
             new GameTranscriptCompactionContext(
@@ -1544,9 +1548,663 @@ public sealed class RuntimeTests
                 tokenEstimator: ApproximateGameTokenEstimator.EstimateMessages),
             TestContext.Current.CancellationToken);
 
-        Assert.True(compacted.Count < messages.Length);
-        Assert.Equal("transcript_summary", compacted[0].CustomRole);
-        Assert.True(ApproximateGameTokenEstimator.EstimateMessages(compacted) <= 100);
+        Assert.True(compacted.Messages.Count < messages.Length);
+        Assert.Equal("transcript_summary", compacted.Messages[0].CustomRole);
+        Assert.True(ApproximateGameTokenEstimator.EstimateMessages(compacted.Messages) <= 100);
+    }
+
+    [Fact]
+    public async Task TranscriptCompactionReturnsSummaryUsageAndTypedDetails()
+    {
+        var messages = new AgentMessage[]
+        {
+            AgentMessage.User("one"),
+            Assistant("one"),
+            AgentMessage.User("two"),
+            Assistant("two"),
+        };
+        var usage = new ModelUsage(
+            7,
+            3,
+            reasoningTokens: 2,
+            cost: new ModelCost(input: 0.07, output: 0.06));
+        var compactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+            new ValueTask<GameTranscriptSummaryResult>(
+                new GameTranscriptSummaryResult("complete summary", usage, "{\"provider\":\"summary\"}")));
+
+        var result = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(
+                new GameSessionKey("session", "actor"),
+                messages,
+                targetMessageCount: 1,
+                targetEstimatedTokens: 100,
+                tokenEstimator: ApproximateGameTokenEstimator.EstimateMessages),
+            TestContext.Current.CancellationToken);
+
+        Assert.Same(usage, result.Usage);
+        Assert.Equal(4, result.Details.OriginalMessageCount);
+        Assert.Equal(4, result.Details.CompactedMessageCount);
+        Assert.Equal(0, result.Details.RetainedMessageCount);
+        Assert.NotNull(result.Details.EstimatedTokensBefore);
+        Assert.Equal("{\"provider\":\"summary\"}", result.Details.SummaryDetailsJson);
+        Assert.Equal("transcript_summary", Assert.Single(result.Messages).CustomRole);
+    }
+
+    [Fact]
+    public async Task RepeatedTranscriptCompactionUpdatesThePriorSummaryWithOnlyNewHistory()
+    {
+        var requests = new List<GameTranscriptSummaryContext>();
+        var compactor = new SummarizingGameTranscriptCompactor((request, _) =>
+        {
+            requests.Add(request);
+            var text = request.PreviousSummary is null ? "first summary" : "updated summary";
+            return new ValueTask<GameTranscriptSummaryAttemptResult>(
+                GameTranscriptSummaryAttemptResult.Success(text, new ModelUsage(1, 1)));
+        });
+        var key = new GameSessionKey("session", "actor");
+        var first = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(
+                key,
+                new[]
+                {
+                    AgentMessage.User("one"),
+                    Assistant("one"),
+                    AgentMessage.User("two"),
+                    Assistant("two"),
+                },
+                targetMessageCount: 3),
+            TestContext.Current.CancellationToken);
+        var secondSource = first.Messages
+            .Concat(new[] { AgentMessage.User("three"), Assistant("three") })
+            .ToArray();
+
+        var second = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(key, secondSource, targetMessageCount: 3),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, requests.Count);
+        Assert.Null(requests[0].PreviousSummary);
+        Assert.Equal(new[] { "one", "one" }, requests[0].Messages.Select(MessageText));
+        Assert.Equal("first summary", requests[1].PreviousSummary);
+        Assert.Equal(new[] { "two", "two" }, requests[1].Messages.Select(MessageText));
+        Assert.Equal(3, requests[1].SourceMessages.Count);
+        Assert.DoesNotContain(requests[1].Messages, message => message.CustomRole == "transcript_summary");
+        Assert.True(second.Details.PreviousSummaryUsed);
+        Assert.Equal(2, second.Details.IncrementalMessageCount);
+        Assert.Equal("updated summary", MessageText(second.Messages[0]));
+    }
+
+    [Fact]
+    public async Task TranscriptCompactionDoesNotTreatCustomMessagesInsideToolExchangesAsTurnBoundaries()
+    {
+        var call = new ToolCallContent("safe-call", "act", "{}");
+        var source = new AgentMessage[]
+        {
+            AgentMessage.User("old"),
+            Assistant("old"),
+            AgentMessage.User("build"),
+            new(AgentRole.Assistant, new AgentContent[] { call }, DateTimeOffset.UnixEpoch, model: "m", stopReason: ModelStopReason.ToolUse),
+            new(AgentRole.Custom, new AgentContent[] { new TextContent("progress") }, DateTimeOffset.UnixEpoch, customRole: "world_event"),
+            AgentMessage.ToolResult(call, new ToolResult(new AgentContent[] { new TextContent("built") }), DateTimeOffset.UnixEpoch),
+            Assistant("finished"),
+            AgentMessage.User("latest"),
+            Assistant("latest"),
+        };
+        IReadOnlyList<AgentMessage>? summarized = null;
+        var compactor = new SummarizingGameTranscriptCompactor((_, messages, _) =>
+        {
+            summarized = messages;
+            return new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("safe summary"));
+        });
+
+        var result = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(new GameSessionKey("session", "actor"), source, 6),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(summarized);
+        Assert.Contains(summarized, message => message.Content.OfType<ToolCallContent>().Any(item => item.Id == call.Id));
+        Assert.Contains(summarized, message => message.Role == AgentRole.Tool && message.ToolCallId == call.Id);
+        Assert.DoesNotContain(result.Messages, message => message.ToolCallId == call.Id);
+        Assert.Equal(7, result.Details.CutMessageIndex);
+        Assert.Equal(1, result.Details.RetainedTurnCount);
+    }
+
+    [Fact]
+    public async Task TranscriptSummaryRetriesAggregateEveryAttemptUsageAndExposeAttemptDetails()
+    {
+        var seenPreviousErrors = new List<string?>();
+        var compactor = new SummarizingGameTranscriptCompactor((request, _) =>
+        {
+            seenPreviousErrors.Add(request.PreviousError);
+            return request.Attempt == 1
+                ? new ValueTask<GameTranscriptSummaryAttemptResult>(
+                    GameTranscriptSummaryAttemptResult.Failure(
+                        "temporary provider failure",
+                        new ModelUsage(3, 1, cost: new ModelCost(input: 0.3, output: 0.1)),
+                        retryable: true,
+                        detailsJson: "{\"attempt\":1}"))
+                : new ValueTask<GameTranscriptSummaryAttemptResult>(
+                    GameTranscriptSummaryAttemptResult.Success(
+                        "summary",
+                        new ModelUsage(2, 1, cost: new ModelCost(input: 0.2, output: 0.1)),
+                        "{\"attempt\":2}"));
+        }, maxSummaryAttempts: 2);
+
+        var result = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(
+                new GameSessionKey("session", "actor"),
+                new[] { AgentMessage.User("one"), Assistant("one") },
+                targetMessageCount: 1),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(new string?[] { null, "temporary provider failure" }, seenPreviousErrors);
+        Assert.Equal(7, result.Usage.TotalTokens);
+        Assert.Equal(0.7, result.Usage.Cost.Total, precision: 10);
+        Assert.Equal(2, result.Details.SummaryAttemptCount);
+        Assert.Equal(1, result.Details.FailedSummaryAttemptCount);
+        Assert.False(result.Details.SummaryAttempts[0].Succeeded);
+        Assert.True(result.Details.SummaryAttempts[0].Retryable);
+        Assert.True(result.Details.SummaryAttempts[1].Succeeded);
+        Assert.Equal(GameTranscriptCompactionTrigger.MessageLimit, result.Details.Trigger);
+    }
+
+    [Fact]
+    public async Task OversizedTranscriptSummaryIsRetriedAndChargesBothModelCalls()
+    {
+        var previousErrors = new List<string?>();
+        var compactor = new SummarizingGameTranscriptCompactor((request, _) =>
+        {
+            previousErrors.Add(request.PreviousError);
+            var summary = request.Attempt == 1 ? new string('x', 1_000) : "ok";
+            return new ValueTask<GameTranscriptSummaryAttemptResult>(
+                GameTranscriptSummaryAttemptResult.Success(summary, new ModelUsage(1, 1)));
+        }, maxSummaryAttempts: 2);
+
+        var result = await compactor.CompactAsync(
+            new GameTranscriptCompactionContext(
+                new GameSessionKey("session", "actor"),
+                new[] { AgentMessage.User(new string('u', 100)), Assistant(new string('a', 100)) },
+                targetMessageCount: 1,
+                targetEstimatedTokens: 80,
+                tokenEstimator: ApproximateGameTokenEstimator.EstimateMessages),
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(previousErrors[0]);
+        Assert.Contains("token target", previousErrors[1], StringComparison.Ordinal);
+        Assert.Equal(4, result.Usage.TotalTokens);
+        Assert.Equal(2, result.Details.SummaryAttemptCount);
+        Assert.False(result.Details.SummaryAttempts[0].Succeeded);
+        Assert.True(result.Details.SummaryAttempts[1].Succeeded);
+        Assert.Equal("ok", MessageText(Assert.Single(result.Messages)));
+    }
+
+    [Fact]
+    public async Task FailedSummaryDoesNotStartAnotherRetryAfterItsRunUsageBudgetIsExhausted()
+    {
+        var attempts = 0;
+        var compactor = new SummarizingGameTranscriptCompactor((_, _) =>
+        {
+            attempts++;
+            return new ValueTask<GameTranscriptSummaryAttemptResult>(
+                GameTranscriptSummaryAttemptResult.Failure(
+                    "temporary failure",
+                    new ModelUsage(2, 1),
+                    retryable: true));
+        }, maxSummaryAttempts: 3);
+
+        var exception = await Assert.ThrowsAsync<GameTranscriptCompactionException>(async () =>
+            await compactor.CompactAsync(
+                new GameTranscriptCompactionContext(
+                    new GameSessionKey("session", "actor"),
+                    new[] { AgentMessage.User("one"), Assistant("one") },
+                    targetMessageCount: 1,
+                    maximumSummaryUsageTokens: 3),
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, attempts);
+        Assert.Equal("summary_usage_limit_exceeded", exception.ErrorCode);
+        Assert.Equal(3, exception.Usage.TotalTokens);
+        Assert.Single(exception.Details.SummaryAttempts);
+        Assert.False(exception.Details.Applied);
+        Assert.Equal(exception.ErrorCode, exception.Details.FailureCode);
+    }
+
+    [Fact]
+    public async Task FailedTranscriptSummaryPersistsAllRetryUsageWithoutProcessingTheInput()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        var original = new[]
+        {
+            AgentMessage.User("one"),
+            Assistant("one"),
+            AgentMessage.User("two"),
+            Assistant("two"),
+        };
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, original),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(_ => Text("must not run"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            AgentLimits = new AgentLimits { MaxMessages = 5 },
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((request, _) =>
+                new ValueTask<GameTranscriptSummaryAttemptResult>(
+                    GameTranscriptSummaryAttemptResult.Failure(
+                        "summary service unavailable",
+                        new ModelUsage(2, 1, cost: new ModelCost(input: 0.2, output: 0.1)),
+                        retryable: true,
+                        detailsJson: "{\"attempt\":" + request.Attempt + "}")),
+                maxSummaryAttempts: 2),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "failed-summary-usage"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
+        Assert.Contains("summary service unavailable", result.Error, StringComparison.Ordinal);
+        Assert.Equal(0, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Equal(2, saved.Revision);
+        Assert.Equal(original, saved.Messages);
+        Assert.DoesNotContain("failed-summary-usage", saved.ProcessedInputIds);
+        Assert.Equal(6, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+        var usageRecord = Assert.Single(saved.UsageLedger.Records);
+        Assert.Contains("\"SummaryAttemptCount\":2", usageRecord.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("\"Applied\":false", usageRecord.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("\"FailureCode\":\"summary_failed\"", usageRecord.DetailsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AppliedUsageOnlyCasConflictDoesNotDuplicateFailedSummaryCharges()
+    {
+        var store = new AppliedButReportedConflictOnSecondSaveSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new[]
+            {
+                AgentMessage.User("one"),
+                Assistant("one"),
+                AgentMessage.User("two"),
+                Assistant("two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
+            new RecordingProvider(_ => Text("must not run")),
+            "model")
+        {
+            SessionStore = store,
+            AgentLimits = new AgentLimits { MaxMessages = 5 },
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _) =>
+                new ValueTask<GameTranscriptSummaryAttemptResult>(
+                    GameTranscriptSummaryAttemptResult.Failure(
+                        "failed",
+                        new ModelUsage(2, 1),
+                        retryable: false))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "failed-summary-cas"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
+        Assert.Equal(2, store.SaveCalls);
+        Assert.NotNull(saved);
+        Assert.Single(saved.UsageLedger.Records);
+        Assert.Equal(3, saved.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task BranchSummaryHelperSelectsACompleteRecentTurnWithoutSessionTreeState()
+    {
+        var call = new ToolCallContent("branch-call", "act", "{}");
+        var source = new AgentMessage[]
+        {
+            AgentMessage.User("old"),
+            Assistant("old"),
+            AgentMessage.User("branch action"),
+            new(AgentRole.Assistant, new AgentContent[] { call }, DateTimeOffset.UnixEpoch, model: "m", stopReason: ModelStopReason.ToolUse),
+            AgentMessage.ToolResult(call, new ToolResult(new AgentContent[] { new TextContent("done") }), DateTimeOffset.UnixEpoch),
+            Assistant("branch finished"),
+        };
+        GameTranscriptSummaryContext? request = null;
+        var summarizer = new GameBranchSummarizer((context, _) =>
+        {
+            request = context;
+            return new ValueTask<GameTranscriptSummaryAttemptResult>(
+                GameTranscriptSummaryAttemptResult.Success("branch summary", new ModelUsage(2, 1)));
+        });
+
+        var result = await summarizer.SummarizeAsync(
+            new GameSessionKey("session", "actor"),
+            source,
+            targetEstimatedTokens: 40,
+            messages => messages.Count * 10L,
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(request);
+        Assert.Equal(GameTranscriptSummaryPurpose.Branch, request.Purpose);
+        Assert.Equal(4, request.Messages.Count);
+        Assert.Contains(request.Messages, message => message.Content.OfType<ToolCallContent>().Any(item => item.Id == call.Id));
+        Assert.Contains(request.Messages, message => message.Role == AgentRole.Tool && message.ToolCallId == call.Id);
+        Assert.Equal(2, result.Details.OmittedMessageCount);
+        Assert.Equal(3, result.Usage.TotalTokens);
+    }
+
+    [Fact]
+    public async Task TranscriptSummaryUsageCountsTowardTheRunTokenLimit()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("one"),
+                Assistant("one"),
+                AgentMessage.User("two"),
+                Assistant("two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(_ => Text("answer"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            AgentLimits = new AgentLimits { MaxMessages = 5, MaxTotalTokens = 10 },
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(
+                    new GameTranscriptSummaryResult("summary", new ModelUsage(6, 3)))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "usage-budget"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
+        Assert.Contains("including transcript compaction", result.Error, StringComparison.Ordinal);
+        Assert.Equal(1, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Equal(11, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(9, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+        Assert.Equal(2, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
+    }
+
+    [Fact]
+    public async Task OverBudgetTranscriptSummaryPreventsTheNextModelRequest()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("one"),
+                Assistant("one"),
+                AgentMessage.User("two"),
+                Assistant("two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(_ => Text("must not run"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            AgentLimits = new AgentLimits { MaxMessages = 5, MaxTotalTokens = 5 },
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(
+                    new GameTranscriptSummaryResult("summary", new ModelUsage(4, 2)))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "summary-over-budget"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
+        Assert.Equal(0, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Single(saved.UsageLedger.Records, record => record.Cause == GameSessionUsageCause.Compaction);
+        Assert.Equal(6, saved.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task UsageLedgerSurvivesRepeatedCompactionAndRuntimeRestart()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        var provider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new TextContent("answer") },
+            ModelStopReason.Stop,
+            new ModelUsage(2, 1, cost: new ModelCost(input: 0.2, output: 0.1))));
+        var compactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+            new ValueTask<GameTranscriptSummaryResult>(
+                new GameTranscriptSummaryResult(
+                    "summary",
+                    new ModelUsage(3, 2, cost: new ModelCost(input: 0.3, output: 0.2)))));
+
+        GameAgentRuntime CreateRuntime() => new(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            AgentLimits = new AgentLimits { MaxMessages = 3 },
+            TranscriptCompactor = compactor,
+        });
+
+        await using (var runtime = CreateRuntime())
+        {
+            Assert.True((await runtime.RunAsync(
+                Input("chat", "{}", "usage-one"),
+                TestContext.Current.CancellationToken)).Succeeded);
+            Assert.True((await runtime.RunAsync(
+                Input("chat", "{}", "usage-two"),
+                TestContext.Current.CancellationToken)).Succeeded);
+        }
+
+        await using (var restarted = CreateRuntime())
+        {
+            Assert.True((await restarted.RunAsync(
+                Input("chat", "{}", "usage-three"),
+                TestContext.Current.CancellationToken)).Succeeded);
+        }
+
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+        Assert.NotNull(saved);
+        Assert.Equal(3, saved.Messages.Count);
+        Assert.Equal(5, saved.UsageLedger.Records.Count);
+        Assert.Equal(19, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(10, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+        Assert.Equal(9, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
+        Assert.Equal(1.9, saved.UsageLedger.Stats.CostTotal, precision: 10);
+    }
+
+    [Fact]
+    public async Task LegacyMessageUsageIsBootstrappedBeforeCompactionRemovesHistory()
+    {
+        static AgentMessage LegacyAssistant(string text, ModelUsage usage) => new(
+            AgentRole.Assistant,
+            new AgentContent[] { new TextContent(text) },
+            DateTimeOffset.UnixEpoch,
+            model: "legacy-model",
+            stopReason: ModelStopReason.Stop,
+            usage: usage);
+
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("one"),
+                LegacyAssistant("one", new ModelUsage(3, 1)),
+                AgentMessage.User("two"),
+                LegacyAssistant("two", new ModelUsage(4, 2)),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
+            new RecordingProvider(_ => Text("answer")),
+            "model")
+        {
+            SessionStore = store,
+            AgentLimits = new AgentLimits { MaxMessages = 5 },
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(
+                    new GameTranscriptSummaryResult("summary", new ModelUsage(2, 1)))),
+        });
+
+        Assert.True((await runtime.RunAsync(
+            Input("chat", "{}", "legacy-compaction"),
+            TestContext.Current.CancellationToken)).Succeeded);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(saved);
+        Assert.Equal(4, saved.UsageLedger.Records.Count);
+        Assert.Equal(15, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Contains(saved.UsageLedger.Records, record => record.RecordId == "legacy-message-1");
+        Assert.Contains(saved.UsageLedger.Records, record => record.RecordId == "legacy-message-3");
+    }
+
+    [Fact]
+    public async Task AppliedCasConflictRetryDoesNotDuplicateUsage()
+    {
+        var store = new AppliedButReportedConflictSessionStore();
+        var provider = new RecordingProvider(_ => Text("answer"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+        });
+        var input = Input("chat", "{}", "cas-usage");
+
+        var first = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        var retry = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.SessionConflict, first.Status);
+        Assert.Equal(GameAgentRunStatus.Duplicate, retry.Status);
+        Assert.Equal(1, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Single(saved.UsageLedger.Records);
+        Assert.Equal(2, saved.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task LosingCasAttemptSettlesUsageOnceBeforeARealRetry()
+    {
+        var store = new ConflictOnceSessionStore();
+        var provider = new RecordingProvider(_ => Text("answer"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+        });
+        var input = Input("chat", "{}", "losing-cas-usage");
+
+        var conflicted = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        var retried = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.SessionConflict, conflicted.Status);
+        Assert.True(retried.Succeeded);
+        Assert.Equal(2, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Equal(2, saved.UsageLedger.Records.Count);
+        Assert.Equal(4, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(3, saved.Revision);
+    }
+
+    [Fact]
+    public void UsageLedgerAppendIsIdempotentAndRejectsRecordIdentityReuse()
+    {
+        var record = new GameSessionUsageRecord(
+            "usage-record",
+            GameSessionUsageCause.Assistant,
+            new ModelUsage(2, 1),
+            "run",
+            "input");
+        var ledger = new GameSessionUsageLedger(new[] { record });
+
+        var replayed = ledger.Append(new[] { record });
+
+        Assert.Same(ledger, replayed);
+        Assert.Single(replayed.Records);
+        Assert.Throws<InvalidOperationException>(() => replayed.Append(new[]
+        {
+            new GameSessionUsageRecord(
+                record.RecordId,
+                record.Cause,
+                new ModelUsage(8, 1),
+                record.RunId,
+                record.InputId),
+        }));
+    }
+
+    [Fact]
+    public async Task UsageLedgerBoundsRecentRecordsWithoutLosingCumulativeStats()
+    {
+        var records = Enumerable.Range(0, 10)
+            .Select(index => new GameSessionUsageRecord(
+                "bounded-" + index,
+                GameSessionUsageCause.Assistant,
+                new ModelUsage(1, 1, cost: new ModelCost(input: 0.01, output: 0.02))))
+            .ToArray();
+        var ledger = new GameSessionUsageLedger(records, recentRecordCapacity: 3);
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("bounded-session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, usageLedger: ledger),
+            0,
+            TestContext.Current.CancellationToken);
+
+        var loaded = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(3, loaded.UsageLedger.Records.Count);
+        Assert.Equal(10, loaded.UsageLedger.TotalRecordCount);
+        Assert.Equal(20, loaded.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(0.3, loaded.UsageLedger.Stats.CostTotal, precision: 10);
+        Assert.Equal(new[] { "bounded-7", "bounded-8", "bounded-9" },
+            loaded.UsageLedger.Records.Select(record => record.RecordId));
+    }
+
+    [Fact]
+    public async Task ToolModelUsageIsIncludedInTheSessionLedger()
+    {
+        var store = new InMemoryGameSessionStore();
+        var provider = new RecordingProvider(call => call == 1
+            ? Tools(new ToolCallContent("usage-tool", "inspect", "{}"))
+            : Text("done"));
+        var tool = new AgentTool(
+            new ToolDefinition("inspect", "inspect", "{\"type\":\"object\"}"),
+            (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                new AgentContent[] { new TextContent("inspected") },
+                usage: new ModelUsage(3, 1, cost: new ModelCost(input: 0.03, output: 0.02)))));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { tool }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("inspect", "{}", "tool-usage"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.NotNull(saved);
+        Assert.Equal(3, saved.UsageLedger.Records.Count);
+        Assert.Equal(8, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(4, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
+        Assert.Equal(4, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Tool).TotalTokens);
+        Assert.Equal(0.05, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Tool).CostTotal, precision: 10);
     }
 
     [Fact]
@@ -1575,7 +2233,8 @@ public sealed class RuntimeTests
             TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
             {
                 compacted = true;
-                return new ValueTask<string>("summary:" + removed.Count);
+                return new ValueTask<GameTranscriptSummaryResult>(
+                    new GameTranscriptSummaryResult("summary:" + removed.Count));
             }),
         });
 
@@ -1592,6 +2251,356 @@ public sealed class RuntimeTests
             request.SystemPrompt,
             request.Messages,
             request.Tools) <= 900);
+    }
+
+    [Fact]
+    public async Task RuntimeRecoversOnceFromAProviderReportedContextOverflowBeforeOutput()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("old one"),
+                Assistant("old one"),
+                AgentMessage.User("old two"),
+                Assistant("old two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(call => call == 1
+            ? new ModelResponse(
+                Array.Empty<AgentContent>(),
+                ModelStopReason.Length,
+                new ModelUsage(inputTokens: 990))
+            : Text("recovered"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult(
+                    "older history",
+                    new ModelUsage(inputTokens: 2, outputTokens: 1)))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{\"text\":\"keep this exact input\"}"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, provider.CallCount);
+        var requests = provider.Requests.ToArray();
+        Assert.Equal(5, requests[0].Messages.Count);
+        Assert.True(requests[1].Messages.Count < requests[0].Messages.Count);
+        Assert.Equal(
+            Assert.IsType<JsonContent>(requests[0].Messages[^1].Content[0]).Json,
+            Assert.IsType<JsonContent>(requests[1].Messages[^1].Content[0]).Json);
+        Assert.NotNull(saved);
+        Assert.Equal(995, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(992, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
+        Assert.Equal(3, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+        Assert.Contains(saved.UsageLedger.Records, record =>
+            record.DetailsJson?.Contains("context_overflow_recovery", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public async Task RuntimeRecoversFromStructuredRequestTooLargeBeforeAStreamStarts()
+    {
+        var store = new InMemoryGameSessionStore();
+        await store.SaveAsync(
+            new GameSessionSnapshot(new GameSessionKey("session", "actor"), 1, new AgentMessage[]
+            {
+                AgentMessage.User("old one"),
+                Assistant("old one"),
+                AgentMessage.User("old two"),
+                Assistant("old two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RequestTooLargeThenResponseProvider();
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("older history"))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task RuntimeRecoversFromAStructuredContextOverflowDiagnostic()
+    {
+        var store = new InMemoryGameSessionStore();
+        await store.SaveAsync(
+            new GameSessionSnapshot(new GameSessionKey("session", "actor"), 1, new AgentMessage[]
+            {
+                AgentMessage.User("old one"),
+                Assistant("old one"),
+                AgentMessage.User("old two"),
+                Assistant("old two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(call => call == 1
+            ? new ModelResponse(
+                Array.Empty<AgentContent>(),
+                ModelStopReason.Error,
+                errorMessage: "request rejected",
+                diagnostics: new[]
+                {
+                    new ModelDiagnostic(
+                        "provider_failure",
+                        "structured provider error",
+                        ModelDiagnosticSeverity.Error,
+                        "{\"status\":400,\"errorCode\":\"model_context_window_exceeded\"}"),
+                })
+            : Text("recovered"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("older history"))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task RuntimeNeverReplaysAnOverflowAfterMeaningfulOutputWasExposed()
+    {
+        var compacted = false;
+        var provider = new MeaningfulOutputThenOverflowProvider();
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+            {
+                compacted = true;
+                return new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("must not run"));
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(1, provider.CallCount);
+        Assert.False(compacted);
+    }
+
+    [Fact]
+    public async Task RuntimeNeverReplaysAfterAToolMayHaveChangedTheGame()
+    {
+        var compacted = false;
+        var provider = new RecordingProvider(call => call == 1
+            ? Tools(new ToolCallContent("call", "inspect", "{}"))
+            : new ModelResponse(
+                Array.Empty<AgentContent>(),
+                ModelStopReason.Length,
+                new ModelUsage(inputTokens: 990)));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+            {
+                compacted = true;
+                return new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("must not run"));
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("inspect", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, provider.CallCount);
+        Assert.False(compacted);
+    }
+
+    [Fact]
+    public async Task RuntimeDoesNotMisclassifyRateLimitsAsContextOverflow()
+    {
+        var provider = new RateLimitedProvider();
+        var compacted = false;
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+            {
+                compacted = true;
+                return new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult("must not run"));
+            }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(1, provider.CallCount);
+        Assert.False(compacted);
+    }
+
+    [Fact]
+    public async Task FailedOverflowCompactionIsChargedWithoutReplayingTheProvider()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("old one"),
+                Assistant("old one"),
+                AgentMessage.User("old two"),
+                Assistant("old two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(_ => new ModelResponse(
+            Array.Empty<AgentContent>(),
+            ModelStopReason.Length,
+            new ModelUsage(inputTokens: 990)));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor(
+                (_, _) => new ValueTask<GameTranscriptSummaryAttemptResult>(
+                    GameTranscriptSummaryAttemptResult.Failure(
+                        "summary unavailable",
+                        new ModelUsage(inputTokens: 5, outputTokens: 2),
+                        retryable: false))),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}"),
+            TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Equal(997, saved.UsageLedger.Stats.TotalTokens);
+        Assert.Equal(990, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
+        Assert.Equal(7, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
+    }
+
+    [Fact]
+    public async Task AppliedCasConflictDoesNotDuplicateOverflowRecoveryUsage()
+    {
+        var inner = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await inner.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("old one"),
+                Assistant("old one"),
+                AgentMessage.User("old two"),
+                Assistant("old two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var store = new AppliedButReportedConflictWrapper(inner);
+        var provider = new RecordingProvider(call => call == 1
+            ? new ModelResponse(
+                Array.Empty<AgentContent>(),
+                ModelStopReason.Length,
+                new ModelUsage(inputTokens: 990))
+            : Text("recovered"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
+                new ValueTask<GameTranscriptSummaryResult>(new GameTranscriptSummaryResult(
+                    "older history",
+                    new ModelUsage(inputTokens: 2, outputTokens: 1)))),
+        });
+        var input = Input("chat", "{}", "overflow-cas");
+
+        var conflicted = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        var duplicate = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.SessionConflict, conflicted.Status);
+        Assert.Equal(GameAgentRunStatus.Duplicate, duplicate.Status);
+        Assert.Equal(2, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Equal(3, saved.UsageLedger.Records.Count);
+        Assert.Equal(995, saved.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task CancellingOverflowCompactionDoesNotReplayAndStillChargesReportedProviderUsage()
+    {
+        var store = new InMemoryGameSessionStore();
+        var key = new GameSessionKey("session", "actor");
+        await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new AgentMessage[]
+            {
+                AgentMessage.User("old one"),
+                Assistant("old one"),
+                AgentMessage.User("old two"),
+                Assistant("old two"),
+            }),
+            0,
+            TestContext.Current.CancellationToken);
+        var provider = new RecordingProvider(_ => new ModelResponse(
+            Array.Empty<AgentContent>(),
+            ModelStopReason.Length,
+            new ModelUsage(inputTokens: 990)));
+        var compactionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
+        {
+            SessionStore = store,
+            ContextWindowTokens = 1_000,
+            ContextWindowReserveTokens = 100,
+            TranscriptCompactor = new SummarizingGameTranscriptCompactor(async (_, cancellationToken) =>
+            {
+                compactionStarted.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return GameTranscriptSummaryAttemptResult.Success("unreachable");
+            }),
+        });
+        using var cancellation = new CancellationTokenSource();
+
+        var run = runtime.RunAsync(Input("chat", "{}"), cancellation.Token);
+        await compactionStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+        var result = await run;
+        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(AgentRunStatus.Aborted, result.AgentResult!.Status);
+        Assert.Equal(1, provider.CallCount);
+        Assert.NotNull(saved);
+        Assert.Equal(2, saved.Revision);
+        Assert.Equal(990, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
     }
 
     [Fact]
@@ -1674,7 +2683,8 @@ public sealed class RuntimeTests
             TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
             {
                 compacted = true;
-                return new ValueTask<string>("tool turn summary:" + removed.Count);
+                return new ValueTask<GameTranscriptSummaryResult>(
+                    new GameTranscriptSummaryResult("tool turn summary:" + removed.Count));
             }),
         });
 
@@ -1727,7 +2737,8 @@ public sealed class RuntimeTests
             TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, removed, _) =>
             {
                 compacted = true;
-                return new ValueTask<string>("summary:" + removed.Count);
+                return new ValueTask<GameTranscriptSummaryResult>(
+                    new GameTranscriptSummaryResult("summary:" + removed.Count));
             }),
         });
 
@@ -2307,6 +3318,9 @@ public sealed class RuntimeTests
             stopReason: ModelStopReason.Stop,
             usage: new ModelUsage());
 
+    private static string MessageText(AgentMessage message) =>
+        string.Join("\n", message.Content.OfType<TextContent>().Select(content => content.Text));
+
     private static async Task<IReadOnlyList<ModelStreamEvent>> CollectAsync(IAsyncEnumerable<ModelStreamEvent> stream)
     {
         var result = new List<ModelStreamEvent>();
@@ -2501,6 +3515,83 @@ public sealed class RuntimeTests
         }
     }
 
+    private sealed class AppliedButReportedConflictSessionStore : IGameSessionStore
+    {
+        private readonly InMemoryGameSessionStore _inner = new();
+        private int _reportedConflict;
+
+        public ValueTask<GameSessionSnapshot?> LoadAsync(
+            GameSessionKey key,
+            CancellationToken cancellationToken) => _inner.LoadAsync(key, cancellationToken);
+
+        public async ValueTask<GameSessionSaveResult> SaveAsync(
+            GameSessionSnapshot snapshot,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            var saved = await _inner.SaveAsync(snapshot, expectedRevision, cancellationToken);
+            if (saved.Saved && Interlocked.Exchange(ref _reportedConflict, 1) == 0)
+            {
+                return new GameSessionSaveResult(saved: false, saved.Current);
+            }
+
+            return saved;
+        }
+    }
+
+    private sealed class AppliedButReportedConflictWrapper : IGameSessionStore
+    {
+        private readonly IGameSessionStore _inner;
+        private int _reportedConflict;
+
+        public AppliedButReportedConflictWrapper(IGameSessionStore inner)
+        {
+            _inner = inner;
+        }
+
+        public ValueTask<GameSessionSnapshot?> LoadAsync(
+            GameSessionKey key,
+            CancellationToken cancellationToken) => _inner.LoadAsync(key, cancellationToken);
+
+        public async ValueTask<GameSessionSaveResult> SaveAsync(
+            GameSessionSnapshot snapshot,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            var saved = await _inner.SaveAsync(snapshot, expectedRevision, cancellationToken);
+            if (saved.Saved && Interlocked.Exchange(ref _reportedConflict, 1) == 0)
+            {
+                return new GameSessionSaveResult(saved: false, saved.Current);
+            }
+
+            return saved;
+        }
+    }
+
+    private sealed class AppliedButReportedConflictOnSecondSaveSessionStore : IGameSessionStore
+    {
+        private readonly InMemoryGameSessionStore _inner = new();
+        private int _saveCalls;
+
+        public int SaveCalls => Volatile.Read(ref _saveCalls);
+
+        public ValueTask<GameSessionSnapshot?> LoadAsync(
+            GameSessionKey key,
+            CancellationToken cancellationToken) => _inner.LoadAsync(key, cancellationToken);
+
+        public async ValueTask<GameSessionSaveResult> SaveAsync(
+            GameSessionSnapshot snapshot,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            var call = Interlocked.Increment(ref _saveCalls);
+            var saved = await _inner.SaveAsync(snapshot, expectedRevision, cancellationToken);
+            return call == 2 && saved.Saved
+                ? new GameSessionSaveResult(saved: false, saved.Current)
+                : saved;
+        }
+    }
+
     private sealed class CorruptingSavedSessionStore : IGameSessionStore
     {
         public ValueTask<GameSessionSnapshot?> LoadAsync(
@@ -2633,6 +3724,91 @@ public sealed class RuntimeTests
         }
     }
 
+    private sealed class RequestTooLargeThenResponseProvider : IModelProvider
+    {
+        private int _calls;
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            var call = Interlocked.Increment(ref _calls);
+            await Task.Yield();
+            if (call == 1)
+            {
+                throw new ModelProviderException(
+                    "The request body is too large.",
+                    isTransient: false,
+                    statusCode: 413);
+            }
+
+            yield return ModelStreamEvent.Terminal(Text("recovered"));
+        }
+    }
+
+    private sealed class MeaningfulOutputThenOverflowProvider : IModelProvider
+    {
+        private int _calls;
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _calls);
+            yield return ModelStreamEvent.Update(
+                ModelStreamEventKind.Started,
+                new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending));
+            yield return ModelStreamEvent.Update(
+                ModelStreamEventKind.TextStarted,
+                new ModelResponse(
+                    new AgentContent[] { new TextContent(string.Empty) },
+                    ModelStopReason.Pending));
+            yield return ModelStreamEvent.Update(
+                ModelStreamEventKind.TextDelta,
+                new ModelResponse(
+                    new AgentContent[] { new TextContent("already visible") },
+                    ModelStopReason.Pending),
+                delta: "already visible");
+            await Task.Yield();
+            throw new ModelProviderException(
+                "maximum context length exceeded",
+                isTransient: false,
+                statusCode: 400);
+        }
+    }
+
+    private sealed class RateLimitedProvider : IModelProvider
+    {
+        private int _calls;
+
+        public int CallCount => Volatile.Read(ref _calls);
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _calls);
+            await Task.Yield();
+            throw new ModelProviderException(
+                "rate limit: maximum context length metric unavailable",
+                isTransient: true,
+                statusCode: 429);
+#pragma warning disable CS0162
+            yield break;
+#pragma warning restore CS0162
+        }
+    }
+
     private sealed class FailureThenTerminalProviderWithFailingCleanup : IModelProvider
     {
         private readonly int _failuresBeforeSuccess;
@@ -2718,7 +3894,14 @@ public sealed class RuntimeTests
             if (progress is not null)
             {
                 await progress(
-                    new GameMediaGenerationProgress("rendering", 0.5, "{\"frame\":1}"),
+                    new GameMediaGenerationProgress(
+                        "rendering",
+                        0.5,
+                        "{\"frame\":1}",
+                        new ResourceContent(
+                            "data:image/png;base64,cHJldmlldw==",
+                            "image/png",
+                            "preview")),
                     cancellationToken);
             }
 
@@ -3027,13 +4210,13 @@ public sealed class RuntimeTests
 
     private sealed class NullTranscriptCompactor : IGameTranscriptCompactor
     {
-        public ValueTask<IReadOnlyList<AgentMessage>> CompactAsync(
+        public ValueTask<GameTranscriptCompactionResult> CompactAsync(
             GameTranscriptCompactionContext context,
             CancellationToken cancellationToken)
         {
             _ = context;
             cancellationToken.ThrowIfCancellationRequested();
-            return new ValueTask<IReadOnlyList<AgentMessage>>((IReadOnlyList<AgentMessage>)null!);
+            return new ValueTask<GameTranscriptCompactionResult>((GameTranscriptCompactionResult)null!);
         }
     }
 }

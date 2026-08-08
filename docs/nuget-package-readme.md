@@ -13,4 +13,4 @@ Open-source C# agent runtime for AI-native games, autonomous NPCs, and interacti
 
 Documentation and source: https://github.com/EricSun0218/OpenGameAgent
 
-This package is an alpha release. See the repository README and getting-started guide before integrating it into a shipped game.
+Before 1.0, public APIs may change between releases. See the repository README and getting-started guide before integrating it into a shipped game.

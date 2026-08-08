@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>OpenGameAgent.ProviderTransport</RootNamespace>
+    <Description>Bounded provider transport metadata, observation, and retry primitives for OpenGameAgent.</Description>
+  </PropertyGroup>
+</Project>

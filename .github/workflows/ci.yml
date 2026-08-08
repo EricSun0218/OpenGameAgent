@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CI_PACKAGE_VERSION: 0.3.0-alpha.1
+
 jobs:
   dotnet:
     name: .NET (${{ matrix.os }})
@@ -24,6 +27,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
         with:
           global-json-file: global.json
+      - name: Test release scripts
+        shell: pwsh
+        run: ./tools/Test-ReleaseScripts.ps1 -Version $env:CI_PACKAGE_VERSION
       - name: Restore locked dependencies
         run: dotnet restore OpenGameAgent.sln --locked-mode
       - name: Build
@@ -35,7 +41,15 @@ jobs:
       - name: Pack libraries
         if: runner.os == 'Linux'
         shell: pwsh
-        run: ./tools/Pack-NuGet.ps1
+        run: ./tools/Pack-NuGet.ps1 -PackageVersion $env:CI_PACKAGE_VERSION
+      - name: Verify packed asset payloads
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./tools/Test-FrozenReleaseAssets.ps1 -CandidateDirectory artifacts/nuget -FrozenDirectory artifacts/nuget
+      - name: Verify clean NuGet consumer
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./tools/Test-NuGetPackages.ps1 -PackageVersion $env:CI_PACKAGE_VERSION -ExpectedRepositoryCommit $env:GITHUB_SHA
       - name: Validate public tree
         shell: pwsh
         run: ./tools/Test-PublicTree.ps1

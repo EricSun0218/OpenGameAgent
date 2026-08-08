@@ -7,9 +7,14 @@ OpenGameAgent defines provider-neutral image, audio, and video generation contra
 - `GameMediaGenerationRequest` carries a stable request ID, media kind, structured context, provider parameters, optional prompt, and source resource references.
 - `IGameMediaGenerator` performs generation and reports bounded progress.
 - `GameMediaGenerationResult` returns one or more `ResourceContent` references plus structured metadata.
+- `GameMediaGenerationProgress` may carry a bounded preview resource. When generation is exposed as a tool, inline data is converted to typed image/audio/video progress content for the host UI.
 - `GameMediaGenerationTool` exposes a generator to the agent as a non-idempotent write by default; a stable request ID lets the media service deduplicate or resume submissions when it implements that guarantee.
 
+`OpenGameAgent.Media` adds a provider/model registry on top of these contracts. It validates model capability, media kind, authentication, request/result limits, refresh races, cancellation, and timeouts, then returns an in-band completed/failed/canceled generation result. The registry retains the underlying generator's progress and async job behavior.
+
 `OpenGameAgent.Providers.MediaHttp` implements a bounded JSON HTTP transport for cloud or local APIs that implement the documented request/job shape. If a service uses different fields, authentication, upload semantics, or durable job handles, adapt it behind `IGameMediaGenerator` instead of pretending the wire formats are interchangeable. The game is responsible for downloading or importing resources after validating origin, content type, size, checksum, license metadata, storage quota, and content policy.
+
+`OpenGameAgent.Providers.OpenRouter` is a dedicated image-generation adapter with model discovery, text and image references, buffered or SSE results, progressive previews, usage metadata, and the same unified provider authentication used by the media registry. It is separate from the generic HTTP adapter because its wire contract is different.
 
 Use `GetApiKeyAsync` when credentials rotate or expire during long-running jobs. Status URLs are restricted to the submission endpoint's origin by default. If cross-origin polling is enabled, authorization is still withheld from the other origin unless `SendAuthorizationToCrossOriginStatusUrls` is explicitly enabled.
 

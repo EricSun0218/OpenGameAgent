@@ -5,6 +5,9 @@
     <PackageId>OpenGameAgent.Models</PackageId>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Kernel\OpenGameAgent.Kernel.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Data\model-directory.json" />
   </ItemGroup>
 </Project>

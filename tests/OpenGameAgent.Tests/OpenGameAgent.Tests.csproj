@@ -17,4 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenGameAgent\OpenGameAgent.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\PublicApiSurface.cs" Link="PublicApiSurface.cs" />
+  </ItemGroup>
 </Project>

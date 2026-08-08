@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Ready-to-use model directory runtime backed by the official OpenGameAgent providers.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.Anthropic\OpenGameAgent.Providers.Anthropic.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.Bedrock\OpenGameAgent.Providers.Bedrock.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.Google\OpenGameAgent.Providers.Google.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.Mistral\OpenGameAgent.Providers.Mistral.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.OpenAI\OpenGameAgent.Providers.OpenAI.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
+  </ItemGroup>
+</Project>

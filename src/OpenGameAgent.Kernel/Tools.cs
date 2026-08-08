@@ -22,9 +22,68 @@ public enum ToolExecutionMode
     Parallel,
 }
 
+public enum ToolConstrainedSamplingKind
+{
+    JsonSchema,
+    Grammar,
+}
+
+public enum ToolSchemaStrictness
+{
+    Prefer,
+    Require,
+}
+
+public sealed class ToolConstrainedSampling
+{
+    private ToolConstrainedSampling(
+        ToolConstrainedSamplingKind kind,
+        ToolSchemaStrictness? strictness,
+        string? openAiLark,
+        string? openAiRegex)
+    {
+        Kind = kind;
+        Strictness = strictness;
+        OpenAiLark = openAiLark;
+        OpenAiRegex = openAiRegex;
+    }
+
+    public ToolConstrainedSamplingKind Kind { get; }
+
+    public ToolSchemaStrictness? Strictness { get; }
+
+    public string? OpenAiLark { get; }
+
+    public string? OpenAiRegex { get; }
+
+    public static ToolConstrainedSampling JsonSchema(ToolSchemaStrictness strictness = ToolSchemaStrictness.Prefer)
+    {
+        if (!Enum.IsDefined(typeof(ToolSchemaStrictness), strictness))
+        {
+            throw new ArgumentOutOfRangeException(nameof(strictness));
+        }
+
+        return new ToolConstrainedSampling(ToolConstrainedSamplingKind.JsonSchema, strictness, null, null);
+    }
+
+    public static ToolConstrainedSampling Grammar(string? openAiLark = null, string? openAiRegex = null)
+    {
+        if (string.IsNullOrWhiteSpace(openAiLark) && string.IsNullOrWhiteSpace(openAiRegex))
+        {
+            throw new ArgumentException("At least one grammar variant is required.");
+        }
+
+        return new ToolConstrainedSampling(ToolConstrainedSamplingKind.Grammar, null, openAiLark, openAiRegex);
+    }
+}
+
 public sealed class ToolDefinition
 {
-    public ToolDefinition(string name, string description, string inputSchemaJson)
+    public ToolDefinition(
+        string name,
+        string description,
+        string inputSchemaJson,
+        ToolConstrainedSampling? constrainedSampling = null)
     {
         if (string.IsNullOrWhiteSpace(name))
         {
@@ -39,6 +98,7 @@ public sealed class ToolDefinition
         Name = name;
         Description = description;
         InputSchemaJson = JsonValue.RequireObject(inputSchemaJson, nameof(inputSchemaJson));
+        ConstrainedSampling = constrainedSampling;
     }
 
     public string Name { get; }
@@ -46,11 +106,17 @@ public sealed class ToolDefinition
     public string Description { get; }
 
     public string InputSchemaJson { get; }
+
+    public ToolConstrainedSampling? ConstrainedSampling { get; }
 }
 
 public sealed class ToolProgress
 {
-    public ToolProgress(string? message = null, double? fraction = null, string? detailsJson = null)
+    public ToolProgress(
+        string? message = null,
+        double? fraction = null,
+        string? detailsJson = null,
+        IEnumerable<AgentContent>? content = null)
     {
         if (fraction is { } value
             && (double.IsNaN(value) || double.IsInfinity(value) || value < 0 || value > 1))
@@ -61,6 +127,20 @@ public sealed class ToolProgress
         Message = message;
         Fraction = fraction;
         DetailsJson = detailsJson is null ? null : JsonValue.RequireValid(detailsJson, nameof(detailsJson));
+        var copied = content?.ToArray() ?? Array.Empty<AgentContent>();
+        if (copied.Any(part => part is null))
+        {
+            throw new ArgumentException("Tool progress content cannot contain null parts.", nameof(content));
+        }
+
+        if (copied.Any(part => part is ReasoningContent or ToolCallContent))
+        {
+            throw new ArgumentException(
+                "Tool progress cannot contain assistant-only reasoning or tool-call parts.",
+                nameof(content));
+        }
+
+        Content = Array.AsReadOnly(copied);
     }
 
     public string? Message { get; }
@@ -68,6 +148,8 @@ public sealed class ToolProgress
     public double? Fraction { get; }
 
     public string? DetailsJson { get; }
+
+    public IReadOnlyList<AgentContent> Content { get; }
 }
 
 public sealed class ToolResult
@@ -78,7 +160,8 @@ public sealed class ToolResult
         string? detailsJson = null,
         bool terminate = false,
         ModelUsage? usage = null,
-        bool outcomeUncertain = false)
+        bool outcomeUncertain = false,
+        IEnumerable<string>? addedToolNames = null)
     {
         var copied = content?.ToArray() ?? throw new ArgumentNullException(nameof(content));
         if (copied.Any(part => part is null))
@@ -99,6 +182,14 @@ public sealed class ToolResult
         Terminate = terminate;
         Usage = usage;
         OutcomeUncertain = outcomeUncertain;
+        var copiedAddedTools = addedToolNames?.ToArray() ?? Array.Empty<string>();
+        if (copiedAddedTools.Any(string.IsNullOrWhiteSpace)
+            || copiedAddedTools.Distinct(StringComparer.Ordinal).Count() != copiedAddedTools.Length)
+        {
+            throw new ArgumentException("Added tool names must be non-empty and unique.", nameof(addedToolNames));
+        }
+
+        AddedToolNames = Array.AsReadOnly(copiedAddedTools);
     }
 
     public IReadOnlyList<AgentContent> Content { get; }
@@ -112,6 +203,8 @@ public sealed class ToolResult
     public ModelUsage? Usage { get; }
 
     public bool OutcomeUncertain { get; }
+
+    public IReadOnlyList<string> AddedToolNames { get; }
 
     public static ToolResult Error(string message) =>
         new(new AgentContent[] { new TextContent(message ?? string.Empty) }, isError: true);
