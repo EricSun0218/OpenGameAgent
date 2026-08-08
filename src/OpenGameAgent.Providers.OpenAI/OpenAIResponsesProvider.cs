@@ -18,7 +18,54 @@ public enum OpenAISessionAffinityFormat
     OpenAI,
     OpenAIWithoutSessionHeader,
     OpenRouter,
+    Codex,
 }
+
+public enum OpenAIAuthenticationStyle
+{
+    Bearer,
+    ApiKeyHeader,
+    None,
+}
+
+public enum OpenAISystemPromptMode
+{
+    InputMessage,
+    Instructions,
+}
+
+public enum OpenAIToolChoice
+{
+    Auto,
+    None,
+    Required,
+}
+
+public enum OpenAITextVerbosity
+{
+    Low,
+    Medium,
+    High,
+}
+
+public sealed class OpenAIRequestCredential
+{
+    public OpenAIRequestCredential(
+        string? apiKey,
+        IReadOnlyDictionary<string, string>? headers = null)
+    {
+        ApiKey = apiKey;
+        Headers = new ReadOnlyDictionary<string, string>(
+            new Dictionary<string, string>(headers ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase));
+    }
+
+    public string? ApiKey { get; }
+
+    public IReadOnlyDictionary<string, string> Headers { get; }
+}
+
+public delegate ValueTask<OpenAIRequestCredential?> OpenAIRequestCredentialProvider(
+    CancellationToken cancellationToken);
 
 public sealed class OpenAIResponsesProviderOptions
 {
@@ -35,6 +82,28 @@ public sealed class OpenAIResponsesProviderOptions
     public string? ApiKey { get; set; }
 
     public OpenAIApiKeyProvider? GetApiKeyAsync { get; set; }
+
+    public OpenAIRequestCredentialProvider? GetCredentialAsync { get; set; }
+
+    public OpenAIAuthenticationStyle AuthenticationStyle { get; set; } = OpenAIAuthenticationStyle.Bearer;
+
+    public string ApiKeyHeaderName { get; set; } = "api-key";
+
+    public OpenAISystemPromptMode SystemPromptMode { get; set; } = OpenAISystemPromptMode.InputMessage;
+
+    public string DefaultInstructions { get; set; } = "You are a helpful assistant.";
+
+    public string? ReasoningSummary { get; set; }
+
+    public string? ServiceTier { get; set; }
+
+    public OpenAITextVerbosity? TextVerbosity { get; set; }
+
+    public OpenAIToolChoice? ToolChoice { get; set; }
+
+    public bool? ParallelToolCalls { get; set; }
+
+    public bool AlwaysIncludeEncryptedReasoning { get; set; }
 
     public IDictionary<string, string> Headers { get; } =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -79,6 +148,17 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
     private readonly Uri _endpoint;
     private readonly string? _apiKey;
     private readonly OpenAIApiKeyProvider? _getApiKeyAsync;
+    private readonly OpenAIRequestCredentialProvider? _getCredentialAsync;
+    private readonly OpenAIAuthenticationStyle _authenticationStyle;
+    private readonly string _apiKeyHeaderName;
+    private readonly OpenAISystemPromptMode _systemPromptMode;
+    private readonly string _defaultInstructions;
+    private readonly string? _reasoningSummary;
+    private readonly string? _serviceTier;
+    private readonly OpenAITextVerbosity? _textVerbosity;
+    private readonly OpenAIToolChoice? _toolChoice;
+    private readonly bool? _parallelToolCalls;
+    private readonly bool _alwaysIncludeEncryptedReasoning;
     private readonly IReadOnlyDictionary<string, string> _headers;
     private readonly string _providerId;
     private readonly string _apiId;
@@ -109,6 +189,17 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         _endpoint = options.Endpoint;
         _apiKey = options.ApiKey;
         _getApiKeyAsync = options.GetApiKeyAsync;
+        _getCredentialAsync = options.GetCredentialAsync;
+        _authenticationStyle = options.AuthenticationStyle;
+        _apiKeyHeaderName = options.ApiKeyHeaderName;
+        _systemPromptMode = options.SystemPromptMode;
+        _defaultInstructions = options.DefaultInstructions;
+        _reasoningSummary = options.ReasoningSummary;
+        _serviceTier = options.ServiceTier;
+        _textVerbosity = options.TextVerbosity;
+        _toolChoice = options.ToolChoice;
+        _parallelToolCalls = options.ParallelToolCalls;
+        _alwaysIncludeEncryptedReasoning = options.AlwaysIncludeEncryptedReasoning;
         _headers = new ReadOnlyDictionary<string, string>(
             new Dictionary<string, string>(options.Headers, StringComparer.OrdinalIgnoreCase));
         _providerId = options.ProviderId;
@@ -150,10 +241,14 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         }
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, _endpoint);
-        var apiKey = _getApiKeyAsync is null
-            ? _apiKey
-            : await _getApiKeyAsync(cancellationToken).ConfigureAwait(false);
-        ApplyHeaders(httpRequest, apiKey, request);
+        var credential = _getCredentialAsync is null
+            ? new OpenAIRequestCredential(
+                _getApiKeyAsync is null
+                    ? _apiKey
+                    : await _getApiKeyAsync(cancellationToken).ConfigureAwait(false))
+            : await _getCredentialAsync(cancellationToken).ConfigureAwait(false)
+              ?? throw new InvalidOperationException("The credential provider returned null.");
+        ApplyHeaders(httpRequest, credential, request);
         httpRequest.Content = new ByteArrayContent(SerializeRequest(request));
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json")
         {
@@ -204,6 +299,11 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             {
                 yield return item;
             }
+
+            if (state.IsTerminal)
+            {
+                break;
+            }
         }
 
         yield return ModelStreamEvent.Terminal(state.Complete());
@@ -232,6 +332,10 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         }
 
         if (!Enum.IsDefined(typeof(OpenAISessionAffinityFormat), options.SessionAffinityFormat)
+            || !Enum.IsDefined(typeof(OpenAIAuthenticationStyle), options.AuthenticationStyle)
+            || !Enum.IsDefined(typeof(OpenAISystemPromptMode), options.SystemPromptMode)
+            || options.TextVerbosity is { } verbosity && !Enum.IsDefined(typeof(OpenAITextVerbosity), verbosity)
+            || options.ToolChoice is { } toolChoice && !Enum.IsDefined(typeof(OpenAIToolChoice), toolChoice)
             || options.MaxEventCharacters is < 1 or > 100_000_000
             || options.MaxErrorCharacters is < 1 or > 10_000_000
             || options.MaxRequestBytes is < 2 or > 100_000_000
@@ -247,14 +351,36 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         }
 
         ValidateCredential(options.ApiKey, nameof(options));
+        ValidateHeader(options.ApiKeyHeaderName, "placeholder", nameof(options));
+        if (options.DefaultInstructions is null
+            || options.DefaultInstructions.Length > options.MaxRequestBytes
+            || (options.ReasoningSummary?.Length ?? 0) > 64
+            || (options.ServiceTier?.Length ?? 0) > 64)
+        {
+            throw new ArgumentException("One or more Responses request defaults are invalid.", nameof(options));
+        }
+
+        if (options.GetCredentialAsync is not null && options.GetApiKeyAsync is not null)
+        {
+            throw new ArgumentException("Configure either a credential provider or an API-key provider, not both.", nameof(options));
+        }
         foreach (var header in options.Headers)
         {
             ValidateHeader(header.Key, header.Value, nameof(options));
         }
     }
 
-    private void ApplyHeaders(HttpRequestMessage request, string? apiKey, ModelRequest modelRequest)
+    private void ApplyHeaders(
+        HttpRequestMessage request,
+        OpenAIRequestCredential credential,
+        ModelRequest modelRequest)
     {
+        if (credential.Headers.Count > 64)
+        {
+            throw new InvalidOperationException("A request credential cannot carry more than 64 headers.");
+        }
+
+        var apiKey = credential.ApiKey;
         ValidateCredential(apiKey, nameof(OpenAIResponsesProviderOptions.GetApiKeyAsync));
         foreach (var header in _headers)
         {
@@ -264,9 +390,26 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             }
         }
 
-        if (!string.IsNullOrEmpty(apiKey)
-            && !request.Headers.Contains("Authorization")
-            && !request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey))
+        foreach (var header in credential.Headers)
+        {
+            ValidateHeader(header.Key, header.Value, nameof(OpenAIResponsesProviderOptions.GetCredentialAsync));
+            request.Headers.Remove(header.Key);
+            if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
+            {
+                throw new InvalidOperationException($"Credential header '{header.Key}' is not valid for an HTTP request.");
+            }
+        }
+
+        var credentialHeader = _authenticationStyle == OpenAIAuthenticationStyle.Bearer
+            ? "Authorization"
+            : _apiKeyHeaderName;
+        var credentialValue = _authenticationStyle == OpenAIAuthenticationStyle.Bearer
+            ? "Bearer " + apiKey
+            : apiKey;
+        if (_authenticationStyle != OpenAIAuthenticationStyle.None
+            && !string.IsNullOrEmpty(apiKey)
+            && !request.Headers.Contains(credentialHeader)
+            && !request.Headers.TryAddWithoutValidation(credentialHeader, credentialValue))
         {
             throw new InvalidOperationException("The authorization header could not be applied.");
         }
@@ -282,6 +425,7 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         {
             OpenAISessionAffinityFormat.OpenRouter => new[] { ("x-session-id", sessionId) },
             OpenAISessionAffinityFormat.OpenAIWithoutSessionHeader => new[] { ("x-client-request-id", sessionId) },
+            OpenAISessionAffinityFormat.Codex => new[] { ("session-id", sessionId), ("x-client-request-id", sessionId) },
             _ => new[] { ("session_id", sessionId), ("x-client-request-id", sessionId) },
         };
         foreach (var header in affinityHeaders)
@@ -306,10 +450,43 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
         var payload = new Dictionary<string, object?>
         {
             ["model"] = request.Model,
-            ["input"] = ProjectInput(request, normalizedMessages, toolPlacement.Deferred),
+            ["input"] = ProjectInput(
+                request,
+                normalizedMessages,
+                toolPlacement.Deferred,
+                includeSystemPrompt: _systemPromptMode == OpenAISystemPromptMode.InputMessage),
             ["stream"] = true,
             ["store"] = false,
         };
+        if (_systemPromptMode == OpenAISystemPromptMode.Instructions)
+        {
+            payload["instructions"] = request.SystemPrompt.Length == 0
+                ? _defaultInstructions
+                : request.SystemPrompt;
+        }
+
+        if (_serviceTier is not null)
+        {
+            payload["service_tier"] = _serviceTier;
+        }
+
+        if (_textVerbosity is { } verbosity)
+        {
+            payload["text"] = new Dictionary<string, object?>
+            {
+                ["verbosity"] = verbosity.ToString().ToLowerInvariant(),
+            };
+        }
+
+        if (_toolChoice is { } toolChoice)
+        {
+            payload["tool_choice"] = toolChoice.ToString().ToLowerInvariant();
+        }
+
+        if (_parallelToolCalls is { } parallelToolCalls)
+        {
+            payload["parallel_tool_calls"] = parallelToolCalls;
+        }
         if (request.Parameters.MaxOutputTokens is { } maximum)
         {
             payload["max_output_tokens"] = Math.Max(MinimumOutputTokens, maximum);
@@ -345,8 +522,12 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
             payload["reasoning"] = new Dictionary<string, object?>
             {
                 ["effort"] = request.Parameters.ReasoningLevel,
-                ["summary"] = "auto",
+                ["summary"] = _reasoningSummary ?? "auto",
             };
+            payload["include"] = new[] { "reasoning.encrypted_content" };
+        }
+        else if (_alwaysIncludeEncryptedReasoning)
+        {
             payload["include"] = new[] { "reasoning.encrypted_content" };
         }
 
@@ -381,10 +562,11 @@ public sealed class OpenAIResponsesProvider : IModelProvider, IModelProviderCapa
     private IReadOnlyList<object> ProjectInput(
         ModelRequest request,
         IReadOnlyList<AgentMessage> messages,
-        IReadOnlyDictionary<string, ToolDefinition> deferredTools)
+        IReadOnlyDictionary<string, ToolDefinition> deferredTools,
+        bool includeSystemPrompt)
     {
         var input = new List<object>();
-        if (request.SystemPrompt.Length > 0)
+        if (includeSystemPrompt && request.SystemPrompt.Length > 0)
         {
             input.Add(new Dictionary<string, object?>
             {

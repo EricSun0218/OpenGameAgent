@@ -18,6 +18,7 @@ internal sealed class ResponsesStreamState
     private string? _responseId;
     private string? _responseModel;
     private string? _rawStopReason;
+    private bool? _endTurn;
     private ModelStopReason _stopReason = ModelStopReason.Pending;
     private string? _errorMessage;
     private ModelUsage _usage = new();
@@ -87,6 +88,7 @@ internal sealed class ResponsesStreamState
                     CompleteSlot(RequiredIndex(root), RequiredObject(root, "item"), updates);
                     break;
                 case "response.completed":
+                case "response.done":
                 case "response.incomplete":
                     CompleteResponse(RequiredObject(root, "response"));
                     break;
@@ -115,6 +117,8 @@ internal sealed class ResponsesStreamState
     }
 
     public ModelResponse Partial() => BuildResponse(ModelStopReason.Pending, null);
+
+    public bool IsTerminal => _terminal;
 
     public ModelResponse Complete()
     {
@@ -184,7 +188,7 @@ internal sealed class ResponsesStreamState
             _responseModel ?? _requestModel,
             _responseId,
             _rawStopReason,
-            endTurn: _slots.Values.Any(slot => slot.Phase == "final_answer") ? true : null);
+            endTurn: _endTurn ?? (_slots.Values.Any(slot => slot.Phase == "final_answer") ? true : null));
     }
 
     private void CreateSlot(int outputIndex, JsonElement item, ICollection<ModelStreamEvent> updates)
@@ -462,6 +466,11 @@ internal sealed class ResponsesStreamState
 
         _terminal = true;
         ReadResponseIdentity(response);
+        if (response.TryGetProperty("end_turn", out var endTurn)
+            && endTurn.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            _endTurn = endTurn.GetBoolean();
+        }
         BackfillReasoningSignatures(response);
         ReadUsage(response);
         var status = OptionalString(response, "status") ?? "completed";
