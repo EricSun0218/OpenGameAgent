@@ -212,8 +212,8 @@ public sealed class GameAgentArtifactExtension : IGameAgentExtension
             "large-tool-result-spill",
             context => new AgentHooks
             {
-                AfterToolCallAsync = (call, result, _, cancellationToken) =>
-                    SpillToolResultAsync(context, call, result, cancellationToken),
+                AfterToolCallAsync = (toolContext, cancellationToken) =>
+                    SpillToolResultAsync(context, toolContext.ToolCall, toolContext.Result, cancellationToken),
             });
     }
 

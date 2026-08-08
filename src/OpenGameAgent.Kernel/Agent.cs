@@ -19,7 +19,7 @@ public sealed class Agent
     private ToolExecutionMode _toolExecution;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Func<string> _runIdFactory;
-    private readonly string? _sessionId;
+    private string? _sessionId;
     private readonly PendingMessageQueue _steering;
     private readonly PendingMessageQueue _followUps;
     private readonly List<Subscriber> _subscribers = new();
@@ -85,6 +85,7 @@ public sealed class Agent
                     _systemPrompt,
                     _provider,
                     _model,
+                    _sessionId,
                     _parameters,
                     _tools,
                     _messages,
@@ -299,6 +300,27 @@ public sealed class Agent
         lock (_gate)
         {
             return _activeTask ?? Task.CompletedTask;
+        }
+    }
+
+    public string? SessionId
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _sessionId;
+            }
+        }
+    }
+
+    public void SetSessionId(string? sessionId)
+    {
+        lock (_gate)
+        {
+            EnsureIdle();
+            AgentValidator.ValidateOptions(_model, sessionId, _parameters, _limits, _clock, _runIdFactory);
+            _sessionId = sessionId;
         }
     }
 
@@ -544,6 +566,7 @@ public sealed class Agent
         try
         {
             Subscriber[] subscribers;
+            CancellationToken subscriberToken;
             lock (_gate)
             {
                 switch (agentEvent.Kind)
@@ -592,13 +615,14 @@ public sealed class Agent
                 }
 
                 subscribers = _subscribers.ToArray();
+                subscriberToken = _activeCancellation?.Token ?? cancellationToken;
             }
 
             foreach (var subscriber in subscribers)
             {
                 try
                 {
-                    await subscriber.Handler(agentEvent, cancellationToken).ConfigureAwait(false);
+                    await subscriber.Handler(agentEvent, subscriberToken).ConfigureAwait(false);
                 }
                 catch (Exception exception)
                 {

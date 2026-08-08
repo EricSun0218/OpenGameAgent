@@ -296,6 +296,7 @@ public static class AgentLoop
                     else
                     {
                         batch = await ExecuteToolCallsAsync(
+                            assistantMessage,
                             calls,
                             runId,
                             turns,
@@ -817,6 +818,7 @@ public static class AgentLoop
     }
 
     private static async Task<ToolBatchOutcome> ExecuteToolCallsAsync(
+        AgentMessage assistantMessage,
         IReadOnlyList<ToolCallContent> calls,
         string runId,
         int turn,
@@ -843,7 +845,15 @@ public static class AgentLoop
             {
                 try
                 {
-                    preparation = await PrepareToolCallAsync(call, current, options, limits, cancellationToken).ConfigureAwait(false);
+                    preparation = await PrepareToolCallAsync(
+                        assistantMessage,
+                        call,
+                        runId,
+                        turn,
+                        current,
+                        options,
+                        limits,
+                        cancellationToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -918,6 +928,7 @@ public static class AgentLoop
 
                     var outcome = await ExecutePreparedToolCallAsync(
                         item,
+                        assistantMessage,
                         runId,
                         turn,
                         current.Snapshot(),
@@ -989,6 +1000,7 @@ public static class AgentLoop
                 {
                     outcome = await ExecutePreparedToolCallAsync(
                         item,
+                        assistantMessage,
                         runId,
                         turn,
                         current.Snapshot(),
@@ -1023,7 +1035,10 @@ public static class AgentLoop
     }
 
     private static async Task<ToolPreparation> PrepareToolCallAsync(
+        AgentMessage assistantMessage,
         ToolCallContent originalCall,
+        string runId,
+        int turn,
         MutableLoopContext current,
         AgentLoopOptions options,
         AgentLimits limits,
@@ -1060,7 +1075,15 @@ public static class AgentLoop
 
             if (options.Hooks.BeforeToolCallAsync is not null)
             {
-                var decision = await options.Hooks.BeforeToolCallAsync(call, current.Snapshot(), cancellationToken).ConfigureAwait(false);
+                var decision = await options.Hooks.BeforeToolCallAsync(
+                    new BeforeToolCallContext(
+                        runId,
+                        turn,
+                        assistantMessage,
+                        call,
+                        arguments,
+                        current.Snapshot()),
+                    cancellationToken).ConfigureAwait(false);
                 if (decision?.Blocked == true)
                 {
                     return ToolPreparation.Failed(CreateToolError(
@@ -1109,6 +1132,7 @@ public static class AgentLoop
 
     private static async Task<ToolCallOutcome> ExecutePreparedToolCallAsync(
         PreparedToolCall prepared,
+        AgentMessage assistantMessage,
         string runId,
         int turn,
         AgentContext context,
@@ -1232,7 +1256,16 @@ public static class AgentLoop
         {
             if (options.Hooks.AfterToolCallAsync is not null)
             {
-                result = await options.Hooks.AfterToolCallAsync(prepared.Call, result, context, cancellationToken).ConfigureAwait(false)
+                result = await options.Hooks.AfterToolCallAsync(
+                        new AfterToolCallContext(
+                            runId,
+                            turn,
+                            assistantMessage,
+                            prepared.Call,
+                            prepared.Arguments,
+                            result,
+                            context),
+                        cancellationToken).ConfigureAwait(false)
                     ?? result;
                 uncertainSideEffect |= result.OutcomeUncertain;
             }

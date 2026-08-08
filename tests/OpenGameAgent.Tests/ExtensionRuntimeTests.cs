@@ -391,7 +391,7 @@ public sealed class ExtensionRuntimeTests
                 "rewrite",
                 _ => new AgentHooks
                 {
-                    BeforeToolCallAsync = (_, _, _) => new ValueTask<ToolCallDecision?>(
+                    BeforeToolCallAsync = (_, _) => new ValueTask<ToolCallDecision?>(
                         ToolCallDecision.Allow("{\"value\":2}")),
                 },
                 priority: 10))
@@ -399,10 +399,9 @@ public sealed class ExtensionRuntimeTests
                 "policy",
                 _ => new AgentHooks
                 {
-                    BeforeToolCallAsync = (call, _, _) =>
+                    BeforeToolCallAsync = (context, _) =>
                     {
-                        using var arguments = JsonDocument.Parse(call.ArgumentsJson);
-                        policySawValue = arguments.RootElement.GetProperty("value").GetInt32();
+                        policySawValue = context.Arguments.GetProperty("value").GetInt32();
                         return new ValueTask<ToolCallDecision?>(ToolCallDecision.Block("denied"));
                     },
                 }))

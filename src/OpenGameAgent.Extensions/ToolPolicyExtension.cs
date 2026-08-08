@@ -195,9 +195,9 @@ public sealed class ToolPolicyExtension : IGameAgentExtension
             "tool-policy-gate",
             runContext => new AgentHooks
             {
-                BeforeToolCallAsync = async (call, agentContext, cancellationToken) =>
+                BeforeToolCallAsync = async (toolContext, cancellationToken) =>
                 {
-                    var current = call;
+                    var current = toolContext.ToolCall;
                     string? replacement = null;
                     var applied = false;
                     foreach (var policy in _policies)
@@ -206,7 +206,7 @@ public sealed class ToolPolicyExtension : IGameAgentExtension
                         try
                         {
                             decision = await policy.EvaluateAsync(
-                                new GameToolPolicyContext(runContext.Input, current, agentContext),
+                                new GameToolPolicyContext(runContext.Input, current, toolContext.Context),
                                 cancellationToken).ConfigureAwait(false)
                                 ?? throw new InvalidOperationException($"Policy '{policy.Id}' returned null.");
                         }
