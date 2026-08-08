@@ -56,7 +56,7 @@ public sealed class ProjectDependencyBoundaryTests
         return document.Descendants("ProjectReference")
             .Select(element => element.Attribute("Include")?.Value)
             .Where(value => value is not null)
-            .Select(value => Path.GetFileNameWithoutExtension(value!))
+            .Select(value => Path.GetFileNameWithoutExtension(value!.Replace('\\', '/')))
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
     }
