@@ -43,6 +43,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 可扩展工具、Skills、路由、Workflow、Hooks、事件与服务的类型化接口；
 - 能力感知模型目录与开发者托管的短期凭证；
 - 外部工具按需发现与大型结果产物化；
+- 包含可移植 Skills 与 MCP Server 的 Agent Plugins 1.0.0 插件包；
 - 通过可替换 API 生成图片、语音和视频。
 
 Runtime **不会**判断攻击是否合法、物品能否使用、资源够不够或 NPC 有没有权限。游戏只暴露窄而明确的工具，校验每次变更请求，在正确线程或服务端执行，并返回权威回执。
@@ -82,6 +83,7 @@ GameAgentRuntime
 | 世界原语 | 可恢复动作、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
+| 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、远程网关和消息网关；重试与回退包装器 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务，以及带渐进预览的专用图片适配器 |
 | 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |

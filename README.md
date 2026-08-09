@@ -43,6 +43,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
 - capability-aware model catalogs and developer-hosted short-lived credentials;
 - lazy external-tool discovery and large-result artifact spill;
+- Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
 - image, audio, and video generation through replaceable APIs.
 
 The runtime does **not** decide combat legality, inventory rules, economy changes, NPC permissions, or other business rules. The game exposes narrow tools, validates every requested mutation, performs it on the correct thread or server, and returns the authoritative receipt.
@@ -84,6 +85,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
+| Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
 | Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, remote gateway, and message-gateway transports; retry/fallback decorators |
 | Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, and a dedicated OpenRouter image adapter with progressive previews |
 | Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |

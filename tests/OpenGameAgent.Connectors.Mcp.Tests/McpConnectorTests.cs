@@ -13,6 +13,49 @@ namespace OpenGameAgent.Connectors.Mcp.Tests;
 public sealed class McpConnectorTests
 {
     [Fact]
+    public async Task FailureIsolationKeepsOtherServersAvailable()
+    {
+        var clientToServer = new Pipe();
+        var serverToClient = new Pipe();
+        await using var server = McpServer.Create(
+            new StreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream()),
+            new McpServerOptions
+            {
+                ToolCollection =
+                [
+                    McpServerTool.Create((string value) => $"echo:{value}", new() { Name = "echo" }),
+                ],
+            });
+        var serverTask = server.RunAsync(TestContext.Current.CancellationToken);
+        var unavailable = new GameMcpServer(
+            "unavailable",
+            _ => throw new InvalidOperationException("server unavailable"));
+        var available = new GameMcpServer(
+            "available",
+            async cancellationToken => await McpClient.CreateAsync(
+                new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()),
+                cancellationToken: cancellationToken));
+        var provider = new ScriptedProvider(_ =>
+            new ModelResponse(new AgentContent[] { new TextContent("done") }, ModelStopReason.Stop));
+        await using var runtime = new GameAgentBuilder(provider, "model")
+            .UseExtension(new McpToolConnectorExtension(
+                new[] { unavailable, available },
+                continueOnServerFailure: true,
+                exposure: GameMcpToolExposure.Direct))
+            .Build();
+
+        var result = await runtime.RunAsync(
+            new GameInput("session", "actor", "request", "{}", new GameMoment("world", 1), "input"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(Assert.Single(provider.Requests).Tools, tool => tool.Name == "available__echo");
+        await runtime.DisposeAsync();
+        await server.DisposeAsync();
+        await serverTask;
+    }
+
+    [Fact]
     public async Task DiscoversAndCallsAStandardExternalTool()
     {
         var clientToServer = new Pipe();
