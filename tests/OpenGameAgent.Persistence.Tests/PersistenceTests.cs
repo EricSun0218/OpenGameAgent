@@ -29,7 +29,7 @@ public sealed class PersistenceTests
                 AgentRole.Assistant,
                 new AgentContent[]
                 {
-                    new ReasoningContent("plan", "signature"),
+                    new ReasoningContent("plan", "signature", redacted: true),
                     new ToolCallContent("call", "move", "{\"x\":2.5}"),
                 },
                 DateTimeOffset.UnixEpoch.AddSeconds(1),
@@ -59,6 +59,7 @@ public sealed class PersistenceTests
         Assert.Equal(3, loaded.Messages.Count);
         Assert.Equal("{\"value\":1.25}", Assert.IsType<JsonContent>(loaded.Messages[0].Content[1]).Json);
         Assert.Equal("signature", Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Signature);
+        Assert.True(Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Redacted);
         Assert.Equal(10, loaded.Messages[1].Usage!.InputTokens);
         Assert.Equal("{\"revision\":7}", loaded.Messages[2].DetailsJson);
         Assert.Equal(3, loaded.Messages[2].Usage!.TotalTokens);
@@ -114,7 +115,7 @@ public sealed class PersistenceTests
         Assert.Equal(2, loaded.UsageLedger.Records[0].Usage.ReasoningTokens);
         Assert.Equal(1, loaded.UsageLedger.Records[0].Usage.CacheWriteOneHourTokens);
         var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
-        Assert.Equal(3, JsonNode.Parse(await File.ReadAllTextAsync(
+        Assert.Equal(4, JsonNode.Parse(await File.ReadAllTextAsync(
             file,
             TestContext.Current.CancellationToken))!["FormatVersion"]!.GetValue<int>());
     }

@@ -98,7 +98,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
     private static SessionDocument Encode(GameSessionSnapshot snapshot) => new()
     {
-        FormatVersion = 3,
+        FormatVersion = 4,
         SessionId = snapshot.Key.SessionId,
         ActorId = snapshot.Key.ActorId,
         Revision = snapshot.Revision,
@@ -138,7 +138,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
             return null;
         }
 
-        if (document.FormatVersion is not (1 or 2 or 3))
+        if (document.FormatVersion is not (1 or 2 or 3 or 4))
         {
             throw new PersistenceException($"Unsupported session format version '{document.FormatVersion}'.");
         }

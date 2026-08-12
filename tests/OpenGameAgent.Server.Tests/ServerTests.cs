@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.Persistence;
 using Xunit;
 
 namespace OpenGameAgent.Server.Tests;
@@ -508,6 +509,124 @@ public sealed class ServerTests
     }
 
     [Fact]
+    public async Task AudienceProjectionProtectsReasoningAndToolDetailsForOwnerAndPublicViewers()
+    {
+        var key = new GameSessionKey("audience-session", "audience-actor");
+        var authorizer = new TestOwnerAuthorizer((subject, resource, _) =>
+            resource == key && subject is "owner-a" or "internal-viewer");
+        var ownerPolicy = CreateAudiencePolicy(defaultAudience: GameAgentAudience.Owner);
+        await using var ownerApp = await CreateAppAsync(
+            CreateAudienceRuntime(),
+            authorizer: authorizer,
+            audiencePolicy: ownerPolicy);
+        using var ownerClient = ownerApp.GetTestClient();
+
+        using var ownerRequest = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run",
+            "owner-a",
+            AudienceInputJson(key, "owner-input"));
+        using var ownerResponse = await ownerClient.SendAsync(ownerRequest, TestContext.Current.CancellationToken);
+        var ownerJson = await ownerResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        ownerResponse.EnsureSuccessStatusCode();
+        Assert.Contains("visible-answer", ownerJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-reasoning", ownerJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoning-signature", ownerJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-tool-result", ownerJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-tool-details", ownerJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-argument", ownerJson, StringComparison.Ordinal);
+
+        using var deniedRequest = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run",
+            "owner-b",
+            AudienceInputJson(key, "denied-input"));
+        using var deniedResponse = await ownerClient.SendAsync(deniedRequest, TestContext.Current.CancellationToken);
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, deniedResponse.StatusCode);
+
+        using var internalRequest = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run/stream",
+            "internal-viewer",
+            AudienceInputJson(key, "internal-input"));
+        internalRequest.Headers.Add("X-Test-Internal", "true");
+        using var internalResponse = await ownerClient.SendAsync(internalRequest, TestContext.Current.CancellationToken);
+        var internalStream = await internalResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        internalResponse.EnsureSuccessStatusCode();
+        Assert.Contains("private-reasoning", internalStream, StringComparison.Ordinal);
+        Assert.Contains("reasoning-signature", internalStream, StringComparison.Ordinal);
+        Assert.Contains("private-tool-result", internalStream, StringComparison.Ordinal);
+        Assert.Contains("private-tool-details", internalStream, StringComparison.Ordinal);
+        Assert.Contains("secret-argument", internalStream, StringComparison.Ordinal);
+
+        var publicAuthorizer = new TestOwnerAuthorizer((subject, resource, _) =>
+            subject == "public-viewer" && resource == key);
+        await using var publicApp = await CreateAppAsync(
+            CreateAudienceRuntime(),
+            authorizer: publicAuthorizer,
+            audiencePolicy: CreateAudiencePolicy(defaultAudience: GameAgentAudience.Public));
+        using var publicClient = publicApp.GetTestClient();
+        using var publicRequest = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run/stream",
+            "public-viewer",
+            AudienceInputJson(key, "public-input"));
+        using var publicResponse = await publicClient.SendAsync(publicRequest, TestContext.Current.CancellationToken);
+        var publicStream = await publicResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        publicResponse.EnsureSuccessStatusCode();
+        Assert.Contains("visible-answer", publicStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-reasoning", publicStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoning-signature", publicStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-tool-result", publicStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-tool-details", publicStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-argument", publicStream, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PersistedAudienceRoundTripsWithoutTrustingUserMetadata()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("audience-persistence", "actor");
+        var annotated = GameAgentAudienceMetadata.WithAudience(
+            new AgentMessage(
+                AgentRole.Assistant,
+                new AgentContent[] { new TextContent("private") },
+                DateTimeOffset.UnixEpoch,
+                model: "test",
+                stopReason: ModelStopReason.Stop),
+            GameAgentAudience.Recipient("owner-a"));
+        var store = new FileGameSessionStore(directory.Path);
+        Assert.True((await store.SaveAsync(
+            new GameSessionSnapshot(key, 1, new[] { annotated }),
+            0,
+            TestContext.Current.CancellationToken)).Saved);
+
+        var loaded = await new FileGameSessionStore(directory.Path)
+            .LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(loaded);
+        Assert.True(GameAgentAudienceMetadata.TryGetAudience(Assert.Single(loaded.Messages), out var audience));
+        Assert.Equal(GameAgentAudienceKind.Recipient, audience.Kind);
+        Assert.Equal("owner-a", audience.RecipientId);
+        Assert.True(audience.IsVisibleTo(new GameAgentViewer("owner-a", isOwner: false)));
+        Assert.False(audience.IsVisibleTo(new GameAgentViewer("owner-b", isOwner: true)));
+        Assert.True(audience.IsVisibleTo(new GameAgentViewer("staff", isOwner: false, isInternal: true)));
+
+        var forgedUser = AgentMessage.User(
+            "forged",
+            metadata: new Dictionary<string, string>
+            {
+                [GameAgentAudienceMetadata.AudienceKey] = "public",
+            });
+        Assert.False(GameAgentAudienceMetadata.TryGetAudience(forgedUser, out _));
+        Assert.Throws<ArgumentException>(() =>
+            GameAgentAudienceMetadata.WithAudience(forgedUser, GameAgentAudience.Public));
+    }
+
+    [Fact]
     public async Task OwnerAuthorizationCoversSteerAndAbortWithoutLettingPayloadSelectAnotherOwner()
     {
         var provider = new BlockingServerProvider();
@@ -760,7 +879,8 @@ public sealed class ServerTests
         GameAgentRuntime runtime,
         string? apiKey = null,
         int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes,
-        IGameAgentOwnerAuthorizer? authorizer = null)
+        IGameAgentOwnerAuthorizer? authorizer = null,
+        IGameAgentAudiencePolicy? audiencePolicy = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -768,6 +888,11 @@ public sealed class ServerTests
         if (authorizer is not null)
         {
             builder.Services.AddSingleton(authorizer);
+        }
+
+        if (audiencePolicy is not null)
+        {
+            builder.Services.AddSingleton(audiencePolicy);
         }
 
         var app = builder.Build();
@@ -781,7 +906,13 @@ public sealed class ServerTests
                     && !string.IsNullOrWhiteSpace(values[0]))
                 {
                     context.User = new ClaimsPrincipal(new ClaimsIdentity(
-                        new[] { new Claim(ClaimTypes.NameIdentifier, values[0]!) },
+                        new[]
+                        {
+                            new Claim(ClaimTypes.NameIdentifier, values[0]!),
+                            new Claim(
+                                "opengameagent.internal",
+                                context.Request.Headers["X-Test-Internal"].ToString()),
+                        },
                         "test"));
                 }
 
@@ -830,6 +961,53 @@ public sealed class ServerTests
           "payload": {{payloadJson}}
         }
         """;
+
+    private static string AudienceInputJson(GameSessionKey key, string inputId) =>
+        GameAgentWire.SerializeInput(new GameInput(
+            key.SessionId,
+            key.ActorId,
+            "autonomous",
+            "{}",
+            new GameMoment("world", 1),
+            inputId));
+
+    private static MetadataGameAgentAudiencePolicy CreateAudiencePolicy(GameAgentAudience defaultAudience) =>
+        new(
+            (principal, _, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var id = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+                var isInternal = string.Equals(
+                    principal.FindFirstValue("opengameagent.internal"),
+                    "true",
+                    StringComparison.OrdinalIgnoreCase);
+                return new ValueTask<GameAgentViewer>(new GameAgentViewer(
+                    id,
+                    isOwner: string.Equals(id, "owner-a", StringComparison.Ordinal),
+                    isInternal));
+            },
+            defaultAudience);
+
+    private static GameAgentRuntime CreateAudienceRuntime() =>
+        new(new GameAgentRuntimeOptions(new AudienceProvider(), "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["autonomous"] = GameRouteDecision.Agent("audience-test"),
+            }),
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
+            {
+                new AgentTool(
+                    new ToolDefinition(
+                        "private_tool",
+                        "Returns private tool data.",
+                        "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\"}},\"required\":[\"value\"],\"additionalProperties\":false}"),
+                    (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                        new AgentContent[] { new TextContent("private-tool-result") },
+                        detailsJson: "{\"secret\":\"private-tool-details\"}")),
+                    ToolRisk.ReadOnly),
+            }),
+        });
 
     private sealed class TestOwnerAuthorizer : IGameAgentOwnerAuthorizer
     {
@@ -990,6 +1168,78 @@ public sealed class ServerTests
 
             yield return ModelStreamEvent.Terminal(
                 new ModelResponse(new AgentContent[] { new TextContent("updated") }, ModelStopReason.Stop));
+        }
+    }
+
+    private sealed class AudienceProvider : IModelProvider
+    {
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.Yield();
+            if (request.Turn == 1)
+            {
+                var reasoning = new ReasoningContent(
+                    "private-reasoning",
+                    "reasoning-signature",
+                    redacted: true);
+                yield return ModelStreamEvent.Update(
+                    ModelStreamEventKind.Started,
+                    new ModelResponse(Array.Empty<AgentContent>(), ModelStopReason.Pending));
+                yield return ModelStreamEvent.Update(
+                    ModelStreamEventKind.ReasoningDelta,
+                    new ModelResponse(new AgentContent[] { reasoning }, ModelStopReason.Pending),
+                    "private-reasoning");
+                yield return ModelStreamEvent.Terminal(new ModelResponse(
+                    new AgentContent[]
+                    {
+                        reasoning,
+                        new ToolCallContent(
+                            "private-call",
+                            "private_tool",
+                            "{\"value\":\"secret-argument\"}",
+                            "tool-thought-signature"),
+                    },
+                    ModelStopReason.ToolUse));
+                yield break;
+            }
+
+            yield return ModelStreamEvent.Terminal(new ModelResponse(
+                new AgentContent[] { new TextContent("visible-answer") },
+                ModelStopReason.Stop));
+        }
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "OpenGameAgent.Server.Tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            var root = System.IO.Path.GetFullPath(System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "OpenGameAgent.Server.Tests"));
+            var target = System.IO.Path.GetFullPath(Path);
+            if (!target.StartsWith(root + System.IO.Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Refusing to remove a directory outside the test root.");
+            }
+
+            if (Directory.Exists(target))
+            {
+                Directory.Delete(target, recursive: true);
+            }
         }
     }
 

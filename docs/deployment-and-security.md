@@ -48,6 +48,12 @@ Register an `IGameAgentOwnerAuthorizer` for player-facing or multi-tenant deploy
 
 Control requests only address an already active `(session, actor)` loop; they cannot register tools or mutate game state directly. Put TLS, request-rate limits, tenant quotas, and abuse protection at the gateway. The included shared-secret gate identifies one deployment-wide subject; it is not a multi-user account system.
 
+### Output audiences
+
+Register an `IGameAgentAudiencePolicy` when server output can be observed by more than one trust class. The policy resolves a viewer from the authenticated principal and classifies every event or message as `Internal`, `Owner`, `Public`, or a named `Recipient`. The framework—not the model response or tool payload—applies that decision to both JSON and SSE output. Non-internal viewers never receive reasoning text or signatures, redacted reasoning, tool arguments, tool results, tool progress details, or message metadata. An internal viewer can receive the complete diagnostic stream.
+
+`MetadataGameAgentAudiencePolicy` is the safe stock policy for persisted annotations. `GameAgentAudienceMetadata.WithAudience` accepts only host-authored assistant or custom messages; user messages and tool results cannot promote themselves with request metadata. Audience and recipient annotations use the existing bounded message metadata and survive memory and file-session round trips. Redacted reasoning state is also preserved by the file-session format. Hosts that compute audience from an external ACL may implement the policy directly instead.
+
 The included file stores coordinate local writers through cross-process leases when they use the same data directory. They are not distributed storage. Multi-host services must replace the interfaces with transactional shared storage and coordinate actor ownership. Custom session, workflow, action, artifact, delegation, and ranking implementations are checked at their trust boundaries; inconsistent saved state and cross-session data are rejected.
 
 ## Remote game actions

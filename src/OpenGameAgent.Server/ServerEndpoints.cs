@@ -117,6 +117,7 @@ public static class ServerEndpoints
             routes = new[] { "quick", "agent", "workflow" },
             execution = new[] { "in-process", "server" },
             control = new[] { "steer", "abort" },
+            audience = new[] { "internal", "owner", "public", "recipient" },
         }));
         endpoints.MapPost(
             "/v1/run",
@@ -297,6 +298,11 @@ public static class ServerEndpoints
             return authorizationFailure;
         }
 
+        var audienceProjection = await CreateAudienceProjectionAsync(
+            httpRequest.HttpContext,
+            new GameSessionKey(input.SessionId, input.ActorId),
+            cancellationToken);
+
         Task<GameAgentRunResult> pendingRun;
         try
         {
@@ -310,7 +316,10 @@ public static class ServerEndpoints
         }
 
         var result = await pendingRun;
-        return Results.Text(GameAgentWire.SerializeResult(result), "application/json", Encoding.UTF8);
+        var resultJson = audienceProjection is null
+            ? GameAgentWire.SerializeResult(result)
+            : await audienceProjection.ProjectResultAsync(result, cancellationToken);
+        return Results.Text(resultJson, "application/json", Encoding.UTF8);
     }
 
     private static async Task StreamAsync(
@@ -365,6 +374,11 @@ public static class ServerEndpoints
             return;
         }
 
+        var audienceProjection = await CreateAudienceProjectionAsync(
+            httpRequest.HttpContext,
+            new GameSessionKey(input.SessionId, input.ActorId),
+            cancellationToken);
+
         response.StatusCode = StatusCodes.Status200OK;
         response.ContentType = "text/event-stream";
         response.Headers.CacheControl = "no-cache";
@@ -376,7 +390,13 @@ public static class ServerEndpoints
                 input,
                 async (_, agentEvent, token) =>
                 {
-                    await WriteEventAsync(response, "agent", GameAgentWire.SerializeEvent(agentEvent), token);
+                    var eventJson = audienceProjection is null
+                        ? GameAgentWire.SerializeEvent(agentEvent)
+                        : await audienceProjection.ProjectEventAsync(agentEvent, token);
+                    if (eventJson is not null)
+                    {
+                        await WriteEventAsync(response, "agent", eventJson, token);
+                    }
                 },
                 cancellationToken);
         }
@@ -395,7 +415,10 @@ public static class ServerEndpoints
         try
         {
             var result = await pendingRun;
-            await WriteEventAsync(response, "result", GameAgentWire.SerializeResult(result), cancellationToken);
+            var resultJson = audienceProjection is null
+                ? GameAgentWire.SerializeResult(result)
+                : await audienceProjection.ProjectResultAsync(result, cancellationToken);
+            await WriteEventAsync(response, "result", resultJson, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -459,6 +482,22 @@ public static class ServerEndpoints
         return allowed
             ? null
             : Results.Json(new { error = "forbidden" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    private static async ValueTask<GameAgentAudienceProjection?> CreateAudienceProjectionAsync(
+        HttpContext httpContext,
+        GameSessionKey key,
+        CancellationToken cancellationToken)
+    {
+        var policy = httpContext.RequestServices.GetService<IGameAgentAudiencePolicy>();
+        if (policy is null)
+        {
+            return null;
+        }
+
+        var viewer = await policy.ResolveViewerAsync(httpContext.User, key, cancellationToken)
+            ?? throw new InvalidOperationException("The game audience policy returned no viewer.");
+        return new GameAgentAudienceProjection(policy, viewer, key);
     }
 
     private static async Task<JsonDocument> ReadRequestDocumentAsync(
