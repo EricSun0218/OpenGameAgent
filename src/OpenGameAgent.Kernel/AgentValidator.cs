@@ -496,6 +496,14 @@ internal static class AgentValidator
 
             ValidateConstrainedSampling(tool, limits);
 
+            var schemaError = JsonSchemaValidator.Preflight(tool.InputSchemaJson);
+            if (schemaError is not null)
+            {
+                throw new ArgumentException(
+                    $"Provider tool schema '{tool.Name}' failed preflight: {schemaError}",
+                    nameof(request));
+            }
+
             if (!names.Add(tool.Name))
             {
                 throw new ArgumentException($"Duplicate provider tool name '{tool.Name}'.", nameof(request));

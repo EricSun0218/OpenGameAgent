@@ -78,7 +78,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Area | Capability |
 | --- | --- |
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
-| Tool execution | Bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
+| Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |

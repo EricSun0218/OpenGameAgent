@@ -34,21 +34,32 @@ internal static class JsonSchemaValidator
         "multipleOf",
     };
 
+    public static string? Preflight(string schemaJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(schemaJson);
+            return Preflight(document.RootElement);
+        }
+        catch (JsonException exception)
+        {
+            return "The tool schema is invalid: " + exception.Message;
+        }
+        catch (NumberLimitException exception)
+        {
+            return exception.Message;
+        }
+    }
+
     public static string? Validate(string schemaJson, JsonElement value)
     {
         try
         {
             using var document = JsonDocument.Parse(schemaJson);
-            var schemaError = ValidateSchemaNode(document.RootElement, "$", 0);
+            var schemaError = Preflight(document.RootElement);
             if (schemaError is not null)
             {
                 return schemaError;
-            }
-
-            var schemaJsonError = ValidateJsonValue(document.RootElement, "$schema", 0);
-            if (schemaJsonError is not null)
-            {
-                return schemaJsonError;
             }
 
             var valueError = ValidateJsonValue(value, "$", 0);
@@ -67,6 +78,12 @@ internal static class JsonSchemaValidator
         {
             return exception.Message;
         }
+    }
+
+    private static string? Preflight(JsonElement schema)
+    {
+        var schemaError = ValidateSchemaNode(schema, "$", 0);
+        return schemaError ?? ValidateJsonValue(schema, "$schema", 0);
     }
 
     private static string? ValidateSchemaNode(JsonElement schema, string path, int depth)
