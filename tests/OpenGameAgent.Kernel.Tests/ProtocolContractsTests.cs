@@ -42,6 +42,18 @@ public sealed class ProtocolContractsTests
     }
 
     [Fact]
+    public void CostDistinguishesUnavailablePricingFromKnownFreePricing()
+    {
+        var unknown = new ModelCost();
+        var free = new ModelCost(isKnown: true);
+
+        Assert.False(unknown.IsKnown);
+        Assert.Null(unknown.TotalIfKnown);
+        Assert.True(free.IsKnown);
+        Assert.Equal(0, free.TotalIfKnown);
+    }
+
+    [Fact]
     public async Task DeferredResponseIdentitySurvivesTheAgentLoop()
     {
         var handle = new DeferredModelHandle(
