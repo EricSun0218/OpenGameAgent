@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -187,7 +188,7 @@ public sealed class GameMcpServer
 
         var copiedEnvironment = environment is null
             ? StdioClientTransportOptions.GetDefaultEnvironmentVariables()
-            : new Dictionary<string, string?>(environment, StringComparer.OrdinalIgnoreCase);
+            : new Dictionary<string, string?>(environment, EnvironmentNameComparer);
         return new GameMcpServer(
             id,
             async cancellationToken =>
@@ -212,6 +213,9 @@ public sealed class GameMcpServer
         string.IsNullOrWhiteSpace(value) || value.Length > 512
             ? throw new ArgumentException("A value of at most 512 characters is required.", name)
             : value;
+
+    private static StringComparer EnvironmentNameComparer =>
+        Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 }
 
 public sealed class McpToolSetChange
@@ -264,11 +268,37 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
     private readonly IGameAgentArtifactStore? _artifactStore;
     private readonly Func<DateTimeOffset> _clock;
     private readonly GameMcpToolExposure _exposure;
+    private readonly bool _continueOnServerFailure;
     private readonly CancellationTokenSource _lifetime = new();
     private int _disposed;
 
     public McpToolConnectorExtension(
         IReadOnlyList<GameMcpServer> servers,
+        TimeSpan? refreshInterval = null,
+        int maximumToolsPerServer = 256,
+        int maximumSchemaCharacters = 262_144,
+        int maximumInlineResultCharacters = 262_144,
+        IGameAgentArtifactStore? artifactStore = null,
+        Func<DateTimeOffset>? operationalClock = null,
+        int maximumResultCharacters = 10_000_000,
+        GameMcpToolExposure exposure = GameMcpToolExposure.OnDemand)
+        : this(
+            servers,
+            continueOnServerFailure: false,
+            refreshInterval,
+            maximumToolsPerServer,
+            maximumSchemaCharacters,
+            maximumInlineResultCharacters,
+            artifactStore,
+            operationalClock,
+            maximumResultCharacters,
+            exposure)
+    {
+    }
+
+    public McpToolConnectorExtension(
+        IReadOnlyList<GameMcpServer> servers,
+        bool continueOnServerFailure,
         TimeSpan? refreshInterval = null,
         int maximumToolsPerServer = 256,
         int maximumSchemaCharacters = 262_144,
@@ -336,6 +366,7 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
         _artifactStore = artifactStore;
         _clock = operationalClock ?? (() => DateTimeOffset.UtcNow);
         _exposure = exposure;
+        _continueOnServerFailure = continueOnServerFailure;
     }
 
     public static GameAgentExtensionChannel<McpToolSetChange> ToolSetChanged { get; } = new("mcp.tools.changed");
@@ -423,8 +454,15 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
         var result = new List<AgentTool>();
         foreach (var server in _servers)
         {
-            var tools = await GetToolsAsync(api, server, linked.Token).ConfigureAwait(false);
-            result.AddRange(tools.Select(tool => CreateTool(server, tool, context)));
+            try
+            {
+                var tools = await GetToolsAsync(api, server, linked.Token).ConfigureAwait(false);
+                result.AddRange(tools.Select(tool => CreateTool(server, tool, context)));
+            }
+            catch (Exception exception) when (CanIsolateServerFailure(exception, linked.Token))
+            {
+                // A portable plugin keeps its remaining MCP servers available when one server is down.
+            }
         }
 
         return result;
@@ -647,10 +685,21 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
         }
 
         var matches = new List<object>();
+        var unavailableServers = new List<string>();
         foreach (var server in _servers.Where(value => serverFilter is null
                      || string.Equals(value.Id, serverFilter, StringComparison.Ordinal)))
         {
-            var tools = await GetToolsAsync(api, server, cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<McpClientTool> tools;
+            try
+            {
+                tools = await GetToolsAsync(api, server, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (CanIsolateServerFailure(exception, cancellationToken))
+            {
+                unavailableServers.Add(server.Id);
+                continue;
+            }
+
             foreach (var tool in tools)
             {
                 if (query.Length > 0
@@ -690,6 +739,7 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
                 query,
                 matches = returned,
                 truncated,
+                unavailableServers,
             })),
         });
     }
@@ -712,7 +762,16 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
             }
 
             var name = path.Substring(server.ToolPrefix.Length);
-            var tools = await GetToolsAsync(api, server, cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<McpClientTool> tools;
+            try
+            {
+                tools = await GetToolsAsync(api, server, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (CanIsolateServerFailure(exception, cancellationToken))
+            {
+                return ResolvedTool.Failed($"External tool server '{server.Id}' is unavailable.");
+            }
+
             var tool = tools.FirstOrDefault(value => string.Equals(value.Name, name, StringComparison.Ordinal));
             if (tool is not null)
             {
@@ -722,6 +781,13 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
 
         return ResolvedTool.Failed($"External tool '{path}' does not exist.");
     }
+
+    private bool CanIsolateServerFailure(Exception exception, CancellationToken cancellationToken) =>
+        _continueOnServerFailure
+        && !cancellationToken.IsCancellationRequested
+        && !_lifetime.IsCancellationRequested
+        && exception is not OutOfMemoryException
+        && exception is not AccessViolationException;
 
     private async ValueTask<ToolResult> InvokeAsync(
         GameMcpServer server,

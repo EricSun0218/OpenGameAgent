@@ -160,6 +160,30 @@ For game-specific selection, use `skill.json` with `id`, `name`, optional `input
 
 The directory loader scans nested skill folders, rejects paths that escape the selected skill directory, and loads instructions only for selected skills. Imported instructions are untrusted content; they do not install code or grant tool permission.
 
+To consume a portable Agent Plugins 1.0.0 package instead of a standalone skill directory, install `OpenGameAgent.Plugins` and load the package as one runtime extension:
+
+```powershell
+dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.1
+```
+
+```csharp
+using OpenGameAgent.Plugins;
+
+var plugin = AgentPluginLoader.Load(
+    pluginDirectory,
+    new AgentPluginLoadOptions
+    {
+        // Required only when the package contains stdio MCP servers.
+        PluginDataDirectory = pluginDataDirectory,
+    });
+
+await using var runtime = new GameAgentBuilder(provider, model)
+    .UseExtension(plugin)
+    .Build();
+```
+
+The adapter validates `plugin.json`, discovers only immediate `skills/*/SKILL.md` children, and maps valid `mcp.json` stdio and Streamable HTTP entries to the existing MCP connector. Invalid skills and MCP server entries are diagnosed independently. The optional legacy SSE MCP transport is reported and skipped. Package paths cannot escape the plugin root, `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` expansion is single-pass, and the default HTTP transport disables redirects so visible package headers do not cross origins. See [Agent Plugins](agent-plugins.md) for the complete boundary.
+
 After any tool turn, the runtime refreshes game context, tools, and selected skills before asking the model to continue. Set `RefreshContextAfterToolTurns = false` only when a game supplies immutable turn context or implements replacement context in `AgentHooks.PrepareNextTurnAsync`.
 
 ## Keep large catalogs and outputs out of context
