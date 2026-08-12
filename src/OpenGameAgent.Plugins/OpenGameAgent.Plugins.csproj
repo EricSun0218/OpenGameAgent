@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Agent Plugins 1.0.0 package loading for OpenGameAgent skills and MCP servers.</Description>
+    <PackageId>OpenGameAgent.Plugins</PackageId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="10.0.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Persistence\OpenGameAgent.Persistence.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Connectors.Mcp\OpenGameAgent.Connectors.Mcp.csproj" />
+  </ItemGroup>
+</Project>
