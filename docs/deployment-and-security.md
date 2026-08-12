@@ -59,6 +59,37 @@ Register an `IGameAgentAudiencePolicy` when server output can be observed by mor
 
 `MetadataGameAgentAudiencePolicy` is the safe stock policy for persisted annotations. `GameAgentAudienceMetadata.WithAudience` accepts only host-authored assistant or custom messages; user messages and tool results cannot promote themselves with request metadata. Audience and recipient annotations use the existing bounded message metadata and survive memory and file-session round trips. Redacted reasoning state is also preserved by the file-session format. Hosts that compute audience from an external ACL may implement the policy directly instead.
 
+## Trusted model routing
+
+The stock server can expose several named model routes without accepting an endpoint, API key, or raw provider configuration from a game request. Configure `OpenGameAgent:ModelRoutes`, choose `OpenGameAgent:DefaultModelRoute`, and optionally map trusted input types through `OpenGameAgent:InputModelRoutes`:
+
+```json
+{
+  "OpenGameAgent": {
+    "DefaultModelRoute": "local",
+    "ModelRoutes": {
+      "local": {
+        "ProviderId": "local",
+        "Endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+        "Model": "local-model",
+        "Fallbacks": [ "cloud" ]
+      },
+      "cloud": {
+        "ProviderId": "cloud",
+        "Endpoint": "https://model-gateway.example/v1/chat/completions",
+        "Model": "cloud-model",
+        "ApiKey": "set-this-through-a-secret-configuration-provider"
+      }
+    },
+    "InputModelRoutes": {
+      "complex-plan": "cloud"
+    }
+  }
+}
+```
+
+Route selection is server policy: request JSON can contain arbitrary game data, but it cannot create a provider, replace an endpoint, or supply a server credential. A custom host can build the same boundary with `TrustedGameAgentServerModelRouter` and a selector that returns only a registered route name. Fallback is allowed only before meaningful streamed output; once text, reasoning, tool calls, or usage are visible, the framework never silently replays the request. Final assistant messages expose the provider, API, response model, and response ID that actually completed, while provider credentials remain inside the server transport and never enter the model transcript or response wire.
+
 The included file stores coordinate local writers through cross-process leases when they use the same data directory. They are not distributed storage. Multi-host services must replace the interfaces with transactional shared storage and coordinate actor ownership. Custom session, workflow, action, artifact, delegation, and ranking implementations are checked at their trust boundaries; inconsistent saved state and cross-session data are rejected.
 
 ## Remote game actions

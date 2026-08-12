@@ -20,21 +20,34 @@ builder.Services.AddSingleton(serviceProvider => new DurableGameActionDispatcher
 builder.Services.AddSingleton(serviceProvider =>
 {
     var configuration = serviceProvider.GetRequiredService<IConfiguration>();
-    var endpointText = configuration["OpenGameAgent:ModelEndpoint"]
-        ?? throw new InvalidOperationException("Configure OpenGameAgent:ModelEndpoint.");
-    var model = configuration["OpenGameAgent:Model"]
-        ?? throw new InvalidOperationException("Configure OpenGameAgent:Model.");
-    var httpClient = serviceProvider.GetRequiredService<IHttpClientFactory>().CreateClient("model");
-    var providerOptions = new OpenAICompatibleProviderOptions(httpClient, new Uri(endpointText))
+    var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+    GameAgentRuntimeOptions runtimeOptions;
+    if (configuration.GetSection("OpenGameAgent:ModelRoutes").GetChildren().Any())
     {
-        ApiKey = configuration["OpenGameAgent:ApiKey"],
-    };
-    var runtimeOptions = new GameAgentRuntimeOptions(new OpenAICompatibleProvider(providerOptions), model)
+        var routing = StockGameAgentModelRouting.Create(configuration, httpClientFactory);
+        runtimeOptions = new GameAgentRuntimeOptions(routing.DefaultProvider, routing.DefaultModel)
+        {
+            ModelSelector = routing.SelectAsync,
+        };
+    }
+    else
     {
-        Instructions = configuration["OpenGameAgent:Instructions"] ?? string.Empty,
-        SessionStore = new FileGameSessionStore(
-            configuration["OpenGameAgent:DataDirectory"] ?? Path.Combine(AppContext.BaseDirectory, "data", "sessions")),
-    };
+        var endpointText = configuration["OpenGameAgent:ModelEndpoint"]
+            ?? throw new InvalidOperationException("Configure OpenGameAgent:ModelEndpoint or ModelRoutes.");
+        var model = configuration["OpenGameAgent:Model"]
+            ?? throw new InvalidOperationException("Configure OpenGameAgent:Model.");
+        var providerOptions = new OpenAICompatibleProviderOptions(
+            httpClientFactory.CreateClient("model"),
+            new Uri(endpointText))
+        {
+            ApiKey = configuration["OpenGameAgent:ApiKey"],
+        };
+        runtimeOptions = new GameAgentRuntimeOptions(new OpenAICompatibleProvider(providerOptions), model);
+    }
+
+    runtimeOptions.Instructions = configuration["OpenGameAgent:Instructions"] ?? string.Empty;
+    runtimeOptions.SessionStore = new FileGameSessionStore(
+        configuration["OpenGameAgent:DataDirectory"] ?? Path.Combine(AppContext.BaseDirectory, "data", "sessions"));
     return new GameAgentRuntime(runtimeOptions);
 });
 

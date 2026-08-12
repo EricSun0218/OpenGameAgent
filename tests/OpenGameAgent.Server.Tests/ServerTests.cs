@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
@@ -110,6 +111,175 @@ public sealed class ServerTests
         var resource = Assert.Single(Assert.Single(provider.Requests).Messages.SelectMany(message => message.Content).OfType<ResourceContent>());
         Assert.Equal("game://capture/frame", resource.Uri);
         Assert.Equal("image/png", resource.MediaType);
+    }
+
+    [Fact]
+    public async Task TrustedModelRoutesCanSwitchProvidersWithinOneSession()
+    {
+        var local = new RoutedProvider("local-answer", "local-response");
+        var cloud = new RoutedProvider("cloud-answer", "cloud-response");
+        var router = new TrustedGameAgentServerModelRouter(
+            new[]
+            {
+                new GameAgentServerModelRoute("local", new[]
+                {
+                    new GameAgentServerModelTarget("local-provider", "local-model", local, "test-api"),
+                }),
+                new GameAgentServerModelRoute("cloud", new[]
+                {
+                    new GameAgentServerModelTarget("cloud-provider", "cloud-model", cloud, "test-api"),
+                }),
+            },
+            "local",
+            (input, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return new ValueTask<string>(input.Type == "complex" ? "cloud" : "local");
+            });
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
+            router.DefaultProvider,
+            router.DefaultModel)
+        {
+            ModelSelector = router.SelectAsync,
+        });
+
+        var first = await runtime.RunAsync(new GameInput(
+            "routing-session",
+            "actor",
+            "chat",
+            "{\"endpoint\":\"https://attacker.invalid\",\"apiKey\":\"attacker-key\"}",
+            new GameMoment("world", 1),
+            "route-local"), TestContext.Current.CancellationToken);
+        var second = await runtime.RunAsync(new GameInput(
+            "routing-session",
+            "actor",
+            "complex",
+            "{}",
+            new GameMoment("world", 2),
+            "route-cloud"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("local-model", Assert.Single(local.Requests).Model);
+        Assert.Equal("cloud-model", Assert.Single(cloud.Requests).Model);
+        var firstAssistant = Assert.Single(first.AgentResult!.NewMessages, message => message.Role == AgentRole.Assistant);
+        var secondAssistant = Assert.Single(second.AgentResult!.NewMessages, message => message.Role == AgentRole.Assistant);
+        Assert.Equal("local-provider", firstAssistant.Provider);
+        Assert.Equal("local-model", firstAssistant.ResponseModel);
+        Assert.Equal("cloud-provider", secondAssistant.Provider);
+        Assert.Equal("cloud-model", secondAssistant.ResponseModel);
+    }
+
+    [Fact]
+    public async Task TrustedFallbackReportsTheProviderModelAndResponseThatActuallyCompleted()
+    {
+        var failing = new TransientFailureProvider();
+        var fallback = new RoutedProvider("fallback-answer", "fallback-response");
+        var router = new TrustedGameAgentServerModelRouter(
+            new[]
+            {
+                new GameAgentServerModelRoute("balanced", new[]
+                {
+                    new GameAgentServerModelTarget("primary-provider", "primary-model", failing, "primary-api"),
+                    new GameAgentServerModelTarget("fallback-provider", "fallback-model", fallback, "fallback-api"),
+                }),
+            },
+            "balanced");
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
+            router.DefaultProvider,
+            router.DefaultModel)
+        {
+            ModelSelector = router.SelectAsync,
+        });
+
+        var result = await runtime.RunAsync(new GameInput(
+            "fallback-session",
+            "actor",
+            "chat",
+            "{}",
+            new GameMoment("world", 1),
+            "fallback-input"), TestContext.Current.CancellationToken);
+        using var document = JsonDocument.Parse(GameAgentWire.SerializeResult(result));
+        var messages = document.RootElement.GetProperty("agent").GetProperty("newMessages");
+        var assistant = messages.EnumerateArray().Single(message => message.GetProperty("role").GetString() == "Assistant");
+
+        Assert.Equal(1, failing.Calls);
+        Assert.Equal("fallback-model", Assert.Single(fallback.Requests).Model);
+        Assert.Equal("fallback-provider", assistant.GetProperty("provider").GetString());
+        Assert.Equal("fallback-api", assistant.GetProperty("api").GetString());
+        Assert.Equal("fallback-model", assistant.GetProperty("responseModel").GetString());
+        Assert.Equal("fallback-response", assistant.GetProperty("responseId").GetString());
+    }
+
+    [Fact]
+    public async Task TrustedModelRouterRejectsPolicyNamesOutsideTheAllowlistBeforeProviderUse()
+    {
+        var provider = new RoutedProvider("unused", "unused-response");
+        var router = new TrustedGameAgentServerModelRouter(
+            new[]
+            {
+                new GameAgentServerModelRoute("allowed", new[]
+                {
+                    new GameAgentServerModelTarget("allowed-provider", "allowed-model", provider),
+                }),
+            },
+            "allowed",
+            (_, _) => new ValueTask<string>("https://attacker.invalid/v1"));
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
+            router.DefaultProvider,
+            router.DefaultModel)
+        {
+            ModelSelector = router.SelectAsync,
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.RunAsync(new GameInput(
+            "unknown-route-session",
+            "actor",
+            "chat",
+            "{\"apiKey\":\"attacker-key\"}",
+            new GameMoment("world", 1),
+            "unknown-route-input"), TestContext.Current.CancellationToken));
+
+        Assert.Empty(provider.Requests);
+    }
+
+    [Fact]
+    public async Task StockModelRoutingUsesOnlyConfiguredNamedTargetsAndInputTypePolicy()
+    {
+        const string serverSecret = "server-only-secret";
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["OpenGameAgent:DefaultModelRoute"] = "local",
+                ["OpenGameAgent:ModelRoutes:local:ProviderId"] = "local-provider",
+                ["OpenGameAgent:ModelRoutes:local:Endpoint"] = "http://127.0.0.1:11434/v1/chat/completions",
+                ["OpenGameAgent:ModelRoutes:local:Model"] = "local-model",
+                ["OpenGameAgent:ModelRoutes:cloud:ProviderId"] = "cloud-provider",
+                ["OpenGameAgent:ModelRoutes:cloud:Endpoint"] = "https://cloud.invalid/v1/chat/completions",
+                ["OpenGameAgent:ModelRoutes:cloud:Model"] = "cloud-model",
+                ["OpenGameAgent:ModelRoutes:cloud:ApiKey"] = serverSecret,
+                ["OpenGameAgent:InputModelRoutes:complex"] = "cloud",
+            })
+            .Build();
+        var routing = StockGameAgentModelRouting.Create(
+            configuration,
+            new StaticHttpClientFactory(new StaticResponseHandler(string.Empty)));
+        var hostileInput = new GameInput(
+            "configured-route-session",
+            "actor",
+            "complex",
+            "{\"endpoint\":\"https://attacker.invalid\",\"apiKey\":\"attacker-key\"}",
+            new GameMoment("world", 1),
+            "configured-route-input",
+            new Dictionary<string, string>
+            {
+                ["modelRoute"] = "https://attacker.invalid/v1",
+            });
+
+        var selection = await routing.SelectAsync(hostileInput, TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { "cloud", "local" }, routing.RouteNames);
+        Assert.Equal("cloud-model", selection!.Model);
+        Assert.NotNull(selection.Provider);
+        Assert.DoesNotContain(serverSecret, GameAgentWire.SerializeInput(hostileInput), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1098,6 +1268,52 @@ public sealed class ServerTests
         }
     }
 
+    private sealed class RoutedProvider : IModelProvider
+    {
+        private readonly string _text;
+        private readonly string _responseId;
+
+        public RoutedProvider(string text, string responseId)
+        {
+            _text = text;
+            _responseId = responseId;
+        }
+
+        public System.Collections.Concurrent.ConcurrentQueue<ModelRequest> Requests { get; } = new();
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Enqueue(request);
+            await Task.Yield();
+            yield return ModelStreamEvent.Terminal(new ModelResponse(
+                new AgentContent[] { new TextContent(_text) },
+                ModelStopReason.Stop,
+                responseId: _responseId));
+        }
+    }
+
+    private sealed class TransientFailureProvider : IModelProvider
+    {
+        public int Calls { get; private set; }
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            Calls++;
+            await Task.Yield();
+            throw new ModelProviderException("temporary failure", isTransient: true);
+#pragma warning disable CS0162
+            yield break;
+#pragma warning restore CS0162
+        }
+    }
+
     private sealed class ToolIdentityProvider : IModelProvider
     {
         private int _calls;
@@ -1261,6 +1477,22 @@ public sealed class ServerTests
             {
                 Content = new StringContent(_body, Encoding.UTF8, "text/event-stream"),
             });
+        }
+    }
+
+    private sealed class StaticHttpClientFactory : IHttpClientFactory
+    {
+        private readonly HttpMessageHandler _handler;
+
+        public StaticHttpClientFactory(HttpMessageHandler handler)
+        {
+            _handler = handler;
+        }
+
+        public HttpClient CreateClient(string name)
+        {
+            _ = name;
+            return new HttpClient(_handler, disposeHandler: false);
         }
     }
 }
