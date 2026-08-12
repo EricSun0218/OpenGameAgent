@@ -166,15 +166,43 @@ public static class GameAgentWire
                 newMessages = result.AgentResult.NewMessages.Select(ProjectMessage).ToArray(),
                 subscriberErrors = result.AgentResult.SubscriberErrors,
                 error = result.AgentResult.Error,
-                usage = new
-                {
-                    inputTokens = result.AgentResult.Usage.InputTokens,
-                    outputTokens = result.AgentResult.Usage.OutputTokens,
-                    cacheReadTokens = result.AgentResult.Usage.CacheReadTokens,
-                    cacheWriteTokens = result.AgentResult.Usage.CacheWriteTokens,
-                },
+                usage = ProjectUsage(result.AgentResult.Usage),
             },
             error = result.Error,
+        }, JsonOptions);
+    }
+
+    public static string SerializeUsage(GameSessionUsageSnapshot snapshot)
+    {
+        if (snapshot is null)
+        {
+            throw new ArgumentNullException(nameof(snapshot));
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            sessionId = snapshot.Key.SessionId,
+            actorId = snapshot.Key.ActorId,
+            sessionRevision = snapshot.SessionRevision,
+            totalRecordCount = snapshot.Ledger.TotalRecordCount,
+            recentRecordCapacity = snapshot.Ledger.RecentRecordCapacity,
+            total = ProjectTotals(snapshot.Ledger.Stats.Total),
+            byCause = snapshot.Ledger.TotalsByCause
+                .OrderBy(pair => pair.Key)
+                .Select(pair => new
+                {
+                    cause = pair.Key.ToString(),
+                    usage = ProjectTotals(pair.Value),
+                })
+                .ToArray(),
+            recentRecords = snapshot.Ledger.Records.Select(record => new
+            {
+                recordId = record.RecordId,
+                cause = record.Cause.ToString(),
+                runId = record.RunId,
+                inputId = record.InputId,
+                usage = ProjectUsage(record.Usage),
+            }).ToArray(),
         }, JsonOptions);
     }
 
@@ -190,6 +218,11 @@ public static class GameAgentWire
         details = message.DetailsJson is null ? (JsonElement?)null : ParseElement(message.DetailsJson),
         metadata = message.Metadata,
         model = message.Model,
+        provider = message.Provider,
+        api = message.Api,
+        responseModel = message.ResponseModel,
+        responseId = message.ResponseId,
+        rawStopReason = message.RawStopReason,
         stopReason = message.StopReason?.ToString(),
         usage = ProjectUsage(message.Usage),
         error = message.ErrorMessage,
@@ -201,7 +234,40 @@ public static class GameAgentWire
         outputTokens = usage.OutputTokens,
         cacheReadTokens = usage.CacheReadTokens,
         cacheWriteTokens = usage.CacheWriteTokens,
+        reasoningTokens = usage.ReasoningTokens,
+        cacheWriteOneHourTokens = usage.CacheWriteOneHourTokens,
         totalTokens = usage.TotalTokens,
+        cost = ProjectCost(usage.Cost),
+    };
+
+    private static object ProjectTotals(GameSessionUsageTotals totals) => new
+    {
+        inputTokens = totals.InputTokens,
+        outputTokens = totals.OutputTokens,
+        cacheReadTokens = totals.CacheReadTokens,
+        cacheWriteTokens = totals.CacheWriteTokens,
+        reasoningTokens = totals.ReasoningTokens,
+        cacheWriteOneHourTokens = totals.CacheWriteOneHourTokens,
+        totalTokens = totals.TotalTokens,
+        cost = new
+        {
+            known = totals.CostKnown,
+            input = totals.CostKnown ? totals.InputCost : (double?)null,
+            output = totals.CostKnown ? totals.OutputCost : (double?)null,
+            cacheRead = totals.CostKnown ? totals.CacheReadCost : (double?)null,
+            cacheWrite = totals.CostKnown ? totals.CacheWriteCost : (double?)null,
+            total = totals.CostTotalIfKnown,
+        },
+    };
+
+    private static object ProjectCost(ModelCost cost) => new
+    {
+        known = cost.IsKnown,
+        input = cost.IsKnown ? cost.Input : (double?)null,
+        output = cost.IsKnown ? cost.Output : (double?)null,
+        cacheRead = cost.IsKnown ? cost.CacheRead : (double?)null,
+        cacheWrite = cost.IsKnown ? cost.CacheWrite : (double?)null,
+        total = cost.TotalIfKnown,
     };
 
     private static bool IsDeltaOnlyUpdate(AgentEvent agentEvent) =>
