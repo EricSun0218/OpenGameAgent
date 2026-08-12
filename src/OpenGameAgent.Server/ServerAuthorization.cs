@@ -51,3 +51,48 @@ public interface IGameAgentOwnerAuthorizer
         GameAgentAuthorizationContext context,
         CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// A bounded opaque credential presented in a JSON request body. This is intended for local
+/// engine clients that cannot set HTTP headers. The credential is authentication input only and
+/// must never be copied into a game input, transcript, session snapshot, or response.
+/// </summary>
+public sealed class GameAgentPresentedCredentialContext
+{
+    public GameAgentPresentedCredentialContext(
+        string credential,
+        GameSessionKey key,
+        GameAgentServerOperation operation)
+    {
+        if (string.IsNullOrWhiteSpace(credential) || credential.Length > 4_096)
+        {
+            throw new ArgumentException("A presented credential must contain between 1 and 4096 characters.", nameof(credential));
+        }
+
+        if (credential.Any(static character => char.IsControl(character)))
+        {
+            throw new ArgumentException("A presented credential cannot contain control characters.", nameof(credential));
+        }
+
+        Credential = credential;
+        Key = new GameSessionKey(key.SessionId, key.ActorId);
+        Operation = operation;
+    }
+
+    public string Credential { get; }
+
+    public GameSessionKey Key { get; }
+
+    public GameAgentServerOperation Operation { get; }
+}
+
+/// <summary>
+/// Maps a host-issued body credential to an authenticated principal. Ownership is still decided
+/// independently by <see cref="IGameAgentOwnerAuthorizer"/> using the returned principal.
+/// </summary>
+public interface IGameAgentPresentedCredentialAuthenticator
+{
+    ValueTask<ClaimsPrincipal?> AuthenticateAsync(
+        GameAgentPresentedCredentialContext context,
+        CancellationToken cancellationToken);
+}

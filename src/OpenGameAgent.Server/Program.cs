@@ -6,6 +6,17 @@ using OpenGameAgent.Server;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpClient("model");
+builder.Services.AddSingleton<IGameActionJournal>(serviceProvider =>
+{
+    var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+    var actionDirectory = configuration["OpenGameAgent:ActionDirectory"]
+        ?? Path.Combine(AppContext.BaseDirectory, "data", "actions");
+    return new FileGameActionJournal(actionDirectory);
+});
+builder.Services.AddSingleton<GameActionExchange>();
+builder.Services.AddSingleton(serviceProvider => new DurableGameActionDispatcher(
+    serviceProvider.GetRequiredService<IGameActionJournal>(),
+    serviceProvider.GetRequiredService<GameActionExchange>()));
 builder.Services.AddSingleton(serviceProvider =>
 {
     var configuration = serviceProvider.GetRequiredService<IConfiguration>();

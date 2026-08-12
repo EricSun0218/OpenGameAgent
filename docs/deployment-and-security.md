@@ -29,6 +29,7 @@ OpenGameAgent__Model=your-model
 OpenGameAgent__ApiKey=provider-secret
 OpenGameAgent__ServerApiKey=game-to-agent-secret
 OpenGameAgent__DataDirectory=/var/lib/opengameagent/sessions
+OpenGameAgent__ActionDirectory=/var/lib/opengameagent/actions
 ```
 
 The included service exposes:
@@ -39,6 +40,10 @@ The included service exposes:
 - `POST /v1/run/stream` (Server-Sent Events)
 - `POST /v1/control/steer`
 - `POST /v1/control/abort`
+- `POST /v1/actions/claim`
+- `POST /v1/actions/stream` (Server-Sent Events over a JSON POST request)
+- `POST /v1/actions/receipt`
+- `POST /v1/actions/reconcile`
 
 Mutation endpoints require a JSON content type, parse with a fixed depth limit, and reject request bodies larger than 8 MB by default. `MapOpenGameAgent` accepts a lower deployment-specific body limit; the reverse proxy should enforce an equal or tighter limit before buffering requests.
 
@@ -58,13 +63,62 @@ The included file stores coordinate local writers through cross-process leases w
 
 ## Remote game actions
 
-The included server runs tools that are registered in its process. If authoritative game state lives elsewhere, prefer one of these designs:
+If authoritative game state lives in a non-C# game process, register one shared journal, exchange, and dispatcher. The dispatcher persists `Prepared` and then `Dispatched` before the intent can be claimed:
 
-1. run the runtime inside the authoritative game server;
-2. implement server-side tools that call authenticated internal game APIs using operation IDs;
-3. let the agent service return a proposal and have the game execute it as a separate command.
+```csharp
+builder.Services.AddSingleton<IGameActionJournal>(
+    new FileGameActionJournal("data/actions"));
+builder.Services.AddSingleton<GameActionExchange>();
+builder.Services.AddSingleton(services => new DurableGameActionDispatcher(
+    services.GetRequiredService<IGameActionJournal>(),
+    services.GetRequiredService<GameActionExchange>()));
+```
 
-Do not create an unauthenticated generic “execute any client action” endpoint. Tool catalogs and permissions are part of the game deployment.
+Register game tools with that dispatcher. Supply a host-controlled `generationId` that changes when a loaded save or world generation could invalidate an old receipt:
+
+```csharp
+GameActionTool.Create(
+    input,
+    "apply_game_command",
+    "Submit a typed command to the authoritative game host.",
+    commandSchema,
+    dispatcher,
+    ToolRisk.NonIdempotentWrite,
+    conflictKey: args => args.GetProperty("entityId").GetString(),
+    expectedRevision: worldRevision,
+    operationIdFactory: null,
+    generationId: saveGeneration);
+```
+
+The external host calls `claim` or `stream`, reconciles every delivered `operationId` against its own authoritative operation log, and only then executes or resumes it. It submits a final receipt containing the same session, actor, timeline, tick, generation, and expected revision. A repeated claim returns the same durable operation; a service restart after delivery but before receipt leaves it `Dispatched` and requires reconciliation instead of blind replay.
+
+The minimal JSON exchange is:
+
+```json
+POST /v1/actions/claim
+{"credential":"short-lived-pairing-token","sessionId":"save-1","actorId":"npc-1","limit":16}
+
+POST /v1/actions/receipt
+{
+  "credential":"short-lived-pairing-token",
+  "sessionId":"save-1",
+  "actorId":"npc-1",
+  "operationId":"the-delivered-operation-id",
+  "status":"committed",
+  "result":{"accepted":true},
+  "timelineId":"world-1",
+  "tick":120,
+  "generationId":"save-generation-8",
+  "expectedRevision":41,
+  "stateRevision":42
+}
+```
+
+Use `POST /v1/actions/stream` with the same claim body for SSE delivery. Use `POST /v1/actions/reconcile` with the credential, session, actor, and operation ID before acting on every delivery whose `requiresReconciliation` is true.
+
+All action endpoints use `IGameAgentOwnerAuthorizer` before touching the exchange or journal. Clients cannot gain access by changing `sessionId` or `actorId` in JSON. A localhost engine client that cannot set headers may include a bounded top-level `credential` in the JSON body when the host registers `IGameAgentPresentedCredentialAuthenticator`. The authenticator only maps that opaque value to a principal; the normal owner authorizer still decides access. The credential is removed at the HTTP boundary and never enters `GameInput`, model context, transcripts, session storage, action delivery, or responses. Prefer short-lived single-use pairing credentials and bind the resulting principal to the game's authoritative player identity.
+
+The exchange coordinates delivery and recovery; it does not replace game authority. The game must validate action arguments and permissions, commit the world mutation plus its operation record atomically where possible, and return the resulting revision. Tool catalogs and schemas remain deployment-owned.
 
 ## Untrusted boundaries
 

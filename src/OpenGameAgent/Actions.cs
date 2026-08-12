@@ -28,6 +28,29 @@ public sealed class GameActionIntent
         string argumentsJson,
         GameMoment moment,
         long? expectedRevision = null)
+        : this(
+            operationId,
+            inputId,
+            sessionId,
+            actorId,
+            action,
+            argumentsJson,
+            moment,
+            expectedRevision,
+            generationId: null)
+    {
+    }
+
+    public GameActionIntent(
+        string operationId,
+        string inputId,
+        string sessionId,
+        string actorId,
+        string action,
+        string argumentsJson,
+        GameMoment moment,
+        long? expectedRevision,
+        string? generationId)
     {
         OperationId = GameJson.RequireId(operationId, nameof(operationId));
         InputId = GameJson.RequireId(inputId, nameof(inputId));
@@ -42,6 +65,9 @@ public sealed class GameActionIntent
         }
 
         ExpectedRevision = expectedRevision;
+        GenerationId = generationId is null
+            ? null
+            : GameJson.RequireId(generationId, nameof(generationId));
     }
 
     public string OperationId { get; }
@@ -59,6 +85,13 @@ public sealed class GameActionIntent
     public GameMoment Moment { get; }
 
     public long? ExpectedRevision { get; }
+
+    /// <summary>
+    /// Identifies the authoritative save/world generation in which this intent is valid.
+    /// Hosts should change it whenever loading or replacing a world snapshot could make an old
+    /// external receipt unsafe to apply.
+    /// </summary>
+    public string? GenerationId { get; }
 }
 
 public sealed class GameActionReceipt
@@ -362,7 +395,8 @@ public sealed class InMemoryGameActionJournal : IGameActionJournal
             || !string.Equals(expected.Action, actual.Action, StringComparison.Ordinal)
             || !string.Equals(expected.ArgumentsJson, actual.ArgumentsJson, StringComparison.Ordinal)
             || expected.Moment != actual.Moment
-            || expected.ExpectedRevision != actual.ExpectedRevision)
+            || expected.ExpectedRevision != actual.ExpectedRevision
+            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The operation ID is already reserved for a different action intent.");
         }
@@ -695,7 +729,8 @@ public sealed class DurableGameActionDispatcher
             || !string.Equals(left.Action, right.Action, StringComparison.Ordinal)
             || !string.Equals(left.ArgumentsJson, right.ArgumentsJson, StringComparison.Ordinal)
             || left.Moment != right.Moment
-            || left.ExpectedRevision != right.ExpectedRevision)
+            || left.ExpectedRevision != right.ExpectedRevision
+            || !string.Equals(left.GenerationId, right.GenerationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The action journal returned a different reserved intent.");
         }
@@ -723,6 +758,29 @@ public static class GameActionTool
         Func<JsonElement, string?>? conflictKey = null,
         long? expectedRevision = null,
         GameActionOperationIdFactory? operationIdFactory = null)
+        => Create(
+            input,
+            action,
+            description,
+            inputSchemaJson,
+            dispatcher,
+            risk,
+            conflictKey,
+            expectedRevision,
+            operationIdFactory,
+            generationId: null);
+
+    public static AgentTool Create(
+        GameInput input,
+        string action,
+        string description,
+        string inputSchemaJson,
+        DurableGameActionDispatcher dispatcher,
+        ToolRisk risk,
+        Func<JsonElement, string?>? conflictKey,
+        long? expectedRevision,
+        GameActionOperationIdFactory? operationIdFactory,
+        string? generationId)
     {
         if (input is null)
         {
@@ -753,7 +811,8 @@ public static class GameActionTool
                     action: action,
                     argumentsJson: arguments.GetRawText(),
                     moment: input.Moment,
-                    expectedRevision: expectedRevision);
+                    expectedRevision: expectedRevision,
+                    generationId: generationId);
                 var receipt = await dispatcher.ExecuteAsync(intent, cancellationToken).ConfigureAwait(false);
                 var json = JsonSerializer.Serialize(new ReceiptPayload(receipt), ReceiptJsonOptions);
                 return new ToolResult(

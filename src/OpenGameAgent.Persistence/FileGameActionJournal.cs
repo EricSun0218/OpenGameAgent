@@ -265,7 +265,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         GameActionReceipt? receipt,
         bool dispatched) => new()
         {
-            FormatVersion = 1,
+            FormatVersion = 2,
             Dispatched = dispatched,
             Intent = new IntentDocument
             {
@@ -277,6 +277,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
                 ArgumentsJson = intent.ArgumentsJson,
                 Moment = MomentDocument.Encode(intent.Moment),
                 ExpectedRevision = intent.ExpectedRevision,
+                GenerationId = intent.GenerationId,
             },
             Receipt = receipt is null ? null : new ReceiptDocument
             {
@@ -295,7 +296,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
 
     private static GameActionJournalEntry DecodeCore(ActionDocument document)
     {
-        if (document.FormatVersion != 1 || document.Intent is null)
+        if (document.FormatVersion is not (1 or 2) || document.Intent is null)
         {
             throw new PersistenceException("The action journal document has an unsupported format.");
         }
@@ -308,7 +309,8 @@ public sealed class FileGameActionJournal : IGameActionJournal
             document.Intent.Action,
             document.Intent.ArgumentsJson,
             document.Intent.Moment?.Decode() ?? throw new PersistenceException("The action intent moment is missing."),
-            document.Intent.ExpectedRevision);
+            document.Intent.ExpectedRevision,
+            document.FormatVersion >= 2 ? document.Intent.GenerationId : null);
         GameActionReceipt? receipt = null;
         if (document.Receipt is not null)
         {
@@ -353,7 +355,8 @@ public sealed class FileGameActionJournal : IGameActionJournal
             || !string.Equals(expected.Action, actual.Action, StringComparison.Ordinal)
             || !string.Equals(expected.ArgumentsJson, actual.ArgumentsJson, StringComparison.Ordinal)
             || expected.Moment != actual.Moment
-            || expected.ExpectedRevision != actual.ExpectedRevision)
+            || expected.ExpectedRevision != actual.ExpectedRevision
+            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The operation ID is already reserved for a different action intent.");
         }
@@ -404,6 +407,8 @@ public sealed class FileGameActionJournal : IGameActionJournal
         public MomentDocument? Moment { get; set; }
 
         public long? ExpectedRevision { get; set; }
+
+        public string? GenerationId { get; set; }
     }
 
     private sealed class ReceiptDocument

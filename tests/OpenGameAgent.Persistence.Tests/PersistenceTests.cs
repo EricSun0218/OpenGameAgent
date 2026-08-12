@@ -365,6 +365,67 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task ActionGenerationBindingSurvivesRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var baseline = Intent("generation-operation");
+        var intent = new GameActionIntent(
+            baseline.OperationId,
+            baseline.InputId,
+            baseline.SessionId,
+            baseline.ActorId,
+            baseline.Action,
+            baseline.ArgumentsJson,
+            baseline.Moment,
+            baseline.ExpectedRevision,
+            "save-generation-4");
+        await new FileGameActionJournal(directory.Path).ReserveAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+
+        var restored = await new FileGameActionJournal(directory.Path).FindAsync(
+            intent.OperationId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("save-generation-4", restored!.Intent.GenerationId);
+        var conflicting = new GameActionIntent(
+            intent.OperationId,
+            intent.InputId,
+            intent.SessionId,
+            intent.ActorId,
+            intent.Action,
+            intent.ArgumentsJson,
+            intent.Moment,
+            intent.ExpectedRevision,
+            "different-generation");
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await new FileGameActionJournal(directory.Path).ReserveAsync(
+                conflicting,
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task VersionOneActionJournalRemainsReadableWithoutGenerationBinding()
+    {
+        using var directory = new TemporaryDirectory();
+        var intent = Intent("legacy-action");
+        await new FileGameActionJournal(directory.Path).ReserveAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+        var path = Assert.Single(Directory.GetFiles(directory.Path, "*.action.json"));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!.AsObject();
+        document["FormatVersion"] = 1;
+        document["Intent"]!.AsObject().Remove("GenerationId");
+        await File.WriteAllTextAsync(path, document.ToJsonString(), TestContext.Current.CancellationToken);
+
+        var restored = await new FileGameActionJournal(directory.Path).FindAsync(
+            intent.OperationId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(restored!.Intent.GenerationId);
+    }
+
+    [Fact]
     public async Task IndependentFileDispatchersNeverExecuteTheSameOperationTwice()
     {
         using var directory = new TemporaryDirectory();
