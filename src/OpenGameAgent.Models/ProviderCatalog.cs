@@ -289,6 +289,12 @@ public sealed class GameModelResolution
             throw new ArgumentNullException(nameof(usage));
         }
 
+        if (!Model.Cost.IsKnown)
+        {
+            throw new InvalidOperationException(
+                $"Pricing is unavailable for model '{Model.ProviderId}/{Model.ModelId}'.");
+        }
+
         const decimal scale = 1_000_000m;
         var inputVolume = checked(usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens);
         var rates = Model.Cost.RatesForInput(inputVolume);
@@ -299,6 +305,16 @@ public sealed class GameModelResolution
             + usage.CacheReadTokens / scale * rates.CacheReadPerMillionTokens
             + shortCacheWrite / scale * rates.CacheWritePerMillionTokens
             + longCacheWrite / scale * rates.InputPerMillionTokens * 2;
+    }
+
+    public decimal? EstimateCostOrNull(ModelUsage usage)
+    {
+        if (usage is null)
+        {
+            throw new ArgumentNullException(nameof(usage));
+        }
+
+        return Model.Cost.IsKnown ? EstimateCost(usage) : null;
     }
 }
 
@@ -1037,7 +1053,8 @@ public sealed class GameModelCatalog
         && string.Equals(left.CompatibilityJson, right.CompatibilityJson, StringComparison.Ordinal);
 
     private static bool Equivalent(GameModelCost left, GameModelCost right) =>
-        left.InputPerMillionTokens == right.InputPerMillionTokens
+        left.IsKnown == right.IsKnown
+        && left.InputPerMillionTokens == right.InputPerMillionTokens
         && left.OutputPerMillionTokens == right.OutputPerMillionTokens
         && left.CacheReadPerMillionTokens == right.CacheReadPerMillionTokens
         && left.CacheWritePerMillionTokens == right.CacheWritePerMillionTokens

@@ -208,11 +208,9 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
-    public async Task UnsupportedSchemaAssertionsFailClosedBeforeToolExecution()
+    public async Task UnsupportedSchemaAssertionsFailClosedBeforeProviderRequest()
     {
-        var provider = ScriptedProvider.FromResponses(
-            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("ref", "referenced", "{}")),
-            Responses.Text("done"));
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
         var executed = 0;
         var options = new AgentOptions(provider, "test");
         options.Tools.Add(Responses.Tool(
@@ -225,20 +223,18 @@ public sealed class AgentLoopTests
             schema: "{\"$ref\":\"#/$defs/input\",\"$defs\":{\"input\":{\"type\":\"object\"}}}"));
 
         var agent = new Agent(options);
-        await agent.RunAsync("go", TestContext.Current.CancellationToken);
+        var run = await agent.RunAsync("go", TestContext.Current.CancellationToken);
 
         Assert.Equal(0, executed);
-        var result = Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool);
-        Assert.True(result.IsError);
-        Assert.Contains("not supported", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text, StringComparison.Ordinal);
+        Assert.Equal(0, provider.CallCount);
+        Assert.Equal(AgentRunStatus.KernelError, run.Status);
+        Assert.Contains("not supported", run.Error, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task MalformedSupportedSchemaAssertionsFailClosedBeforeToolExecution()
+    public async Task MalformedSupportedSchemaAssertionsFailClosedBeforeProviderRequest()
     {
-        var provider = ScriptedProvider.FromResponses(
-            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("invalid-schema", "write", "{\"value\":1.5}")),
-            Responses.Text("done"));
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
         var executed = false;
         var options = new AgentOptions(provider, "test");
         options.Tools.Add(Responses.Tool(
@@ -251,20 +247,18 @@ public sealed class AgentLoopTests
             schema: "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"number\",\"minimum\":\"zero\"}}}"));
 
         var agent = new Agent(options);
-        await agent.RunAsync("go", TestContext.Current.CancellationToken);
+        var run = await agent.RunAsync("go", TestContext.Current.CancellationToken);
 
         Assert.False(executed);
-        var result = Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool);
-        Assert.True(result.IsError);
-        Assert.Contains("finite number", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text, StringComparison.Ordinal);
+        Assert.Equal(0, provider.CallCount);
+        Assert.Equal(AgentRunStatus.KernelError, run.Status);
+        Assert.Contains("finite number", run.Error, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task UnsupportedAssertionsInUnselectedSchemaBranchesStillFailClosed()
+    public async Task UnsupportedAssertionsInUnselectedSchemaBranchesFailBeforeProviderRequest()
     {
-        var provider = ScriptedProvider.FromResponses(
-            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("nested-ref", "write", "{}")),
-            Responses.Text("done"));
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
         var executed = false;
         var options = new AgentOptions(provider, "test");
         options.Tools.Add(Responses.Tool(
@@ -277,11 +271,12 @@ public sealed class AgentLoopTests
             schema: "{\"anyOf\":[{\"type\":\"object\"},{\"$ref\":\"#/unsafe\"}]}"));
 
         var agent = new Agent(options);
-        await agent.RunAsync("go", TestContext.Current.CancellationToken);
+        var run = await agent.RunAsync("go", TestContext.Current.CancellationToken);
 
         Assert.False(executed);
-        var result = Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool);
-        Assert.Contains("not supported", Assert.IsType<TextContent>(Assert.Single(result.Content)).Text, StringComparison.Ordinal);
+        Assert.Equal(0, provider.CallCount);
+        Assert.Equal(AgentRunStatus.KernelError, run.Status);
+        Assert.Contains("not supported", run.Error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -388,15 +383,12 @@ public sealed class AgentLoopTests
     }
 
     [Theory]
-    [InlineData("{}", "{\"allOf\":[]}", "at least one")]
-    public async Task AmbiguousJsonAndSchemasFailClosed(
-        string arguments,
+    [InlineData("{\"allOf\":[]}", "at least one")]
+    public async Task AmbiguousSchemasFailBeforeProviderRequest(
         string schema,
         string expectedError)
     {
-        var provider = ScriptedProvider.FromResponses(
-            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("ambiguous", "write", arguments)),
-            Responses.Text("done"));
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
         var executed = false;
         var options = new AgentOptions(provider, "test");
         options.Tools.Add(Responses.Tool(
@@ -409,11 +401,97 @@ public sealed class AgentLoopTests
             schema: schema));
 
         var agent = new Agent(options);
-        await agent.RunAsync("go", TestContext.Current.CancellationToken);
+        var run = await agent.RunAsync("go", TestContext.Current.CancellationToken);
 
         Assert.False(executed);
-        var result = Assert.Single(agent.State.Messages, message => message.Role == AgentRole.Tool);
-        Assert.Contains(expectedError, Assert.IsType<TextContent>(Assert.Single(result.Content)).Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, provider.CallCount);
+        Assert.Equal(AgentRunStatus.KernelError, run.Status);
+        Assert.Contains(expectedError, run.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ClosedStandardToolSchemaPassesPreflightAndExecutionValidation()
+    {
+        const string schema = """
+            {
+              "type":"object",
+              "required":["mode","values"],
+              "properties":{
+                "mode":{"type":"string","enum":["add","remove"]},
+                "values":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"number","minimum":-10,"maximum":10}}
+              },
+              "additionalProperties":false
+            }
+            """;
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(
+                ModelStopReason.ToolUse,
+                new ToolCallContent("valid", "apply", "{\"mode\":\"add\",\"values\":[-1,2.5]}")),
+            Responses.Text("done"));
+        var executed = false;
+        var options = new AgentOptions(provider, "test");
+        options.Tools.Add(Responses.Tool(
+            "apply",
+            (_, _, _) =>
+            {
+                executed = true;
+                return new ValueTask<ToolResult>(Responses.Result("ok"));
+            },
+            schema: schema));
+
+        var run = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(run.Succeeded);
+        Assert.True(executed);
+        Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task BeforeModelHookCannotInjectAnInvalidToolSchema()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
+        var options = new AgentOptions(provider, "test")
+        {
+            Hooks = new AgentHooks
+            {
+                BeforeModelRequestAsync = (request, _) => new ValueTask<ModelRequest>(new ModelRequest(
+                    request.Model,
+                    request.SystemPrompt,
+                    request.Messages,
+                    new[]
+                    {
+                        new ToolDefinition(
+                            "injected",
+                            "Injected tool",
+                            "{\"type\":\"object\",\"properties\":{\"count\":{\"minimum\":\"zero\"}}}"),
+                    },
+                    request.Parameters,
+                    request.SessionId,
+                    request.RunId,
+                    request.Turn)),
+            },
+        };
+
+        var run = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.KernelError, run.Status);
+        Assert.Equal(0, provider.CallCount);
+        Assert.Contains("failed preflight", run.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExcessivelyDeepToolSchemasAreRejectedBeforeAnyProviderRequest()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("unused"));
+        var schema = "{\"type\":\"object\"}";
+        for (var index = 0; index < 80; index++)
+        {
+            schema = "{\"allOf\":[" + schema + "]}";
+        }
+
+        Assert.Throws<ArgumentException>(() => Responses.Tool("deep", (_, _, _) =>
+            new ValueTask<ToolResult>(Responses.Result("unused")), schema: schema));
+        Assert.Equal(0, provider.CallCount);
     }
 
     [Fact]
@@ -969,6 +1047,38 @@ public sealed class AgentLoopTests
         Assert.Equal("replacement", second.SystemPrompt);
         Assert.Single(second.Messages);
         Assert.IsType<JsonContent>(Assert.Single(second.Messages[0].Content));
+    }
+
+    [Fact]
+    public async Task NextTurnToolReplacementIsPreflightedBeforeAnotherProviderRequest()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "next", "{}")),
+            Responses.Text("unused"));
+        var invalid = Responses.Tool(
+            "invalid",
+            (_, _, _) => new ValueTask<ToolResult>(Responses.Result("unused")),
+            schema: "{\"anyOf\":[{\"type\":\"object\"},{\"$ref\":\"#/unsupported\"}]}");
+        var options = new AgentOptions(provider, "test")
+        {
+            Hooks = new AgentHooks
+            {
+                PrepareNextTurnAsync = (turn, _) => new ValueTask<NextTurnUpdate?>(new NextTurnUpdate
+                {
+                    Context = new AgentContext(
+                        turn.Context.SystemPrompt,
+                        turn.Context.Messages,
+                        new[] { invalid }),
+                }),
+            },
+        };
+        options.Tools.Add(Responses.Tool("next", (_, _, _) => new ValueTask<ToolResult>(Responses.Result("ok"))));
+
+        var run = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.Equal(AgentRunStatus.KernelError, run.Status);
+        Assert.Equal(1, provider.CallCount);
+        Assert.Contains("failed preflight", run.Error, StringComparison.Ordinal);
     }
 
     [Fact]

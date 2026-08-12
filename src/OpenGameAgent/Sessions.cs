@@ -113,6 +113,7 @@ public sealed class GameSessionUsageRecord
         && left.CacheWriteTokens == right.CacheWriteTokens
         && left.ReasoningTokens == right.ReasoningTokens
         && left.CacheWriteOneHourTokens == right.CacheWriteOneHourTokens
+        && left.Cost.IsKnown == right.Cost.IsKnown
         && left.Cost.Input.Equals(right.Cost.Input)
         && left.Cost.Output.Equals(right.Cost.Output)
         && left.Cost.CacheRead.Equals(right.Cost.CacheRead)
@@ -131,7 +132,8 @@ public sealed class GameSessionUsageTotals
         0,
         0,
         0,
-        0);
+        0,
+        costKnown: true);
 
     public GameSessionUsageTotals(
         long inputTokens,
@@ -144,6 +146,33 @@ public sealed class GameSessionUsageTotals
         double outputCost,
         double cacheReadCost,
         double cacheWriteCost)
+        : this(
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            reasoningTokens,
+            cacheWriteOneHourTokens,
+            inputCost,
+            outputCost,
+            cacheReadCost,
+            cacheWriteCost,
+            costKnown: true)
+    {
+    }
+
+    public GameSessionUsageTotals(
+        long inputTokens,
+        long outputTokens,
+        long cacheReadTokens,
+        long cacheWriteTokens,
+        long reasoningTokens,
+        long cacheWriteOneHourTokens,
+        double inputCost,
+        double outputCost,
+        double cacheReadCost,
+        double cacheWriteCost,
+        bool costKnown)
     {
         if (inputTokens < 0
             || outputTokens < 0
@@ -172,6 +201,7 @@ public sealed class GameSessionUsageTotals
         OutputCost = outputCost;
         CacheReadCost = cacheReadCost;
         CacheWriteCost = cacheWriteCost;
+        CostKnown = costKnown;
     }
 
     public long InputTokens { get; }
@@ -194,9 +224,13 @@ public sealed class GameSessionUsageTotals
 
     public double CacheWriteCost { get; }
 
+    public bool CostKnown { get; }
+
     public long TotalTokens => checked(InputTokens + OutputTokens + CacheReadTokens + CacheWriteTokens);
 
     public double CostTotal => InputCost + OutputCost + CacheReadCost + CacheWriteCost;
+
+    public double? CostTotalIfKnown => CostKnown ? CostTotal : null;
 
     internal static GameSessionUsageTotals Empty => EmptyValue;
 
@@ -210,7 +244,8 @@ public sealed class GameSessionUsageTotals
         AddCost(left.InputCost, right.InputCost),
         AddCost(left.OutputCost, right.OutputCost),
         AddCost(left.CacheReadCost, right.CacheReadCost),
-        AddCost(left.CacheWriteCost, right.CacheWriteCost));
+        AddCost(left.CacheWriteCost, right.CacheWriteCost),
+        left.CostKnown && right.CostKnown);
 
     internal static bool AtLeast(GameSessionUsageTotals candidate, GameSessionUsageTotals previous) =>
         candidate.InputTokens >= previous.InputTokens
@@ -219,6 +254,7 @@ public sealed class GameSessionUsageTotals
         && candidate.CacheWriteTokens >= previous.CacheWriteTokens
         && candidate.ReasoningTokens >= previous.ReasoningTokens
         && candidate.CacheWriteOneHourTokens >= previous.CacheWriteOneHourTokens
+        && (previous.CostKnown || !candidate.CostKnown)
         && candidate.InputCost >= previous.InputCost
         && candidate.OutputCost >= previous.OutputCost
         && candidate.CacheReadCost >= previous.CacheReadCost
@@ -231,6 +267,7 @@ public sealed class GameSessionUsageTotals
         && left.CacheWriteTokens == right.CacheWriteTokens
         && left.ReasoningTokens == right.ReasoningTokens
         && left.CacheWriteOneHourTokens == right.CacheWriteOneHourTokens
+        && left.CostKnown == right.CostKnown
         && left.InputCost.Equals(right.InputCost)
         && left.OutputCost.Equals(right.OutputCost)
         && left.CacheReadCost.Equals(right.CacheReadCost)
@@ -248,6 +285,7 @@ public sealed class GameSessionUsageTotals
         var outputCost = 0d;
         var cacheReadCost = 0d;
         var cacheWriteCost = 0d;
+        var costKnown = true;
         foreach (var record in records)
         {
             var usage = record.Usage;
@@ -261,6 +299,7 @@ public sealed class GameSessionUsageTotals
             outputCost = AddCost(outputCost, usage.Cost.Output);
             cacheReadCost = AddCost(cacheReadCost, usage.Cost.CacheRead);
             cacheWriteCost = AddCost(cacheWriteCost, usage.Cost.CacheWrite);
+            costKnown &= usage.Cost.IsKnown;
         }
 
         return new GameSessionUsageTotals(
@@ -273,7 +312,8 @@ public sealed class GameSessionUsageTotals
             inputCost,
             outputCost,
             cacheReadCost,
-            cacheWriteCost);
+            cacheWriteCost,
+            costKnown);
     }
 
     private static double AddCost(double left, double right)
@@ -666,6 +706,27 @@ public sealed class GameSessionUsageLedger
 
         public long TotalRecordCount { get; }
     }
+}
+
+public sealed class GameSessionUsageSnapshot
+{
+    public GameSessionUsageSnapshot(
+        GameSessionKey key,
+        long sessionRevision,
+        GameSessionUsageLedger ledger)
+    {
+        Key = key.EnsureValid(nameof(key));
+        SessionRevision = sessionRevision >= 0
+            ? sessionRevision
+            : throw new ArgumentOutOfRangeException(nameof(sessionRevision));
+        Ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
+    }
+
+    public GameSessionKey Key { get; }
+
+    public long SessionRevision { get; }
+
+    public GameSessionUsageLedger Ledger { get; }
 }
 
 public sealed class GameSessionSnapshot

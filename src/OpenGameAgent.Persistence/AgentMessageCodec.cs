@@ -78,7 +78,13 @@ internal static class AgentMessageCodec
     {
         TextContent text => new ContentDocument { Kind = "text", Text = text.Text },
         JsonContent json => new ContentDocument { Kind = "json", Json = json.Json },
-        ReasoningContent reasoning => new ContentDocument { Kind = "reasoning", Text = reasoning.Text, Detail = reasoning.Signature },
+        ReasoningContent reasoning => new ContentDocument
+        {
+            Kind = "reasoning",
+            Text = reasoning.Text,
+            Detail = reasoning.Signature,
+            Redacted = reasoning.Redacted,
+        },
         ResourceContent resource => new ContentDocument { Kind = "resource", Text = resource.Name, Reference = resource.Uri, Detail = resource.MediaType },
         ToolCallContent call => new ContentDocument { Kind = "tool_call", Text = call.Name, Reference = call.Id, Json = call.ArgumentsJson },
         _ => throw new InvalidOperationException("Unsupported agent content type."),
@@ -88,7 +94,7 @@ internal static class AgentMessageCodec
     {
         "text" => new TextContent(document.Text ?? string.Empty),
         "json" => new JsonContent(document.Json ?? throw new PersistenceException("Persisted JSON content is missing.")),
-        "reasoning" => new ReasoningContent(document.Text ?? string.Empty, document.Detail),
+        "reasoning" => new ReasoningContent(document.Text ?? string.Empty, document.Detail, document.Redacted),
         "resource" => new ResourceContent(
             document.Reference ?? throw new PersistenceException("Persisted resource URI is missing."),
             document.Detail ?? throw new PersistenceException("Persisted resource media type is missing."),
@@ -141,6 +147,8 @@ internal sealed class ContentDocument
     public string? Reference { get; set; }
 
     public string? Detail { get; set; }
+
+    public bool Redacted { get; set; }
 }
 
 internal sealed class UsageDocument

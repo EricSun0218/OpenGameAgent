@@ -36,6 +36,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Delegate bounded foreground or background work | `AgentDelegationExtension` |
 | Query a game-owned knowledge source | `ExternalKnowledgeExtension` |
 | Capture bounded lifecycle traces | `GameAgentTracingExtension` |
+| Load a portable package of skills and MCP servers | `AgentPluginLoader`, `AgentPluginPackage` |
 
 ## Game integration
 
@@ -84,6 +85,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Refresh a provider's model list safely | `GameModelProviderRegistration.RefreshModels`, `GameModelCatalog.RefreshAsync` |
 | Resolve API keys, OAuth-style tokens, or local/no-auth modes | `IGameProviderAuthentication`, `IGameCredentialStore` |
 | Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |
+| Read durable per-session usage and explicit known/unknown cost | `GameAgentRuntime.ReadUsageAsync`, `GameSessionUsageLedger` |
 | Register supported browser/device authorization flows | `BuiltInGameOAuthRegistration` |
 | Observe bounded provider response metadata | `ProviderResponseObserver` |
 | Fetch short-lived developer-hosted credentials | `DeveloperGatewayProvider`, `HttpDeveloperGatewayCredentialSource` |
@@ -91,6 +93,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Connect to a compatible message-gateway service | `MessageGatewayProvider` |
 | Use external tool servers without loading every schema into context | `McpToolConnectorExtension` (default `OnDemand`) |
 | Expose every remote tool natively when the catalog is small | `GameMcpToolExposure.Direct` |
+| Load Agent Plugins 1.0.0 with fixed-location discovery and failure isolation | `OpenGameAgent.Plugins` |
 
 ## Included stores
 

@@ -476,6 +476,31 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
     public IReadOnlyList<GameAgentExtensionDiagnostic> ExtensionDiagnostics => _extensions.GetDiagnostics();
 
+    /// <summary>
+    /// Reads the durable usage ledger for one session actor. Server hosts must authorize the
+    /// caller before invoking this method.
+    /// </summary>
+    public async ValueTask<GameSessionUsageSnapshot?> ReadUsageAsync(
+        GameSessionKey key,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValid(nameof(key));
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(GameAgentRuntime));
+        }
+
+        var snapshot = await _sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is not null && !snapshot.Key.Equals(key))
+        {
+            throw new InvalidOperationException("The game session store returned a snapshot for a different session key.");
+        }
+
+        return snapshot is null
+            ? null
+            : new GameSessionUsageSnapshot(snapshot.Key, snapshot.Revision, snapshot.UsageLedger);
+    }
+
     public Task<GameAgentRunResult> RunAsync(
         GameInput input,
         GameAgentEventHandler? observer,

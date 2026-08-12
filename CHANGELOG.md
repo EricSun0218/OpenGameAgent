@@ -12,6 +12,7 @@
 - Add an executable bundled model directory with provider-specific dispatch, compatibility flags, request transforms, cost tiers, response observation, and nine native wire APIs.
 - Add optional bounded browser/device authentication flows, explicit client registration, stored credential refresh, and cancellation-safe login settlement.
 - Add lazy external tool-server search/describe/call by default with explicit direct exposure for small trusted catalogs.
+- Add optional Agent Plugins 1.0.0 package loading with portable Skill and MCP discovery, client namespaces, path containment, placeholder expansion, and component-level failure isolation.
 - Add native Anthropic, Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, remote-proxy, and message-gateway providers with cross-provider transcript handoff.
 - Add a provider-neutral image/audio/video registry, strict generic HTTP media jobs, dedicated image generation with progressive previews, and typed partial tool output.
 - Add bounded request/response parsing, rotating credentials, safe response metadata observation, protocol-aware retries, and retry/fallback composition that stops before replaying meaningful streamed output.

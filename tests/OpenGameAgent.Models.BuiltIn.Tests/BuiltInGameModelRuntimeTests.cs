@@ -501,6 +501,67 @@ public sealed class BuiltInGameModelRuntimeTests
         Assert.All(reads, name => Assert.Equal("HF_TOKEN", name));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DirectoryPricingIsAppliedWithoutTurningUnknownPriceIntoFree(bool pricingKnown)
+    {
+        const string response = """
+            data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"completion_tokens_details":{"reasoning_tokens":1}}}
+
+            data: {"id":"response-1","model":"served-model","choices":[{"delta":{},"finish_reason":"stop"}]}
+
+            data: [DONE]
+
+            """;
+        var handler = new RecordingHandler(BuiltInGameModelApis.OpenAiCompletions, responseBody: response);
+        using var client = new HttpClient(handler);
+        var cost = pricingKnown
+            ? new Dictionary<string, object?>
+            {
+                ["known"] = true,
+                ["input"] = 1m,
+                ["output"] = 2m,
+                ["cacheRead"] = 0.5m,
+                ["cacheWrite"] = 1.5m,
+            }
+            : new Dictionary<string, object?> { ["known"] = false };
+        var options = Options(client, Directory(
+            "compatible",
+            BuiltInGameModelApis.OpenAiCompletions,
+            "https://compatible.invalid/v1",
+            cost: cost));
+        options.Authentications.Add(
+            "compatible",
+            new StaticGameProviderAuthentication(
+                credential: new GameCredential(GameCredentialKind.ApiKey, "secret")));
+        var runtime = new BuiltInGameModelRuntime(options);
+
+        var events = await CollectAsync(runtime.StreamAsync(
+            "compatible",
+            Request(),
+            TestContext.Current.CancellationToken));
+
+        var usage = Assert.Single(events, item => item.IsTerminal).Response!.Usage;
+        Assert.Equal(5, usage.InputTokens);
+        Assert.Equal(4, usage.OutputTokens);
+        Assert.Equal(3, usage.CacheReadTokens);
+        Assert.Equal(2, usage.CacheWriteTokens);
+        Assert.Equal(1, usage.ReasoningTokens);
+        Assert.Equal(pricingKnown, usage.Cost.IsKnown);
+        if (pricingKnown)
+        {
+            Assert.Equal(0.000005, usage.Cost.Input, 10);
+            Assert.Equal(0.000008, usage.Cost.Output, 10);
+            Assert.Equal(0.0000015, usage.Cost.CacheRead, 10);
+            Assert.Equal(0.000003, usage.Cost.CacheWrite, 10);
+        }
+        else
+        {
+            Assert.Null(usage.Cost.TotalIfKnown);
+        }
+    }
+
     [Fact]
     public void InvalidDirectoryEnvironmentVariableMetadataIsRejected()
     {
@@ -1825,7 +1886,8 @@ public sealed class BuiltInGameModelRuntimeTests
         string? environmentVariables = null,
         string modelId = "model",
         Dictionary<string, object?>? compatibility = null,
-        Dictionary<string, string?>? modelHeaders = null)
+        Dictionary<string, string?>? modelHeaders = null,
+        Dictionary<string, object?>? cost = null)
     {
         var json = JsonSerializer.Serialize(new
         {
@@ -1855,6 +1917,7 @@ public sealed class BuiltInGameModelRuntimeTests
                             maximumOutput = 512,
                             input = new[] { "text" },
                             output = new[] { "text", "tools" },
+                            cost = cost ?? new Dictionary<string, object?>(),
                             sampling = new Dictionary<string, object?>
                             {
                                 ["directory_marker"] = "applied",

@@ -82,6 +82,10 @@
       "project": "src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj"
     },
     {
+      "id": "OpenGameAgent.Plugins",
+      "project": "src/OpenGameAgent.Plugins/OpenGameAgent.Plugins.csproj"
+    },
+    {
       "id": "OpenGameAgent.Providers.OpenRouter",
       "project": "src/OpenGameAgent.Providers.OpenRouter/OpenGameAgent.Providers.OpenRouter.csproj"
     }

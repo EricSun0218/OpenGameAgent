@@ -243,8 +243,68 @@ public sealed class BuiltInGameModelRuntime
                            .WithCancellation(cancellationToken)
                            .ConfigureAwait(false))
         {
-            yield return streamEvent;
+            yield return ApplyCatalogCost(streamEvent, model.Cost);
         }
+    }
+
+    private static ModelStreamEvent ApplyCatalogCost(ModelStreamEvent streamEvent, GameModelCost pricing)
+    {
+        if (streamEvent is null)
+        {
+            throw new InvalidOperationException("A model provider emitted a null event.");
+        }
+
+        if (streamEvent.IsTerminal)
+        {
+            return ModelStreamEvent.Terminal(ApplyCatalogCost(
+                streamEvent.Response
+                ?? throw new InvalidOperationException("A terminal model event is missing its response."),
+                pricing));
+        }
+
+        return ModelStreamEvent.Update(
+            streamEvent.Kind,
+            ApplyCatalogCost(
+                streamEvent.Partial
+                ?? throw new InvalidOperationException("A model update is missing its partial response."),
+                pricing),
+            streamEvent.Delta,
+            streamEvent.ContentIndex,
+            streamEvent.ToolCallId,
+            streamEvent.ToolName,
+            streamEvent.ToolCall,
+            streamEvent.Content);
+    }
+
+    private static ModelResponse ApplyCatalogCost(ModelResponse response, GameModelCost pricing)
+    {
+        if (response.Usage.Cost.IsKnown)
+        {
+            return response;
+        }
+
+        var usage = response.Usage;
+        var pricedUsage = new ModelUsage(
+            usage.InputTokens,
+            usage.OutputTokens,
+            usage.CacheReadTokens,
+            usage.CacheWriteTokens,
+            usage.ReasoningTokens,
+            usage.CacheWriteOneHourTokens,
+            pricing.Estimate(usage));
+        return new ModelResponse(
+            response.Content,
+            response.StopReason,
+            pricedUsage,
+            response.ErrorMessage,
+            response.Provider,
+            response.Api,
+            response.ResponseModel,
+            response.ResponseId,
+            response.RawStopReason,
+            response.EndTurn,
+            response.Diagnostics,
+            response.Deferred);
     }
 
     private static ResolvedGameModelTransportConfiguration AuthenticationTransportConfiguration(

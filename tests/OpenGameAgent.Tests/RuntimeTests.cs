@@ -176,8 +176,64 @@ public sealed class RuntimeTests
         Assert.Equal(GameAgentRunStatus.Duplicate, duplicate.Status);
         Assert.Equal(1, handler.ExecuteCount);
         Assert.Equal(2, provider.CallCount);
-        var entry = await journal.FindAsync("same-input:1:0", TestContext.Current.CancellationToken);
+        var operationId = GameActionOperationIds.CreateV2(
+            input.SessionId,
+            input.ActorId,
+            input.InputId,
+            1,
+            0,
+            "place_block",
+            input.Moment);
+        var entry = await journal.FindAsync(operationId, TestContext.Current.CancellationToken);
         Assert.Equal(GameActionStatus.Committed, entry!.Receipt!.Status);
+    }
+
+    [Fact]
+    public void DefaultActionOperationIdV2IsStableBoundedAndSeparatesEveryAuthorityDimension()
+    {
+        static string Create(
+            string session = "session",
+            string actor = "actor",
+            string input = "input",
+            int turn = 1,
+            int index = 0,
+            string action = "act",
+            string timeline = "world",
+            long tick = 10,
+            string? generation = "generation") => GameActionOperationIds.CreateV2(
+                session,
+                actor,
+                input,
+                turn,
+                index,
+                action,
+                new GameMoment(timeline, tick),
+                generation);
+
+        var baseline = Create();
+        Assert.Equal(baseline, Create());
+        Assert.True(GameActionOperationIds.IsVersion2(baseline));
+        Assert.Equal(GameActionOperationIds.Version2Prefix.Length + 64, baseline.Length);
+        Assert.All(
+            new[]
+            {
+                Create(session: "other-session"),
+                Create(actor: "other-actor"),
+                Create(input: "other-input"),
+                Create(turn: 2),
+                Create(index: 1),
+                Create(action: "other-action"),
+                Create(timeline: "other-world"),
+                Create(tick: 11),
+                Create(generation: "other-generation"),
+            },
+            candidate => Assert.NotEqual(baseline, candidate));
+        Assert.Equal(
+            GameActionOperationIds.Version2Prefix.Length + 64,
+            Create(session: new string('s', 16_384)).Length);
+        Assert.Equal("input:1:0", GameActionOperationIds.CreateLegacyV1("input", 1, 0));
+        GameActionOperationIdFactory legacyFactory = GameActionOperationIds.CreateLegacyV1;
+        Assert.NotNull(legacyFactory);
     }
 
     [Fact]
@@ -510,7 +566,16 @@ public sealed class RuntimeTests
         Assert.Equal(GameAgentRunStatus.SessionConflict, conflicted.Status);
         Assert.True(retried.Succeeded);
         Assert.Equal(1, handler.ExecuteCount);
-        Assert.NotNull(await journal.FindAsync("stable-input:1:0", TestContext.Current.CancellationToken));
+        Assert.NotNull(await journal.FindAsync(
+            GameActionOperationIds.CreateV2(
+                input.SessionId,
+                input.ActorId,
+                input.InputId,
+                1,
+                0,
+                "place_block",
+                input.Moment),
+            TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -2134,6 +2199,8 @@ public sealed class RuntimeTests
 
         Assert.Same(ledger, replayed);
         Assert.Single(replayed.Records);
+        Assert.False(replayed.Stats.Total.CostKnown);
+        Assert.Null(replayed.Stats.Total.CostTotalIfKnown);
         Assert.Throws<InvalidOperationException>(() => replayed.Append(new[]
         {
             new GameSessionUsageRecord(
