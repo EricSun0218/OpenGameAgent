@@ -64,6 +64,16 @@ foreach ($invalidVersion in @(
 
 $packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
 Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
+$packScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tools\Pack-NuGet.ps1') -Raw
+$removesExactVersionedPackage =
+    $packScript -match '\$\(\$package\.id\)\.\$PackageVersion\.nupkg' -and
+    $packScript -match '\$\(\$package\.id\)\.\$PackageVersion\.snupkg' -and
+    $packScript -match 'Remove-Item\s+-LiteralPath\s+\$stalePackagePath'
+$pinsRepositoryCommit = $packScript -match '-p:RepositoryCommit=\$repositoryCommit'
+$assertsExpectedPackage = $packScript -match "Packing did not produce"
+if (-not ($removesExactVersionedPackage -and $pinsRepositoryCommit -and $assertsExpectedPackage)) {
+    throw 'NuGet packing must replace exact same-version outputs, pin HEAD, and verify each result.'
+}
 $godotSmokeScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engines\godot\test-engine.ps1') -Raw
 $startsGodotProcess = $godotSmokeScript -match 'Start-Process'
 $waitsForGodotProcess = $godotSmokeScript -match '(?m)^\s*-Wait\s*`?\s*$'
