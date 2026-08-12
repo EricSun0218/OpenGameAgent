@@ -120,6 +120,17 @@ All action endpoints use `IGameAgentOwnerAuthorizer` before touching the exchang
 
 The exchange coordinates delivery and recovery; it does not replace game authority. The game must validate action arguments and permissions, commit the world mutation plus its operation record atomically where possible, and return the resulting revision. Tool catalogs and schemas remain deployment-owned.
 
+### Operation ID v2 migration
+
+The default `GameActionTool` identifier is `oga-action-v2:<sha256>`. Its canonical identity includes session, actor, input, turn, tool-call index, action, timeline/tick, and save generation. The output has a fixed bounded length, identical replay produces the same ID, and changing any identity dimension produces a different ID. Tool arguments and expected state revision are deliberately not part of the ID: if a replay of the same logical tool position produces different arguments or authority preconditions, the durable journal rejects it instead of allowing a second mutation.
+
+Existing version-one action journal files remain readable and are not rewritten. Their operation IDs remain valid for claim, receipt, and reconcile. Do not silently switch an active save with unresolved v1 operations to the v2 default: the authoritative game log knows the old identifiers and an automatic rewrite could duplicate a side effect. Use one of these explicit migration paths:
+
+1. reconcile and drain all v1 pending/dispatched operations, then switch to v2 at a save-generation boundary; or
+2. temporarily pass `operationIdFactory: GameActionOperationIds.CreateLegacyV1`, drain the old journal, then remove that override when starting the next save generation.
+
+Never copy one action journal into multiple coexisting save namespaces. `GameActionOperationIds.CreateLegacyV1` exists only for this controlled migration window and does not isolate session, actor, timeline, or action.
+
 ## Untrusted boundaries
 
 Treat all of the following as untrusted or potentially sensitive:

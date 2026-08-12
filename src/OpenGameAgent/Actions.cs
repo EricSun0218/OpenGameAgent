@@ -2,6 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -231,6 +233,156 @@ public delegate string GameActionOperationIdFactory(
     GameInput input,
     JsonElement arguments,
     ToolExecutionContext execution);
+
+/// <summary>
+/// Creates stable, bounded operation identifiers for authoritative game actions.
+/// </summary>
+public static class GameActionOperationIds
+{
+    public const string Version2Prefix = "oga-action-v2:";
+
+    public static string CreateV2(
+        GameInput input,
+        string action,
+        ToolExecutionContext execution,
+        string? generationId = null)
+    {
+        if (input is null)
+        {
+            throw new ArgumentNullException(nameof(input));
+        }
+
+        if (execution is null)
+        {
+            throw new ArgumentNullException(nameof(execution));
+        }
+        return CreateV2(
+            input.SessionId,
+            input.ActorId,
+            input.InputId,
+            execution.Turn,
+            execution.ToolCallIndex,
+            action,
+            input.Moment,
+            generationId);
+    }
+
+    public static string CreateV2(
+        string sessionId,
+        string actorId,
+        string inputId,
+        int turn,
+        int toolCallIndex,
+        string action,
+        GameMoment moment,
+        string? generationId = null)
+    {
+        if (turn < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(turn));
+        }
+
+        if (toolCallIndex < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(toolCallIndex));
+        }
+
+        moment = moment.EnsureValid(nameof(moment));
+        using var canonical = new MemoryStream();
+        using (var writer = new BinaryWriter(canonical, Encoding.UTF8, leaveOpen: true))
+        {
+            WriteComponent(writer, "OpenGameAgent.GameActionOperationId.v2", "version");
+            WriteComponent(writer, sessionId, nameof(sessionId));
+            WriteComponent(writer, actorId, nameof(actorId));
+            WriteComponent(writer, inputId, nameof(inputId));
+            writer.Write(turn);
+            writer.Write(toolCallIndex);
+            WriteComponent(writer, action, nameof(action));
+            WriteComponent(writer, moment.TimelineId, nameof(moment));
+            writer.Write(moment.Tick);
+            WriteNullableComponent(writer, generationId, nameof(generationId));
+        }
+
+        canonical.Position = 0;
+        using var algorithm = SHA256.Create();
+        var hash = algorithm.ComputeHash(canonical);
+        return Version2Prefix + BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Reproduces the pre-v2 default ID for a controlled migration window. Do not use it for new
+    /// save namespaces because it does not isolate sessions, actors, timelines, or actions.
+    /// </summary>
+    public static string CreateLegacyV1(
+        GameInput input,
+        JsonElement arguments,
+        ToolExecutionContext execution)
+    {
+        if (input is null)
+        {
+            throw new ArgumentNullException(nameof(input));
+        }
+
+        if (execution is null)
+        {
+            throw new ArgumentNullException(nameof(execution));
+        }
+        _ = arguments;
+        return CreateLegacyV1(input.InputId, execution.Turn, execution.ToolCallIndex);
+    }
+
+    public static string CreateLegacyV1(string inputId, int turn, int toolCallIndex)
+    {
+        if (turn < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(turn));
+        }
+
+        if (toolCallIndex < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(toolCallIndex));
+        }
+
+        return GameJson.JoinIds(
+            RequireComponent(inputId, nameof(inputId)),
+            turn.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            toolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    public static bool IsVersion2(string operationId) =>
+        operationId?.StartsWith(Version2Prefix, StringComparison.Ordinal) == true
+        && operationId.Length == Version2Prefix.Length + 64
+        && operationId.Skip(Version2Prefix.Length).All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static void WriteComponent(BinaryWriter writer, string value, string parameterName)
+    {
+        var bytes = Encoding.UTF8.GetBytes(RequireComponent(value, parameterName));
+        writer.Write(bytes.Length);
+        writer.Write(bytes);
+    }
+
+    private static void WriteNullableComponent(BinaryWriter writer, string? value, string parameterName)
+    {
+        writer.Write(value is not null);
+        if (value is not null)
+        {
+            WriteComponent(writer, value, parameterName);
+        }
+    }
+
+    private static string RequireComponent(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 16_384)
+        {
+            throw new ArgumentException(
+                "An operation identity component must contain between 1 and 16384 characters.",
+                parameterName);
+        }
+
+        return value;
+    }
+}
 
 public sealed class InMemoryGameActionJournal : IGameActionJournal
 {
@@ -798,10 +950,11 @@ public static class GameActionTool
             async (arguments, execution, cancellationToken) =>
             {
                 var operationId = operationIdFactory is null
-                    ? GameJson.JoinIds(
-                        input.InputId,
-                        execution.Turn.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        execution.ToolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    ? GameActionOperationIds.CreateV2(
+                        input,
+                        action,
+                        execution,
+                        generationId)
                     : GameJson.RequireId(operationIdFactory(input, arguments, execution), nameof(operationIdFactory));
                 var intent = new GameActionIntent(
                     operationId: operationId,
