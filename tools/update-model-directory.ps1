@@ -379,6 +379,9 @@ foreach ($providerId in $providerIds) {
             })
         }
         if ($costTiers.Count -gt 0) { $cost["tiers"] = @($costTiers) }
+        $cost["known"] = $cost.input -gt 0 -or $cost.output -gt 0 -or
+            $cost.cacheRead -gt 0 -or $cost.cacheWrite -gt 0 -or
+            $costTiers.Count -gt 0 -or $modelProperty.Name.EndsWith(":free", [StringComparison]::OrdinalIgnoreCase)
         $reasoning = Get-ReasoningProfile $providerId $apiId $modelProperty.Name $model
         $compatibility = Get-ModelCompatibility $providerId $apiId $modelEndpoint $modelProperty.Name $model
 
