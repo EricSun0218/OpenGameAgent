@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -6,7 +7,7 @@ using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent.Server;
 
-public static class ServerEndpoints
+public static partial class ServerEndpoints
 {
     public const int DefaultMaximumRequestBodyBytes = 8_000_000;
 
@@ -53,7 +54,9 @@ public static class ServerEndpoints
         return app.Use(async (context, next) =>
         {
             if (!context.Request.Path.StartsWithSegments("/v1/run")
-                && !context.Request.Path.StartsWithSegments("/v1/control"))
+                && !context.Request.Path.StartsWithSegments("/v1/control")
+                && !context.Request.Path.StartsWithSegments("/v1/actions")
+                && !context.Request.Path.StartsWithSegments("/v1/usage"))
             {
                 await next(context);
                 return;
@@ -64,6 +67,13 @@ public static class ServerEndpoints
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return;
+            }
+
+            if (context.User.Identity?.IsAuthenticated != true)
+            {
+                context.User = new ClaimsPrincipal(new ClaimsIdentity(
+                    new[] { new Claim(ClaimTypes.NameIdentifier, "server-api-key") },
+                    "OpenGameAgent.ApiKey"));
             }
 
             await next(context);
@@ -109,6 +119,9 @@ public static class ServerEndpoints
             routes = new[] { "quick", "agent", "workflow" },
             execution = new[] { "in-process", "server" },
             control = new[] { "steer", "abort" },
+            audience = new[] { "internal", "owner", "public", "recipient" },
+            actions = new[] { "claim", "stream", "receipt", "reconcile" },
+            usage = new[] { "session-ledger", "by-cause", "itemized-cost" },
         }));
         endpoints.MapPost(
             "/v1/run",
@@ -126,7 +139,71 @@ public static class ServerEndpoints
             "/v1/control/abort",
             (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
                 AbortAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/usage",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                ReadUsageAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        MapGameActionExchangeEndpoints(endpoints, maximumRequestBodyBytes);
         return endpoints;
+    }
+
+    private static async Task<IResult> ReadUsageAsync(
+        HttpRequest httpRequest,
+        GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
+    {
+        ControlRequest request;
+        GameSessionKey key;
+        try
+        {
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            request = ParseRequest<ControlRequest>(requestDocument.RootElement);
+            key = request.ToKey();
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            return Results.Json(
+                new { error = "invalid_request", message = exception.Message },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            request.Credential,
+            key,
+            GameAgentServerOperation.ReadUsage,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.ReadUsage,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        var usage = await runtime.ReadUsageAsync(key, cancellationToken);
+        return usage is null
+            ? Results.NotFound(new { error = "session_not_found" })
+            : Results.Text(GameAgentWire.SerializeUsage(usage), "application/json", Encoding.UTF8);
     }
 
     private static async Task<IResult> SteerAsync(
@@ -135,19 +212,16 @@ public static class ServerEndpoints
         int maximumRequestBodyBytes,
         CancellationToken cancellationToken)
     {
+        ControlRequest request;
+        GameSessionKey key;
         try
         {
             using var requestDocument = await ReadRequestDocumentAsync(
                 httpRequest,
                 maximumRequestBodyBytes,
                 cancellationToken);
-            var request = ParseRequest<ControlRequest>(requestDocument.RootElement);
-            var accepted = runtime.TrySteer(
-                request.ToKey(),
-                AgentMessage.UserJson(request.GetPayloadJson()));
-            return accepted
-                ? Results.Ok(new { accepted = true })
-                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+            request = ParseRequest<ControlRequest>(requestDocument.RootElement);
+            key = request.ToKey();
         }
         catch (RequestBodyTooLargeException exception)
         {
@@ -166,6 +240,44 @@ public static class ServerEndpoints
                 new { accepted = false, error = "invalid_request", message = exception.Message },
                 statusCode: StatusCodes.Status400BadRequest);
         }
+
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            request.Credential,
+            key,
+            GameAgentServerOperation.Steer,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.Steer,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        try
+        {
+            var accepted = runtime.TrySteer(key, AgentMessage.UserJson(request.GetPayloadJson()));
+            return accepted
+                ? Results.Ok(new { accepted = true })
+                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or AgentLimitException
+            or GameRuntimeLimitException
+            or JsonException)
+        {
+            return Results.Json(
+                new { accepted = false, error = "invalid_request", message = exception.Message },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
     }
 
     private static async Task<IResult> AbortAsync(
@@ -174,17 +286,16 @@ public static class ServerEndpoints
         int maximumRequestBodyBytes,
         CancellationToken cancellationToken)
     {
+        ControlRequest request;
+        GameSessionKey key;
         try
         {
             using var requestDocument = await ReadRequestDocumentAsync(
                 httpRequest,
                 maximumRequestBodyBytes,
                 cancellationToken);
-            var request = ParseRequest<ControlRequest>(requestDocument.RootElement);
-            var accepted = runtime.TryAbort(request.ToKey());
-            return accepted
-                ? Results.Ok(new { accepted = true })
-                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+            request = ParseRequest<ControlRequest>(requestDocument.RootElement);
+            key = request.ToKey();
         }
         catch (RequestBodyTooLargeException exception)
         {
@@ -193,6 +304,41 @@ public static class ServerEndpoints
         catch (UnsupportedRequestContentTypeException exception)
         {
             return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            return Results.Json(
+                new { accepted = false, error = "invalid_request", message = exception.Message },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            request.Credential,
+            key,
+            GameAgentServerOperation.Abort,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.Abort,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        try
+        {
+            var accepted = runtime.TryAbort(key);
+            return accepted
+                ? Results.Ok(new { accepted = true })
+                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
         }
         catch (Exception exception) when (exception is ArgumentException or JsonException)
         {
@@ -209,12 +355,15 @@ public static class ServerEndpoints
         CancellationToken cancellationToken)
     {
         GameInput input;
+        string? credential;
         try
         {
             using var requestDocument = await ReadRequestDocumentAsync(
                 httpRequest,
                 maximumRequestBodyBytes,
                 cancellationToken);
+            EnsureRequestIsUnambiguous(requestDocument.RootElement);
+            credential = GetPresentedCredential(requestDocument.RootElement);
             input = GameAgentWire.ParseInput(requestDocument.RootElement.GetRawText());
         }
         catch (RequestBodyTooLargeException exception)
@@ -232,6 +381,33 @@ public static class ServerEndpoints
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
+        var key = new GameSessionKey(input.SessionId, input.ActorId);
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            credential,
+            key,
+            GameAgentServerOperation.Run,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.Run,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        var audienceProjection = await CreateAudienceProjectionAsync(
+            httpRequest.HttpContext,
+            key,
+            cancellationToken);
+
         Task<GameAgentRunResult> pendingRun;
         try
         {
@@ -245,7 +421,10 @@ public static class ServerEndpoints
         }
 
         var result = await pendingRun;
-        return Results.Text(GameAgentWire.SerializeResult(result), "application/json", Encoding.UTF8);
+        var resultJson = audienceProjection is null
+            ? GameAgentWire.SerializeResult(result)
+            : await audienceProjection.ProjectResultAsync(result, cancellationToken);
+        return Results.Text(resultJson, "application/json", Encoding.UTF8);
     }
 
     private static async Task StreamAsync(
@@ -256,12 +435,15 @@ public static class ServerEndpoints
         CancellationToken cancellationToken)
     {
         GameInput input;
+        string? credential;
         try
         {
             using var requestDocument = await ReadRequestDocumentAsync(
                 httpRequest,
                 maximumRequestBodyBytes,
                 cancellationToken);
+            EnsureRequestIsUnambiguous(requestDocument.RootElement);
+            credential = GetPresentedCredential(requestDocument.RootElement);
             input = GameAgentWire.ParseInput(requestDocument.RootElement.GetRawText());
         }
         catch (RequestBodyTooLargeException exception)
@@ -289,6 +471,35 @@ public static class ServerEndpoints
             return;
         }
 
+        var key = new GameSessionKey(input.SessionId, input.ActorId);
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            credential,
+            key,
+            GameAgentServerOperation.Stream,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            await authenticationFailure.ExecuteAsync(httpRequest.HttpContext);
+            return;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.Stream,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            await authorizationFailure.ExecuteAsync(httpRequest.HttpContext);
+            return;
+        }
+
+        var audienceProjection = await CreateAudienceProjectionAsync(
+            httpRequest.HttpContext,
+            key,
+            cancellationToken);
+
         response.StatusCode = StatusCodes.Status200OK;
         response.ContentType = "text/event-stream";
         response.Headers.CacheControl = "no-cache";
@@ -300,7 +511,13 @@ public static class ServerEndpoints
                 input,
                 async (_, agentEvent, token) =>
                 {
-                    await WriteEventAsync(response, "agent", GameAgentWire.SerializeEvent(agentEvent), token);
+                    var eventJson = audienceProjection is null
+                        ? GameAgentWire.SerializeEvent(agentEvent)
+                        : await audienceProjection.ProjectEventAsync(agentEvent, token);
+                    if (eventJson is not null)
+                    {
+                        await WriteEventAsync(response, "agent", eventJson, token);
+                    }
                 },
                 cancellationToken);
         }
@@ -319,7 +536,10 @@ public static class ServerEndpoints
         try
         {
             var result = await pendingRun;
-            await WriteEventAsync(response, "result", GameAgentWire.SerializeResult(result), cancellationToken);
+            var resultJson = audienceProjection is null
+                ? GameAgentWire.SerializeResult(result)
+                : await audienceProjection.ProjectResultAsync(result, cancellationToken);
+            await WriteEventAsync(response, "result", resultJson, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -357,6 +577,114 @@ public static class ServerEndpoints
 
     private static IResult RequestError(int statusCode, string error, string message) =>
         Results.Json(new { error, message }, statusCode: statusCode);
+
+    private static string? GetPresentedCredential(JsonElement root)
+    {
+        if (!root.TryGetProperty("credential", out var value))
+        {
+            foreach (var property in root.EnumerateObject())
+            {
+                if (string.Equals(property.Name, "credential", StringComparison.OrdinalIgnoreCase))
+                {
+                    value = property.Value;
+                    break;
+                }
+            }
+        }
+
+        if (value.ValueKind == JsonValueKind.Undefined || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new ArgumentException("The presented credential must be a string.", nameof(root));
+        }
+
+        return value.GetString();
+    }
+
+    private static async ValueTask<IResult?> AuthenticatePresentedCredentialAsync(
+        HttpContext httpContext,
+        string? credential,
+        GameSessionKey key,
+        GameAgentServerOperation operation,
+        CancellationToken cancellationToken)
+    {
+        if (credential is null)
+        {
+            return null;
+        }
+
+        GameAgentPresentedCredentialContext credentialContext;
+        try
+        {
+            credentialContext = new GameAgentPresentedCredentialContext(credential, key, operation);
+        }
+        catch (ArgumentException)
+        {
+            return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var authenticator = httpContext.RequestServices.GetService<IGameAgentPresentedCredentialAuthenticator>();
+        if (authenticator is null)
+        {
+            return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var principal = await authenticator.AuthenticateAsync(credentialContext, cancellationToken);
+        if (principal?.Identity?.IsAuthenticated != true)
+        {
+            return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        httpContext.User = principal;
+        return null;
+    }
+
+    private static async ValueTask<IResult?> GetAuthorizationFailureAsync(
+        HttpContext httpContext,
+        GameSessionKey key,
+        GameAgentServerOperation operation,
+        CancellationToken cancellationToken)
+    {
+        var authorizer = httpContext.RequestServices.GetService<IGameAgentOwnerAuthorizer>();
+        if (authorizer is null)
+        {
+            return null;
+        }
+
+        if (httpContext.User.Identity?.IsAuthenticated != true)
+        {
+            return Results.Json(
+                new { error = "unauthorized" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var allowed = await authorizer.AuthorizeAsync(
+            new GameAgentAuthorizationContext(httpContext.User, key, operation),
+            cancellationToken);
+        return allowed
+            ? null
+            : Results.Json(new { error = "forbidden" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    private static async ValueTask<GameAgentAudienceProjection?> CreateAudienceProjectionAsync(
+        HttpContext httpContext,
+        GameSessionKey key,
+        CancellationToken cancellationToken)
+    {
+        var policy = httpContext.RequestServices.GetService<IGameAgentAudiencePolicy>();
+        if (policy is null)
+        {
+            return null;
+        }
+
+        var viewer = await policy.ResolveViewerAsync(httpContext.User, key, cancellationToken)
+            ?? throw new InvalidOperationException("The game audience policy returned no viewer.");
+        return new GameAgentAudienceProjection(policy, viewer, key);
+    }
 
     private static async Task<JsonDocument> ReadRequestDocumentAsync(
         HttpRequest request,
@@ -487,6 +815,8 @@ public static class ServerEndpoints
 
 public sealed class ControlRequest
 {
+    public string? Credential { get; set; }
+
     public string SessionId { get; set; } = string.Empty;
 
     public string ActorId { get; set; } = string.Empty;
