@@ -1838,6 +1838,7 @@ internal static class GameTranscriptSummaryUtilities
                 usages.Sum(usage => usage.Cost.Input),
                 usages.Sum(usage => usage.Cost.Output),
                 usages.Sum(usage => usage.Cost.CacheRead),
-                usages.Sum(usage => usage.Cost.CacheWrite)));
+                usages.Sum(usage => usage.Cost.CacheWrite),
+                usages.All(usage => usage.Cost.IsKnown)));
     }
 }
