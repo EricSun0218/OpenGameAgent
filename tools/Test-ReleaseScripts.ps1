@@ -64,6 +64,13 @@ foreach ($invalidVersion in @(
 
 $packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
 Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
+$godotDownloadPattern = "Godot_v4\.7\.1-stable_mono_win64\.zip'.*-MaximumRetryCount\s+4\s+-RetryIntervalSec\s+5"
+foreach ($workflowPath in @('.github\workflows\ci.yml', '.github\workflows\release.yml')) {
+    $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot $workflowPath) -Raw
+    if ($workflow -notmatch $godotDownloadPattern) {
+        throw "Godot download in '$workflowPath' must use bounded transient retries before checksum verification."
+    }
+}
 $packScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tools\Pack-NuGet.ps1') -Raw
 $removesExactVersionedPackage =
     $packScript -match '\$\(\$package\.id\)\.\$PackageVersion\.nupkg' -and
