@@ -96,7 +96,7 @@ Run inputs, model content, tool catalogs, loops, queues, progress, and concurren
 
 ### Model access without hand-wiring every provider
 
-`OpenGameAgent.Models.BuiltIn` turns the bundled model directory into an executable runtime. It currently dispatches nine wire APIs across 27 provider definitions and hundreds of text/tool-capable models, applying provider-specific request formats, reasoning settings, compatibility flags, cost metadata, authentication, cancellation, and bounded response handling. The lower provider packages remain independently usable when a game wants an explicit model and endpoint instead of a directory.
+`OpenGameAgent.Models.BuiltIn` turns the bundled model directory into an executable runtime. It currently dispatches nine wire APIs across 27 provider definitions and hundreds of text/tool-capable models, applying provider-specific request formats, reasoning settings, compatibility flags, cost metadata, authentication, cancellation, and bounded response handling. Provider usage is priced from the resolved directory when the provider does not report cost, while unavailable pricing remains explicitly unknown rather than appearing free. The lower provider packages remain independently usable when a game wants an explicit model and endpoint instead of a directory.
 
 `OpenGameAgent.Models.Auth.BuiltIn` adds opt-in browser or device authorization flows for supported subscription providers. Public client registrations are never embedded in the framework: flows that require a client ID remain disabled until the game developer supplies one. `OpenGameAgent.ProviderTransport` exposes only allowlisted, bounded response metadata to observers and never passes credentials or arbitrary response headers to tracing code.
 

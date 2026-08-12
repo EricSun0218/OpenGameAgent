@@ -114,10 +114,42 @@ public sealed class PersistenceTests
         Assert.Equal("{\"removed\":8}", loaded.UsageLedger.Records[1].DetailsJson);
         Assert.Equal(2, loaded.UsageLedger.Records[0].Usage.ReasoningTokens);
         Assert.Equal(1, loaded.UsageLedger.Records[0].Usage.CacheWriteOneHourTokens);
+        Assert.True(loaded.UsageLedger.Records[0].Usage.Cost.IsKnown);
+        Assert.True(loaded.UsageLedger.Stats.Total.CostKnown);
         var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
         Assert.Equal(4, JsonNode.Parse(await File.ReadAllTextAsync(
             file,
             TestContext.Current.CancellationToken))!["FormatVersion"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task UnknownUsageCostRemainsUnknownAcrossRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("unknown-cost", "actor");
+        var store = new FileGameSessionStore(directory.Path);
+        var saved = await store.SaveAsync(
+            new GameSessionSnapshot(
+                key,
+                1,
+                usageLedger: new GameSessionUsageLedger(new[]
+                {
+                    new GameSessionUsageRecord(
+                        "unknown-cost-record",
+                        GameSessionUsageCause.Assistant,
+                        new ModelUsage(3, 1)),
+                })),
+            0,
+            TestContext.Current.CancellationToken);
+
+        var loaded = await new FileGameSessionStore(directory.Path)
+            .LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.True(saved.Saved);
+        Assert.NotNull(loaded);
+        Assert.False(Assert.Single(loaded.UsageLedger.Records).Usage.Cost.IsKnown);
+        Assert.False(loaded.UsageLedger.Stats.Total.CostKnown);
+        Assert.Null(loaded.UsageLedger.Stats.Total.CostTotalIfKnown);
     }
 
     [Fact]

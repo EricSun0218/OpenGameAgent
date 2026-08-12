@@ -1140,7 +1140,8 @@ internal sealed class MessageGatewayStreamState
             MessageGatewayJson.RequiredDouble(cost, "input"),
             MessageGatewayJson.RequiredDouble(cost, "output"),
             MessageGatewayJson.RequiredDouble(cost, "cacheRead"),
-            MessageGatewayJson.RequiredDouble(cost, "cacheWrite"));
+            MessageGatewayJson.RequiredDouble(cost, "cacheWrite"),
+            isKnown: true);
         var reportedCostTotal = MessageGatewayJson.RequiredDouble(cost, "total");
         var computedCostTotal = modelCost.Input + modelCost.Output + modelCost.CacheRead + modelCost.CacheWrite;
         if (double.IsNaN(computedCostTotal) || double.IsInfinity(computedCostTotal))

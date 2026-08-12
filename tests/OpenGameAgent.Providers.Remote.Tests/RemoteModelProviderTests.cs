@@ -86,6 +86,7 @@ public sealed class RemoteModelProviderTests
         Assert.Equal(3, response.Usage.CacheWriteTokens);
         Assert.Equal(4, response.Usage.ReasoningTokens);
         Assert.Equal(1, response.Usage.CacheWriteOneHourTokens);
+        Assert.True(response.Usage.Cost.IsKnown);
         Assert.Equal(0.11, response.Usage.Cost.Input);
         Assert.Equal(0.07, response.Usage.Cost.Output);
         Assert.Equal(0.02, response.Usage.Cost.CacheRead);
@@ -100,6 +101,28 @@ public sealed class RemoteModelProviderTests
         Assert.Equal("42", handler.GameBuild);
         var captured = Assert.IsType<ModelRequest>(upstream.CapturedRequest);
         AssertRequestEqual(request, captured);
+    }
+
+    [Fact]
+    public async Task UnknownCostRemainsUnknownAcrossTheRemoteWire()
+    {
+        var upstream = new ScriptedProvider(new[]
+        {
+            ModelStreamEvent.Update(ModelStreamEventKind.Started, Pending()),
+            ModelStreamEvent.Terminal(new ModelResponse(
+                new AgentContent[] { new TextContent("ok") },
+                ModelStopReason.Stop,
+                new ModelUsage(2, 1))),
+        });
+        var remote = CreateRemote(new LoopbackHandler(new ModelProviderProxyServer(upstream)));
+
+        var events = await CollectAsync(remote.StreamAsync(
+            SimpleRequest(),
+            TestContext.Current.CancellationToken));
+
+        var usage = Assert.Single(events, item => item.IsTerminal).Response!.Usage;
+        Assert.False(usage.Cost.IsKnown);
+        Assert.Null(usage.Cost.TotalIfKnown);
     }
 
     [Fact]

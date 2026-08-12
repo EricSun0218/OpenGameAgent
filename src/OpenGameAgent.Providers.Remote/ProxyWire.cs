@@ -586,6 +586,9 @@ internal sealed class WireParameters
 
 internal sealed class WireCost
 {
+    [JsonPropertyName("k")]
+    public bool? Known { get; set; }
+
     [JsonPropertyName("i")]
     public double Input { get; set; }
 
@@ -600,13 +603,16 @@ internal sealed class WireCost
 
     public static WireCost From(ModelCost cost) => new()
     {
+        Known = cost.IsKnown,
         Input = cost.Input,
         Output = cost.Output,
         CacheRead = cost.CacheRead,
         CacheWrite = cost.CacheWrite,
     };
 
-    public ModelCost ToModelCost() => new(Input, Output, CacheRead, CacheWrite);
+    public ModelCost ToModelCost() => Known.HasValue
+        ? new ModelCost(Input, Output, CacheRead, CacheWrite, Known.Value)
+        : new ModelCost(Input, Output, CacheRead, CacheWrite);
 }
 
 internal sealed class WireUsage

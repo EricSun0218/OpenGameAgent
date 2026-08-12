@@ -250,6 +250,8 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
         public double CacheWriteCost { get; set; }
 
+        public bool? CostKnown { get; set; }
+
         public string? RunId { get; set; }
 
         public string? InputId { get; set; }
@@ -270,6 +272,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
             OutputCost = record.Usage.Cost.Output,
             CacheReadCost = record.Usage.Cost.CacheRead,
             CacheWriteCost = record.Usage.Cost.CacheWrite,
+            CostKnown = record.Usage.Cost.IsKnown,
             RunId = record.RunId,
             InputId = record.InputId,
             DetailsJson = record.DetailsJson,
@@ -285,7 +288,9 @@ public sealed class FileGameSessionStore : IGameSessionStore
                 CacheWriteTokens,
                 ReasoningTokens,
                 CacheWriteOneHourTokens,
-                new ModelCost(InputCost, OutputCost, CacheReadCost, CacheWriteCost)),
+                CostKnown.HasValue
+                    ? new ModelCost(InputCost, OutputCost, CacheReadCost, CacheWriteCost, CostKnown.Value)
+                    : new ModelCost(InputCost, OutputCost, CacheReadCost, CacheWriteCost)),
             RunId,
             InputId,
             DetailsJson);
@@ -315,6 +320,8 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
         public double CacheWriteCost { get; set; }
 
+        public bool? CostKnown { get; set; }
+
         public static UsageTotalsDocument Encode(
             GameSessionUsageCause cause,
             GameSessionUsageTotals totals) => new()
@@ -330,6 +337,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
                 OutputCost = totals.OutputCost,
                 CacheReadCost = totals.CacheReadCost,
                 CacheWriteCost = totals.CacheWriteCost,
+                CostKnown = totals.CostKnown,
             };
 
         public GameSessionUsageTotals Decode() => new(
@@ -342,7 +350,12 @@ public sealed class FileGameSessionStore : IGameSessionStore
             InputCost,
             OutputCost,
             CacheReadCost,
-            CacheWriteCost);
+            CacheWriteCost,
+            CostKnown
+            ?? InputCost != 0
+            || OutputCost != 0
+            || CacheReadCost != 0
+            || CacheWriteCost != 0);
     }
 }
 

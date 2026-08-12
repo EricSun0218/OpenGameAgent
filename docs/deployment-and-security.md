@@ -40,6 +40,7 @@ The included service exposes:
 - `POST /v1/run/stream` (Server-Sent Events)
 - `POST /v1/control/steer`
 - `POST /v1/control/abort`
+- `POST /v1/usage`
 - `POST /v1/actions/claim`
 - `POST /v1/actions/stream` (Server-Sent Events over a JSON POST request)
 - `POST /v1/actions/receipt`
@@ -89,6 +90,18 @@ The stock server can expose several named model routes without accepting an endp
 ```
 
 Route selection is server policy: request JSON can contain arbitrary game data, but it cannot create a provider, replace an endpoint, or supply a server credential. A custom host can build the same boundary with `TrustedGameAgentServerModelRouter` and a selector that returns only a registered route name. Fallback is allowed only before meaningful streamed output; once text, reasoning, tool calls, or usage are visible, the framework never silently replays the request. Final assistant messages expose the provider, API, response model, and response ID that actually completed, while provider credentials remain inside the server transport and never enter the model transcript or response wire.
+
+### Usage and cost
+
+The runtime keeps one durable, bounded usage ledger per `(session, actor)`. Assistant responses, tool-reported usage, transcript compaction, and other framework causes are accumulated exactly once across retries, optimistic-save conflicts, eviction of old audit records, and process restarts. `POST /v1/usage` uses the same authentication and owner authorization as run/control/action endpoints and must be authorized before the session store is read:
+
+```json
+{"credential":"short-lived-pairing-token","sessionId":"save-1","actorId":"npc-1"}
+```
+
+The response contains lifetime totals, totals grouped by cause, and a bounded recent-record audit window. Token data includes reasoning and one-hour cache-write counts. Cost is itemized as input, output, cache-read, cache-write, and total. Every cost object includes `known`: when pricing is unavailable, all monetary fields are `null`; a model that is explicitly free returns `known: true` and zero amounts. Unknown price is never reported as zero cost.
+
+`BuiltInGameModelRuntime` preserves provider-reported itemized cost. When a provider reports usage without cost, it estimates cost from the resolved model directory entry, including tiered rates and one-hour cache writes. A directory entry with unavailable pricing remains unknown instead of silently becoming free.
 
 The included file stores coordinate local writers through cross-process leases when they use the same data directory. They are not distributed storage. Multi-host services must replace the interfaces with transactional shared storage and coordinate actor ownership. Custom session, workflow, action, artifact, delegation, and ranking implementations are checked at their trust boundaries; inconsistent saved state and cross-session data are rejected.
 

@@ -121,6 +121,7 @@ public static partial class ServerEndpoints
             control = new[] { "steer", "abort" },
             audience = new[] { "internal", "owner", "public", "recipient" },
             actions = new[] { "claim", "stream", "receipt", "reconcile" },
+            usage = new[] { "session-ledger", "by-cause", "itemized-cost" },
         }));
         endpoints.MapPost(
             "/v1/run",
@@ -138,8 +139,71 @@ public static partial class ServerEndpoints
             "/v1/control/abort",
             (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
                 AbortAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/usage",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                ReadUsageAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
         MapGameActionExchangeEndpoints(endpoints, maximumRequestBodyBytes);
         return endpoints;
+    }
+
+    private static async Task<IResult> ReadUsageAsync(
+        HttpRequest httpRequest,
+        GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
+    {
+        ControlRequest request;
+        GameSessionKey key;
+        try
+        {
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            request = ParseRequest<ControlRequest>(requestDocument.RootElement);
+            key = request.ToKey();
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            return Results.Json(
+                new { error = "invalid_request", message = exception.Message },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            request.Credential,
+            key,
+            GameAgentServerOperation.ReadUsage,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.ReadUsage,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        var usage = await runtime.ReadUsageAsync(key, cancellationToken);
+        return usage is null
+            ? Results.NotFound(new { error = "session_not_found" })
+            : Results.Text(GameAgentWire.SerializeUsage(usage), "application/json", Encoding.UTF8);
     }
 
     private static async Task<IResult> SteerAsync(

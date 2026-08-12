@@ -2199,6 +2199,8 @@ public sealed class RuntimeTests
 
         Assert.Same(ledger, replayed);
         Assert.Single(replayed.Records);
+        Assert.False(replayed.Stats.Total.CostKnown);
+        Assert.Null(replayed.Stats.Total.CostTotalIfKnown);
         Assert.Throws<InvalidOperationException>(() => replayed.Append(new[]
         {
             new GameSessionUsageRecord(

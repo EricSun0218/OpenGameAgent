@@ -311,6 +311,7 @@ public sealed class ServerTests
         Assert.Contains("healthy", health, StringComparison.Ordinal);
         Assert.Contains("in-process", capabilities, StringComparison.Ordinal);
         Assert.Contains("server", capabilities, StringComparison.Ordinal);
+        Assert.Contains("session-ledger", capabilities, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -445,7 +446,14 @@ public sealed class ServerTests
         using var client = app.GetTestClient();
         var oversized = "{\"padding\":\"" + new string('x', 256) + "\"}";
 
-        foreach (var path in new[] { "/v1/run", "/v1/run/stream", "/v1/control/steer", "/v1/control/abort" })
+        foreach (var path in new[]
+                 {
+                     "/v1/run",
+                     "/v1/run/stream",
+                     "/v1/control/steer",
+                     "/v1/control/abort",
+                     "/v1/usage",
+                 })
         {
             using var content = new StringContent(oversized, Encoding.UTF8, "application/json");
             using var response = await client.PostAsync(path, content, TestContext.Current.CancellationToken);
@@ -592,6 +600,16 @@ public sealed class ServerTests
             TestContext.Current.CancellationToken);
         Assert.Equal(System.Net.HttpStatusCode.Unauthorized, deniedControl.StatusCode);
 
+        using var deniedUsageContent = new StringContent(
+            ControlJson(new GameSessionKey("session", "actor")),
+            Encoding.UTF8,
+            "application/json");
+        using var deniedUsage = await client.PostAsync(
+            "/v1/usage",
+            deniedUsageContent,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, deniedUsage.StatusCode);
+
         using var allowedContent = new StringContent(RequestJson("allowed"), Encoding.UTF8, "application/json");
         using var allowedRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/run") { Content = allowedContent };
         allowedRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "secret");
@@ -676,6 +694,112 @@ public sealed class ServerTests
 
         response.EnsureSuccessStatusCode();
         Assert.Contains(authorizer.Calls, call => call.SubjectId == "server-api-key");
+    }
+
+    [Fact]
+    public async Task UsageEndpointIsOwnerAuthorizedAndReturnsCompleteDurableCauseTotals()
+    {
+        var key = new GameSessionKey("usage-session", "usage-actor");
+        var sessionStore = new CountingGameSessionStore();
+        await sessionStore.SeedAsync(new GameSessionSnapshot(
+            key,
+            1,
+            usageLedger: new GameSessionUsageLedger(new[]
+            {
+                new GameSessionUsageRecord(
+                    "usage-assistant",
+                    GameSessionUsageCause.Assistant,
+                    new ModelUsage(
+                        10,
+                        4,
+                        3,
+                        2,
+                        reasoningTokens: 2,
+                        cacheWriteOneHourTokens: 1,
+                        cost: new ModelCost(0.1, 0.2, 0.03, 0.04, isKnown: true)),
+                    "run-1",
+                    "input-1"),
+                new GameSessionUsageRecord(
+                    "usage-tool",
+                    GameSessionUsageCause.Tool,
+                    new ModelUsage(2, 1, cost: new ModelCost(0.02, 0.01, 0, 0, isKnown: true)),
+                    "run-1",
+                    "input-1"),
+                new GameSessionUsageRecord(
+                    "usage-compaction",
+                    GameSessionUsageCause.Compaction,
+                    new ModelUsage(5, 2, cost: new ModelCost(0.05, 0.02, 0, 0, isKnown: true)),
+                    "run-1",
+                    "input-1"),
+            })));
+        sessionStore.ResetCounters();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")
+        {
+            SessionStore = sessionStore,
+        });
+        var authorizer = new TestOwnerAuthorizer((subject, resource, operation) =>
+            subject == "owner-a"
+            && resource == key
+            && operation == GameAgentServerOperation.ReadUsage);
+        await using var app = await CreateAppAsync(runtime, authorizer: authorizer);
+        using var client = app.GetTestClient();
+        var requestJson = ControlJson(key);
+
+        using var deniedRequest = CreateOwnedRequest(HttpMethod.Post, "/v1/usage", "owner-b", requestJson);
+        using var denied = await client.SendAsync(deniedRequest, TestContext.Current.CancellationToken);
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, denied.StatusCode);
+        Assert.Equal(0, sessionStore.LoadCalls);
+
+        using var allowedRequest = CreateOwnedRequest(HttpMethod.Post, "/v1/usage", "owner-a", requestJson);
+        using var allowed = await client.SendAsync(allowedRequest, TestContext.Current.CancellationToken);
+        var json = await allowed.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+        allowed.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.Equal(3, root.GetProperty("totalRecordCount").GetInt64());
+        Assert.Equal(29, root.GetProperty("total").GetProperty("totalTokens").GetInt64());
+        Assert.Equal(2, root.GetProperty("total").GetProperty("reasoningTokens").GetInt64());
+        Assert.Equal(1, root.GetProperty("total").GetProperty("cacheWriteOneHourTokens").GetInt64());
+        Assert.True(root.GetProperty("total").GetProperty("cost").GetProperty("known").GetBoolean());
+        Assert.Equal(3, root.GetProperty("byCause").GetArrayLength());
+        Assert.Equal(3, root.GetProperty("recentRecords").GetArrayLength());
+        Assert.Contains(root.GetProperty("byCause").EnumerateArray(), item =>
+            item.GetProperty("cause").GetString() == "Compaction"
+            && item.GetProperty("usage").GetProperty("totalTokens").GetInt64() == 7);
+        Assert.Equal(1, sessionStore.LoadCalls);
+    }
+
+    [Fact]
+    public void UsageWireDistinguishesUnknownCostFromKnownFreeCost()
+    {
+        var key = new GameSessionKey("cost-session", "actor");
+        var unknown = new GameSessionUsageSnapshot(
+            key,
+            1,
+            new GameSessionUsageLedger(new[]
+            {
+                new GameSessionUsageRecord("unknown", GameSessionUsageCause.Assistant, new ModelUsage(1, 1)),
+            }));
+        var free = new GameSessionUsageSnapshot(
+            key,
+            1,
+            new GameSessionUsageLedger(new[]
+            {
+                new GameSessionUsageRecord(
+                    "free",
+                    GameSessionUsageCause.Assistant,
+                    new ModelUsage(1, 1, cost: new ModelCost(isKnown: true))),
+            }));
+
+        using var unknownDocument = JsonDocument.Parse(GameAgentWire.SerializeUsage(unknown));
+        using var freeDocument = JsonDocument.Parse(GameAgentWire.SerializeUsage(free));
+
+        var unknownCost = unknownDocument.RootElement.GetProperty("total").GetProperty("cost");
+        Assert.False(unknownCost.GetProperty("known").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, unknownCost.GetProperty("total").ValueKind);
+        var freeCost = freeDocument.RootElement.GetProperty("total").GetProperty("cost");
+        Assert.True(freeCost.GetProperty("known").GetBoolean());
+        Assert.Equal(0, freeCost.GetProperty("total").GetDouble());
     }
 
     [Fact]
@@ -1213,6 +1337,18 @@ public sealed class ServerTests
         public int LoadCalls { get; private set; }
 
         public int SaveCalls { get; private set; }
+
+        public async Task SeedAsync(GameSessionSnapshot snapshot)
+        {
+            var result = await _inner.SaveAsync(snapshot, 0, TestContext.Current.CancellationToken);
+            Assert.True(result.Saved);
+        }
+
+        public void ResetCounters()
+        {
+            LoadCalls = 0;
+            SaveCalls = 0;
+        }
 
         public ValueTask<GameSessionSnapshot?> LoadAsync(
             GameSessionKey key,

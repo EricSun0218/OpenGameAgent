@@ -81,6 +81,7 @@ public sealed class MessageGatewayProviderTests
         Assert.Equal("message-gateway", terminal.Api);
         Assert.Equal("world-model", terminal.ResponseModel);
         Assert.Equal(10, terminal.Usage.TotalTokens);
+        Assert.True(terminal.Usage.Cost.IsKnown);
         Assert.Equal("plan", Assert.IsType<ReasoningContent>(terminal.Content[0]).Text);
         Assert.Equal("reason-signature", Assert.IsType<ReasoningContent>(terminal.Content[0]).Signature);
         Assert.Equal("text-signature", Assert.IsType<TextContent>(terminal.Content[1]).Signature);

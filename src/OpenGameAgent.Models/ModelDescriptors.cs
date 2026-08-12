@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent.Models;
 
@@ -48,6 +49,32 @@ public sealed class GameModelCost
         decimal cacheReadPerMillionTokens = 0,
         decimal cacheWritePerMillionTokens = 0,
         IReadOnlyCollection<GameModelCostTier>? tiers = null)
+        : this(
+            inputPerMillionTokens,
+            outputPerMillionTokens,
+            cacheReadPerMillionTokens,
+            cacheWritePerMillionTokens,
+            tiers,
+            inputPerMillionTokens != 0
+            || outputPerMillionTokens != 0
+            || cacheReadPerMillionTokens != 0
+            || cacheWritePerMillionTokens != 0
+            || (tiers?.Count ?? 0) != 0)
+    {
+    }
+
+    public GameModelCost(bool isKnown)
+        : this(0, 0, 0, 0, null, isKnown)
+    {
+    }
+
+    public GameModelCost(
+        decimal inputPerMillionTokens,
+        decimal outputPerMillionTokens,
+        decimal cacheReadPerMillionTokens,
+        decimal cacheWritePerMillionTokens,
+        IReadOnlyCollection<GameModelCostTier>? tiers,
+        bool isKnown)
     {
         InputPerMillionTokens = RequireCost(inputPerMillionTokens, nameof(inputPerMillionTokens));
         OutputPerMillionTokens = RequireCost(outputPerMillionTokens, nameof(outputPerMillionTokens));
@@ -62,6 +89,7 @@ public sealed class GameModelCost
             throw new ArgumentException("Cost tiers must be non-null and use unique thresholds.", nameof(tiers));
         }
 
+        IsKnown = isKnown;
         Tiers = Array.AsReadOnly(copiedTiers);
     }
 
@@ -72,6 +100,8 @@ public sealed class GameModelCost
     public decimal CacheReadPerMillionTokens { get; }
 
     public decimal CacheWritePerMillionTokens { get; }
+
+    public bool IsKnown { get; }
 
     public IReadOnlyList<GameModelCostTier> Tiers { get; }
 
@@ -89,7 +119,43 @@ public sealed class GameModelCost
                 tier.InputPerMillionTokens,
                 tier.OutputPerMillionTokens,
                 tier.CacheReadPerMillionTokens,
-                tier.CacheWritePerMillionTokens);
+                tier.CacheWritePerMillionTokens,
+                tiers: null,
+                isKnown: IsKnown);
+    }
+
+    public ModelCost Estimate(ModelUsage usage)
+    {
+        if (usage is null)
+        {
+            throw new ArgumentNullException(nameof(usage));
+        }
+        if (!IsKnown)
+        {
+            return new ModelCost();
+        }
+
+        const decimal scale = 1_000_000m;
+        var inputVolume = checked(usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens);
+        var rates = RatesForInput(inputVolume);
+        var longCacheWrite = usage.CacheWriteOneHourTokens ?? 0;
+        var shortCacheWrite = usage.CacheWriteTokens - longCacheWrite;
+        return new ModelCost(
+            DecimalToDouble(usage.InputTokens / scale * rates.InputPerMillionTokens),
+            DecimalToDouble(usage.OutputTokens / scale * rates.OutputPerMillionTokens),
+            DecimalToDouble(usage.CacheReadTokens / scale * rates.CacheReadPerMillionTokens),
+            DecimalToDouble(
+                shortCacheWrite / scale * rates.CacheWritePerMillionTokens
+                + longCacheWrite / scale * rates.InputPerMillionTokens * 2),
+            isKnown: true);
+    }
+
+    private static double DecimalToDouble(decimal value)
+    {
+        var result = (double)value;
+        return double.IsNaN(result) || double.IsInfinity(result)
+            ? throw new OverflowException("The estimated model cost is too large.")
+            : result;
     }
 
     private static decimal RequireCost(decimal value, string parameterName) =>

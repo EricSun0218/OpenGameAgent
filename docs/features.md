@@ -85,6 +85,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Refresh a provider's model list safely | `GameModelProviderRegistration.RefreshModels`, `GameModelCatalog.RefreshAsync` |
 | Resolve API keys, OAuth-style tokens, or local/no-auth modes | `IGameProviderAuthentication`, `IGameCredentialStore` |
 | Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |
+| Read durable per-session usage and explicit known/unknown cost | `GameAgentRuntime.ReadUsageAsync`, `GameSessionUsageLedger` |
 | Register supported browser/device authorization flows | `BuiltInGameOAuthRegistration` |
 | Observe bounded provider response metadata | `ProviderResponseObserver` |
 | Fetch short-lived developer-hosted credentials | `DeveloperGatewayProvider`, `HttpDeveloperGatewayCredentialSource` |
