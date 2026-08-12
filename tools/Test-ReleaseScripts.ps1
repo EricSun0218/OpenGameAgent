@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $Version = '0.3.0-alpha.1'
+    [string] $Version = '0.3.0-alpha.2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,6 +64,13 @@ foreach ($invalidVersion in @(
 
 $packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
 Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
+$godotSmokeScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engines\godot\test-engine.ps1') -Raw
+$startsGodotProcess = $godotSmokeScript -match 'Start-Process'
+$waitsForGodotProcess = $godotSmokeScript -match '(?m)^\s*-Wait\s*`?\s*$'
+$requiresGodotMarker = $godotSmokeScript -match 'OPENGAMEAGENT_GODOT_SMOKE_OK'
+if (-not ($startsGodotProcess -and $waitsForGodotProcess -and $requiresGodotMarker)) {
+    throw 'The Godot real-editor gate must wait for the editor process and require the runtime smoke marker.'
+}
 $packageLayers = @(Get-ReleasePackageLayers -Packages $packages)
 $layeredPackages = @($packageLayers | ForEach-Object { $_.Packages })
 if ($packageLayers.Count -eq 0 -or $layeredPackages.Count -ne $packages.Count) {

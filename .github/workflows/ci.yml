@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  CI_PACKAGE_VERSION: 0.3.0-alpha.1
+  CI_PACKAGE_VERSION: 0.3.0-alpha.2
 
 jobs:
   dotnet:

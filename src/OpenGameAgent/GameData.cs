@@ -89,6 +89,11 @@ public readonly struct GameMoment : IEquatable<GameMoment>, IComparable<GameMome
 
 public sealed class GameInput
 {
+    /// <summary>
+    /// Creates one logical game input. Supply a stable <paramref name="inputId"/>
+    /// whenever the input may be retried across a process restart or participates
+    /// in durable actions. The generated fallback is unique only to this object.
+    /// </summary>
     public GameInput(
         string sessionId,
         string actorId,

@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Runtime version
-      placeholder: 0.3.0-alpha.1
+      placeholder: 0.3.0-alpha.2
     validations:
       required: true
   - type: dropdown

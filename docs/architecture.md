@@ -41,6 +41,7 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 ### Optional packages
 
 - `OpenGameAgent.Extensions` adds policy, searchable tools, structured player interaction, goals, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
+- `OpenGameAgent.Memory` adds an optional, model-agnostic embedding contract, rebuildable vector index, lexical/vector hybrid recall, structured diagnostics, and game-time reranking. It never replaces the authoritative memory save.
 - `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
 - `OpenGameAgent.Models.BuiltIn` turns the bundled directory into an executable multi-provider model runtime; `OpenGameAgent.Models.Auth.BuiltIn` adds explicitly configured browser and device authorization flows.
 - `OpenGameAgent.ProviderTransport` centralizes bounded response observations, header guards, and retry metadata without adding HTTP concepts to the kernel.
@@ -68,7 +69,7 @@ model tool call
   -> receipt returned to model
 ```
 
-The default operation identity is derived from the stable game input ID, model turn, and tool-call source index. It therefore remains stable even when a provider changes its generated tool-call ID during a retry. A game can replace this with a semantic identity through `GameActionOperationIdFactory`. Replaying an already closed operation returns the stored receipt.
+The default versioned operation identity is derived from the session, actor, stable game input ID, action, timeline/tick, optional save generation, model turn, and tool-call source index. It therefore remains stable when the same logical call is replayed, but cannot collide across actors, sessions, actions, or save generations. A game can replace this with a semantic identity through `GameActionOperationIdFactory`. Replaying an already closed operation returns the stored receipt, while changed arguments or authority preconditions at the same identity fail closed.
 
 The journal distinguishes `Prepared`, `Dispatched`, and a final receipt. If a process can fail after dispatch but before the receipt is recorded, `RecoverAsync` asks the game to reconcile the operation. The framework reports `Uncertain` when the game cannot prove the outcome; it never converts cancellation or a timeout into permission to repeat a write.
 
@@ -97,7 +98,7 @@ Large worlds should not invoke every NPC on every frame. Let deterministic game 
 
 `IGameContextProvider` supplies current authoritative context slices. Memory is intentionally separate: `IGameMemoryStore` stores and filters records, while game code decides which retrieved memories become a context slice. This avoids silently inserting stale or private memory.
 
-The included memory stores support scopes, kinds, tags, importance, owner, game-time cutoffs, and expiry. `RankedGameMemoryStore` can apply a game-selected vector, reranking, or domain-specific ranker without requiring an embedding model in the framework.
+The included memory stores support scopes, kinds, tags, importance, owner, game-time cutoffs, and expiry. `RankedGameMemoryStore` applies a game-selected ranker. The optional `OpenGameAgent.Memory` package adds model-agnostic vector indexing and hybrid recall while keeping the original store authoritative; a game supplies its local or remote embedding implementation and explicitly rebuilds after changing its model identity.
 
 Skills are bounded instruction packages selected by input type and required tools. Skills do not install or execute code. Directory-backed skills accept either a zero-configuration `SKILL.md` with scalar `name` and `description` front matter, or `skill.json` plus a separate Markdown instruction file for game-specific filtering. Manifests are rescanned for each selection and only selected instruction files are loaded, allowing safe edits without rebuilding the runtime.
 

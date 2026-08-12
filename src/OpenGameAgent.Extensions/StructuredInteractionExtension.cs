@@ -409,7 +409,11 @@ public sealed class StructuredInteractionExtension : IGameAgentExtension
         }
 
         return new GameInteractionRequest(
-            string.Join(":", input.InputId, execution.RunId, execution.Turn, execution.ToolCallIndex),
+            GameExtensionOperationIds.Create(
+                "oga-interaction-v1:",
+                "ask_player",
+                input,
+                execution),
             input,
             questions);
     }

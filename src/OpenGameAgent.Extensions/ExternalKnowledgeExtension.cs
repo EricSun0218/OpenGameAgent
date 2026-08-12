@@ -238,13 +238,11 @@ public sealed class ExternalKnowledgeExtension : IGameAgentExtension
                         "The knowledge result exceeded the inline limit and no artifact store is configured.");
                 }
 
-                var artifactId = string.Join(
-                    ":",
-                    context.Input.InputId,
-                    execution.RunId,
-                    execution.Turn,
-                    execution.ToolCallIndex,
-                    sourceId);
+                var artifactId = GameExtensionOperationIds.Create(
+                    "oga-knowledge-v1:",
+                    "query_external_knowledge:" + sourceId,
+                    context.Input,
+                    execution);
                 await _artifactStore.PutAsync(
                     new GameAgentArtifact(
                         artifactId,

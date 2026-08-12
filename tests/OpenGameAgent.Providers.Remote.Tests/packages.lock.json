@@ -211,7 +211,7 @@
       "opengameagent.providers.remote": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       }

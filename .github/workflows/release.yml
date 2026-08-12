@@ -6,7 +6,7 @@ on:
       version:
         description: Semantic version for the artifacts
         required: true
-        default: 0.3.0-alpha.1
+        default: 0.3.0-alpha.2
       publish:
         description: Publish NuGet packages and the GitHub release
         required: true

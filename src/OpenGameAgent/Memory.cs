@@ -234,6 +234,18 @@ public interface IGameMemoryStore
     ValueTask<IReadOnlyList<GameMemory>> SearchAsync(GameMemoryQuery query, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Provides a deterministic, authoritative memory snapshot for rebuilding
+/// optional derived indexes. Implementations must not return memories from a
+/// different session and must preserve the store's normal visibility data.
+/// </summary>
+public interface IGameMemorySnapshotSource
+{
+    IAsyncEnumerable<GameMemory> EnumerateAsync(
+        string sessionId,
+        CancellationToken cancellationToken);
+}
+
 public interface IGameMemoryRanker
 {
     ValueTask<IReadOnlyList<GameMemory>> RankAsync(
@@ -374,7 +386,7 @@ public sealed class RankedGameMemoryStore : IGameMemoryStore
     }
 }
 
-public sealed class InMemoryGameMemoryStore : IGameMemoryStore
+public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnapshotSource
 {
     private readonly object _gate = new();
     private readonly Dictionary<(string SessionId, string OwnerId, string MemoryId), GameMemory> _memories = new();
@@ -459,6 +471,29 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore
             .ToArray();
 
         return new ValueTask<IReadOnlyList<GameMemory>>(Array.AsReadOnly(candidates));
+    }
+
+    public async IAsyncEnumerable<GameMemory> EnumerateAsync(
+        string sessionId,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        sessionId = GameJson.RequireId(sessionId, nameof(sessionId));
+        GameMemory[] snapshot;
+        lock (_gate)
+        {
+            snapshot = _memories.Values
+                .Where(memory => string.Equals(memory.SessionId, sessionId, StringComparison.Ordinal))
+                .OrderBy(memory => memory.OwnerId, StringComparer.Ordinal)
+                .ThenBy(memory => memory.MemoryId, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        foreach (var memory in snapshot)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return memory;
+            await Task.Yield();
+        }
     }
 
     private static IReadOnlyList<MemoryCandidate> ScoreCandidates(

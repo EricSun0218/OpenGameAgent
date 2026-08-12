@@ -32,7 +32,7 @@ Legacy HTTP+SSE is optional in Agent Plugins 1.0.0 and is not implemented. Its e
 Install the optional adapter package alongside the core runtime:
 
 ```powershell
-dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.1
+dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.2
 ```
 
 ```csharp

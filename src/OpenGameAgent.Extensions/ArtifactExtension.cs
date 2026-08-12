@@ -213,16 +213,17 @@ public sealed class GameAgentArtifactExtension : IGameAgentExtension
             context => new AgentHooks
             {
                 AfterToolCallAsync = (toolContext, cancellationToken) =>
-                    SpillToolResultAsync(context, toolContext.ToolCall, toolContext.Result, cancellationToken),
+                    SpillToolResultAsync(context, toolContext, cancellationToken),
             });
     }
 
     private async ValueTask<ToolResult?> SpillToolResultAsync(
         GameAgentExtensionRunContext context,
-        ToolCallContent call,
-        ToolResult result,
+        AfterToolCallContext toolContext,
         CancellationToken cancellationToken)
     {
+        var call = toolContext.ToolCall;
+        var result = toolContext.Result;
         if (string.Equals(call.Name, "read_agent_artifact", StringComparison.Ordinal))
         {
             return result;
@@ -239,16 +240,23 @@ public sealed class GameAgentArtifactExtension : IGameAgentExtension
             return result;
         }
 
+        var toolCallIndex = FindToolCallIndex(toolContext.AssistantMessage, call);
         var payload = JsonSerializer.Serialize(new
         {
             toolName = call.Name,
-            toolCallId = call.Id,
+            toolCallId = string.Join(
+                ":",
+                context.Input.InputId,
+                toolContext.Turn.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                toolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            turn = toolContext.Turn,
+            toolCallIndex,
             result.IsError,
             result.OutcomeUncertain,
             result.DetailsJson,
             content = result.Content.Select(SerializeContent),
         });
-        var artifactId = CreateArtifactId(context, call, payload);
+        var artifactId = CreateArtifactId(context, toolContext.Turn, toolCallIndex, call.Name, payload);
         try
         {
             await _store.PutAsync(
@@ -344,17 +352,25 @@ public sealed class GameAgentArtifactExtension : IGameAgentExtension
 
     private static string CreateArtifactId(
         GameAgentExtensionRunContext context,
-        ToolCallContent call,
+        int turn,
+        int toolCallIndex,
+        string toolName,
         string payload)
     {
         using var hash = SHA256.Create();
-        var bytes = hash.ComputeHash(Encoding.UTF8.GetBytes(string.Join(
-            "\n",
-            context.Input.SessionId,
-            context.Input.ActorId,
-            context.Input.InputId,
-            call.Id,
-            payload)));
+        using var identity = new MemoryStream();
+        Write("OpenGameAgent.ToolResultArtifactId.v1");
+        Write(context.Input.SessionId);
+        Write(context.Input.ActorId);
+        Write(context.Input.InputId);
+        Write(context.Input.Moment.TimelineId);
+        Write(context.Input.Moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(turn.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(toolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(toolName);
+        Write(payload);
+        identity.Position = 0;
+        var bytes = hash.ComputeHash(identity);
         var encoded = new StringBuilder(bytes.Length * 2);
         foreach (var value in bytes)
         {
@@ -362,6 +378,41 @@ public sealed class GameAgentArtifactExtension : IGameAgentExtension
         }
 
         return "tool-result-" + encoded;
+
+        void Write(string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            Span<byte> length = stackalloc byte[4];
+            length[0] = (byte)(bytes.Length >> 24);
+            length[1] = (byte)(bytes.Length >> 16);
+            length[2] = (byte)(bytes.Length >> 8);
+            length[3] = (byte)bytes.Length;
+            identity.Write(length);
+            identity.Write(bytes, 0, bytes.Length);
+        }
+    }
+
+    private static int FindToolCallIndex(AgentMessage assistantMessage, ToolCallContent call)
+    {
+        var index = 0;
+        foreach (var content in assistantMessage.Content)
+        {
+            if (content is not ToolCallContent candidate)
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(candidate, call)
+                || (string.Equals(candidate.Id, call.Id, StringComparison.Ordinal)
+                    && string.Equals(candidate.Name, call.Name, StringComparison.Ordinal)))
+            {
+                return index;
+            }
+
+            index++;
+        }
+
+        throw new InvalidOperationException("The completed tool call was not present in its assistant message.");
     }
 
     private AgentTool CreateReadTool(GameAgentExtensionRunContext context) =>

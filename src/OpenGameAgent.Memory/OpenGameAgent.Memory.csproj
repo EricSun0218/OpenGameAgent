@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>OpenGameAgent.Memory</RootNamespace>
+    <Description>Optional vector memory, hybrid recall, rebuild lifecycle, and game-aware reranking for OpenGameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+  </ItemGroup>
+</Project>

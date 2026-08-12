@@ -219,22 +219,22 @@
       "opengameagent": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.client": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.1, )",
+          "OpenGameAgent": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.extensions": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Models": "[0.3.0-alpha.1, )"
+          "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Models": "[0.3.0-alpha.2, )"
         }
       },
       "opengameagent.kernel": {
@@ -246,22 +246,22 @@
       "opengameagent.models": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )"
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )"
         }
       },
       "opengameagent.persistence": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Extensions": "[0.3.0-alpha.1, )",
+          "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Extensions": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.providers.openaicompatible": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
@@ -271,9 +271,9 @@
       "opengameagent.server": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Persistence": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.OpenAICompatible": "[0.3.0-alpha.1, )"
+          "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Persistence": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.OpenAICompatible": "[0.3.0-alpha.2, )"
         }
       }
     }

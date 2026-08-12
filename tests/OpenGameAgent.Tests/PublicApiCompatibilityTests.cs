@@ -5,7 +5,7 @@ namespace OpenGameAgent.Tests;
 
 public sealed class PublicApiCompatibilityTests
 {
-    private const string ApprovedApiHash = "4B4E24261A64AA1944A7A416B751BF0D47693C7034F8A226A7283EE684C6C2A8";
+    private const string ApprovedApiHash = "356405F4CFB66C1CEC6D5F5BE5AB9B428EF3E46C85986D9BF7BF04940247D95B";
 
     [Fact]
     public void RuntimePublicApiMatchesTheApprovedStableSurface()

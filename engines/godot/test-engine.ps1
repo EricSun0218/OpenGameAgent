@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Godot,
     [Parameter(Mandatory = $true)]
-    [string] $GodotSharpDir
+    [string] $GodotSharpDir,
+    [switch] $KeepProject
 )
 
 Set-StrictMode -Version Latest
@@ -141,13 +142,47 @@ script = ExtResource("1")
 
     & dotnet build (Join-Path $testRoot 'OpenGameAgent.Godot.Smoke.csproj') -c Debug
     if ($LASTEXITCODE -ne 0) { throw 'Godot smoke project build failed.' }
-    & $Godot --headless --path $testRoot --editor --quit
-    if ($LASTEXITCODE -ne 0) { throw 'Godot editor import failed.' }
-    & $Godot --headless --path $testRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Godot runtime smoke test failed.' }
+    $editorOut = Join-Path $testRoot 'godot-editor.stdout.log'
+    $editorErr = Join-Path $testRoot 'godot-editor.stderr.log'
+    $editor = Start-Process `
+        -FilePath $Godot `
+        -ArgumentList @('--headless', '--path', $testRoot, '--editor', '--quit') `
+        -PassThru `
+        -Wait `
+        -NoNewWindow `
+        -RedirectStandardOutput $editorOut `
+        -RedirectStandardError $editorErr
+    if ($editor.ExitCode -ne 0) {
+        $details = ((Get-Content -LiteralPath $editorOut -Raw -ErrorAction SilentlyContinue) +
+            (Get-Content -LiteralPath $editorErr -Raw -ErrorAction SilentlyContinue)).Trim()
+        throw "Godot editor import failed with exit code $($editor.ExitCode). $details"
+    }
+
+    $runtimeOut = Join-Path $testRoot 'godot-runtime.stdout.log'
+    $runtimeErr = Join-Path $testRoot 'godot-runtime.stderr.log'
+    $runtime = Start-Process `
+        -FilePath $Godot `
+        -ArgumentList @('--headless', '--path', $testRoot) `
+        -PassThru `
+        -Wait `
+        -NoNewWindow `
+        -RedirectStandardOutput $runtimeOut `
+        -RedirectStandardError $runtimeErr
+    $runtimeLog = ((Get-Content -LiteralPath $runtimeOut -Raw -ErrorAction SilentlyContinue) +
+        (Get-Content -LiteralPath $runtimeErr -Raw -ErrorAction SilentlyContinue)).Trim()
+    if ($runtime.ExitCode -ne 0) {
+        throw "Godot runtime smoke test failed with exit code $($runtime.ExitCode). $runtimeLog"
+    }
+
+    if ($runtimeLog -notmatch 'OPENGAMEAGENT_GODOT_SMOKE_OK') {
+        throw "Godot runtime did not execute the OpenGameAgent smoke scene. $runtimeLog"
+    }
 }
 finally {
-    if (Test-Path -LiteralPath $testRoot) {
+    if ($KeepProject) {
+        Write-Verbose "Godot smoke project retained at $testRoot"
+    }
+    elseif (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
