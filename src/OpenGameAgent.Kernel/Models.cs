@@ -46,11 +46,32 @@ public sealed class ModelCost
         double output = 0,
         double cacheRead = 0,
         double cacheWrite = 0)
+        : this(
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+            input != 0 || output != 0 || cacheRead != 0 || cacheWrite != 0)
+    {
+    }
+
+    public ModelCost(bool isKnown)
+        : this(0, 0, 0, 0, isKnown)
+    {
+    }
+
+    public ModelCost(
+        double input,
+        double output,
+        double cacheRead,
+        double cacheWrite,
+        bool isKnown)
     {
         Input = RequireAmount(input, nameof(input));
         Output = RequireAmount(output, nameof(output));
         CacheRead = RequireAmount(cacheRead, nameof(cacheRead));
         CacheWrite = RequireAmount(cacheWrite, nameof(cacheWrite));
+        IsKnown = isKnown;
     }
 
     public double Input { get; }
@@ -61,7 +82,15 @@ public sealed class ModelCost
 
     public double CacheWrite { get; }
 
+    /// <summary>
+    /// Whether the amounts represent a complete price rather than an unavailable estimate.
+    /// Unknown cost is distinct from a known free request.
+    /// </summary>
+    public bool IsKnown { get; }
+
     public double Total => Input + Output + CacheRead + CacheWrite;
+
+    public double? TotalIfKnown => IsKnown ? Total : null;
 
     internal static ModelCost Aggregate(IEnumerable<ModelCost> values)
     {
@@ -69,15 +98,17 @@ public sealed class ModelCost
         var output = 0d;
         var cacheRead = 0d;
         var cacheWrite = 0d;
+        var known = true;
         foreach (var value in values)
         {
             input += value.Input;
             output += value.Output;
             cacheRead += value.CacheRead;
             cacheWrite += value.CacheWrite;
+            known &= value.IsKnown;
         }
 
-        return new ModelCost(input, output, cacheRead, cacheWrite);
+        return new ModelCost(input, output, cacheRead, cacheWrite, known);
     }
 
     private static double RequireAmount(double value, string name)

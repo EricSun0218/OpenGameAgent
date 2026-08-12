@@ -183,16 +183,17 @@ public static class GameModelDirectory
             outputCapabilities |= GameModelOutputCapabilities.Reasoning;
         }
 
+        var modelId = RequiredString(element, "id", 1024);
         return new GameModelDescriptor(
             provider.ProviderId,
-            RequiredString(element, "id", 1024),
+            modelId,
             OptionalString(element, "name", 4096),
             OptionalInt32(element, "contextWindow") ?? 0,
             OptionalInt32(element, "maximumOutput") ?? 0,
             ParseInputCapabilities(element),
             outputCapabilities,
             reasoningLevels,
-            ParseCost(element),
+            ParseCost(element, modelId),
             ParseStringMap(element, "metadata"),
             ParseReasoningValues(element, reasoningLevels),
             OptionalString(element, "api", 256) ?? "custom",
@@ -293,7 +294,7 @@ public static class GameModelDirectory
         return new ReadOnlyDictionary<GameReasoningLevel, string>(result);
     }
 
-    private static GameModelCost ParseCost(JsonElement element)
+    private static GameModelCost ParseCost(JsonElement element, string modelId)
     {
         if (!element.TryGetProperty("cost", out var cost))
         {
@@ -316,12 +317,24 @@ public static class GameModelDirectory
             }
         }
 
+        var input = OptionalDecimal(cost, "input") ?? 0;
+        var output = OptionalDecimal(cost, "output") ?? 0;
+        var cacheRead = OptionalDecimal(cost, "cacheRead") ?? 0;
+        var cacheWrite = OptionalDecimal(cost, "cacheWrite") ?? 0;
+        var known = OptionalBoolean(cost, "known")
+            ?? input != 0
+            || output != 0
+            || cacheRead != 0
+            || cacheWrite != 0
+            || tiers.Count != 0
+            || modelId.EndsWith(":free", StringComparison.OrdinalIgnoreCase);
         return new GameModelCost(
-            OptionalDecimal(cost, "input") ?? 0,
-            OptionalDecimal(cost, "output") ?? 0,
-            OptionalDecimal(cost, "cacheRead") ?? 0,
-            OptionalDecimal(cost, "cacheWrite") ?? 0,
-            tiers);
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+            tiers,
+            known);
     }
 
     private static IReadOnlyDictionary<string, string> ParseStringMap(JsonElement element, string propertyName)
