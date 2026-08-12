@@ -71,6 +71,39 @@ public sealed class ModelCatalogTests
     }
 
     [Fact]
+    public void PricingDistinguishesUnknownFromKnownFreeAndEstimatesItemizedUsage()
+    {
+        var unknown = Catalog(Registration(
+            "provider",
+            new ScriptedProvider(),
+            Model("provider", "unknown", cost: new GameModelCost())))
+            .Resolve("provider", "unknown");
+        Assert.False(unknown.Model.Cost.IsKnown);
+        Assert.Null(unknown.EstimateCostOrNull(new ModelUsage(1, 1)));
+        Assert.Throws<ArgumentNullException>(() => unknown.EstimateCostOrNull(null!));
+        Assert.Throws<InvalidOperationException>(() => unknown.EstimateCost(new ModelUsage(1, 1)));
+
+        var free = new GameModelCost(isKnown: true);
+        Assert.True(free.IsKnown);
+        Assert.True(free.Estimate(new ModelUsage(1, 1)).IsKnown);
+        Assert.Equal(0, free.Estimate(new ModelUsage(1, 1)).Total);
+
+        var priced = new GameModelCost(1, 2, 0.5m, 1.5m, tiers: null, isKnown: true);
+        var estimate = priced.Estimate(new ModelUsage(
+            inputTokens: 5,
+            outputTokens: 4,
+            cacheReadTokens: 3,
+            cacheWriteTokens: 2,
+            reasoningTokens: 1,
+            cacheWriteOneHourTokens: 1));
+        Assert.True(estimate.IsKnown);
+        Assert.Equal(0.000005, estimate.Input, 10);
+        Assert.Equal(0.000008, estimate.Output, 10);
+        Assert.Equal(0.0000015, estimate.CacheRead, 10);
+        Assert.Equal(0.0000035, estimate.CacheWrite, 10);
+    }
+
+    [Fact]
     public void DescriptorPreservesAlwaysThinkingAndProviderSpecificOffValues()
     {
         var alwaysThinking = Model(
@@ -163,6 +196,7 @@ public sealed class ModelCatalogTests
             ($"{nameof(GameModelDescriptor.Cost)}.Output", () => ComparableModel(cost: ComparableCost(output: 12))),
             ($"{nameof(GameModelDescriptor.Cost)}.CacheRead", () => ComparableModel(cost: ComparableCost(cacheRead: 13))),
             ($"{nameof(GameModelDescriptor.Cost)}.CacheWrite", () => ComparableModel(cost: ComparableCost(cacheWrite: 14))),
+            ($"{nameof(GameModelDescriptor.Cost)}.IsKnown", () => ComparableModel(cost: new GameModelCost(isKnown: false))),
             ($"{nameof(GameModelDescriptor.Cost)}.TierCount", () => ComparableModel(cost: new GameModelCost(
                 1,
                 2,

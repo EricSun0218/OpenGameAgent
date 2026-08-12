@@ -52,6 +52,34 @@ public sealed class GameModelDirectoryTests
     }
 
     [Fact]
+    public void DirectoryPricingDistinguishesUnavailableKnownFreeAndFreeModelIds()
+    {
+        const string json = """
+            {
+              "version": "test",
+              "generatedAt": "2026-08-12T00:00:00Z",
+              "providers": [{
+                "id": "provider",
+                "models": [
+                  { "id": "unknown", "cost": {} },
+                  { "id": "known-free", "cost": { "known": true } },
+                  { "id": "model:free", "cost": {} },
+                  { "id": "priced", "cost": { "input": 1.25 } }
+                ]
+              }]
+            }
+            """;
+
+        var models = GameModelDirectory.ParseJson(json).GetModels("provider")
+            .ToDictionary(model => model.ModelId, StringComparer.Ordinal);
+
+        Assert.False(models["unknown"].Cost.IsKnown);
+        Assert.True(models["known-free"].Cost.IsKnown);
+        Assert.True(models["model:free"].Cost.IsKnown);
+        Assert.True(models["priced"].Cost.IsKnown);
+    }
+
+    [Fact]
     public void BundledDirectoryApisMatchExecutableProviderCapabilities()
     {
         using var httpClient = new HttpClient();
