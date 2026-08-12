@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -64,6 +65,13 @@ public static class ServerEndpoints
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return;
+            }
+
+            if (context.User.Identity?.IsAuthenticated != true)
+            {
+                context.User = new ClaimsPrincipal(new ClaimsIdentity(
+                    new[] { new Claim(ClaimTypes.NameIdentifier, "server-api-key") },
+                    "OpenGameAgent.ApiKey"));
             }
 
             await next(context);
@@ -135,19 +143,16 @@ public static class ServerEndpoints
         int maximumRequestBodyBytes,
         CancellationToken cancellationToken)
     {
+        ControlRequest request;
+        GameSessionKey key;
         try
         {
             using var requestDocument = await ReadRequestDocumentAsync(
                 httpRequest,
                 maximumRequestBodyBytes,
                 cancellationToken);
-            var request = ParseRequest<ControlRequest>(requestDocument.RootElement);
-            var accepted = runtime.TrySteer(
-                request.ToKey(),
-                AgentMessage.UserJson(request.GetPayloadJson()));
-            return accepted
-                ? Results.Ok(new { accepted = true })
-                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+            request = ParseRequest<ControlRequest>(requestDocument.RootElement);
+            key = request.ToKey();
         }
         catch (RequestBodyTooLargeException exception)
         {
@@ -166,6 +171,33 @@ public static class ServerEndpoints
                 new { accepted = false, error = "invalid_request", message = exception.Message },
                 statusCode: StatusCodes.Status400BadRequest);
         }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.Steer,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        try
+        {
+            var accepted = runtime.TrySteer(key, AgentMessage.UserJson(request.GetPayloadJson()));
+            return accepted
+                ? Results.Ok(new { accepted = true })
+                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or AgentLimitException
+            or GameRuntimeLimitException
+            or JsonException)
+        {
+            return Results.Json(
+                new { accepted = false, error = "invalid_request", message = exception.Message },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
     }
 
     private static async Task<IResult> AbortAsync(
@@ -174,17 +206,16 @@ public static class ServerEndpoints
         int maximumRequestBodyBytes,
         CancellationToken cancellationToken)
     {
+        ControlRequest request;
+        GameSessionKey key;
         try
         {
             using var requestDocument = await ReadRequestDocumentAsync(
                 httpRequest,
                 maximumRequestBodyBytes,
                 cancellationToken);
-            var request = ParseRequest<ControlRequest>(requestDocument.RootElement);
-            var accepted = runtime.TryAbort(request.ToKey());
-            return accepted
-                ? Results.Ok(new { accepted = true })
-                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
+            request = ParseRequest<ControlRequest>(requestDocument.RootElement);
+            key = request.ToKey();
         }
         catch (RequestBodyTooLargeException exception)
         {
@@ -193,6 +224,30 @@ public static class ServerEndpoints
         catch (UnsupportedRequestContentTypeException exception)
         {
             return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            return Results.Json(
+                new { accepted = false, error = "invalid_request", message = exception.Message },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.Abort,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        try
+        {
+            var accepted = runtime.TryAbort(key);
+            return accepted
+                ? Results.Ok(new { accepted = true })
+                : Results.NotFound(new { accepted = false, error = "actor_not_running" });
         }
         catch (Exception exception) when (exception is ArgumentException or JsonException)
         {
@@ -230,6 +285,16 @@ public static class ServerEndpoints
             return Results.Json(
                 new { error = "invalid_request", message = exception.Message },
                 statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            new GameSessionKey(input.SessionId, input.ActorId),
+            GameAgentServerOperation.Run,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
         }
 
         Task<GameAgentRunResult> pendingRun;
@@ -286,6 +351,17 @@ public static class ServerEndpoints
             await response.WriteAsJsonAsync(
                 new { error = "invalid_request", message = exception.Message },
                 cancellationToken);
+            return;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            new GameSessionKey(input.SessionId, input.ActorId),
+            GameAgentServerOperation.Stream,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            await authorizationFailure.ExecuteAsync(httpRequest.HttpContext);
             return;
         }
 
@@ -357,6 +433,33 @@ public static class ServerEndpoints
 
     private static IResult RequestError(int statusCode, string error, string message) =>
         Results.Json(new { error, message }, statusCode: statusCode);
+
+    private static async ValueTask<IResult?> GetAuthorizationFailureAsync(
+        HttpContext httpContext,
+        GameSessionKey key,
+        GameAgentServerOperation operation,
+        CancellationToken cancellationToken)
+    {
+        var authorizer = httpContext.RequestServices.GetService<IGameAgentOwnerAuthorizer>();
+        if (authorizer is null)
+        {
+            return null;
+        }
+
+        if (httpContext.User.Identity?.IsAuthenticated != true)
+        {
+            return Results.Json(
+                new { error = "unauthorized" },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var allowed = await authorizer.AuthorizeAsync(
+            new GameAgentAuthorizationContext(httpContext.User, key, operation),
+            cancellationToken);
+        return allowed
+            ? null
+            : Results.Json(new { error = "forbidden" }, statusCode: StatusCodes.Status403Forbidden);
+    }
 
     private static async Task<JsonDocument> ReadRequestDocumentAsync(
         HttpRequest request,

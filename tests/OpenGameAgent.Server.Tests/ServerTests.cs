@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -431,6 +432,145 @@ public sealed class ServerTests
     }
 
     [Fact]
+    public async Task OwnerAuthorizationRejectsAnonymousAndCrossOwnerRunsBeforeRuntimeStateIsTouched()
+    {
+        var provider = new ResourceCaptureProvider();
+        var sessionStore = new CountingGameSessionStore();
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            SessionStore = sessionStore,
+        });
+        var authorizer = new TestOwnerAuthorizer((subject, key, _) =>
+            subject == "owner-a" && key == new GameSessionKey("session", "actor"));
+        await using var app = await CreateAppAsync(runtime, authorizer: authorizer);
+        using var client = app.GetTestClient();
+
+        foreach (var path in new[] { "/v1/run", "/v1/run/stream" })
+        {
+            using var anonymousContent = new StringContent(RequestJson("anonymous"), Encoding.UTF8, "application/json");
+            using var anonymous = await client.PostAsync(path, anonymousContent, TestContext.Current.CancellationToken);
+            Assert.Equal(System.Net.HttpStatusCode.Unauthorized, anonymous.StatusCode);
+
+            using var denied = CreateOwnedRequest(
+                HttpMethod.Post,
+                path,
+                "owner-a",
+                RequestJson("cross-owner", "other-session", "actor"));
+            using var deniedResponse = await client.SendAsync(denied, TestContext.Current.CancellationToken);
+            Assert.Equal(System.Net.HttpStatusCode.Forbidden, deniedResponse.StatusCode);
+        }
+
+        Assert.DoesNotContain(authorizer.Calls, call => call.SubjectId.Length == 0);
+        Assert.Equal(0, sessionStore.LoadCalls);
+        Assert.Equal(0, sessionStore.SaveCalls);
+        Assert.Empty(provider.Requests);
+
+        using var allowed = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run",
+            "owner-a",
+            RequestJson("allowed"));
+        using var allowedResponse = await client.SendAsync(allowed, TestContext.Current.CancellationToken);
+
+        allowedResponse.EnsureSuccessStatusCode();
+        Assert.True(sessionStore.LoadCalls > 0);
+        Assert.True(sessionStore.SaveCalls > 0);
+        Assert.Single(provider.Requests);
+        Assert.Contains(authorizer.Calls, call =>
+            call.SubjectId == "owner-a"
+            && call.Key == new GameSessionKey("session", "actor")
+            && call.Operation == GameAgentServerOperation.Run);
+        Assert.Contains(authorizer.Calls, call => call.Operation == GameAgentServerOperation.Stream);
+    }
+
+    [Fact]
+    public async Task ApiKeyAuthenticationProducesAStablePrincipalForOwnerAuthorization()
+    {
+        var authorizer = new TestOwnerAuthorizer((subject, key, operation) =>
+            subject == "server-api-key"
+            && key == new GameSessionKey("session", "actor")
+            && operation == GameAgentServerOperation.Run);
+        await using var app = await CreateAppAsync(
+            new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")),
+            apiKey: "secret",
+            authorizer: authorizer);
+        using var client = app.GetTestClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/run")
+        {
+            Content = new StringContent(RequestJson("api-key-owner"), Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "secret");
+
+        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        Assert.Contains(authorizer.Calls, call => call.SubjectId == "server-api-key");
+    }
+
+    [Fact]
+    public async Task OwnerAuthorizationCoversSteerAndAbortWithoutLettingPayloadSelectAnotherOwner()
+    {
+        var provider = new BlockingServerProvider();
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["autonomous"] = GameRouteDecision.Agent("typed"),
+            }),
+        });
+        var key = new GameSessionKey("owned-session", "owned-actor");
+        var authorizer = new TestOwnerAuthorizer((subject, resource, _) =>
+            subject == "owner-a" && resource == key);
+        await using var app = await CreateAppAsync(runtime, authorizer: authorizer);
+        using var client = app.GetTestClient();
+        var input = new GameInput(
+            key.SessionId,
+            key.ActorId,
+            "autonomous",
+            "{}",
+            new GameMoment("world", 1),
+            "owned-input");
+        using var runRequest = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run",
+            "owner-a",
+            GameAgentWire.SerializeInput(input));
+        var run = client.SendAsync(runRequest, TestContext.Current.CancellationToken);
+        await provider.FirstRequestStarted.Task;
+
+        using var deniedSteer = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/control/steer",
+            "owner-b",
+            ControlJson(key, "{\"threat\":true}"));
+        using var deniedSteerResponse = await client.SendAsync(deniedSteer, TestContext.Current.CancellationToken);
+        using var deniedAbort = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/control/abort",
+            "owner-b",
+            ControlJson(key));
+        using var deniedAbortResponse = await client.SendAsync(deniedAbort, TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, deniedSteerResponse.StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, deniedAbortResponse.StatusCode);
+        Assert.False(run.IsCompleted);
+        Assert.Single(provider.Requests);
+
+        using var allowedAbort = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/control/abort",
+            "owner-a",
+            ControlJson(key));
+        using var allowedAbortResponse = await client.SendAsync(allowedAbort, TestContext.Current.CancellationToken);
+        allowedAbortResponse.EnsureSuccessStatusCode();
+        using var runResponse = await run;
+
+        Assert.Contains(authorizer.Calls, call => call.SubjectId == "owner-b" && call.Operation == GameAgentServerOperation.Steer);
+        Assert.Contains(authorizer.Calls, call => call.SubjectId == "owner-b" && call.Operation == GameAgentServerOperation.Abort);
+        Assert.Contains(authorizer.Calls, call => call.SubjectId == "owner-a" && call.Operation == GameAgentServerOperation.Abort);
+    }
+
+    [Fact]
     public async Task EngineClientRejectsOversizedStreamingLineBeforeDispatchingEvent()
     {
         using var httpClient = new HttpClient(new StaticResponseHandler(
@@ -619,29 +759,130 @@ public sealed class ServerTests
     private static async Task<WebApplication> CreateAppAsync(
         GameAgentRuntime runtime,
         string? apiKey = null,
-        int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)
+        int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes,
+        IGameAgentOwnerAuthorizer? authorizer = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSingleton(runtime);
+        if (authorizer is not null)
+        {
+            builder.Services.AddSingleton(authorizer);
+        }
+
         var app = builder.Build();
         app.UseOpenGameAgentApiKey(apiKey);
+        if (authorizer is not null)
+        {
+            app.Use(async (context, next) =>
+            {
+                if (context.Request.Headers.TryGetValue("X-Test-Subject", out var values)
+                    && values.Count == 1
+                    && !string.IsNullOrWhiteSpace(values[0]))
+                {
+                    context.User = new ClaimsPrincipal(new ClaimsIdentity(
+                        new[] { new Claim(ClaimTypes.NameIdentifier, values[0]!) },
+                        "test"));
+                }
+
+                await next(context);
+            });
+        }
+
         app.MapOpenGameAgent(maximumRequestBodyBytes);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
     }
 
-    private static string RequestJson(string inputId) => $$"""
+    private static string RequestJson(
+        string inputId,
+        string sessionId = "session",
+        string actorId = "actor") => $$"""
         {
           "inputId": "{{inputId}}",
-          "sessionId": "session",
-          "actorId": "actor",
+          "sessionId": "{{sessionId}}",
+          "actorId": "{{actorId}}",
           "type": "chat",
           "payload": { "text": "hello", "weight": 1.5 },
           "timelineId": "world",
           "tick": 42
         }
         """;
+
+    private static HttpRequestMessage CreateOwnedRequest(
+        HttpMethod method,
+        string path,
+        string subjectId,
+        string json)
+    {
+        var request = new HttpRequestMessage(method, path)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("X-Test-Subject", subjectId);
+        return request;
+    }
+
+    private static string ControlJson(GameSessionKey key, string payloadJson = "{}") => $$"""
+        {
+          "sessionId": "{{key.SessionId}}",
+          "actorId": "{{key.ActorId}}",
+          "payload": {{payloadJson}}
+        }
+        """;
+
+    private sealed class TestOwnerAuthorizer : IGameAgentOwnerAuthorizer
+    {
+        private readonly Func<string, GameSessionKey, GameAgentServerOperation, bool> _authorize;
+
+        public TestOwnerAuthorizer(Func<string, GameSessionKey, GameAgentServerOperation, bool> authorize)
+        {
+            _authorize = authorize;
+        }
+
+        public System.Collections.Concurrent.ConcurrentQueue<AuthorizationCall> Calls { get; } = new();
+
+        public ValueTask<bool> AuthorizeAsync(
+            GameAgentAuthorizationContext context,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var subjectId = context.Principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? string.Empty;
+            Calls.Enqueue(new AuthorizationCall(subjectId, context.Key, context.Operation));
+            return new ValueTask<bool>(_authorize(subjectId, context.Key, context.Operation));
+        }
+    }
+
+    private sealed record AuthorizationCall(
+        string SubjectId,
+        GameSessionKey Key,
+        GameAgentServerOperation Operation);
+
+    private sealed class CountingGameSessionStore : IGameSessionStore
+    {
+        private readonly InMemoryGameSessionStore _inner = new();
+
+        public int LoadCalls { get; private set; }
+
+        public int SaveCalls { get; private set; }
+
+        public ValueTask<GameSessionSnapshot?> LoadAsync(
+            GameSessionKey key,
+            CancellationToken cancellationToken)
+        {
+            LoadCalls++;
+            return _inner.LoadAsync(key, cancellationToken);
+        }
+
+        public ValueTask<GameSessionSaveResult> SaveAsync(
+            GameSessionSnapshot snapshot,
+            long expectedRevision,
+            CancellationToken cancellationToken)
+        {
+            SaveCalls++;
+            return _inner.SaveAsync(snapshot, expectedRevision, cancellationToken);
+        }
+    }
 
     private sealed class StreamingProvider : IModelProvider
     {
