@@ -29,7 +29,7 @@ public sealed class PersistenceTests
                 AgentRole.Assistant,
                 new AgentContent[]
                 {
-                    new ReasoningContent("plan", "signature"),
+                    new ReasoningContent("plan", "signature", redacted: true),
                     new ToolCallContent("call", "move", "{\"x\":2.5}"),
                 },
                 DateTimeOffset.UnixEpoch.AddSeconds(1),
@@ -59,6 +59,7 @@ public sealed class PersistenceTests
         Assert.Equal(3, loaded.Messages.Count);
         Assert.Equal("{\"value\":1.25}", Assert.IsType<JsonContent>(loaded.Messages[0].Content[1]).Json);
         Assert.Equal("signature", Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Signature);
+        Assert.True(Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Redacted);
         Assert.Equal(10, loaded.Messages[1].Usage!.InputTokens);
         Assert.Equal("{\"revision\":7}", loaded.Messages[2].DetailsJson);
         Assert.Equal(3, loaded.Messages[2].Usage!.TotalTokens);
@@ -113,10 +114,42 @@ public sealed class PersistenceTests
         Assert.Equal("{\"removed\":8}", loaded.UsageLedger.Records[1].DetailsJson);
         Assert.Equal(2, loaded.UsageLedger.Records[0].Usage.ReasoningTokens);
         Assert.Equal(1, loaded.UsageLedger.Records[0].Usage.CacheWriteOneHourTokens);
+        Assert.True(loaded.UsageLedger.Records[0].Usage.Cost.IsKnown);
+        Assert.True(loaded.UsageLedger.Stats.Total.CostKnown);
         var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
-        Assert.Equal(3, JsonNode.Parse(await File.ReadAllTextAsync(
+        Assert.Equal(4, JsonNode.Parse(await File.ReadAllTextAsync(
             file,
             TestContext.Current.CancellationToken))!["FormatVersion"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task UnknownUsageCostRemainsUnknownAcrossRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("unknown-cost", "actor");
+        var store = new FileGameSessionStore(directory.Path);
+        var saved = await store.SaveAsync(
+            new GameSessionSnapshot(
+                key,
+                1,
+                usageLedger: new GameSessionUsageLedger(new[]
+                {
+                    new GameSessionUsageRecord(
+                        "unknown-cost-record",
+                        GameSessionUsageCause.Assistant,
+                        new ModelUsage(3, 1)),
+                })),
+            0,
+            TestContext.Current.CancellationToken);
+
+        var loaded = await new FileGameSessionStore(directory.Path)
+            .LoadAsync(key, TestContext.Current.CancellationToken);
+
+        Assert.True(saved.Saved);
+        Assert.NotNull(loaded);
+        Assert.False(Assert.Single(loaded.UsageLedger.Records).Usage.Cost.IsKnown);
+        Assert.False(loaded.UsageLedger.Stats.Total.CostKnown);
+        Assert.Null(loaded.UsageLedger.Stats.Total.CostTotalIfKnown);
     }
 
     [Fact]
@@ -361,6 +394,67 @@ public sealed class PersistenceTests
         Assert.Equal(GameActionStatus.Committed, entry!.Receipt!.Status);
         Assert.Equal(2, entry.Receipt.StateRevision);
         Assert.Empty(await finalRestart.ListPendingAsync(10, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ActionGenerationBindingSurvivesRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var baseline = Intent("generation-operation");
+        var intent = new GameActionIntent(
+            baseline.OperationId,
+            baseline.InputId,
+            baseline.SessionId,
+            baseline.ActorId,
+            baseline.Action,
+            baseline.ArgumentsJson,
+            baseline.Moment,
+            baseline.ExpectedRevision,
+            "save-generation-4");
+        await new FileGameActionJournal(directory.Path).ReserveAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+
+        var restored = await new FileGameActionJournal(directory.Path).FindAsync(
+            intent.OperationId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("save-generation-4", restored!.Intent.GenerationId);
+        var conflicting = new GameActionIntent(
+            intent.OperationId,
+            intent.InputId,
+            intent.SessionId,
+            intent.ActorId,
+            intent.Action,
+            intent.ArgumentsJson,
+            intent.Moment,
+            intent.ExpectedRevision,
+            "different-generation");
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await new FileGameActionJournal(directory.Path).ReserveAsync(
+                conflicting,
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task VersionOneActionJournalRemainsReadableWithoutGenerationBinding()
+    {
+        using var directory = new TemporaryDirectory();
+        var intent = Intent("legacy-action");
+        await new FileGameActionJournal(directory.Path).ReserveAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+        var path = Assert.Single(Directory.GetFiles(directory.Path, "*.action.json"));
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!.AsObject();
+        document["FormatVersion"] = 1;
+        document["Intent"]!.AsObject().Remove("GenerationId");
+        await File.WriteAllTextAsync(path, document.ToJsonString(), TestContext.Current.CancellationToken);
+
+        var restored = await new FileGameActionJournal(directory.Path).FindAsync(
+            intent.OperationId,
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(restored!.Intent.GenerationId);
     }
 
     [Fact]
