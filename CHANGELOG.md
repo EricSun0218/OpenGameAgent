@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0-alpha.2
+
+- Add the optional `OpenGameAgent.Memory` package with a model-agnostic embedding provider contract, authoritative-save verification, rebuildable local vector indexes, hybrid lexical/vector recall, structured diagnostics, and game-time-aware reranking.
+- Add deterministic authoritative memory snapshots for in-memory and local-file stores so derived indexes can be rebuilt explicitly after embedding model or preprocessing changes.
+- Document local source references and game-provided local embedding integration, including BGE-M3-compatible query/document adapters and save boundaries.
+- Make generated memory, delegation, structured-interaction, large-result artifact, external-knowledge artifact, and MCP artifact IDs stable across fresh runtime attempts, and keep engine project lock files aligned with the release version.
+
 ## 0.3.0-alpha.1
 
 - Introduce a compact stateful streaming Agent kernel with typed content, validated tools, steering, follow-up, hooks, cancellation, transcript integrity checks, bounded concurrency, and explicit failure results.

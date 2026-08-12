@@ -14,6 +14,10 @@
       "project": "src/OpenGameAgent/OpenGameAgent.csproj"
     },
     {
+      "id": "OpenGameAgent.Memory",
+      "project": "src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj"
+    },
+    {
       "id": "OpenGameAgent.Models",
       "project": "src/OpenGameAgent.Models/OpenGameAgent.Models.csproj"
     },

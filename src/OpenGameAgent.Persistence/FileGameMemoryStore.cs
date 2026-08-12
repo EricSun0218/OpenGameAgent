@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 
 namespace OpenGameAgent.Persistence;
 
-public sealed class FileGameMemoryStore : IGameMemoryStore
+public sealed class FileGameMemoryStore : IGameMemoryStore, IGameMemorySnapshotSource
 {
     private const string Suffix = ".memory.json";
     private readonly FileStore _files;
@@ -112,6 +112,42 @@ public sealed class FileGameMemoryStore : IGameMemoryStore
         }
 
         return await inMemory.SearchAsync(query, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async IAsyncEnumerable<GameMemory> EnumerateAsync(
+        string sessionId,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        sessionId = GameJson.RequireId(sessionId, nameof(sessionId));
+        var scanned = 0;
+        foreach (var path in Directory.EnumerateFiles(_files.DirectoryPath, "*" + Suffix, SearchOption.TopDirectoryOnly)
+                     .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (++scanned > _maximumEntries)
+            {
+                throw new GameRuntimeLimitException(nameof(_maximumEntries), "The file memory snapshot exceeded its configured capacity.");
+            }
+
+            var document = await _files.ReadAsync<MemoryDocument>(path, cancellationToken).ConfigureAwait(false);
+            if (document is null)
+            {
+                continue;
+            }
+
+            var memory = Decode(document);
+            _files.EnsurePathFor(
+                path,
+                StorageKey(memory.SessionId, memory.OwnerId, memory.MemoryId),
+                Suffix,
+                "memory");
+            if (!string.Equals(memory.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            yield return memory;
+        }
     }
 
     private static MemoryDocument Encode(GameMemory memory) => new()

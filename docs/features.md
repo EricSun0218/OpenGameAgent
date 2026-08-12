@@ -51,8 +51,8 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Run many NPCs concurrently | `GameRuntimeLimits.MaxConcurrentActors`, `MultiActorScheduler` |
 | Correct or cancel an active NPC run | `GameAgentRuntime.TrySteer`, `GameAgentRuntime.TryAbort` |
 | Persist transcripts and deduplicate inputs | `IGameSessionStore` |
-| Keep an append-only branch/lane audit history | `IGameSessionHistoryRepository`, `GameSessionHistory` |
-| Fork, search, page, or project a session history | `GameSessionHistory`, `GameHistoryContextProjection` |
+| Build a standalone append-only branch/lane audit history | `IGameSessionHistoryRepository`, `GameSessionHistory` |
+| Fork, search, page, or project that explicit history | `GameSessionHistory`, `GameHistoryContextProjection` |
 | Compact a long transcript | `IGameTranscriptCompactor` |
 
 ## World actions and simulation
@@ -64,6 +64,8 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Execute on engine main thread | implement `IGameActionHandler` by queueing into the engine, then await the receipt |
 | Store long-term NPC facts/events | `IGameMemoryStore`, `GameMemory` |
 | Apply custom semantic ranking | `IGameMemoryRanker`, `RankedGameMemoryStore` |
+| Add local or remote vector embeddings and hybrid recall | `IMemoryEmbeddingProvider`, `VectorMemoryStore` |
+| Inspect or explicitly rebuild vectors after a model change | `RuntimeMemoryLifecycle`, `VectorMemoryStatus` |
 | Add reusable behavior instructions | `IGameSkillSource`, `GameSkill` |
 | Load portable or game-filtered skills | `DirectoryGameSkillSource` (`SKILL.md` or `skill.json`) |
 | Load reusable prompt templates with bounded arguments | `FileGamePromptTemplateLoader`, `GamePromptTemplate` |
@@ -120,7 +122,7 @@ OpenGameAgent does not prescribe:
 - pathfinding, animation, physics, combat, inventory, quests, or construction code;
 - who can observe which data;
 - NPC activation and level-of-detail policy;
-- vector database or embedding model;
+- embedding model runtime or service (the optional memory package provides the contract and derived index);
 - model vendor, prompt catalog, or monetization;
 - visual UI, world editor, or downloadable world-package format.
 

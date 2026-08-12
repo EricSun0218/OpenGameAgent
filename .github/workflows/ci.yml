@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  CI_PACKAGE_VERSION: 0.3.0-alpha.1
+  CI_PACKAGE_VERSION: 0.3.0-alpha.2
 
 jobs:
   dotnet:
@@ -74,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'godot.zip'
-          Invoke-WebRequest -Uri 'https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_mono_win64.zip' -OutFile $archive
+          Invoke-WebRequest -Uri 'https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_mono_win64.zip' -OutFile $archive -MaximumRetryCount 4 -RetryIntervalSec 5
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA512).Hash.ToLowerInvariant()
           $expected = 'aa04876c7932c2e6807233e6908da4045e904781a83dc3c793c34ba71c9f66292eb4da82aa55a6b8694fccf856f8c244c7709cfba20405066445daf9c2749b71'
           if ($actual -ne $expected) { throw 'Godot archive checksum mismatch.' }

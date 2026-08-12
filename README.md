@@ -12,7 +12,7 @@ OpenGameAgent brings the small, composable agent-kernel model to game developmen
 
 Inputs are bounded JSON. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
 
-> Current version: `0.3.0-alpha.1`. Public APIs can change before `1.0`.
+> Current version: `0.3.0-alpha.2`. Public APIs can change before `1.0`.
 
 The kernel boundary is intentionally small and designed to stabilize early. New game-specific capabilities should normally arrive as extensions, tools, policies, workflows, or game-owned services instead of expanding the model/tool loop.
 
@@ -21,7 +21,8 @@ The kernel boundary is intentionally small and designed to stabilize early. New 
 Install the complete game runtime from NuGet:
 
 ```bash
-dotnet add package OpenGameAgent --version 0.3.0-alpha.1
+dotnet add package OpenGameAgent --version 0.3.0-alpha.2
+dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # optional semantic memory
 ```
 
 The kernel, persistence, providers, and engine-compatible client are also published as separate `OpenGameAgent.*` packages. Godot, Unity, and portable server archives are available on the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
@@ -38,6 +39,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - per-actor serialization with bounded cross-actor concurrency;
 - journaled action intents and authoritative game receipts;
 - game-time memory filtering, expiry, and optional custom ranking;
+- optional local/remote embeddings, rebuildable vector indexes, and lexical/vector hybrid recall;
 - skills selected by input type and available tools;
 - recurring game-time triggers and persistent actor mailboxes;
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
@@ -89,6 +91,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, remote gateway, and message-gateway transports; retry/fallback decorators |
 | Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, and a dedicated OpenRouter image adapter with progressive previews |
 | Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
+| Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service and engine client |
 | Engines | Godot 4.7 .NET and Unity 6 packages, both exercised in real Windows editors |
 

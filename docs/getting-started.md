@@ -104,6 +104,8 @@ Context is treated as data, not as a hidden state mutation channel.
 
 Create tools per input so they can carry the stable input identity and actor scope. Prefer `GameActionTool.Create` for state changes.
 
+Pass an explicit, game-owned `inputId` to `GameInput` when an input can be retried after a disconnect or process restart. The optional constructor fallback creates a fresh unique ID; it cannot identify the same logical input in a later process.
+
 ```csharp
 var dispatcher = new DurableGameActionDispatcher(actionJournal, gameActionHandler);
 
@@ -144,7 +146,7 @@ options.RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRo
 
 ## Add memory and skills
 
-Memory is not injected automatically. Search it in your context provider, enforce game-time and visibility filters, then return selected results as a context slice. Wrap a store in `RankedGameMemoryStore` when you have a domain-specific or embedding-based ranker.
+Memory is not injected automatically. Search it in your context provider, enforce game-time and visibility filters, then return selected results as a context slice. Wrap a store in `RankedGameMemoryStore` for a custom ranker. For model-agnostic local or remote embeddings, a rebuildable derived vector index, and lexical/vector hybrid recall, use the optional `OpenGameAgent.Memory` package described in [Hybrid and vector memory](memory.md).
 
 Skills are instruction-only packages. Use `InMemoryGameSkillSource` or `DirectoryGameSkillSource`. A directory skill can be a portable `SKILL.md`:
 
@@ -163,7 +165,7 @@ The directory loader scans nested skill folders, rejects paths that escape the s
 To consume a portable Agent Plugins 1.0.0 package instead of a standalone skill directory, install `OpenGameAgent.Plugins` and load the package as one runtime extension:
 
 ```powershell
-dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.1
+dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.2
 ```
 
 ```csharp

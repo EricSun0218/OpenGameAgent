@@ -868,6 +868,160 @@ public sealed class OfficialExtensionTests
     }
 
     [Fact]
+    public async Task DefaultMemoryIdentityIsStableAcrossRunRetriesAndNamespacedByOwner()
+    {
+        var store = new InMemoryGameMemoryStore();
+
+        var first = await RunRememberAsync("actor");
+        var retry = await RunRememberAsync("actor");
+        var otherActor = await RunRememberAsync("other");
+
+        Assert.Equal(first, retry);
+        Assert.NotEqual(first, otherActor);
+        Assert.StartsWith("oga-memory-v1:", first, StringComparison.Ordinal);
+        Assert.Single(await store.SearchAsync(
+            new GameMemoryQuery("session", 10, ownerId: "actor"),
+            TestContext.Current.CancellationToken));
+        Assert.Single(await store.SearchAsync(
+            new GameMemoryQuery("session", 10, ownerId: "other"),
+            TestContext.Current.CancellationToken));
+
+        async Task<string> RunRememberAsync(string actorId)
+        {
+            var provider = new ScriptedProvider(call => call == 1
+                ? ToolCall(
+                    "remember",
+                    "remember_game_memory",
+                    "{\"scope\":\"facts\",\"kind\":\"fact\",\"payload\":{\"value\":1.25}}")
+                : TextResponse("remembered"));
+            await using var runtime = new GameAgentBuilder(provider, "model")
+                .UseExtension(new GameMemoryExtension(store))
+                .Build();
+            var result = await runtime.RunAsync(
+                new GameInput(
+                    "session",
+                    actorId,
+                    "request",
+                    "{}",
+                    new GameMoment("world", 5),
+                    "stable-input"),
+                TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded);
+            var toolResult = provider.Requests.ElementAt(1).Messages.Last(message => message.Role == AgentRole.Tool);
+            var json = Assert.IsType<JsonContent>(Assert.Single(toolResult.Content)).Json;
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            return document.RootElement.GetProperty("memoryId").GetString()!;
+        }
+    }
+
+    [Fact]
+    public async Task GeneratedExtensionOperationIdsRemainStableAcrossFreshRunAttempts()
+    {
+        var broker = new RecordingBroker();
+        var firstInteraction = await RunInteractionAsync(broker);
+        var retriedInteraction = await RunInteractionAsync(broker);
+        Assert.Equal(firstInteraction, retriedInteraction);
+
+        var executor = new ImmediateDelegateExecutor(new GameAgentDelegateOutcome(
+            true,
+            new[] { Assistant("delegated") }));
+        var delegations = new InMemoryGameAgentDelegationStore();
+        await RunDelegationAsync(executor, delegations);
+        await RunDelegationAsync(executor, delegations);
+        var delegated = Assert.Single(executor.Requests);
+        Assert.StartsWith("oga-delegation-v1:", delegated.Id, StringComparison.Ordinal);
+
+        var artifacts = new InMemoryGameAgentArtifactStore();
+        var firstArtifact = await RunKnowledgeAsync(artifacts);
+        var retriedArtifact = await RunKnowledgeAsync(artifacts);
+        Assert.Equal(firstArtifact, retriedArtifact);
+
+        var toolArtifacts = new InMemoryGameAgentArtifactStore();
+        var firstToolArtifact = await RunToolArtifactAsync(toolArtifacts, "provider-call-a");
+        var retriedToolArtifact = await RunToolArtifactAsync(toolArtifacts, "provider-call-b");
+        Assert.Equal(firstToolArtifact, retriedToolArtifact);
+
+        async Task<string> RunInteractionAsync(RecordingBroker targetBroker)
+        {
+            var provider = new ScriptedProvider(call => call == 1
+                ? ToolCall(
+                    "ask",
+                    "ask_player",
+                    "{\"questions\":[{\"id\":\"approach\",\"prompt\":\"Choose\",\"options\":[{\"id\":\"safe\",\"label\":\"Safe\",\"description\":\"Validate\"},{\"id\":\"fast\",\"label\":\"Fast\",\"description\":\"Skip\"}]}]}")
+                : TextResponse("done"));
+            await using var runtime = new GameAgentBuilder(provider, "model")
+                .UseExtension(new StructuredInteractionExtension(targetBroker))
+                .Build();
+            Assert.True((await runtime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
+            return targetBroker.Requests.Last().RequestId;
+        }
+
+        async Task RunDelegationAsync(
+            ImmediateDelegateExecutor targetExecutor,
+            InMemoryGameAgentDelegationStore targetStore)
+        {
+            var provider = new ScriptedProvider(call => call == 1
+                ? ToolCall("delegate", "delegate_agent", "{\"task\":{\"kind\":\"inspect\"}}")
+                : TextResponse("done"));
+            await using var runtime = new GameAgentBuilder(provider, "model")
+                .UseExtension(new AgentDelegationExtension(targetExecutor, targetStore))
+                .Build();
+            Assert.True((await runtime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
+        }
+
+        async Task<string> RunKnowledgeAsync(InMemoryGameAgentArtifactStore targetArtifacts)
+        {
+            var provider = new ScriptedProvider(call => call == 1
+                ? ToolCall(
+                    "knowledge",
+                    "query_external_knowledge",
+                    "{\"source\":\"local\",\"query\":{\"topic\":\"world\"},\"limit\":1}")
+                : TextResponse("done"));
+            await using var runtime = new GameAgentBuilder(provider, "model")
+                .UseExtension(new ExternalKnowledgeExtension(
+                    new[] { new LargeKnowledgeSource() },
+                    maximumInlineResultCharacters: 1_024,
+                    artifactStore: targetArtifacts))
+                .Build();
+            Assert.True((await runtime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
+            var tool = provider.Requests.ElementAt(1).Messages.Last(message => message.Role == AgentRole.Tool);
+            using var document = System.Text.Json.JsonDocument.Parse(
+                Assert.IsType<JsonContent>(Assert.Single(tool.Content)).Json);
+            return document.RootElement.GetProperty("artifactId").GetString()!;
+        }
+
+        async Task<string> RunToolArtifactAsync(
+            InMemoryGameAgentArtifactStore targetArtifacts,
+            string providerToolCallId)
+        {
+            var provider = new ScriptedProvider(call => call == 1
+                ? ToolCall(providerToolCallId, "large_result", "{}")
+                : TextResponse("done"));
+            await using var runtime = new GameAgentBuilder(provider, "model")
+                .UseExtension(
+                    "game.large-results",
+                    "1",
+                    api => api.RegisterTool(new AgentTool(
+                        new ToolDefinition(
+                            "large_result",
+                            "Return a large result.",
+                            "{\"type\":\"object\",\"additionalProperties\":false}"),
+                        (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                            new AgentContent[] { new TextContent(new string('x', 2_048)) })))))
+                .UseExtension(new GameAgentArtifactExtension(
+                    targetArtifacts,
+                    spillToolResultsAboveCharacters: 1_024,
+                    maximumInlinePreviewCharacters: 64))
+                .Build();
+            Assert.True((await runtime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
+            var tool = provider.Requests.ElementAt(1).Messages.Last(message => message.Role == AgentRole.Tool);
+            using var document = System.Text.Json.JsonDocument.Parse(
+                Assert.IsType<JsonContent>(Assert.Single(tool.Content)).Json);
+            return document.RootElement.GetProperty("artifactId").GetString()!;
+        }
+    }
+
+    [Fact]
     public async Task AutomaticMemoryRecallDefaultsToCurrentActorAndCurrentGameMoment()
     {
         var store = new InMemoryGameMemoryStore();

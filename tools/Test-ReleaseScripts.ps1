@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $Version = '0.3.0-alpha.1'
+    [string] $Version = '0.3.0-alpha.2'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,6 +64,30 @@ foreach ($invalidVersion in @(
 
 $packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
 Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
+$godotDownloadPattern = "Godot_v4\.7\.1-stable_mono_win64\.zip'.*-MaximumRetryCount\s+4\s+-RetryIntervalSec\s+5"
+foreach ($workflowPath in @('.github\workflows\ci.yml', '.github\workflows\release.yml')) {
+    $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot $workflowPath) -Raw
+    if ($workflow -notmatch $godotDownloadPattern) {
+        throw "Godot download in '$workflowPath' must use bounded transient retries before checksum verification."
+    }
+}
+$packScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tools\Pack-NuGet.ps1') -Raw
+$removesExactVersionedPackage =
+    $packScript -match '\$\(\$package\.id\)\.\$PackageVersion\.nupkg' -and
+    $packScript -match '\$\(\$package\.id\)\.\$PackageVersion\.snupkg' -and
+    $packScript -match 'Remove-Item\s+-LiteralPath\s+\$stalePackagePath'
+$pinsRepositoryCommit = $packScript -match '-p:RepositoryCommit=\$repositoryCommit'
+$assertsExpectedPackage = $packScript -match "Packing did not produce"
+if (-not ($removesExactVersionedPackage -and $pinsRepositoryCommit -and $assertsExpectedPackage)) {
+    throw 'NuGet packing must replace exact same-version outputs, pin HEAD, and verify each result.'
+}
+$godotSmokeScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engines\godot\test-engine.ps1') -Raw
+$startsGodotProcess = $godotSmokeScript -match 'Start-Process'
+$waitsForGodotProcess = $godotSmokeScript -match '(?m)^\s*-Wait\s*`?\s*$'
+$requiresGodotMarker = $godotSmokeScript -match 'OPENGAMEAGENT_GODOT_SMOKE_OK'
+if (-not ($startsGodotProcess -and $waitsForGodotProcess -and $requiresGodotMarker)) {
+    throw 'The Godot real-editor gate must wait for the editor process and require the runtime smoke marker.'
+}
 $packageLayers = @(Get-ReleasePackageLayers -Packages $packages)
 $layeredPackages = @($packageLayers | ForEach-Object { $_.Packages })
 if ($packageLayers.Count -eq 0 -or $layeredPackages.Count -ne $packages.Count) {

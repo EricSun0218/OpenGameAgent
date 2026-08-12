@@ -225,8 +225,8 @@
         "type": "Project",
         "dependencies": {
           "AWSSDK.BedrockRuntime": "[4.0.101, )",
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },

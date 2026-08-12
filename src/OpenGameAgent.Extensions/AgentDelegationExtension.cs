@@ -774,7 +774,11 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
 
                 var id = arguments.TryGetProperty("delegationId", out var configuredId)
                     ? configuredId.GetString() ?? string.Empty
-                    : string.Join(":", context.Input.InputId, execution.RunId, execution.Turn, execution.ToolCallIndex);
+                    : GameExtensionOperationIds.Create(
+                        "oga-delegation-v1:",
+                        "delegate_agent",
+                        context.Input,
+                        execution);
                 var taskJson = arguments.GetProperty("task").GetRawText();
                 var background = arguments.TryGetProperty("background", out var backgroundElement) && backgroundElement.GetBoolean();
                 var inheritContext = arguments.TryGetProperty("inheritContext", out var inheritElement) && inheritElement.GetBoolean();

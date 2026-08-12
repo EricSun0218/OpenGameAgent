@@ -135,27 +135,27 @@
       "opengameagent.models": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )"
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )"
         }
       },
       "opengameagent.models.builtin": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Models": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.Anthropic": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.Bedrock": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.Google": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.Mistral": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.OpenAI": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.Providers.OpenAICompatible": "[0.3.0-alpha.1, )"
+          "OpenGameAgent.Models": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.Anthropic": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.Bedrock": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.Google": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.Mistral": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.OpenAI": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Providers.OpenAICompatible": "[0.3.0-alpha.2, )"
         }
       },
       "opengameagent.providers.anthropic": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
@@ -163,8 +163,8 @@
         "type": "Project",
         "dependencies": {
           "AWSSDK.BedrockRuntime": "[4.0.101, )",
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
@@ -172,32 +172,32 @@
         "type": "Project",
         "dependencies": {
           "Google.Apis.Auth": "[1.75.0, )",
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.providers.mistral": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.providers.openai": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.providers.openaicompatible": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.1, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.1, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },

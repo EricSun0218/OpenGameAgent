@@ -864,17 +864,19 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
         GameAgentExtensionRunContext context)
     {
         using var hash = SHA256.Create();
-        var identity = string.Join(
-            "\n",
-            context.Input.SessionId,
-            context.Input.ActorId,
-            context.Input.InputId,
-            execution.RunId,
-            execution.Turn.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            execution.ToolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            server.Id,
-            remoteTool.Name);
-        var bytes = hash.ComputeHash(Encoding.UTF8.GetBytes(identity));
+        using var identity = new MemoryStream();
+        Write("OpenGameAgent.McpArtifactId.v1");
+        Write(context.Input.SessionId);
+        Write(context.Input.ActorId);
+        Write(context.Input.InputId);
+        Write(context.Input.Moment.TimelineId);
+        Write(context.Input.Moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(execution.Turn.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(execution.ToolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(server.Id);
+        Write(remoteTool.Name);
+        identity.Position = 0;
+        var bytes = hash.ComputeHash(identity);
         var encoded = new StringBuilder(bytes.Length * 2 + 4);
         encoded.Append("mcp-");
         foreach (var value in bytes)
@@ -883,6 +885,18 @@ public sealed class McpToolConnectorExtension : IGameAgentExtension, IAsyncDispo
         }
 
         return encoded.ToString();
+
+        void Write(string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            Span<byte> length = stackalloc byte[4];
+            length[0] = (byte)(bytes.Length >> 24);
+            length[1] = (byte)(bytes.Length >> 16);
+            length[2] = (byte)(bytes.Length >> 8);
+            length[3] = (byte)bytes.Length;
+            identity.Write(length);
+            identity.Write(bytes, 0, bytes.Length);
+        }
     }
 
     private static JsonElement EmptyObject()

@@ -12,7 +12,7 @@ OpenGameAgent 把小型、可组合的 Agent 内核带进游戏开发。它的�
 
 输入是有大小限制的 JSON，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
 
-> 当前版本：`0.3.0-alpha.1`。在 `1.0` 前公开 API 仍可能调整。
+> 当前版本：`0.3.0-alpha.2`。在 `1.0` 前公开 API 仍可能调整。
 
 内核边界刻意保持小而稳定。后续游戏特有能力通常应通过扩展、工具、策略、工作流或游戏自有服务加入，而不是继续膨胀模型/工具循环。
 
@@ -21,7 +21,8 @@ OpenGameAgent 把小型、可组合的 Agent 内核带进游戏开发。它的�
 从 NuGet 安装完整的游戏 Runtime：
 
 ```bash
-dotnet add package OpenGameAgent --version 0.3.0-alpha.1
+dotnet add package OpenGameAgent --version 0.3.0-alpha.2
+dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # 可选语义记忆
 ```
 
 内核、持久化、模型提供方和引擎兼容客户端也分别提供 `OpenGameAgent.*` 包。Godot、Unity 与可移植服务端压缩包可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 页面下载。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
@@ -38,6 +39,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 同一角色串行、不同角色有界并行；
 - 先记日志的动作意图与游戏权威回执；
 - 按游戏时间过滤、过期并可自定义排序的记忆；
+- 可选本地/远程嵌入、可重建向量索引与词法/向量混合召回；
 - 根据输入类型和可用工具选择的 Skills；
 - 游戏时间触发器与持久邮箱；
 - 可扩展工具、Skills、路由、Workflow、Hooks、事件与服务的类型化接口；
@@ -87,6 +89,7 @@ GameAgentRuntime
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、远程网关和消息网关；重试与回退包装器 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务，以及带渐进预览的专用图片适配器 |
 | 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
+| 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端与引擎客户端 |
 | 引擎 | Godot 4.7 .NET 与 Unity 6 包，均已在 Windows 真实编辑器中通过测试 |
 

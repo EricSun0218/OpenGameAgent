@@ -301,6 +301,68 @@ public sealed class McpConnectorTests
     }
 
     [Fact]
+    public async Task LargeResultArtifactIdentityIsStableAcrossFreshRunAttempts()
+    {
+        var artifacts = new InMemoryGameAgentArtifactStore();
+        var input = new GameInput(
+            "session",
+            "actor",
+            "request",
+            "{}",
+            new GameMoment("world", 7),
+            "stable-input");
+
+        var first = await ExecuteAsync();
+        var second = await ExecuteAsync();
+
+        Assert.Equal(first, second);
+
+        async Task<string> ExecuteAsync()
+        {
+            var clientToServer = new Pipe();
+            var serverToClient = new Pipe();
+            await using var server = McpServer.Create(
+                new StreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream()),
+                new McpServerOptions
+                {
+                    ToolCollection =
+                    [
+                        McpServerTool.Create(() => new string('x', 2_048), new() { Name = "large" }),
+                    ],
+                });
+            var serverTask = server.RunAsync(TestContext.Current.CancellationToken);
+            var provider = new ScriptedProvider(call => call == 1
+                ? new ModelResponse(
+                    new AgentContent[] { new ToolCallContent("external", "test__large", "{}") },
+                    ModelStopReason.ToolUse)
+                : new ModelResponse(new AgentContent[] { new TextContent("done") }, ModelStopReason.Stop));
+            var connection = new GameMcpServer(
+                "test",
+                async cancellationToken => await McpClient.CreateAsync(
+                    new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()),
+                    cancellationToken: cancellationToken));
+            await using var runtime = new GameAgentBuilder(provider, "model")
+                .UseExtension(new McpToolConnectorExtension(
+                    new[] { connection },
+                    maximumInlineResultCharacters: 1_024,
+                    artifactStore: artifacts,
+                    exposure: GameMcpToolExposure.Direct))
+                .Build();
+
+            var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+
+            Assert.True(result.Succeeded);
+            var toolMessage = provider.Requests.ElementAt(1).Messages.Last(message => message.Role == AgentRole.Tool);
+            var reference = Assert.IsType<JsonContent>(Assert.Single(toolMessage.Content));
+            using var document = System.Text.Json.JsonDocument.Parse(reference.Json);
+            var artifactId = Assert.IsType<string>(document.RootElement.GetProperty("artifactId").GetString());
+            await server.DisposeAsync();
+            await serverTask;
+            return artifactId;
+        }
+    }
+
+    [Fact]
     public void StdioRejectsEmbeddedNullCharactersBeforeStartingAProcess()
     {
         Assert.Throws<ArgumentException>(() => GameMcpServer.Stdio("test", "tool\0name"));

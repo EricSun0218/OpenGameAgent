@@ -1,6 +1,6 @@
 {
   "name": "com.opengameagent.runtime",
-  "version": "0.3.0-alpha.1",
+  "version": "0.3.0-alpha.2",
   "displayName": "OpenGameAgent",
   "description": "In-process and server-hosted agent runtime for AI-native Unity games.",
   "unity": "6000.0",

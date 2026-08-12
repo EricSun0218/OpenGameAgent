@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -76,7 +78,11 @@ public sealed class GameMemoryExtension : IGameAgentExtension
             {
                 var id = arguments.TryGetProperty("memoryId", out var configuredId)
                     ? configuredId.GetString() ?? string.Empty
-                    : string.Join(":", context.Input.InputId, execution.RunId, execution.Turn, execution.ToolCallIndex);
+                    : GameExtensionOperationIds.Create(
+                        "oga-memory-v1:",
+                        "remember_game_memory",
+                        context.Input,
+                        execution);
                 var expiresAt = arguments.TryGetProperty("expiresAtTick", out var expiry)
                     ? new GameMoment(context.Input.Moment.TimelineId, expiry.GetInt64())
                     : (GameMoment?)null;
@@ -314,4 +320,53 @@ public sealed class GameMemoryExtension : IGameAgentExtension
 
     private static ToolResult JsonResult(object value) =>
         new(new AgentContent[] { new JsonContent(JsonSerializer.Serialize(value)) });
+}
+
+internal static class GameExtensionOperationIds
+{
+    public static string Create(
+        string prefix,
+        string operation,
+        GameInput input,
+        ToolExecutionContext execution)
+    {
+        if (string.IsNullOrWhiteSpace(prefix) || prefix.Length > 128)
+        {
+            throw new ArgumentException("An extension operation ID prefix is required.", nameof(prefix));
+        }
+
+        if (string.IsNullOrWhiteSpace(operation) || operation.Length > 1_024)
+        {
+            throw new ArgumentException("An extension operation name is required.", nameof(operation));
+        }
+
+        _ = input ?? throw new ArgumentNullException(nameof(input));
+        _ = execution ?? throw new ArgumentNullException(nameof(execution));
+        using var hash = SHA256.Create();
+        using var stream = new MemoryStream();
+        Write("OpenGameAgent.ExtensionOperationId.v1");
+        Write(input.SessionId);
+        Write(input.ActorId);
+        Write(input.InputId);
+        Write(input.Moment.TimelineId);
+        Write(input.Moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(execution.Turn.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(execution.ToolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Write(operation);
+        stream.Position = 0;
+        return prefix + string.Concat(
+            hash.ComputeHash(stream).Select(value => value.ToString("x2", System.Globalization.CultureInfo.InvariantCulture)));
+
+        void Write(string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            Span<byte> length = stackalloc byte[4];
+            length[0] = (byte)(bytes.Length >> 24);
+            length[1] = (byte)(bytes.Length >> 16);
+            length[2] = (byte)(bytes.Length >> 8);
+            length[3] = (byte)bytes.Length;
+            stream.Write(length);
+            stream.Write(bytes, 0, bytes.Length);
+        }
+    }
 }

@@ -7,6 +7,7 @@ Open-source C# agent runtime for AI-native games, autonomous NPCs, and interacti
 - Durable game actions and workflows
 - Typed extension API plus official policy, catalog, interaction, goal, memory, artifact, delegation, tracing, and workflow-graph extensions
 - Skills, scheduling, mailboxes, large-result spill, and multi-actor concurrency
+- Optional model-agnostic vector memory and hybrid lexical/semantic recall
 - Optional Agent Plugins 1.0.0 package loading for portable skills and MCP servers
 - Capability-aware model catalogs, replaceable authentication, and developer-hosted short-lived credentials
 - Lazy external tool discovery; cloud or local text/image/audio/video APIs with no bundled model
