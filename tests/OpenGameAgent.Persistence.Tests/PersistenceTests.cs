@@ -1055,6 +1055,143 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task FileMailboxPendingStatusIsReadOnlyAndSurvivesRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var mailbox = new FileGameMailbox(directory.Path);
+        var recipient = new GameMailboxRecipientKey("session", "npc");
+        var other = new GameMailboxRecipientKey("session", "other");
+        var missing = new GameMailboxRecipientKey("missing", "npc");
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail-a", "session", "npc", "event", "{\"secret\":1}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail-b", "session", "npc", "event", "{\"secret\":2}", new GameMoment("world", 2)),
+            TestContext.Current.CancellationToken);
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail-c", "session", "other", "event", "{}", new GameMoment("world", 3)),
+            TestContext.Current.CancellationToken);
+
+        var requested = new[] { recipient, other, missing };
+        var initial = await mailbox.GetPendingStatusAsync(
+            requested,
+            now,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, initial[0].ReadyCount);
+        Assert.Equal(1, initial[1].ReadyCount);
+        Assert.Equal(0, initial[2].IncompleteCount);
+
+        var delivery = Assert.Single(await mailbox.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            1,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, delivery.Attempt);
+
+        var restarted = new FileGameMailbox(directory.Path);
+        var activeLease = await restarted.GetPendingStatusAsync(
+            requested,
+            now.AddSeconds(30),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(1, activeLease[0].ReadyCount);
+        Assert.Equal(1, activeLease[0].LeasedCount);
+        Assert.Equal(2, activeLease[0].IncompleteCount);
+        Assert.Equal(1, activeLease[1].ReadyCount);
+
+        await restarted.AbandonAsync(
+            delivery.Message.MessageId,
+            delivery.LeaseToken,
+            TestContext.Current.CancellationToken);
+        var abandoned = Assert.Single(await restarted.GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(2, abandoned.ReadyCount);
+        Assert.Equal(0, abandoned.LeasedCount);
+
+        var claimed = await restarted.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            2,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, claimed.Count);
+        Assert.Contains(claimed, item => item.Message.MessageId == delivery.Message.MessageId && item.Attempt == 2);
+        Assert.Contains(claimed, item => item.Message.MessageId != delivery.Message.MessageId && item.Attempt == 1);
+        foreach (var item in claimed)
+        {
+            await restarted.CompleteAsync(
+                item.Message.MessageId,
+                item.LeaseToken,
+                TestContext.Current.CancellationToken);
+        }
+
+        var completed = Assert.Single(await new FileGameMailbox(directory.Path).GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(0, completed.IncompleteCount);
+    }
+
+    [Fact]
+    public async Task FileMailboxPendingBatchReturnsEveryRequestedRecipient()
+    {
+        using var directory = new TemporaryDirectory();
+        var mailbox = new FileGameMailbox(directory.Path, capacity: 512);
+        var recipients = Enumerable.Range(0, 128)
+            .Select(index => new GameMailboxRecipientKey("session", "npc-" + index))
+            .ToArray();
+        for (var index = 0; index < recipients.Length; index++)
+        {
+            await mailbox.EnqueueAsync(
+                new GameMailboxMessage(
+                    "mail-" + index,
+                    recipients[index].SessionId,
+                    recipients[index].RecipientId,
+                    "event",
+                    "{}",
+                    new GameMoment("world", index)),
+                TestContext.Current.CancellationToken);
+        }
+
+        var statuses = await mailbox.GetPendingStatusAsync(
+            recipients,
+            DateTimeOffset.UnixEpoch,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(recipients.Length, statuses.Count);
+        Assert.All(statuses, status =>
+        {
+            Assert.Equal(1, status.ReadyCount);
+            Assert.Equal(0, status.LeasedCount);
+            Assert.Equal(1, status.IncompleteCount);
+        });
+        Assert.Equal(recipients, statuses.Select(status => status.Recipient));
+    }
+
+    [Fact]
+    public async Task FileMailboxPendingStatusRejectsCorruptState()
+    {
+        using var directory = new TemporaryDirectory();
+        var mailbox = new FileGameMailbox(directory.Path);
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail", "session", "npc", "event", "{}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        var path = Assert.Single(Directory.GetFiles(directory.Path, "*.mailbox.json"));
+        await File.WriteAllTextAsync(path, "{\"formatVersion\":1", TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<PersistenceException>(async () =>
+            await mailbox.GetPendingStatusAsync(
+                new[] { new GameMailboxRecipientKey("session", "npc") },
+                DateTimeOffset.UnixEpoch,
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task IndependentMailboxWorkersCannotClaimTheSameMessageLease()
     {
         using var directory = new TemporaryDirectory();

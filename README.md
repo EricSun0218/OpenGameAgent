@@ -67,7 +67,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - game-time memory filtering, expiry, and optional custom ranking;
 - optional local/remote embeddings, rebuildable vector indexes, and lexical/vector hybrid recall;
 - skills selected by input type and available tools;
-- recurring game-time triggers and persistent actor mailboxes;
+- recurring game-time triggers and persistent actor mailboxes with payload-free backlog queries;
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
 - capability-aware model catalogs and developer-hosted short-lived credentials;
 - lazy external-tool discovery and large-result artifact spill;
@@ -110,7 +110,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
-| World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes |
+| World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |

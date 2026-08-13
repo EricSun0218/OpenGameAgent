@@ -30,6 +30,23 @@ game tick / month advance
 
 `MultiActorScheduler` gives per-actor ordering and global concurrency. `GameTimeScheduler` emits bounded recurring occurrences. `IGameMailbox` carries durable work to actors that are not currently resident. The game supplies activation, distance, importance, and budget policy.
 
+When an AI budget ends exactly at a game-time boundary, inspect mailbox backlog without claiming work or invoking a model:
+
+```csharp
+var recipients = activeActors
+    .Select(actorId => new GameMailboxRecipientKey(sessionId, actorId))
+    .ToArray();
+var pending = await mailbox.GetPendingStatusAsync(
+    recipients,
+    DateTimeOffset.UtcNow,
+    cancellationToken);
+
+var mustPauseAtBoundary = pending.Any(status => status.IncompleteCount > 0);
+var canRunImmediately = pending.Any(status => status.ReadyCount > 0);
+```
+
+`GetPendingStatusAsync` is a typed, read-only snapshot. It returns one result per requested key in input order, including zero counts for missing mailboxes, and never returns message payloads. `ReadyCount` includes unleased messages and messages whose operational lease has expired; `LeasedCount` contains incomplete messages whose operational lease is still active; `IncompleteCount` is their sum. Querying does not acquire a lease, increment `Attempt`, complete or abandon a message, or call the model. The built-in file store evaluates the whole recipient batch in one directory pass rather than scanning all mailbox files once per NPC. Supply the same trusted operational clock used for `ClaimAsync`. A concurrent claim or settlement may make any snapshot stale, so use it for scheduling and causal-boundary admission, not as authority to complete a specific message.
+
 Use `GoalLoopExtension` when an actor owns semantic goals that can wait for a tick or event and continue later. `GoalLoopOptions.MaximumActiveGoals` bounds active and waiting work, while `MaximumRetainedTerminalGoals` independently retains only the most recent completed, failed, or cancelled records for audit. Terminal retention never removes active or waiting goals, so long-running sessions do not exhaust their future goal capacity. Use `AgentDelegationExtension` when one actor needs bounded background research or planning without sharing its mutable transcript. Delegates still receive explicitly scoped context and tools; delegation is not permission escalation. Delegation status can be persisted, but the included local executor runs child work in the current process and does not automatically resume an in-flight child after a process restart. Use a host-owned durable workflow or executor when child execution itself must survive restarts.
 
 The host can project goals and task plans after loading a save without invoking a model and without parsing extension-owned JSON keys:
