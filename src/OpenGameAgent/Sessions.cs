@@ -145,34 +145,8 @@ public sealed class GameSessionUsageTotals
         double inputCost,
         double outputCost,
         double cacheReadCost,
-        double cacheWriteCost)
-        : this(
-            inputTokens,
-            outputTokens,
-            cacheReadTokens,
-            cacheWriteTokens,
-            reasoningTokens,
-            cacheWriteOneHourTokens,
-            inputCost,
-            outputCost,
-            cacheReadCost,
-            cacheWriteCost,
-            costKnown: true)
-    {
-    }
-
-    public GameSessionUsageTotals(
-        long inputTokens,
-        long outputTokens,
-        long cacheReadTokens,
-        long cacheWriteTokens,
-        long reasoningTokens,
-        long cacheWriteOneHourTokens,
-        double inputCost,
-        double outputCost,
-        double cacheReadCost,
         double cacheWriteCost,
-        bool costKnown)
+        bool costKnown = true)
     {
         if (inputTokens < 0
             || outputTokens < 0

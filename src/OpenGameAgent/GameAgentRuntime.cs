@@ -769,8 +769,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var systemPrompt = ComposeSystemPrompt(context, skills);
             var agentLimits = CopyAgentLimits(_agentLimits);
             var usageAccounting = new RunUsageAccounting(input.InputId, agentLimits.MaxTotalTokens);
-            var legacyUsageRecords = CreateLegacyUsageRecords(loaded);
-            var baseUsageLedger = loaded.UsageLedger.Append(legacyUsageRecords);
+            var baseUsageLedger = loaded.UsageLedger;
             IReadOnlyList<AgentMessage> initialMessages = loaded.Messages;
             var minimumMessageReserve = resumingCheckpoint ? 1 : 2;
             var preferredMessageReserve = activeTools.Count == 0
@@ -803,7 +802,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 {
                     settled = await SaveUsageOnlyAsync(
                         loaded,
-                        legacyUsageRecords.Concat(usageRecords).ToArray(),
+                        usageRecords,
                         baseUsageLedger.Append(usageRecords),
                         settlementCancellation.Token).ConfigureAwait(false);
                 }
@@ -922,9 +921,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                     if (!checkpointSave.Saved)
                     {
                         checkpointConflict = checkpointSave;
-                        checkpointConflictUsageRecords = commitBase.Revision == loaded.Revision
-                            ? legacyUsageRecords.Concat(usageRecords).ToArray()
-                            : usageRecords;
+                        checkpointConflictUsageRecords = usageRecords;
                         checkpointConflictUsageLedger = checkpoint.UsageLedger;
                         throw new InvalidOperationException(
                             "The session changed while a tool turn was being checkpointed.");
@@ -1032,9 +1029,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 {
                     settledSaveConflict = await SettleUsageAfterConflictAsync(
                         save.Current,
-                        commitBase.Revision == loaded.Revision
-                            ? legacyUsageRecords.Concat(finalUsageRecords).ToArray()
-                            : finalUsageRecords,
+                        finalUsageRecords,
                         usageLedger,
                         settlementCancellation.Token).ConfigureAwait(false);
                 }
@@ -1159,7 +1154,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 messages,
                 extensionState,
                 extensionContext,
-                loaded.UsageLedger.Append(CreateLegacyUsageRecords(loaded)),
+                loaded.UsageLedger,
                 settlementCancellation.Token).ConfigureAwait(false);
         }
         return !save.Saved
@@ -1355,32 +1350,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             right.TotalsByCause.TryGetValue(pair.Key, out var total)
             && GameSessionUsageTotals.ValueEquals(pair.Value, total))
         && left.Records.Zip(right.Records, GameSessionUsageRecord.ValueEquals).All(equal => equal);
-
-    private static IReadOnlyList<GameSessionUsageRecord> CreateLegacyUsageRecords(GameSessionSnapshot session)
-    {
-        if (session.UsageLedger.TotalRecordCount != 0)
-        {
-            return Array.Empty<GameSessionUsageRecord>();
-        }
-
-        var records = session.Messages
-            .Select((message, index) => new { Message = message, Index = index })
-            .Where(item => item.Message.Usage is not null
-                && (item.Message.Usage.TotalTokens > 0 || item.Message.Usage.Cost.Total > 0)
-                && item.Message.Role is AgentRole.Assistant or AgentRole.Tool)
-            .Select(item => new GameSessionUsageRecord(
-                $"legacy-message-{item.Index}",
-                item.Message.Role == AgentRole.Assistant
-                    ? GameSessionUsageCause.Assistant
-                    : GameSessionUsageCause.Tool,
-                item.Message.Usage!,
-                inputId: item.Message.Metadata.TryGetValue("game.input_id", out var inputId)
-                    && !string.IsNullOrWhiteSpace(inputId)
-                        ? inputId
-                        : null))
-            .ToArray();
-        return Array.AsReadOnly(records);
-    }
 
     private string ComposeSystemPrompt(
         IReadOnlyList<GameContextSlice> context,
