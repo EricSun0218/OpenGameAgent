@@ -75,6 +75,7 @@ public sealed class GameGoalSnapshot
         Status = document.Status;
         Revision = document.Revision;
         NonProgressUpdates = document.NonProgressUpdates;
+        TerminalSequence = document.TerminalSequence;
         LastTimelineId = document.LastTimelineId;
         LastTick = document.LastTick;
         Error = document.Error;
@@ -94,6 +95,8 @@ public sealed class GameGoalSnapshot
     public long Revision { get; }
 
     public int NonProgressUpdates { get; }
+
+    internal long TerminalSequence { get; }
 
     public string LastTimelineId { get; }
 
@@ -115,6 +118,36 @@ public sealed class GameGoalChanged
     public GameGoalSnapshot Goal { get; }
 
     public string Reason { get; }
+}
+
+public sealed class GoalLoopOptions
+{
+    public int MaximumActiveGoals { get; set; } = 64;
+
+    public int MaximumRetainedTerminalGoals { get; set; } = 64;
+
+    public int MaximumNonProgressUpdates { get; set; } = 3;
+
+    internal GoalLoopOptions CopyAndValidate()
+    {
+        var copy = (GoalLoopOptions)MemberwiseClone();
+        if (copy.MaximumActiveGoals < 1 || copy.MaximumActiveGoals > 1_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumActiveGoals));
+        }
+
+        if (copy.MaximumRetainedTerminalGoals < 0 || copy.MaximumRetainedTerminalGoals > 1_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumRetainedTerminalGoals));
+        }
+
+        if (copy.MaximumNonProgressUpdates < 1 || copy.MaximumNonProgressUpdates > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumNonProgressUpdates));
+        }
+
+        return copy;
+    }
 }
 
 public sealed class GoalLoopExtension : IGameAgentExtension
@@ -141,23 +174,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         {"type":"object","properties":{"includeTerminal":{"type":"boolean"}},"additionalProperties":false}
         """;
 
-    private readonly int _maximumGoals;
-    private readonly int _maximumNonProgressUpdates;
+    private readonly GoalLoopOptions _options;
 
-    public GoalLoopExtension(int maximumGoals = 64, int maximumNonProgressUpdates = 3)
+    public GoalLoopExtension(GoalLoopOptions? options = null)
     {
-        if (maximumGoals < 1 || maximumGoals > 1_000)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumGoals));
-        }
-
-        if (maximumNonProgressUpdates < 1 || maximumNonProgressUpdates > 100)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumNonProgressUpdates));
-        }
-
-        _maximumGoals = maximumGoals;
-        _maximumNonProgressUpdates = maximumNonProgressUpdates;
+        _options = (options ?? new GoalLoopOptions()).CopyAndValidate();
     }
 
     public static GameAgentExtensionChannel<GameGoalChanged> GoalChanged { get; } = new("goal.changed");
@@ -191,6 +212,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         GameAgentExtensionRunContext context,
         CancellationToken cancellationToken)
     {
+        PruneTerminalGoals(context.State);
         var pending = false;
         foreach (var storedGoal in ReadAll(context.State))
         {
@@ -238,9 +260,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                         return ToolResult.Error($"Goal '{goalId}' already exists.");
                     }
 
-                    if (ReadAll(context.State).Count >= _maximumGoals)
+                    var activeGoalCount = ReadAll(context.State).Count(goal => !IsTerminal(goal.Status));
+                    if (activeGoalCount >= _options.MaximumActiveGoals)
                     {
-                        return ToolResult.Error($"At most {_maximumGoals} goals may be stored in one actor session.");
+                        return ToolResult.Error(
+                            $"At most {_options.MaximumActiveGoals} active or waiting goals may exist in one actor session.");
                     }
 
                     if (!arguments.TryGetProperty("objective", out var objective))
@@ -295,7 +319,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                             document.NonProgressUpdates = string.Equals(document.ProgressJson, nextProgress, StringComparison.Ordinal)
                                 ? checked(document.NonProgressUpdates + 1)
                                 : 0;
-                            if (document.NonProgressUpdates >= _maximumNonProgressUpdates)
+                            if (document.NonProgressUpdates >= _options.MaximumNonProgressUpdates)
                             {
                                 return ToolResult.Error("The goal repeated the same progress without advancing.");
                             }
@@ -326,15 +350,18 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                             break;
                         case "complete":
                             document.Status = GameGoalStatus.Completed;
+                            document.TerminalSequence = NextTerminalSequence(context.State);
                             document.Wait = null;
                             break;
                         case "fail":
                             document.Status = GameGoalStatus.Failed;
+                            document.TerminalSequence = NextTerminalSequence(context.State);
                             document.Error = ReadReason(arguments, "The goal failed.");
                             document.Wait = null;
                             break;
                         case "cancel":
                             document.Status = GameGoalStatus.Cancelled;
+                            document.TerminalSequence = NextTerminalSequence(context.State);
                             document.Error = ReadReason(arguments, "The goal was cancelled.");
                             document.Wait = null;
                             break;
@@ -344,6 +371,10 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                 }
 
                 Write(context.State, document);
+                if (IsTerminal(document.Status))
+                {
+                    PruneTerminalGoals(context.State);
+                }
                 var snapshot = new GameGoalSnapshot(document);
                 await api.PublishAsync(
                     GoalChanged,
@@ -375,6 +406,35 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         arguments.TryGetProperty("reason", out var reason) && !string.IsNullOrWhiteSpace(reason.GetString())
             ? reason.GetString()!
             : fallback;
+
+    private static bool IsTerminal(GameGoalStatus status) =>
+        status is GameGoalStatus.Completed or GameGoalStatus.Failed or GameGoalStatus.Cancelled;
+
+    private static long NextTerminalSequence(GameAgentExtensionState state)
+    {
+        var maximum = ReadAll(state)
+            .Where(goal => IsTerminal(goal.Status))
+            .Select(goal => goal.TerminalSequence)
+            .DefaultIfEmpty()
+            .Max();
+        return checked(maximum + 1);
+    }
+
+    private void PruneTerminalGoals(GameAgentExtensionState state)
+    {
+        var expired = ReadAll(state)
+            .Where(goal => IsTerminal(goal.Status))
+            .OrderByDescending(goal => goal.TerminalSequence)
+            .ThenByDescending(goal => goal.LastTimelineId, StringComparer.Ordinal)
+            .ThenByDescending(goal => goal.LastTick)
+            .ThenBy(goal => goal.Id, StringComparer.Ordinal)
+            .Skip(_options.MaximumRetainedTerminalGoals)
+            .ToArray();
+        foreach (var goal in expired)
+        {
+            state.Remove(GoalPrefix + goal.Id);
+        }
+    }
 
     private static GoalDocument? Read(GameAgentExtensionState state, string goalId)
     {
@@ -424,6 +484,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
             || !string.Equals(document.Id, expectedId, StringComparison.Ordinal)
             || document.Revision < 1
             || document.NonProgressUpdates < 0
+            || document.TerminalSequence < 0
             || string.IsNullOrWhiteSpace(document.LastTimelineId)
             || !Enum.IsDefined(typeof(GameGoalStatus), document.Status)
             || (document.Error?.Length ?? 0) > 4_096)
@@ -456,6 +517,10 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         {
             throw new InvalidOperationException("Only a waiting goal can contain a wait condition.");
         }
+        if (IsTerminal(document.Status) != (document.TerminalSequence > 0))
+        {
+            throw new InvalidOperationException("Terminal goal state and terminal sequence must agree.");
+        }
     }
 
     private static void Write(GameAgentExtensionState state, GoalDocument document) =>
@@ -472,6 +537,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         Status = goal.Status,
         Revision = goal.Revision,
         NonProgressUpdates = goal.NonProgressUpdates,
+        TerminalSequence = goal.TerminalSequence,
         LastTimelineId = goal.LastTimelineId,
         LastTick = goal.LastTick,
         Error = goal.Error,
@@ -499,6 +565,8 @@ internal sealed class GoalDocument
     public long Revision { get; set; }
 
     public int NonProgressUpdates { get; set; }
+
+    public long TerminalSequence { get; set; }
 
     public string LastTimelineId { get; set; } = string.Empty;
 
