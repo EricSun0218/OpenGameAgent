@@ -17,6 +17,7 @@ public enum GameTaskPlanStatus
     Completed,
     Failed,
     Cancelled,
+    Paused,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -213,7 +214,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
           "type":"object",
           "required":["action","planId"],
           "properties":{
-            "action":{"type":"string","enum":["create","advance","replace_remaining","fail","cancel"]},
+            "action":{"type":"string","enum":["create","advance","replace_remaining","pause","resume","fail","cancel"]},
             "planId":{"type":"string","minLength":1,"maxLength":128},
             "expectedRevision":{"type":"integer","minimum":1},
             "objective":{"type":"string","minLength":1,"maxLength":4096},
@@ -244,9 +245,9 @@ public sealed class TaskPlanExtension : IGameAgentExtension
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
         ExtensionId,
-        "1.0.0",
-        "Persistent ordered task checklists with host-validated advancement.",
-        new[] { "task-plan", "checklist", "pending-work", "evidence" });
+        "1.1.0",
+        "Persistent ordered task checklists with host-validated advancement and durable pause/resume.",
+        new[] { "task-plan", "checklist", "pending-work", "evidence", "pause-resume" });
 
     public static async ValueTask<GameTaskPlanQueryResult> ReadAsync(
         IGameSessionStore sessionStore,
@@ -275,7 +276,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         var plans = ReadAll(
                 StoredExtensionStateReader.Read(snapshot, ExtensionId),
                 AbsoluteMaximumStepsPerPlan)
-            .Where(plan => includeTerminal || plan.Status == GameTaskPlanStatus.Active)
+            .Where(plan => includeTerminal || !IsTerminal(plan.Status))
             .OrderBy(plan => plan.Id, StringComparer.Ordinal)
             .ToArray();
         return new GameTaskPlanQueryResult(key, snapshot.Revision, plans);
@@ -285,7 +286,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
     {
         api.RegisterPromptFragment(
             "task-plan-guidance",
-            "Use manage_task_plan for multi-step work that must survive later inputs. An active plan has exactly one in-progress step. Advance only with evidence the host can verify, never by assertion. Use replace_remaining when new world state invalidates unfinished work; completed steps remain immutable.");
+            "Use manage_task_plan for multi-step work that must survive later inputs. An active or paused plan retains exactly one in-progress step. Paused plans do not drive pending work and must be resumed before advancing. Advance only with evidence the host can verify, never by assertion. Use replace_remaining when new world state invalidates unfinished work; completed steps remain immutable.");
         api.RegisterToolProvider(
             "task-plan-tools",
             (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
@@ -307,7 +308,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         new(
             new ToolDefinition(
                 "manage_task_plan",
-                "Create, advance, replan, fail, or cancel a persistent ordered checklist for the current actor session. Advancing the final step completes the plan.",
+                "Create, advance, replan, pause, resume, fail, or cancel a persistent ordered checklist for the current actor session. Advancing the final step completes the plan.",
                 ManageSchema),
             async (arguments, _, cancellationToken) =>
             {
@@ -323,11 +324,11 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                     }
 
                     PruneTerminalPlans(context.State);
-                    var activeCount = ReadAll(context.State).Count(plan => plan.Status == GameTaskPlanStatus.Active);
+                    var activeCount = ReadAll(context.State).Count(plan => !IsTerminal(plan.Status));
                     if (activeCount >= _options.MaximumActivePlans)
                     {
                         return ToolResult.Error(
-                            $"At most {_options.MaximumActivePlans} active task plans may exist in one actor session.");
+                            $"At most {_options.MaximumActivePlans} active or paused task plans may exist in one actor session.");
                     }
 
                     if (!arguments.TryGetProperty("objective", out var objectiveElement)
@@ -370,7 +371,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                     }
 
                     document = existing;
-                    if (document.Status != GameTaskPlanStatus.Active)
+                    if (IsTerminal(document.Status))
                     {
                         return ToolResult.Error($"Task plan '{planId}' is terminal and immutable.");
                     }
@@ -382,6 +383,14 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                             $"Task plan '{planId}' revision conflict. Current revision is {document.Revision}.");
                     }
 
+                    if (document.Status == GameTaskPlanStatus.Paused
+                        && action is not "pause" and not "resume")
+                    {
+                        return ToolResult.Error(
+                            $"Task plan '{planId}' is paused and must be resumed before it can change.");
+                    }
+
+                    var changed = true;
                     switch (action)
                     {
                         case "advance":
@@ -448,6 +457,28 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                             }));
                             document.Steps = completed;
                             break;
+                        case "pause":
+                            if (document.Status == GameTaskPlanStatus.Paused)
+                            {
+                                changed = false;
+                            }
+                            else
+                            {
+                                document.Status = GameTaskPlanStatus.Paused;
+                            }
+
+                            break;
+                        case "resume":
+                            if (document.Status == GameTaskPlanStatus.Active)
+                            {
+                                changed = false;
+                            }
+                            else
+                            {
+                                document.Status = GameTaskPlanStatus.Active;
+                            }
+
+                            break;
                         case "fail":
                             document.Status = GameTaskPlanStatus.Failed;
                             document.Error = ReadReason(arguments, "The task plan failed.");
@@ -462,6 +493,11 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                             break;
                         default:
                             return ToolResult.Error($"Unsupported task-plan action '{action}'.");
+                    }
+
+                    if (!changed)
+                    {
+                        return JsonResult(new GameTaskPlanSnapshot(document));
                     }
 
                     document.Revision = checked(document.Revision + 1);
@@ -504,7 +540,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                 var includeTerminal = arguments.TryGetProperty("includeTerminal", out var include)
                     && include.GetBoolean();
                 var plans = ReadAll(context.State)
-                    .Where(plan => includeTerminal || plan.Status == GameTaskPlanStatus.Active)
+                    .Where(plan => includeTerminal || !IsTerminal(plan.Status))
                     .OrderBy(plan => plan.Id, StringComparer.Ordinal)
                     .ToArray();
                 return new ValueTask<ToolResult>(JsonResult(new { plans }));
@@ -667,12 +703,16 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         }
 
         var inProgress = document.Steps.Count(step => step.Status == GameTaskPlanStepStatus.InProgress);
-        if ((document.Status == GameTaskPlanStatus.Active && inProgress != 1)
-            || (document.Status != GameTaskPlanStatus.Active && inProgress != 0)
+        var resumable = document.Status is GameTaskPlanStatus.Active or GameTaskPlanStatus.Paused;
+        if ((resumable && inProgress != 1)
+            || (!resumable && inProgress != 0)
             || (document.Status == GameTaskPlanStatus.Completed
                 && document.Steps.Any(step => step.Status != GameTaskPlanStepStatus.Completed))
             || IsTerminal(document.Status) != (document.TerminalSequence > 0)
-            || ((document.Status is GameTaskPlanStatus.Active or GameTaskPlanStatus.Completed) && document.Error is not null))
+            || ((document.Status is GameTaskPlanStatus.Active
+                    or GameTaskPlanStatus.Paused
+                    or GameTaskPlanStatus.Completed)
+                && document.Error is not null))
         {
             throw new InvalidOperationException("The task-plan status does not match its checklist.");
         }

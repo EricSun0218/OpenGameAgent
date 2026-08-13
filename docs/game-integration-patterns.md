@@ -68,7 +68,7 @@ ui.Render(goals.SessionRevision, goals.Goals, taskPlans.Plans);
 
 These readers are read-only projections over `IGameSessionStore`. They do not run routing, providers, tools, pruning, or other extension lifecycle work. A missing session returns revision `0` and an empty collection. The caller must authorize the `GameSessionKey` before querying it; the readers deliberately do not replace host ownership policy.
 
-Use `TaskPlanExtension` for an ordered checklist that must survive later inputs. It is separate from `GoalLoopExtension`: goals describe durable intent and game-time waits, while a task plan records an ordered execution path. An active plan always has one `InProgress` step, a completed prefix, and a pending suffix. The model cannot advance a step merely by claiming success; the host-supplied `GameTaskPlanEvidenceValidator` must accept the evidence against the current input, plan, and step.
+Use `TaskPlanExtension` for an ordered checklist that must survive later inputs. It is separate from `GoalLoopExtension`: goals describe durable intent and game-time waits, while a task plan records an ordered execution path. An active or paused plan always retains one `InProgress` step, a completed prefix, and a pending suffix. The model cannot advance a step merely by claiming success; the host-supplied `GameTaskPlanEvidenceValidator` must accept the evidence against the current input, plan, and step.
 
 ```csharp
 var plans = new TaskPlanExtension(
@@ -96,7 +96,9 @@ var runtime = new GameAgentBuilder(provider, model)
     .Build();
 ```
 
-`advance` requires the plan revision and accepted evidence and can succeed only once per input. `replace_remaining` preserves completed steps and replaces only unfinished work. `fail` and `cancel` are terminal. Active plans contribute pending work to routing; terminal retention is independently bounded and never consumes active-plan capacity. State is namespaced by the runtime's session/actor key and persists through any `IGameSessionStore`.
+`advance` requires the plan revision and accepted evidence and can succeed only once per input. `replace_remaining` preserves completed steps and replaces only unfinished work. `pause` changes `Active` to `Paused` without changing any step, and `resume` restores that same plan to `Active`; both require `expectedRevision`. A repeated pause of an already paused plan, or resume of an already active plan, is an idempotent success only when the supplied revision still matches: it does not write state, increment the revision, or emit another change event. A stale revision is always a conflict. `fail` and `cancel` remain terminal and terminal plans cannot resume.
+
+Paused plans remain visible through `list_task_plans` and `TaskPlanExtension.ReadAsync` without requesting terminal records. They continue to count toward `MaximumActivePlans`, but do not contribute pending work. While paused, every mutation except idempotent `pause` and `resume` is rejected; the checklist must resume before it can advance, replan, fail, or cancel. A successful transition increments the plan revision, persists the current game moment, and publishes `GameTaskPlanChanged` with reason `pause` or `resume`; as with every extension change event, wait for the matching `SessionSaved` event before treating it as committed UI state. State is namespaced by the runtime's session/actor key and persists through any `IGameSessionStore`.
 
 The tool payload cannot select an owner, session, or actor scope. Plans always use the already-authorized `GameInput`/`GameSessionKey`; a server host must resolve and authorize that key before invoking the runtime.
 
@@ -107,6 +109,8 @@ The evidence validator is a read-only authority check, not another world mutatio
 ### Host query migration
 
 Hosts that previously inspected `GameSessionSnapshot.ExtensionState` should migrate to `GoalLoopExtension.ReadAsync` and `TaskPlanExtension.ReadAsync`. Treat extension-state key encoding and JSON documents as private storage details. `GameGoalChanged` now follows `GameTaskPlanChanged`: its constructor and every published event include `GameSessionKey` and `InputId`, so event consumers should correlate the change with the matching saved input before updating authoritative UI.
+
+Existing task-plan documents remain valid without migration. `Paused` was appended to the public status enum and is serialized by name; the numeric values and stored JSON names of `Active`, `Completed`, `Failed`, and `Cancelled` are unchanged. Hosts that switch exhaustively on plan status should add `Paused` as a visible, non-terminal, non-runnable state.
 
 ## Monthly or turn-based evolution
 

@@ -5,6 +5,7 @@
 - Add the optional `TaskPlanExtension` for session/actor-scoped persistent ordered checklists, revision-checked mutations, host-validated evidence, per-input advancement guards, pending-work routing, typed UI projection events, and bounded terminal retention.
 - Add typed, model-free host queries for persisted goals and task plans, including session revisions, and scope goal-change events with their session/actor key and input ID.
 - Add batched, payload-free mailbox pending-status queries that distinguish ready work from active leases without claiming delivery or incrementing attempts.
+- Add backward-compatible durable task-plan pause/resume with revision checks, preserved in-progress steps, non-runnable paused routing, typed change reasons, and restart coverage.
 
 ## 0.3.0-alpha.2
 

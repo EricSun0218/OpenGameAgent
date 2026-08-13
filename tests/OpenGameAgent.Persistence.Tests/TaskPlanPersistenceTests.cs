@@ -61,6 +61,71 @@ public sealed class TaskPlanPersistenceTests
         Assert.Equal(1, Volatile.Read(ref evidenceCalls));
     }
 
+    [Fact]
+    public async Task PausedChecklistAndInProgressStepSurviveProcessRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var key = new GameSessionKey("session", "actor");
+        GameTaskPlanEvidenceValidator validator = (_, _) => new ValueTask<bool>(true);
+        await using (var runtime = new GameAgentBuilder(
+                new ScriptedProvider(call => call == 1
+                    ? ToolCall("create", "{\"action\":\"create\",\"planId\":\"paused\",\"objective\":\"persist pause\",\"steps\":[\"one\",\"two\"]}")
+                    : TextResponse("created")),
+                "model")
+            .UseSessionStore(new FileGameSessionStore(directory.Path))
+            .UseExtension(new TaskPlanExtension(validator))
+            .Build())
+        {
+            var result = await runtime.RunAsync(Input("create"), TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded);
+        }
+
+        await using (var runtime = new GameAgentBuilder(
+                new ScriptedProvider(call => call == 1
+                    ? ToolCall("pause", "{\"action\":\"pause\",\"planId\":\"paused\",\"expectedRevision\":1}")
+                    : TextResponse("paused")),
+                "model")
+            .UseSessionStore(new FileGameSessionStore(directory.Path))
+            .UseExtension(new TaskPlanExtension(validator))
+            .Build())
+        {
+            var result = await runtime.RunAsync(Input("pause"), TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded);
+        }
+
+        var restartedStore = new FileGameSessionStore(directory.Path);
+        var paused = Assert.Single((await TaskPlanExtension.ReadAsync(
+            restartedStore,
+            key,
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal(GameTaskPlanStatus.Paused, paused.Status);
+        Assert.Equal(2, paused.Revision);
+        var inProgress = Assert.Single(paused.Steps, step => step.Status == GameTaskPlanStepStatus.InProgress);
+
+        await using (var runtime = new GameAgentBuilder(
+                new ScriptedProvider(call => call == 1
+                    ? ToolCall("resume", "{\"action\":\"resume\",\"planId\":\"paused\",\"expectedRevision\":2}")
+                    : TextResponse("resumed")),
+                "model")
+            .UseSessionStore(new FileGameSessionStore(directory.Path))
+            .UseExtension(new TaskPlanExtension(validator))
+            .Build())
+        {
+            var result = await runtime.RunAsync(Input("resume"), TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded);
+        }
+
+        var resumed = Assert.Single((await TaskPlanExtension.ReadAsync(
+            new FileGameSessionStore(directory.Path),
+            key,
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal(GameTaskPlanStatus.Active, resumed.Status);
+        Assert.Equal(3, resumed.Revision);
+        Assert.Equal(inProgress.Id, Assert.Single(
+            resumed.Steps,
+            step => step.Status == GameTaskPlanStepStatus.InProgress).Id);
+    }
+
     private static GameInput Input(string inputId) =>
         new("session", "actor", "request", "{}", new GameMoment("world", 1), inputId);
 

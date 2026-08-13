@@ -9,6 +9,21 @@ namespace OpenGameAgent.Extensions.Tests;
 public sealed class TaskPlanExtensionTests
 {
     [Fact]
+    public void PauseStatusPreservesExistingEnumValuesAndJsonNames()
+    {
+        Assert.Equal(0, (int)GameTaskPlanStatus.Active);
+        Assert.Equal(1, (int)GameTaskPlanStatus.Completed);
+        Assert.Equal(2, (int)GameTaskPlanStatus.Failed);
+        Assert.Equal(3, (int)GameTaskPlanStatus.Cancelled);
+        Assert.Equal(4, (int)GameTaskPlanStatus.Paused);
+        Assert.Equal("\"Active\"", JsonSerializer.Serialize(GameTaskPlanStatus.Active));
+        Assert.Equal("\"Completed\"", JsonSerializer.Serialize(GameTaskPlanStatus.Completed));
+        Assert.Equal("\"Failed\"", JsonSerializer.Serialize(GameTaskPlanStatus.Failed));
+        Assert.Equal("\"Cancelled\"", JsonSerializer.Serialize(GameTaskPlanStatus.Cancelled));
+        Assert.Equal("\"Paused\"", JsonSerializer.Serialize(GameTaskPlanStatus.Paused));
+    }
+
+    [Fact]
     public async Task OrderedChecklistAdvancesOncePerInputAndPublishesScopedChanges()
     {
         var store = new InMemoryGameSessionStore();
@@ -105,6 +120,168 @@ public sealed class TaskPlanExtensionTests
     }
 
     [Fact]
+    public async Task PauseAndResumeAreDurableIdempotentAndPreserveProgress()
+    {
+        var store = new InMemoryGameSessionStore();
+        var extension = new TaskPlanExtension((_, _) => new ValueTask<bool>(true));
+        var changes = new ConcurrentQueue<GameTaskPlanChanged>();
+        await RunAsync(
+            store,
+            extension,
+            Input("create"),
+            ToolCall("create", "{\"action\":\"create\",\"planId\":\"journey\",\"objective\":\"travel\",\"steps\":[\"prepare\",\"walk\",\"arrive\"]}"),
+            TextResponse("created"));
+        await RunAsync(
+            store,
+            extension,
+            Input("advance"),
+            ToolCall("advance", "{\"action\":\"advance\",\"planId\":\"journey\",\"expectedRevision\":1,\"evidence\":{\"kind\":\"receipt\",\"reference\":\"prepared\"}}"),
+            TextResponse("advanced"));
+
+        await RunWithChangesAsync(
+            store,
+            extension,
+            changes,
+            Input("pause"),
+            ToolCall("pause", "{\"action\":\"pause\",\"planId\":\"journey\",\"expectedRevision\":2}"),
+            ToolCall("pause-again", "{\"action\":\"pause\",\"planId\":\"journey\",\"expectedRevision\":3}"),
+            TextResponse("paused"));
+
+        var pausedQuery = await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var paused = Assert.Single(pausedQuery.Plans);
+        Assert.Equal(GameTaskPlanStatus.Paused, paused.Status);
+        Assert.Equal(3, paused.Revision);
+        Assert.Equal(
+            new[]
+            {
+                GameTaskPlanStepStatus.Completed,
+                GameTaskPlanStepStatus.InProgress,
+                GameTaskPlanStepStatus.Pending,
+            },
+            paused.Steps.Select(step => step.Status).ToArray());
+        Assert.Equal("pause", Assert.Single(changes).Reason);
+
+        var listProvider = new ScriptedProvider(new[]
+        {
+            ListToolCall("list", "{}"),
+            TextResponse("listed"),
+        });
+        await using (var listRuntime = new GameAgentBuilder(listProvider, "model")
+            .UseSessionStore(store)
+            .UseExtension(extension)
+            .Build())
+        {
+            var result = await listRuntime.RunAsync(Input("list"), TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded, result.Error ?? result.AgentResult?.Error);
+        }
+
+        var listMessage = listProvider.Requests.ElementAt(1).Messages.Last(message => message.Role == AgentRole.Tool);
+        var listJson = Assert.IsType<JsonContent>(Assert.Single(listMessage.Content)).Json;
+        Assert.Contains("\"Paused\"", listJson, StringComparison.Ordinal);
+
+        var pending = new ConcurrentQueue<bool>();
+        await using (var pendingRuntime = new GameAgentBuilder(
+                new ScriptedProvider(new[] { TextResponse("observed") }),
+                "model")
+            .UseSessionStore(store)
+            .UseExtension(extension)
+            .UseExtension(
+                "paused.pending-work.observer",
+                "1",
+                api => api.RegisterRouteRule(
+                    "capture",
+                    (_, _, hasPendingWork, _) =>
+                    {
+                        pending.Enqueue(hasPendingWork);
+                        return new ValueTask<GameRouteDecision?>(GameRouteDecision.Agent("captured"));
+                    },
+                    priority: 1_000))
+            .Build())
+        {
+            var result = await pendingRuntime.RunAsync(Input("paused-pending"), TestContext.Current.CancellationToken);
+            Assert.True(result.Succeeded, result.Error ?? result.AgentResult?.Error);
+        }
+
+        Assert.False(Assert.Single(pending));
+
+        await RunAsync(
+            store,
+            extension,
+            Input("blocked"),
+            ToolCall("advance-paused", "{\"action\":\"advance\",\"planId\":\"journey\",\"expectedRevision\":3,\"evidence\":{\"kind\":\"receipt\",\"reference\":\"must-not-run\"}}"),
+            ToolCall("replace-paused", "{\"action\":\"replace_remaining\",\"planId\":\"journey\",\"expectedRevision\":3,\"steps\":[\"changed\"]}"),
+            ToolCall("fail-paused", "{\"action\":\"fail\",\"planId\":\"journey\",\"expectedRevision\":3}"),
+            ToolCall("cancel-paused", "{\"action\":\"cancel\",\"planId\":\"journey\",\"expectedRevision\":3}"),
+            ToolCall("stale-resume", "{\"action\":\"resume\",\"planId\":\"journey\",\"expectedRevision\":2}"),
+            TextResponse("blocked"));
+        var stillPaused = Assert.Single((await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal(GameTaskPlanStatus.Paused, stillPaused.Status);
+        Assert.Equal(3, stillPaused.Revision);
+
+        changes.Clear();
+        await RunWithChangesAsync(
+            store,
+            extension,
+            changes,
+            Input("resume"),
+            ToolCall("resume", "{\"action\":\"resume\",\"planId\":\"journey\",\"expectedRevision\":3}"),
+            ToolCall("resume-again", "{\"action\":\"resume\",\"planId\":\"journey\",\"expectedRevision\":4}"),
+            TextResponse("resumed"));
+        var resumed = Assert.Single((await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal(GameTaskPlanStatus.Active, resumed.Status);
+        Assert.Equal(4, resumed.Revision);
+        Assert.Equal(paused.Steps.Select(step => step.Id), resumed.Steps.Select(step => step.Id));
+        Assert.Equal(paused.Steps.Select(step => step.Status), resumed.Steps.Select(step => step.Status));
+        Assert.Equal("resume", Assert.Single(changes).Reason);
+    }
+
+    [Fact]
+    public async Task TerminalTaskPlanCannotResume()
+    {
+        var store = new InMemoryGameSessionStore();
+        var extension = new TaskPlanExtension((_, _) => new ValueTask<bool>(true));
+        await RunAsync(
+            store,
+            extension,
+            Input("create"),
+            ToolCall("create", "{\"action\":\"create\",\"planId\":\"done\",\"objective\":\"finish\",\"steps\":[\"only\"]}"),
+            TextResponse("created"));
+        await RunAsync(
+            store,
+            extension,
+            Input("complete"),
+            ToolCall("complete", "{\"action\":\"advance\",\"planId\":\"done\",\"expectedRevision\":1,\"evidence\":{\"kind\":\"receipt\",\"reference\":\"done\"}}"),
+            TextResponse("completed"));
+        await RunAsync(
+            store,
+            extension,
+            Input("resume"),
+            ToolCall("resume", "{\"action\":\"resume\",\"planId\":\"done\",\"expectedRevision\":2}"),
+            TextResponse("immutable"));
+
+        Assert.Empty((await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        var completed = Assert.Single((await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            includeTerminal: true,
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal(GameTaskPlanStatus.Completed, completed.Status);
+        Assert.Equal(2, completed.Revision);
+    }
+
+    [Fact]
     public async Task ConcurrentMutationsUseSessionCas()
     {
         var store = new InMemoryGameSessionStore();
@@ -140,6 +317,44 @@ public sealed class TaskPlanExtensionTests
                 $"Unexpected concurrent run status '{result.Status}'."));
         using var document = await ReadOnlyPlanAsync(store, "session", "actor");
         Assert.Equal(2, document.RootElement.GetProperty("Revision").GetInt64());
+    }
+
+    [Fact]
+    public async Task ConcurrentPauseUsesSessionCas()
+    {
+        var store = new InMemoryGameSessionStore();
+        await RunAsync(
+            store,
+            new TaskPlanExtension((_, _) => new ValueTask<bool>(true)),
+            Input("seed"),
+            ToolCall("create", "{\"action\":\"create\",\"planId\":\"shared-pause\",\"objective\":\"shared work\",\"steps\":[\"one\",\"two\"]}"),
+            TextResponse("created"));
+
+        var gate = new ConcurrentRunGate(2);
+        var response = ToolCall(
+            "pause",
+            "{\"action\":\"pause\",\"planId\":\"shared-pause\",\"expectedRevision\":1}");
+        await using var left = new GameAgentBuilder(new FirstCallBarrierProvider(gate, response), "model")
+            .UseSessionStore(store)
+            .UseExtension(new TaskPlanExtension((_, _) => new ValueTask<bool>(true)))
+            .Build();
+        await using var right = new GameAgentBuilder(new FirstCallBarrierProvider(gate, response), "model")
+            .UseSessionStore(store)
+            .UseExtension(new TaskPlanExtension((_, _) => new ValueTask<bool>(true)))
+            .Build();
+
+        var results = await Task.WhenAll(
+            left.RunAsync(Input("left-pause"), TestContext.Current.CancellationToken),
+            right.RunAsync(Input("right-pause"), TestContext.Current.CancellationToken));
+
+        Assert.Contains(results, result => result.Status == GameAgentRunStatus.SessionConflict);
+        var paused = Assert.Single((await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal(GameTaskPlanStatus.Paused, paused.Status);
+        Assert.Equal(2, paused.Revision);
+        Assert.Single(paused.Steps, step => step.Status == GameTaskPlanStepStatus.InProgress);
     }
 
     [Fact]
@@ -239,6 +454,40 @@ public sealed class TaskPlanExtensionTests
         using var retained = JsonDocument.Parse(snapshot.ExtensionState.Single().Value);
         Assert.Equal("plan-3", retained.RootElement.GetProperty("Id").GetString());
         Assert.Equal("Completed", retained.RootElement.GetProperty("Status").GetString());
+    }
+
+    [Fact]
+    public async Task PausedPlanStillConsumesNonTerminalCapacity()
+    {
+        var store = new InMemoryGameSessionStore();
+        var extension = new TaskPlanExtension(
+            (_, _) => new ValueTask<bool>(true),
+            new TaskPlanOptions { MaximumActivePlans = 1 });
+        await RunAsync(
+            store,
+            extension,
+            Input("create"),
+            ToolCall("create", "{\"action\":\"create\",\"planId\":\"first\",\"objective\":\"work\",\"steps\":[\"one\"]}"),
+            TextResponse("created"));
+        await RunAsync(
+            store,
+            extension,
+            Input("pause"),
+            ToolCall("pause", "{\"action\":\"pause\",\"planId\":\"first\",\"expectedRevision\":1}"),
+            TextResponse("paused"));
+        await RunAsync(
+            store,
+            extension,
+            Input("second"),
+            ToolCall("create-second", "{\"action\":\"create\",\"planId\":\"second\",\"objective\":\"other\",\"steps\":[\"one\"]}"),
+            TextResponse("rejected"));
+
+        var plan = Assert.Single((await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken)).Plans);
+        Assert.Equal("first", plan.Id);
+        Assert.Equal(GameTaskPlanStatus.Paused, plan.Status);
     }
 
     [Fact]
@@ -347,6 +596,29 @@ public sealed class TaskPlanExtensionTests
         Assert.True(result.Succeeded, result.Error ?? result.AgentResult?.Error);
     }
 
+    private static async Task RunWithChangesAsync(
+        IGameSessionStore store,
+        TaskPlanExtension extension,
+        ConcurrentQueue<GameTaskPlanChanged> changes,
+        GameInput input,
+        params ModelResponse[] responses)
+    {
+        await using var runtime = new GameAgentBuilder(new ScriptedProvider(responses), "model")
+            .UseSessionStore(store)
+            .UseExtension(extension)
+            .UseExtension(
+                "task-plan.change-listener",
+                "1",
+                api => api.Subscribe(TaskPlanExtension.PlanChanged, (change, _) =>
+                {
+                    changes.Enqueue(change);
+                    return ValueTask.CompletedTask;
+                }))
+            .Build();
+        var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+        Assert.True(result.Succeeded, result.Error ?? result.AgentResult?.Error);
+    }
+
     private static GameInput Input(
         string inputId,
         string sessionId = "session",
@@ -373,6 +645,9 @@ public sealed class TaskPlanExtensionTests
     private static ModelResponse ToolCall(string id, string arguments) =>
         new(new AgentContent[] { new ToolCallContent(id, "manage_task_plan", arguments) }, ModelStopReason.ToolUse);
 
+    private static ModelResponse ListToolCall(string id, string arguments) =>
+        new(new AgentContent[] { new ToolCallContent(id, "list_task_plans", arguments) }, ModelStopReason.ToolUse);
+
     private static ModelResponse TextResponse(string text) =>
         new(new AgentContent[] { new TextContent(text) }, ModelStopReason.Stop);
 
@@ -391,11 +666,14 @@ public sealed class TaskPlanExtensionTests
             _response = response;
         }
 
+        public ConcurrentQueue<ModelRequest> Requests { get; } = new();
+
         public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
             ModelRequest request,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Requests.Enqueue(request);
             yield return ModelStreamEvent.Terminal(_response(Interlocked.Increment(ref _calls)));
             await Task.CompletedTask;
         }
