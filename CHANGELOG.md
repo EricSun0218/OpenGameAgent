@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add the optional `TaskPlanExtension` for session/actor-scoped persistent ordered checklists, revision-checked mutations, host-validated evidence, per-input advancement guards, pending-work routing, typed UI projection events, and bounded terminal retention.
+
 ## 0.3.0-alpha.2
 
 - Add the optional `OpenGameAgent.Memory` package with a model-agnostic embedding provider contract, authoritative-save verification, rebuildable local vector indexes, hybrid lexical/vector recall, structured diagnostics, and game-time-aware reranking.
