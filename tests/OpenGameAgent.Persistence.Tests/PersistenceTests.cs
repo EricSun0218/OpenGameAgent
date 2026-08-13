@@ -226,49 +226,6 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task VersionTwoSessionMigratesToAnEmptyLedgerAndCanUpgrade()
-    {
-        using var directory = new TemporaryDirectory();
-        var key = new GameSessionKey("session", "actor");
-        var store = new FileGameSessionStore(directory.Path);
-        await store.SaveAsync(
-            new GameSessionSnapshot(key, 1, new[] { AgentMessage.User("legacy") }),
-            0,
-            TestContext.Current.CancellationToken);
-        var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
-        var document = JsonNode.Parse(await File.ReadAllTextAsync(
-            file,
-            TestContext.Current.CancellationToken))!.AsObject();
-        document["FormatVersion"] = 2;
-        Assert.True(document.Remove("UsageRecords"));
-        await File.WriteAllTextAsync(file, document.ToJsonString(), TestContext.Current.CancellationToken);
-
-        var restarted = new FileGameSessionStore(directory.Path);
-        var legacy = await restarted.LoadAsync(key, TestContext.Current.CancellationToken);
-        Assert.NotNull(legacy);
-        Assert.Empty(legacy.UsageLedger.Records);
-
-        var record = new GameSessionUsageRecord(
-            "upgraded-usage",
-            GameSessionUsageCause.Assistant,
-            new ModelUsage(2, 1));
-        Assert.True((await restarted.SaveAsync(
-            new GameSessionSnapshot(
-                key,
-                2,
-                legacy.Messages,
-                usageLedger: legacy.UsageLedger.Append(new[] { record })),
-            1,
-            TestContext.Current.CancellationToken)).Saved);
-        var upgraded = await new FileGameSessionStore(directory.Path)
-            .LoadAsync(key, TestContext.Current.CancellationToken);
-
-        Assert.NotNull(upgraded);
-        Assert.Single(upgraded.UsageLedger.Records);
-        Assert.Equal(3, upgraded.UsageLedger.Stats.TotalTokens);
-    }
-
-    [Fact]
     public async Task SessionStoreRejectsUsageLedgerRemovalOrRewrite()
     {
         using var directory = new TemporaryDirectory();
@@ -308,6 +265,51 @@ public sealed class PersistenceTests
         Assert.NotNull(loaded);
         Assert.Equal(1, loaded.Revision);
         Assert.Equal(3, loaded.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task NonCurrentPersistenceFormatsAreRejectedInsteadOfSilentlyMigrated()
+    {
+        using (var sessionDirectory = new TemporaryDirectory())
+        {
+            var key = new GameSessionKey("session", "actor");
+            var store = new FileGameSessionStore(sessionDirectory.Path);
+            await store.SaveAsync(
+                new GameSessionSnapshot(key, 1),
+                0,
+                TestContext.Current.CancellationToken);
+            var path = Assert.Single(Directory.GetFiles(sessionDirectory.Path, "*.session.json"));
+            await SetFormatVersionAsync(path, 3);
+
+            await Assert.ThrowsAsync<PersistenceException>(async () =>
+                await store.LoadAsync(key, TestContext.Current.CancellationToken));
+        }
+
+        using (var actionDirectory = new TemporaryDirectory())
+        {
+            var intent = Intent("pre-release-action");
+            var journal = new FileGameActionJournal(actionDirectory.Path);
+            await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
+            var path = Assert.Single(Directory.GetFiles(actionDirectory.Path, "*.action.json"));
+            await SetFormatVersionAsync(path, 1);
+
+            await Assert.ThrowsAsync<PersistenceException>(async () =>
+                await journal.FindAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        }
+
+        using (var workflowDirectory = new TemporaryDirectory())
+        {
+            var store = new FileGameWorkflowCheckpointStore(workflowDirectory.Path);
+            await store.SaveAsync(
+                new GameWorkflowCheckpoint("instance", "workflow", 1, 0, "{}"),
+                0,
+                TestContext.Current.CancellationToken);
+            var path = Assert.Single(Directory.GetFiles(workflowDirectory.Path, "*.workflow.json"));
+            await SetFormatVersionAsync(path, 1);
+
+            await Assert.ThrowsAsync<PersistenceException>(async () =>
+                await store.LoadAsync("instance", TestContext.Current.CancellationToken));
+        }
     }
 
     [Fact]
@@ -434,27 +436,6 @@ public sealed class PersistenceTests
             await new FileGameActionJournal(directory.Path).ReserveAsync(
                 conflicting,
                 TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task VersionOneActionJournalRemainsReadableWithoutGenerationBinding()
-    {
-        using var directory = new TemporaryDirectory();
-        var intent = Intent("legacy-action");
-        await new FileGameActionJournal(directory.Path).ReserveAsync(
-            intent,
-            TestContext.Current.CancellationToken);
-        var path = Assert.Single(Directory.GetFiles(directory.Path, "*.action.json"));
-        var document = JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!.AsObject();
-        document["FormatVersion"] = 1;
-        document["Intent"]!.AsObject().Remove("GenerationId");
-        await File.WriteAllTextAsync(path, document.ToJsonString(), TestContext.Current.CancellationToken);
-
-        var restored = await new FileGameActionJournal(directory.Path).FindAsync(
-            intent.OperationId,
-            TestContext.Current.CancellationToken);
-
-        Assert.Null(restored!.Intent.GenerationId);
     }
 
     [Fact]
@@ -1246,6 +1227,18 @@ public sealed class PersistenceTests
 
     private static GameActionIntent Intent(string operationId) =>
         new(operationId, "input", "session", "actor", "move", "{\"x\":1.5}", new GameMoment("world", 4));
+
+    private static async Task SetFormatVersionAsync(string path, int formatVersion)
+    {
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(
+            path,
+            TestContext.Current.CancellationToken))!.AsObject();
+        document["FormatVersion"] = formatVersion;
+        await File.WriteAllTextAsync(
+            path,
+            document.ToJsonString(),
+            TestContext.Current.CancellationToken);
+    }
 
     private sealed class CallbackActionHandler : IGameActionHandler
     {

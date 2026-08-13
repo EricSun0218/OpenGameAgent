@@ -231,9 +231,6 @@ public sealed class RuntimeTests
         Assert.Equal(
             GameActionOperationIds.Version2Prefix.Length + 64,
             Create(session: new string('s', 16_384)).Length);
-        Assert.Equal("input:1:0", GameActionOperationIds.CreateLegacyV1("input", 1, 0));
-        GameActionOperationIdFactory legacyFactory = GameActionOperationIds.CreateLegacyV1;
-        Assert.NotNull(legacyFactory);
     }
 
     [Fact]
@@ -2085,52 +2082,6 @@ public sealed class RuntimeTests
         Assert.Equal(10, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Compaction).TotalTokens);
         Assert.Equal(9, saved.UsageLedger.Stats.ForCause(GameSessionUsageCause.Assistant).TotalTokens);
         Assert.Equal(1.9, saved.UsageLedger.Stats.CostTotal, precision: 10);
-    }
-
-    [Fact]
-    public async Task LegacyMessageUsageIsBootstrappedBeforeCompactionRemovesHistory()
-    {
-        static AgentMessage LegacyAssistant(string text, ModelUsage usage) => new(
-            AgentRole.Assistant,
-            new AgentContent[] { new TextContent(text) },
-            DateTimeOffset.UnixEpoch,
-            model: "legacy-model",
-            stopReason: ModelStopReason.Stop,
-            usage: usage);
-
-        var store = new InMemoryGameSessionStore();
-        var key = new GameSessionKey("session", "actor");
-        await store.SaveAsync(
-            new GameSessionSnapshot(key, 1, new AgentMessage[]
-            {
-                AgentMessage.User("one"),
-                LegacyAssistant("one", new ModelUsage(3, 1)),
-                AgentMessage.User("two"),
-                LegacyAssistant("two", new ModelUsage(4, 2)),
-            }),
-            0,
-            TestContext.Current.CancellationToken);
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
-            new RecordingProvider(_ => Text("answer")),
-            "model")
-        {
-            SessionStore = store,
-            AgentLimits = new AgentLimits { MaxMessages = 5 },
-            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
-                new ValueTask<GameTranscriptSummaryResult>(
-                    new GameTranscriptSummaryResult("summary", new ModelUsage(2, 1)))),
-        });
-
-        Assert.True((await runtime.RunAsync(
-            Input("chat", "{}", "legacy-compaction"),
-            TestContext.Current.CancellationToken)).Succeeded);
-        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
-
-        Assert.NotNull(saved);
-        Assert.Equal(4, saved.UsageLedger.Records.Count);
-        Assert.Equal(15, saved.UsageLedger.Stats.TotalTokens);
-        Assert.Contains(saved.UsageLedger.Records, record => record.RecordId == "legacy-message-1");
-        Assert.Contains(saved.UsageLedger.Records, record => record.RecordId == "legacy-message-3");
     }
 
     [Fact]
