@@ -2,15 +2,41 @@
 
 [简体中文](README.zh-CN.md)
 
-**The agent kernel for games.** A compact, hackable C# runtime for building AI-native games, autonomous NPCs, and interactive worlds in Godot, Unity, or .NET services.
+**Pi for games. Give every NPC a Codex-style action loop, not just ChatGPT-style dialogue.**
+
+OpenGameAgent is a compact, hackable C# agent runtime for AI-native games, autonomous NPCs, and interactive worlds in Godot, Unity, or .NET services. An NPC can observe structured game state, plan, call game tools, inspect authoritative results, remember, and continue working—not merely generate the next line of dialogue.
 
 [![CI](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
 
-OpenGameAgent brings the small, composable agent-kernel model to game development. Its stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, add the game layer for game time and durable state, then opt into extension packages for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
+Like Pi, OpenGameAgent starts with a small, composable agent kernel. It brings that model to game development: the stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, add the game layer for game time and durable state, then opt into extension packages for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
 
 Inputs are bounded JSON. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
+
+## What “Pi for games” means
+
+[Pi](https://github.com/earendil-works/pi) gives developers a small, programmable agent foundation rather than a fixed AI product: choose a model, register tools, compose extensions, stream events, steer an active run, and let the model/tool loop continue until the task is finished. OpenGameAgent follows that same developer model in C# and applies it to games.
+
+The kernel remains useful on its own as a general agent loop. The optional game runtime adds the coordinates that an interactive simulation needs: sessions and actors, game timelines and ticks, structured world context, bounded multi-NPC concurrency, persistent memory and tasks, engine-thread handoff, and durable action receipts. These capabilities are composed through typed interfaces instead of being hard-coded into one genre or world model.
+
+## Every NPC can work like Codex, not just chat like ChatGPT
+
+A chatbot-style NPC receives a prompt and returns dialogue. A Codex-style NPC receives a goal and the current environment, chooses tools, performs work, observes the result, and continues until it reaches a terminal outcome. In OpenGameAgent, those tools are ordinary game-owned operations: move, inspect, trade, build, schedule, recruit, investigate, or any other capability the developer exposes.
+
+| Chatbot-style NPC | OpenGameAgent NPC |
+| --- | --- |
+| Reads the latest dialogue | Observes bounded JSON containing dialogue, world state, events, UI input, sensor data, or simulation ticks |
+| Produces the next line of text | Streams text and typed tool calls, then consumes structured tool results |
+| Stops after one model response | Can observe → decide → act → inspect the result → continue across multiple turns |
+| Treats generated text as the outcome | Requests actions while game code validates permissions, rules, revisions, and state changes |
+| Usually follows wall-clock chat history | Can reason against game time, timelines, save/session identity, actor identity, and scoped memory |
+| Models one conversation at a time | Serializes each actor while allowing bounded concurrency across many NPCs |
+| May repeat a write after a timeout | Can journal state-changing intents and reconcile authoritative receipts before retrying |
+
+This does **not** mean the project bundles or depends on Codex, ChatGPT, or a particular model. The names describe the interaction pattern: an NPC is an agent operating through developer-defined tools, not a language model directly controlling game state. The game remains authoritative at every mutation boundary.
+
+Not every interaction needs the full loop. A game can route greetings and other simple inputs through the quick-response path, use the complete agent loop for open-ended tasks, and use deterministic workflows where the execution graph should be fixed.
 
 > Current version: `0.3.0-alpha.2`. Public APIs can change before `1.0`.
 
