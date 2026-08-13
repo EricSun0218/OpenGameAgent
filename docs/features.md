@@ -33,6 +33,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Search a large tool catalog on demand | `ToolCatalogExtension`, `IGameToolCatalog` |
 | Ask the player structured questions and recommend choices | `StructuredInteractionExtension`, `IGameInteractionBroker` |
 | Track goals and resume them after game-time waits | `GoalLoopExtension` |
+| Keep a persistent ordered checklist with host-verified progress | `TaskPlanExtension` |
 | Delegate bounded foreground or background work | `AgentDelegationExtension` |
 | Query a game-owned knowledge source | `ExternalKnowledgeExtension` |
 | Capture bounded lifecycle traces | `GameAgentTracingExtension` |

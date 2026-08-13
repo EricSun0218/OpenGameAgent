@@ -32,6 +32,42 @@ game tick / month advance
 
 Use `GoalLoopExtension` when an actor owns semantic goals that can wait for a tick or event and continue later. `GoalLoopOptions.MaximumActiveGoals` bounds active and waiting work, while `MaximumRetainedTerminalGoals` independently retains only the most recent completed, failed, or cancelled records for audit. Terminal retention never removes active or waiting goals, so long-running sessions do not exhaust their future goal capacity. Use `AgentDelegationExtension` when one actor needs bounded background research or planning without sharing its mutable transcript. Delegates still receive explicitly scoped context and tools; delegation is not permission escalation. Delegation status can be persisted, but the included local executor runs child work in the current process and does not automatically resume an in-flight child after a process restart. Use a host-owned durable workflow or executor when child execution itself must survive restarts.
 
+Use `TaskPlanExtension` for an ordered checklist that must survive later inputs. It is separate from `GoalLoopExtension`: goals describe durable intent and game-time waits, while a task plan records an ordered execution path. An active plan always has one `InProgress` step, a completed prefix, and a pending suffix. The model cannot advance a step merely by claiming success; the host-supplied `GameTaskPlanEvidenceValidator` must accept the evidence against the current input, plan, and step.
+
+```csharp
+var plans = new TaskPlanExtension(
+    async (request, cancellationToken) =>
+        await receipts.ExistsAsync(
+            request.Input.SessionId,
+            request.Input.ActorId,
+            request.Reference,
+            cancellationToken),
+    new TaskPlanOptions
+    {
+        MaximumActivePlans = 8,
+        MaximumRetainedTerminalPlans = 32,
+    });
+
+var runtime = new GameAgentBuilder(provider, model)
+    .UseSessionStore(sessionStore)
+    .UseExtension(plans)
+    .UseExtension("plan-ui", "1", api =>
+        api.Subscribe(TaskPlanExtension.PlanChanged, (change, _) =>
+        {
+            ui.Enqueue(change.Session, change.Plan);
+            return ValueTask.CompletedTask;
+        }))
+    .Build();
+```
+
+`advance` requires the plan revision and accepted evidence and can succeed only once per input. `replace_remaining` preserves completed steps and replaces only unfinished work. `fail` and `cancel` are terminal. Active plans contribute pending work to routing; terminal retention is independently bounded and never consumes active-plan capacity. State is namespaced by the runtime's session/actor key and persists through any `IGameSessionStore`.
+
+The tool payload cannot select an owner, session, or actor scope. Plans always use the already-authorized `GameInput`/`GameSessionKey`; a server host must resolve and authorize that key before invoking the runtime.
+
+The evidence validator is a read-only authority check, not another world mutation hook. Validate a receipt, observation revision, or game-owned fact there; perform actual state changes through ordinary authoritative tools and durable actions.
+
+`PlanChanged` carries the session/actor key and input ID. A UI that must show only committed state should buffer that channel and finalize it after the matching `SessionSaved` lifecycle event; a run that loses session CAS must not become authoritative UI state.
+
 ## Monthly or turn-based evolution
 
 Represent the calendar in `GameMoment.CalendarJson` while using `Tick` for ordering. A monthly advance can be a named `DurableGameWorkflow`:
