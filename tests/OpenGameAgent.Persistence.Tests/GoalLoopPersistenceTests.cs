@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using System.Text.Json;
 using OpenGameAgent.Extensions;
 using OpenGameAgent.Kernel;
 using Xunit;
@@ -56,23 +55,25 @@ public sealed class GoalLoopPersistenceTests
             Assert.True(result.Succeeded);
         }
 
-        var snapshot = await new FileGameSessionStore(directory.Path).LoadAsync(
+        var query = await GoalLoopExtension.ReadAsync(
+            new FileGameSessionStore(directory.Path),
             new GameSessionKey("session", "actor"),
-            TestContext.Current.CancellationToken);
-        var goals = snapshot!.ExtensionState.Values
-            .Select(json =>
-            {
-                using var document = JsonDocument.Parse(json);
-                return (
-                    Id: document.RootElement.GetProperty("Id").GetString(),
-                    Status: document.RootElement.GetProperty("Status").GetString());
-            })
-            .ToDictionary(goal => goal.Id!, goal => goal.Status, StringComparer.Ordinal);
+            includeTerminal: true,
+            cancellationToken: TestContext.Current.CancellationToken);
+        var goals = query.Goals.ToDictionary(goal => goal.Id, goal => goal.Status, StringComparer.Ordinal);
+        Assert.Equal(new GameSessionKey("session", "actor"), query.Session);
+        Assert.True(query.SessionRevision > 0);
         Assert.Equal(3, goals.Count);
-        Assert.Equal("Waiting", goals["waiting"]);
-        Assert.Equal("Completed", goals["recent"]);
-        Assert.Equal("Active", goals["active"]);
+        Assert.Equal(GameGoalStatus.Waiting, goals["waiting"]);
+        Assert.Equal(GameGoalStatus.Completed, goals["recent"]);
+        Assert.Equal(GameGoalStatus.Active, goals["active"]);
         Assert.DoesNotContain("old", goals);
+
+        var activeOnly = await GoalLoopExtension.ReadAsync(
+            new FileGameSessionStore(directory.Path),
+            query.Session,
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { "active", "waiting" }, activeOnly.Goals.Select(goal => goal.Id).ToArray());
     }
 
     private static ModelResponse ToolCall(string id, string arguments) =>

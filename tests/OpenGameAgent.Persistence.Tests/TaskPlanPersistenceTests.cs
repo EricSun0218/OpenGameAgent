@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using System.Text.Json;
 using OpenGameAgent.Extensions;
 using OpenGameAgent.Kernel;
 using Xunit;
@@ -48,16 +47,17 @@ public sealed class TaskPlanPersistenceTests
             Assert.True(result.Succeeded);
         }
 
-        var snapshot = await new FileGameSessionStore(directory.Path).LoadAsync(
+        var query = await TaskPlanExtension.ReadAsync(
+            new FileGameSessionStore(directory.Path),
             new GameSessionKey("session", "actor"),
-            TestContext.Current.CancellationToken);
-        using var document = JsonDocument.Parse(Assert.Single(snapshot!.ExtensionState).Value);
-        Assert.Equal(2, document.RootElement.GetProperty("Revision").GetInt64());
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(new GameSessionKey("session", "actor"), query.Session);
+        Assert.True(query.SessionRevision > 0);
+        var plan = Assert.Single(query.Plans);
+        Assert.Equal(2, plan.Revision);
         Assert.Equal(
-            new[] { "Completed", "InProgress" },
-            document.RootElement.GetProperty("Steps").EnumerateArray()
-                .Select(step => step.GetProperty("Status").GetString()).ToArray());
-        Assert.Equal("advance", document.RootElement.GetProperty("LastAdvancedInputId").GetString());
+            new[] { GameTaskPlanStepStatus.Completed, GameTaskPlanStepStatus.InProgress },
+            plan.Steps.Select(step => step.Status).ToArray());
         Assert.Equal(1, Volatile.Read(ref evidenceCalls));
     }
 
