@@ -103,6 +103,33 @@ public sealed class GameTaskPlanChanged
     public string Reason { get; }
 }
 
+public sealed class GameTaskPlanQueryResult
+{
+    internal GameTaskPlanQueryResult(
+        GameSessionKey session,
+        long sessionRevision,
+        IEnumerable<GameTaskPlanSnapshot> plans)
+    {
+        Session = new GameSessionKey(session.SessionId, session.ActorId);
+        SessionRevision = sessionRevision >= 0
+            ? sessionRevision
+            : throw new ArgumentOutOfRangeException(nameof(sessionRevision));
+        var copy = (plans ?? throw new ArgumentNullException(nameof(plans))).ToArray();
+        if (copy.Any(plan => plan is null))
+        {
+            throw new ArgumentException("Task-plan query results cannot contain null plans.", nameof(plans));
+        }
+
+        Plans = Array.AsReadOnly(copy);
+    }
+
+    public GameSessionKey Session { get; }
+
+    public long SessionRevision { get; }
+
+    public IReadOnlyList<GameTaskPlanSnapshot> Plans { get; }
+}
+
 public sealed class GameTaskPlanEvidenceRequest
 {
     public GameTaskPlanEvidenceRequest(
@@ -178,6 +205,8 @@ public sealed class TaskPlanOptions
 
 public sealed class TaskPlanExtension : IGameAgentExtension
 {
+    private const string ExtensionId = "opengameagent.task-plans";
+    private const int AbsoluteMaximumStepsPerPlan = 64;
     private const string PlanPrefix = "plan/";
     private const string ManageSchema = """
         {
@@ -214,10 +243,43 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         new("task-plan.changed");
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
-        "opengameagent.task-plans",
+        ExtensionId,
         "1.0.0",
         "Persistent ordered task checklists with host-validated advancement.",
         new[] { "task-plan", "checklist", "pending-work", "evidence" });
+
+    public static async ValueTask<GameTaskPlanQueryResult> ReadAsync(
+        IGameSessionStore sessionStore,
+        GameSessionKey session,
+        bool includeTerminal = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionStore is null)
+        {
+            throw new ArgumentNullException(nameof(sessionStore));
+        }
+
+        var key = new GameSessionKey(session.SessionId, session.ActorId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var snapshot = await sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return new GameTaskPlanQueryResult(key, 0, Array.Empty<GameTaskPlanSnapshot>());
+        }
+
+        if (snapshot.Key != key)
+        {
+            throw new InvalidOperationException("The session store returned a different session key.");
+        }
+
+        var plans = ReadAll(
+                StoredExtensionStateReader.Read(snapshot, ExtensionId),
+                AbsoluteMaximumStepsPerPlan)
+            .Where(plan => includeTerminal || plan.Status == GameTaskPlanStatus.Active)
+            .OrderBy(plan => plan.Id, StringComparer.Ordinal)
+            .ToArray();
+        return new GameTaskPlanQueryResult(key, snapshot.Revision, plans);
+    }
 
     public void Configure(GameAgentExtensionApi api)
     {
@@ -533,10 +595,15 @@ public sealed class TaskPlanExtension : IGameAgentExtension
     }
 
     private IReadOnlyList<GameTaskPlanSnapshot> ReadAll(GameAgentExtensionState state)
+        => ReadAll(state.Snapshot(), _options.MaximumStepsPerPlan);
+
+    private static IReadOnlyList<GameTaskPlanSnapshot> ReadAll(
+        IReadOnlyDictionary<string, string> state,
+        int maximumSteps)
     {
-        var plans = state.Snapshot()
+        var plans = state
             .Where(pair => pair.Key.StartsWith(PlanPrefix, StringComparison.Ordinal))
-            .Select(pair => Decode(pair.Value, pair.Key.Substring(PlanPrefix.Length)))
+            .Select(pair => Decode(pair.Value, pair.Key.Substring(PlanPrefix.Length), maximumSteps))
             .Select(document => new GameTaskPlanSnapshot(document))
             .ToArray();
         var duplicate = plans.GroupBy(plan => plan.Id, StringComparer.Ordinal)
@@ -550,12 +617,15 @@ public sealed class TaskPlanExtension : IGameAgentExtension
     }
 
     private TaskPlanDocument Decode(string json, string expectedId)
+        => Decode(json, expectedId, _options.MaximumStepsPerPlan);
+
+    private static TaskPlanDocument Decode(string json, string expectedId, int maximumSteps)
     {
         try
         {
             var document = JsonSerializer.Deserialize<TaskPlanDocument>(json)
                 ?? throw new InvalidOperationException("The task-plan document is null.");
-            ValidateDocument(document, expectedId, _options.MaximumStepsPerPlan);
+            ValidateDocument(document, expectedId, maximumSteps);
             return document;
         }
         catch (Exception exception) when (exception is JsonException or InvalidOperationException)

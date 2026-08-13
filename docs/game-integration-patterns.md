@@ -32,6 +32,25 @@ game tick / month advance
 
 Use `GoalLoopExtension` when an actor owns semantic goals that can wait for a tick or event and continue later. `GoalLoopOptions.MaximumActiveGoals` bounds active and waiting work, while `MaximumRetainedTerminalGoals` independently retains only the most recent completed, failed, or cancelled records for audit. Terminal retention never removes active or waiting goals, so long-running sessions do not exhaust their future goal capacity. Use `AgentDelegationExtension` when one actor needs bounded background research or planning without sharing its mutable transcript. Delegates still receive explicitly scoped context and tools; delegation is not permission escalation. Delegation status can be persisted, but the included local executor runs child work in the current process and does not automatically resume an in-flight child after a process restart. Use a host-owned durable workflow or executor when child execution itself must survive restarts.
 
+The host can project goals and task plans after loading a save without invoking a model and without parsing extension-owned JSON keys:
+
+```csharp
+var authorizedSession = new GameSessionKey(sessionId, actorId);
+var goals = await GoalLoopExtension.ReadAsync(
+    sessionStore,
+    authorizedSession,
+    includeTerminal: true,
+    cancellationToken);
+var taskPlans = await TaskPlanExtension.ReadAsync(
+    sessionStore,
+    authorizedSession,
+    cancellationToken: cancellationToken);
+
+ui.Render(goals.SessionRevision, goals.Goals, taskPlans.Plans);
+```
+
+These readers are read-only projections over `IGameSessionStore`. They do not run routing, providers, tools, pruning, or other extension lifecycle work. A missing session returns revision `0` and an empty collection. The caller must authorize the `GameSessionKey` before querying it; the readers deliberately do not replace host ownership policy.
+
 Use `TaskPlanExtension` for an ordered checklist that must survive later inputs. It is separate from `GoalLoopExtension`: goals describe durable intent and game-time waits, while a task plan records an ordered execution path. An active plan always has one `InProgress` step, a completed prefix, and a pending suffix. The model cannot advance a step merely by claiming success; the host-supplied `GameTaskPlanEvidenceValidator` must accept the evidence against the current input, plan, and step.
 
 ```csharp
@@ -66,7 +85,11 @@ The tool payload cannot select an owner, session, or actor scope. Plans always u
 
 The evidence validator is a read-only authority check, not another world mutation hook. Validate a receipt, observation revision, or game-owned fact there; perform actual state changes through ordinary authoritative tools and durable actions.
 
-`PlanChanged` carries the session/actor key and input ID. A UI that must show only committed state should buffer that channel and finalize it after the matching `SessionSaved` lifecycle event; a run that loses session CAS must not become authoritative UI state.
+`PlanChanged` and `GoalChanged` carry the session/actor key and input ID. A UI that must show only committed state should buffer those channels and finalize them after the matching `SessionSaved` lifecycle event; a run that loses session CAS must not become authoritative UI state.
+
+### Host query migration
+
+Hosts that previously inspected `GameSessionSnapshot.ExtensionState` should migrate to `GoalLoopExtension.ReadAsync` and `TaskPlanExtension.ReadAsync`. Treat extension-state key encoding and JSON documents as private storage details. `GameGoalChanged` now follows `GameTaskPlanChanged`: its constructor and every published event include `GameSessionKey` and `InputId`, so event consumers should correlate the change with the matching saved input before updating authoritative UI.
 
 ## Monthly or turn-based evolution
 

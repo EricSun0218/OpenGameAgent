@@ -210,7 +210,7 @@ public sealed class OfficialExtensionTests
             _ => TextResponse("complete"),
         });
         var store = new InMemoryGameSessionStore();
-        var changes = new ConcurrentQueue<string>();
+        var changes = new ConcurrentQueue<GameGoalChanged>();
         await using var runtime = new GameAgentBuilder(provider, "model")
             .UseSessionStore(store)
             .UseExtension(new GoalLoopExtension())
@@ -219,7 +219,7 @@ public sealed class OfficialExtensionTests
                 "1",
                 api => api.Subscribe(GoalLoopExtension.GoalChanged, (change, _) =>
                 {
-                    changes.Enqueue(change.Reason);
+                    changes.Enqueue(change);
                     return ValueTask.CompletedTask;
                 }))
             .Build();
@@ -241,7 +241,8 @@ public sealed class OfficialExtensionTests
         using var document = System.Text.Json.JsonDocument.Parse(stateJson);
         Assert.Equal("Completed", document.RootElement.GetProperty("Status").GetString());
         Assert.Equal(4, document.RootElement.GetProperty("Revision").GetInt64());
-        Assert.Contains("resumed", changes);
+        Assert.All(changes, change => Assert.Equal(new GameSessionKey("session", "actor"), change.Session));
+        Assert.Contains(changes, change => change.Reason == "resumed" && change.InputId == "three");
     }
 
     [Fact]

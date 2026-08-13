@@ -168,9 +168,42 @@ public sealed class TaskPlanExtensionTests
             (Session: "owner-b", Actor: "actor-a"),
         })
         {
-            using var document = await ReadOnlyPlanAsync(store, scope.Session, scope.Actor);
-            Assert.Equal("same-id", document.RootElement.GetProperty("Id").GetString());
+            var query = await TaskPlanExtension.ReadAsync(
+                store,
+                new GameSessionKey(scope.Session, scope.Actor),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(new GameSessionKey(scope.Session, scope.Actor), query.Session);
+            Assert.True(query.SessionRevision > 0);
+            Assert.Equal("same-id", Assert.Single(query.Plans).Id);
         }
+    }
+
+    [Fact]
+    public async Task HostQueryReturnsEmptyForMissingSessionAndFailsClosedOnInvalidOwnedState()
+    {
+        var store = new InMemoryGameSessionStore();
+        var missing = await TaskPlanExtension.ReadAsync(
+            store,
+            new GameSessionKey("missing", "actor"),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(0, missing.SessionRevision);
+        Assert.Empty(missing.Plans);
+
+        var key = new GameSessionKey("corrupt", "actor");
+        var invalid = new GameSessionSnapshot(
+            key,
+            1,
+            extensionState: new Dictionary<string, string>
+            {
+                ["opengameagent.task-plans:plan%2Finvalid"] = "{}",
+            });
+        Assert.True((await store.SaveAsync(invalid, 0, TestContext.Current.CancellationToken)).Saved);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await TaskPlanExtension.ReadAsync(
+                store,
+                key,
+                includeTerminal: true,
+                cancellationToken: TestContext.Current.CancellationToken));
     }
 
     [Fact]

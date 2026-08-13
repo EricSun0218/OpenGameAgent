@@ -109,15 +109,54 @@ public sealed class GameGoalSnapshot
 
 public sealed class GameGoalChanged
 {
-    public GameGoalChanged(GameGoalSnapshot goal, string reason)
+    public GameGoalChanged(
+        GameSessionKey session,
+        string inputId,
+        GameGoalSnapshot goal,
+        string reason)
     {
+        Session = new GameSessionKey(session.SessionId, session.ActorId);
+        InputId = string.IsNullOrWhiteSpace(inputId) || inputId.Length > 1_024
+            ? throw new ArgumentException("An input ID must contain 1 to 1024 characters.", nameof(inputId))
+            : inputId;
         Goal = goal ?? throw new ArgumentNullException(nameof(goal));
         Reason = reason ?? string.Empty;
     }
 
+    public GameSessionKey Session { get; }
+
+    public string InputId { get; }
+
     public GameGoalSnapshot Goal { get; }
 
     public string Reason { get; }
+}
+
+public sealed class GameGoalQueryResult
+{
+    internal GameGoalQueryResult(
+        GameSessionKey session,
+        long sessionRevision,
+        IEnumerable<GameGoalSnapshot> goals)
+    {
+        Session = new GameSessionKey(session.SessionId, session.ActorId);
+        SessionRevision = sessionRevision >= 0
+            ? sessionRevision
+            : throw new ArgumentOutOfRangeException(nameof(sessionRevision));
+        var copy = (goals ?? throw new ArgumentNullException(nameof(goals))).ToArray();
+        if (copy.Any(goal => goal is null))
+        {
+            throw new ArgumentException("Goal query results cannot contain null goals.", nameof(goals));
+        }
+
+        Goals = Array.AsReadOnly(copy);
+    }
+
+    public GameSessionKey Session { get; }
+
+    public long SessionRevision { get; }
+
+    public IReadOnlyList<GameGoalSnapshot> Goals { get; }
 }
 
 public sealed class GoalLoopOptions
@@ -152,6 +191,7 @@ public sealed class GoalLoopOptions
 
 public sealed class GoalLoopExtension : IGameAgentExtension
 {
+    private const string ExtensionId = "opengameagent.goals";
     private const string GoalPrefix = "goal/";
     private const string ManageSchema = """
         {
@@ -184,10 +224,41 @@ public sealed class GoalLoopExtension : IGameAgentExtension
     public static GameAgentExtensionChannel<GameGoalChanged> GoalChanged { get; } = new("goal.changed");
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
-        "opengameagent.goals",
+        ExtensionId,
         "1.0.0",
         "Durable goal state that can wait on game time or game events and resume on later inputs.",
         new[] { "goals", "durable-loop", "game-time", "game-events" });
+
+    public static async ValueTask<GameGoalQueryResult> ReadAsync(
+        IGameSessionStore sessionStore,
+        GameSessionKey session,
+        bool includeTerminal = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionStore is null)
+        {
+            throw new ArgumentNullException(nameof(sessionStore));
+        }
+
+        var key = new GameSessionKey(session.SessionId, session.ActorId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var snapshot = await sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return new GameGoalQueryResult(key, 0, Array.Empty<GameGoalSnapshot>());
+        }
+
+        if (snapshot.Key != key)
+        {
+            throw new InvalidOperationException("The session store returned a different session key.");
+        }
+
+        var goals = ReadAll(StoredExtensionStateReader.Read(snapshot, ExtensionId))
+            .Where(goal => includeTerminal || goal.Status is GameGoalStatus.Active or GameGoalStatus.Waiting)
+            .OrderBy(goal => goal.Id, StringComparer.Ordinal)
+            .ToArray();
+        return new GameGoalQueryResult(key, snapshot.Revision, goals);
+    }
 
     public void Configure(GameAgentExtensionApi api)
     {
@@ -232,7 +303,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                 goal = new GameGoalSnapshot(resumed);
                 await api.PublishAsync(
                     GoalChanged,
-                    new GameGoalChanged(goal, "resumed"),
+                    new GameGoalChanged(
+                        new GameSessionKey(context.Input.SessionId, context.Input.ActorId),
+                        context.Input.InputId,
+                        goal,
+                        "resumed"),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -378,7 +453,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                 var snapshot = new GameGoalSnapshot(document);
                 await api.PublishAsync(
                     GoalChanged,
-                    new GameGoalChanged(snapshot, action),
+                    new GameGoalChanged(
+                        new GameSessionKey(context.Input.SessionId, context.Input.ActorId),
+                        context.Input.InputId,
+                        snapshot,
+                        action),
                     cancellationToken).ConfigureAwait(false);
                 return JsonResult(snapshot);
             },
@@ -445,8 +524,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
     }
 
     private static IReadOnlyList<GameGoalSnapshot> ReadAll(GameAgentExtensionState state)
+        => ReadAll(state.Snapshot());
+
+    private static IReadOnlyList<GameGoalSnapshot> ReadAll(IReadOnlyDictionary<string, string> state)
     {
-        var goals = state.Snapshot()
+        var goals = state
             .Where(pair => pair.Key.StartsWith(GoalPrefix, StringComparison.Ordinal))
             .Select(pair => Decode(pair.Value, pair.Key.Substring(GoalPrefix.Length)))
             .Select(document => new GameGoalSnapshot(document))
