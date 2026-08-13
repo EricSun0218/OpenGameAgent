@@ -68,6 +68,74 @@ public sealed class GameMailboxDelivery
     public DateTimeOffset OperationalLeaseExpiresAt { get; }
 }
 
+public readonly struct GameMailboxRecipientKey : IEquatable<GameMailboxRecipientKey>
+{
+    public GameMailboxRecipientKey(string sessionId, string recipientId)
+    {
+        SessionId = GameJson.RequireId(sessionId, nameof(sessionId));
+        RecipientId = GameJson.RequireId(recipientId, nameof(recipientId));
+    }
+
+    public string SessionId { get; }
+
+    public string RecipientId { get; }
+
+    public bool Equals(GameMailboxRecipientKey other) =>
+        string.Equals(SessionId, other.SessionId, StringComparison.Ordinal)
+        && string.Equals(RecipientId, other.RecipientId, StringComparison.Ordinal);
+
+    public override bool Equals(object? obj) => obj is GameMailboxRecipientKey other && Equals(other);
+
+    public override int GetHashCode()
+    {
+        unchecked
+        {
+            return ((SessionId is null ? 0 : StringComparer.Ordinal.GetHashCode(SessionId)) * 397)
+                ^ (RecipientId is null ? 0 : StringComparer.Ordinal.GetHashCode(RecipientId));
+        }
+    }
+
+    public override string ToString() => (SessionId ?? string.Empty) + ":" + (RecipientId ?? string.Empty);
+
+    public static bool operator ==(GameMailboxRecipientKey left, GameMailboxRecipientKey right) =>
+        left.Equals(right);
+
+    public static bool operator !=(GameMailboxRecipientKey left, GameMailboxRecipientKey right) =>
+        !left.Equals(right);
+
+    internal GameMailboxRecipientKey EnsureValid(string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(SessionId) || string.IsNullOrWhiteSpace(RecipientId))
+        {
+            throw new ArgumentException("A valid mailbox recipient key is required.", parameterName);
+        }
+
+        return this;
+    }
+}
+
+public sealed class GameMailboxPendingStatus
+{
+    public GameMailboxPendingStatus(
+        GameMailboxRecipientKey recipient,
+        int readyCount,
+        int leasedCount)
+    {
+        Recipient = recipient.EnsureValid(nameof(recipient));
+        ReadyCount = readyCount >= 0 ? readyCount : throw new ArgumentOutOfRangeException(nameof(readyCount));
+        LeasedCount = leasedCount >= 0 ? leasedCount : throw new ArgumentOutOfRangeException(nameof(leasedCount));
+        IncompleteCount = checked(readyCount + leasedCount);
+    }
+
+    public GameMailboxRecipientKey Recipient { get; }
+
+    public int ReadyCount { get; }
+
+    public int LeasedCount { get; }
+
+    public int IncompleteCount { get; }
+}
+
 public interface IGameMailbox
 {
     ValueTask<bool> EnqueueAsync(GameMailboxMessage message, CancellationToken cancellationToken);
@@ -83,6 +151,11 @@ public interface IGameMailbox
     ValueTask CompleteAsync(string messageId, string leaseToken, CancellationToken cancellationToken);
 
     ValueTask AbandonAsync(string messageId, string leaseToken, CancellationToken cancellationToken);
+
+    ValueTask<IReadOnlyList<GameMailboxPendingStatus>> GetPendingStatusAsync(
+        IReadOnlyList<GameMailboxRecipientKey> recipients,
+        DateTimeOffset operationalNow,
+        CancellationToken cancellationToken);
 }
 
 public sealed class InMemoryGameMailbox : IGameMailbox
@@ -214,6 +287,54 @@ public sealed class InMemoryGameMailbox : IGameMailbox
         return default;
     }
 
+    public ValueTask<IReadOnlyList<GameMailboxPendingStatus>> GetPendingStatusAsync(
+        IReadOnlyList<GameMailboxRecipientKey> recipients,
+        DateTimeOffset operationalNow,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var requested = GameMailboxPendingQuery.Validate(recipients);
+        var counts = new Dictionary<GameMailboxRecipientKey, GameMailboxPendingQuery.Counts>();
+        foreach (var recipient in requested)
+        {
+            counts[recipient] = default;
+        }
+
+        lock (_gate)
+        {
+            foreach (var entry in _entries.Values)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (entry.Completed)
+                {
+                    continue;
+                }
+
+                var recipient = new GameMailboxRecipientKey(
+                    entry.Message.SessionId,
+                    entry.Message.RecipientId);
+                if (!counts.TryGetValue(recipient, out var count))
+                {
+                    continue;
+                }
+
+                if (entry.LeaseToken is not null && entry.LeaseExpiresAt > operationalNow)
+                {
+                    count.Leased = checked(count.Leased + 1);
+                }
+                else
+                {
+                    count.Ready = checked(count.Ready + 1);
+                }
+
+                counts[recipient] = count;
+            }
+        }
+
+        return new ValueTask<IReadOnlyList<GameMailboxPendingStatus>>(
+            GameMailboxPendingQuery.Materialize(requested, counts));
+    }
+
     private Entry RequireLease(string messageId, string leaseToken)
     {
         GameJson.RequireId(messageId, nameof(messageId));
@@ -270,5 +391,56 @@ public sealed class InMemoryGameMailbox : IGameMailbox
         public DateTimeOffset LeaseExpiresAt { get; set; }
 
         public bool Completed { get; set; }
+    }
+}
+
+internal static class GameMailboxPendingQuery
+{
+    internal const int MaximumRecipients = 4_096;
+
+    internal static GameMailboxRecipientKey[] Validate(
+        IReadOnlyList<GameMailboxRecipientKey> recipients)
+    {
+        if (recipients is null)
+        {
+            throw new ArgumentNullException(nameof(recipients));
+        }
+
+        if (recipients.Count > MaximumRecipients)
+        {
+            throw new GameRuntimeLimitException(
+                nameof(MaximumRecipients),
+                "A mailbox pending query contains too many recipients.");
+        }
+
+        var copy = new GameMailboxRecipientKey[recipients.Count];
+        for (var index = 0; index < recipients.Count; index++)
+        {
+            copy[index] = recipients[index].EnsureValid(nameof(recipients));
+        }
+
+        return copy;
+    }
+
+    internal static IReadOnlyList<GameMailboxPendingStatus> Materialize(
+        IReadOnlyList<GameMailboxRecipientKey> requested,
+        IReadOnlyDictionary<GameMailboxRecipientKey, Counts> counts)
+    {
+        var result = new GameMailboxPendingStatus[requested.Count];
+        for (var index = 0; index < requested.Count; index++)
+        {
+            var recipient = requested[index];
+            var count = counts[recipient];
+            result[index] = new GameMailboxPendingStatus(recipient, count.Ready, count.Leased);
+        }
+
+        return Array.AsReadOnly(result);
+    }
+
+    internal struct Counts
+    {
+        public int Ready;
+
+        public int Leased;
     }
 }

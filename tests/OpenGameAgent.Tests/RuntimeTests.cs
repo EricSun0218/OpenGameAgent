@@ -3095,6 +3095,124 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task MailboxPendingStatusIsReadOnlyAndTracksLeaseLifecycle()
+    {
+        var mailbox = new InMemoryGameMailbox();
+        var recipient = new GameMailboxRecipientKey("session", "npc");
+        var missing = new GameMailboxRecipientKey("session", "missing");
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage(
+                "mail",
+                recipient.SessionId,
+                recipient.RecipientId,
+                "event",
+                "{\"private\":\"not returned\"}",
+                new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+
+        var requested = new[] { recipient, missing, recipient };
+        var initial = await mailbox.GetPendingStatusAsync(
+            requested,
+            now,
+            TestContext.Current.CancellationToken);
+        var repeated = await mailbox.GetPendingStatusAsync(
+            requested,
+            now,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, initial.Count);
+        Assert.Equal(1, initial[0].ReadyCount);
+        Assert.Equal(0, initial[0].LeasedCount);
+        Assert.Equal(1, initial[0].IncompleteCount);
+        Assert.Equal(0, initial[1].IncompleteCount);
+        Assert.Equal(initial[0].IncompleteCount, initial[2].IncompleteCount);
+        Assert.Equal(initial.Select(StatusTuple), repeated.Select(StatusTuple));
+
+        var delivery = Assert.Single(await mailbox.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            1,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, delivery.Attempt);
+
+        var leased = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now.AddSeconds(30),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(0, leased.ReadyCount);
+        Assert.Equal(1, leased.LeasedCount);
+        Assert.Equal(1, leased.IncompleteCount);
+
+        var expired = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now.AddMinutes(2),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, expired.ReadyCount);
+        Assert.Equal(0, expired.LeasedCount);
+
+        await mailbox.AbandonAsync(
+            delivery.Message.MessageId,
+            delivery.LeaseToken,
+            TestContext.Current.CancellationToken);
+        var abandoned = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, abandoned.ReadyCount);
+        Assert.Equal(0, abandoned.LeasedCount);
+
+        var reclaimed = Assert.Single(await mailbox.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            1,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(2, reclaimed.Attempt);
+        await mailbox.CompleteAsync(
+            reclaimed.Message.MessageId,
+            reclaimed.LeaseToken,
+            TestContext.Current.CancellationToken);
+
+        var completed = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(0, completed.IncompleteCount);
+
+        static (GameMailboxRecipientKey Recipient, int Ready, int Leased, int Incomplete) StatusTuple(
+            GameMailboxPendingStatus status) =>
+            (status.Recipient, status.ReadyCount, status.LeasedCount, status.IncompleteCount);
+    }
+
+    [Fact]
+    public async Task MailboxPendingStatusValidatesBoundsAndCancellation()
+    {
+        var mailbox = new InMemoryGameMailbox();
+        var recipients = Enumerable.Range(0, 4_097)
+            .Select(index => new GameMailboxRecipientKey("session", "npc-" + index))
+            .ToArray();
+
+        var limit = await Assert.ThrowsAsync<GameRuntimeLimitException>(async () =>
+            await mailbox.GetPendingStatusAsync(
+                recipients,
+                DateTimeOffset.UnixEpoch,
+                TestContext.Current.CancellationToken));
+        Assert.Equal("MaximumRecipients", limit.Limit);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await mailbox.GetPendingStatusAsync(
+                new[] { new GameMailboxRecipientKey("session", "npc") },
+                DateTimeOffset.UnixEpoch,
+                cancellation.Token));
+    }
+
+    [Fact]
     public void SchedulerCatchesUpAnOverdueTriggerExactlyOnce()
     {
         var scheduler = new GameTimeScheduler();
