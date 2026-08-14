@@ -1,14 +1,24 @@
-# OpenGameAgent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/opengameagent-mark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/opengameagent-mark-light.svg">
+    <img src="docs/brand/opengameagent-mark-light.svg" alt="OpenGameAgent OGA monogram" width="112">
+  </picture>
+</p>
 
-[English](README.md)
+<h1 align="center">OpenGameAgent</h1>
 
-**游戏版 Pi：让每个 NPC 都拥有类似 Codex 的行动循环，而不只是像 ChatGPT 一样聊天。**
+<p align="center"><strong>游戏版 Pi：让每个 NPC 都拥有类似 Codex 的行动循环，而不只是像 ChatGPT 一样聊天。</strong></p>
+
+<p align="center"><a href="README.md">English</a></p>
 
 OpenGameAgent 是一个紧凑、可修改的 C# Agent Runtime，用于在 Godot、Unity 或 .NET 服务端构建 AI 原生游戏、自主 NPC 与互动世界。NPC 可以观察结构化游戏状态、制定计划、调用游戏工具、检查权威执行结果、形成记忆并继续完成任务，而不只是生成下一句对话。
 
-[![CI](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
+<p align="center">
+  <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
+</p>
 
 与 Pi 一样，OpenGameAgent 从小型、可组合的 Agent 内核出发，并把这种模式带进游戏开发。它的有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用这个内核，也可以叠加游戏层获得游戏时间与可靠状态，再按需加入记忆、目标、宿主证据校验的任务清单、产物、委派、外部工具、结构化交互和工作流图等扩展。
 
@@ -219,6 +229,10 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 ## 项目边界
 
 这是面向开发者的框架，不是通用人物卡、战斗系统、世界包格式、可视化编辑器或 C 端游戏。具体玩法属于每一个游戏。框架提供构建对话角色、自主伙伴、社会模拟、AI 导演、动态任务与道具、策略 Agent、建造 Agent 和持续互动世界所需的 Agent Loop 与游戏原语。
+
+## 署名
+
+OpenGameAgent 使用 Apache-2.0 许可证，不强制游戏展示 Logo 或额外署名。我们欢迎游戏和 Mod 在 Credits、关于或第三方许可中写上：**“Powered by OpenGameAgent | opengameagent.com”**，或 **“本游戏使用 OpenGameAgent 构建游戏角色的 Agent 能力。”** 在许可证要求的情况下，请保留 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。Logo 与品牌使用方式见[品牌资源说明](docs/brand/README.md)。
 
 ## 协议
 

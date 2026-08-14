@@ -1,14 +1,24 @@
-# OpenGameAgent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/opengameagent-mark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/opengameagent-mark-light.svg">
+    <img src="docs/brand/opengameagent-mark-light.svg" alt="OpenGameAgent OGA monogram" width="112">
+  </picture>
+</p>
 
-[简体中文](README.zh-CN.md)
+<h1 align="center">OpenGameAgent</h1>
 
-**Pi for games. Give every NPC a Codex-style action loop, not just ChatGPT-style dialogue.**
+<p align="center"><strong>Pi for games. Give every NPC a Codex-style action loop, not just ChatGPT-style dialogue.</strong></p>
+
+<p align="center"><a href="README.zh-CN.md">简体中文</a></p>
 
 OpenGameAgent is a compact, hackable C# agent runtime for AI-native games, autonomous NPCs, and interactive worlds in Godot, Unity, or .NET services. An NPC can observe structured game state, plan, call game tools, inspect authoritative results, remember, and continue working—not merely generate the next line of dialogue.
 
-[![CI](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
+<p align="center">
+  <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
+</p>
 
 Like Pi, OpenGameAgent starts with a small, composable agent kernel. It brings that model to game development: the stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, add the game layer for game time and durable state, then opt into extension packages for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
 
@@ -220,6 +230,10 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 ## Project boundary
 
 This repository is a developer framework. It does not define a universal character sheet, combat model, world-package format, visual editor, or end-user game. Those belong to each game. The framework provides the agent loop and game-aware primitives needed to build conversational characters, autonomous companions, social simulations, AI directors, generated quests and items, strategy agents, construction agents, and persistent interactive worlds.
+
+## Attribution
+
+OpenGameAgent is licensed under Apache-2.0. An in-game logo or credit is not required, but games and mods are welcome to write **“Powered by OpenGameAgent | opengameagent.com”** in Credits, About, or third-party notices. Preserve [LICENSE](LICENSE) and [NOTICE](NOTICE) when the license requires it. See the [brand assets and usage guidance](docs/brand/README.md).
 
 ## License
 

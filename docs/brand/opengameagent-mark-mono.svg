@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">OpenGameAgent</title>
+  <desc id="desc">The monochrome OGA monogram.</desc>
+  <g fill="none" stroke="#0A0D0F" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M45.5 8H20L8 20v24l12 12h24l12-12V32H39.5" stroke-width="7" />
+    <path d="M56 32H45" stroke-width="7" />
+    <path d="M23.5 44 32 20l8.5 24M27 35h10" stroke-width="5" />
+  </g>
+</svg>
