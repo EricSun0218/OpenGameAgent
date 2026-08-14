@@ -8,11 +8,11 @@
 
 <h1 align="center">OpenGameAgent</h1>
 
-<p align="center"><strong>游戏版 Pi：让每个 NPC 都拥有类似 Codex 的行动循环，而不只是像 ChatGPT 一样聊天。</strong></p>
+<p align="center"><strong>面向 AI 原生游戏、自主 NPC 与互动世界的开源 Agent Runtime。</strong></p>
 
 <p align="center"><a href="README.md">English</a></p>
 
-OpenGameAgent 是一个紧凑、可修改的 C# Agent Runtime，用于在 Godot、Unity 或 .NET 服务端构建 AI 原生游戏、自主 NPC 与互动世界。NPC 可以观察结构化游戏状态、制定计划、调用游戏工具、检查权威执行结果、形成记忆并继续完成任务，而不只是生成下一句对话。
+OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够观察结构化状态、制定计划、调用工具、检查权威结果、形成记忆并持续完成目标。它可以运行在 Godot、Unity 或 .NET 服务端中，而每次状态变更仍由游戏代码裁决。
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
@@ -20,21 +20,19 @@ OpenGameAgent 是一个紧凑、可修改的 C# Agent Runtime，用于在 Godot�
   <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
 </p>
 
-与 Pi 一样，OpenGameAgent 从小型、可组合的 Agent 内核出发，并把这种模式带进游戏开发。它的有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用这个内核，也可以叠加游戏层获得游戏时间与可靠状态，再按需加入记忆、目标、宿主证据校验的任务清单、产物、委派、外部工具、结构化交互和工作流图等扩展。
+OpenGameAgent 从小型、可组合的 Agent 内核出发。有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用内核，也可以叠加游戏 Runtime 获得游戏时间与可靠状态，再按需加入记忆、目标、宿主证据校验的任务清单、产物、委派、外部工具、结构化交互和工作流图等扩展。
 
 输入是有大小限制的 JSON，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
 
-## “游戏版 Pi”是什么意思
+## 为游戏构建的可编程 Agent Runtime
 
-[Pi](https://github.com/earendil-works/pi) 提供的是一个小型、可编程的 Agent 基础，而不是固定形态的 AI 产品：开发者可以选择模型、注册工具、组合扩展、订阅流式事件、在运行中 steering，并让模型/工具循环持续执行到任务结束。OpenGameAgent 在 C# 中采用同样的开发方式，并把它带进游戏。
+开发者可以选择模型、注册游戏自有工具、组合扩展、订阅流式事件、在运行中 steering，并让模型/工具循环持续执行到任务结束。内核本身可以作为通用 Agent Loop 单独使用。可选的游戏 Runtime 则增加互动模拟真正需要的坐标：会话与角色、游戏时间线与 Tick、结构化世界上下文、多 NPC 有界并发、持久记忆与任务、引擎主线程交接，以及可恢复的动作回执。这些能力通过类型化接口组合，不绑定某一种玩法、题材或世界数据模型。
 
-内核本身可以作为通用 Agent Loop 单独使用。可选的游戏 Runtime 则增加互动模拟真正需要的坐标：会话与角色、游戏时间线与 Tick、结构化世界上下文、多 NPC 有界并发、持久记忆与任务、引擎主线程交接，以及可恢复的动作回执。这些能力通过类型化接口组合，不绑定某一种玩法、题材或世界数据模型。
+## 不止对话：观察、决策、行动并持续推进
 
-## 每个 NPC 都可以像 Codex 一样做事，而不只是像 ChatGPT 一样聊天
+仅对话角色接收一段提示词，然后返回一句对话。Agent 驱动的角色接收目标和当前环境，选择工具、执行工作、观察结果，并持续行动直到得到明确结果。在 OpenGameAgent 中，这些工具就是普通的游戏业务能力：移动、观察、交易、建造、安排日程、招募、调查，或开发者允许角色使用的任何操作。
 
-聊天式 NPC 接收一段提示词，然后返回一句对话。Codex 式 NPC 接收目标和当前环境，选择工具、执行工作、观察结果，并持续行动直到得到明确结果。在 OpenGameAgent 中，这些工具就是普通的游戏业务能力：移动、观察、交易、建造、安排日程、招募、调查，或开发者允许 NPC 使用的任何操作。
-
-| 聊天式 NPC | OpenGameAgent NPC |
+| 仅对话角色 | Agent 驱动角色 |
 | --- | --- |
 | 主要读取最近的对话 | 观察有界 JSON，其中可以包含对话、世界状态、事件、UI 输入、传感数据或模拟 Tick |
 | 生成下一句文本 | 流式生成文本和类型化工具调用，并读取结构化工具结果 |
@@ -44,7 +42,7 @@ OpenGameAgent 是一个紧凑、可修改的 C# Agent Runtime，用于在 Godot�
 | 一次处理一段对话 | 同一角色串行，不同 NPC 之间有界并发 |
 | 超时后重试可能重复写入 | 可以先记录状态变更意图，并在重试前核对游戏返回的权威回执 |
 
-这**不代表**项目捆绑或依赖 Codex、ChatGPT 或某个指定模型。这两个名字描述的是交互方式：NPC 是一个通过开发者定义的工具做事的 Agent，而不是一个直接控制游戏状态的大模型。所有状态变更始终由游戏裁决。
+OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的工具行动，模型不能直接控制游戏状态；所有状态变更始终由游戏裁决。
 
 也不是每次互动都必须运行完整 Agent Loop。问候等简单输入可以走快速回复路由，开放式任务使用完整循环，需要固定执行图的场景则可以使用确定性 Workflow。
 
