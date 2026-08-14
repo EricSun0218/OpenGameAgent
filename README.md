@@ -8,11 +8,11 @@
 
 <h1 align="center">OpenGameAgent</h1>
 
-<p align="center"><strong>Pi for games. Give every NPC a Codex-style action loop, not just ChatGPT-style dialogue.</strong></p>
+<p align="center"><strong>Open-source agent runtime for AI-native games, autonomous NPCs, and interactive worlds.</strong></p>
 
 <p align="center"><a href="README.zh-CN.md">简体中文</a></p>
 
-OpenGameAgent is a compact, hackable C# agent runtime for AI-native games, autonomous NPCs, and interactive worlds in Godot, Unity, or .NET services. An NPC can observe structured game state, plan, call game tools, inspect authoritative results, remember, and continue working—not merely generate the next line of dialogue.
+OpenGameAgent is a compact, hackable C# runtime that lets game characters observe structured state, plan, call tools, inspect authoritative results, remember, and continue toward goals. It runs inside Godot, Unity, or .NET services while game code remains authoritative over every state change.
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
@@ -20,21 +20,19 @@ OpenGameAgent is a compact, hackable C# agent runtime for AI-native games, auton
   <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
 </p>
 
-Like Pi, OpenGameAgent starts with a small, composable agent kernel. It brings that model to game development: the stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, add the game layer for game time and durable state, then opt into extension packages for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
+OpenGameAgent starts with a small, composable agent kernel. The stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use the kernel by itself, add the game runtime for game time and durable state, then opt into extensions for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
 
 Inputs are bounded JSON. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
 
-## What “Pi for games” means
+## A programmable agent runtime built for games
 
-[Pi](https://github.com/earendil-works/pi) gives developers a small, programmable agent foundation rather than a fixed AI product: choose a model, register tools, compose extensions, stream events, steer an active run, and let the model/tool loop continue until the task is finished. OpenGameAgent follows that same developer model in C# and applies it to games.
+Developers choose a model, register game-owned tools, compose extensions, stream events, steer an active run, and let the model/tool loop continue until the task is finished. The kernel remains useful on its own as a general agent loop. The optional game runtime adds the coordinates an interactive simulation needs: sessions and actors, game timelines and ticks, structured world context, bounded multi-NPC concurrency, persistent memory and tasks, engine-thread handoff, and durable action receipts. These capabilities are composed through typed interfaces instead of being hard-coded into one genre or world model.
 
-The kernel remains useful on its own as a general agent loop. The optional game runtime adds the coordinates that an interactive simulation needs: sessions and actors, game timelines and ticks, structured world context, bounded multi-NPC concurrency, persistent memory and tasks, engine-thread handoff, and durable action receipts. These capabilities are composed through typed interfaces instead of being hard-coded into one genre or world model.
+## Beyond dialogue: observe, decide, act, and continue
 
-## Every NPC can work like Codex, not just chat like ChatGPT
+A dialogue-only character receives a prompt and returns a line. An agent-driven character receives a goal and the current environment, chooses tools, performs work, observes the result, and continues until it reaches a terminal outcome. In OpenGameAgent, those tools are ordinary game-owned operations: move, inspect, trade, build, schedule, recruit, investigate, or any other capability the developer exposes.
 
-A chatbot-style NPC receives a prompt and returns dialogue. A Codex-style NPC receives a goal and the current environment, chooses tools, performs work, observes the result, and continues until it reaches a terminal outcome. In OpenGameAgent, those tools are ordinary game-owned operations: move, inspect, trade, build, schedule, recruit, investigate, or any other capability the developer exposes.
-
-| Chatbot-style NPC | OpenGameAgent NPC |
+| Dialogue-only character | Agent-driven character |
 | --- | --- |
 | Reads the latest dialogue | Observes bounded JSON containing dialogue, world state, events, UI input, sensor data, or simulation ticks |
 | Produces the next line of text | Streams text and typed tool calls, then consumes structured tool results |
@@ -44,7 +42,7 @@ A chatbot-style NPC receives a prompt and returns dialogue. A Codex-style NPC re
 | Models one conversation at a time | Serializes each actor while allowing bounded concurrency across many NPCs |
 | May repeat a write after a timeout | Can journal state-changing intents and reconcile authoritative receipts before retrying |
 
-This does **not** mean the project bundles or depends on Codex, ChatGPT, or a particular model. The names describe the interaction pattern: an NPC is an agent operating through developer-defined tools, not a language model directly controlling game state. The game remains authoritative at every mutation boundary.
+OpenGameAgent is model- and provider-neutral. Characters operate through developer-defined tools; a model never directly controls game state. The game remains authoritative at every mutation boundary.
 
 Not every interaction needs the full loop. A game can route greetings and other simple inputs through the quick-response path, use the complete agent loop for open-ended tasks, and use deterministic workflows where the execution graph should be fixed.
 
