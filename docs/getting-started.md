@@ -153,6 +153,29 @@ ValueTask<IReadOnlyList<AgentTool>> Tools(GameInput input, CancellationToken _)
 
 `IGameActionHandler.ExecuteAsync` must recheck visibility, permission, resources, expected revision, and all game rules. Return `Rejected` for a legal request that cannot commit. Implement `RecoverAsync` using the game's operation ledger or transaction log.
 
+When the model loop runs off the engine thread, wrap that authoritative handler in
+`QueuedGameActionHandler` and pump it from the engine thread. The durable dispatcher remains the
+only action journal; the queue is a bounded, process-local handoff:
+
+```csharp
+var engineActions = new QueuedGameActionHandler(
+    new AuthoritativeGameActionHandler(world),
+    maximumPendingActions: 256,
+    maximumActiveActions: 16);
+var dispatcher = new DurableGameActionDispatcher(actionJournal, engineActions);
+
+// Unity Update, Godot _Process, or the equivalent host-owned main-thread callback.
+engineActions.Pump(maximumWorkItems: 16);
+```
+
+The first `Pump` call binds the instance to that managed thread. Cancellation removes an action
+only while it is still queued. Once the host starts an action, caller timeout no longer cancels the
+mutation blindly; its receipt is allowed to settle. `Stop` rejects new work and faults queued work,
+while `DisposeAsync` additionally waits for already-started work. The wrapped authoritative handler
+must validate `GenerationId` against the currently loaded save/world generation because only the
+game knows which generation is active. Pending durable journal entries are recovered through the
+same pump after restart.
+
 ## Select routes
 
 The default route is intentionally simple:

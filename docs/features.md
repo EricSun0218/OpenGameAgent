@@ -64,7 +64,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | --- | --- |
 | Mutate game state through a typed tool | `GameActionTool` |
 | Avoid repeating uncertain writes | `DurableGameActionDispatcher`, `IGameActionJournal` |
-| Execute on engine main thread | implement `IGameActionHandler` by queueing into the engine, then await the receipt |
+| Execute on an engine-owned main thread | wrap the authoritative `IGameActionHandler` in `QueuedGameActionHandler`, then call `Pump` from the engine thread |
 | Store long-term NPC facts/events | `IGameMemoryStore`, `GameMemory` |
 | Apply custom semantic ranking | `IGameMemoryRanker`, `RankedGameMemoryStore` |
 | Add local or remote vector embeddings and hybrid recall | `IMemoryEmbeddingProvider`, `VectorMemoryStore` |

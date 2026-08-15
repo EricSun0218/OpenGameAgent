@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-No changes yet.
+- Add `QueuedGameActionHandler`, a bounded engine-thread action handoff with FIFO pumping,
+  queued cancellation, active-action settlement, shutdown cleanup, and main-thread recovery over
+  the existing durable action journal and receipt protocol.
 
 ## 0.3.0-alpha.2
 
