@@ -102,7 +102,21 @@ public sealed class GameInput
         GameMoment moment,
         string? inputId = null,
         IReadOnlyDictionary<string, string>? metadata = null,
-        IReadOnlyList<ResourceContent>? resources = null)
+        IReadOnlyList<AgentContent>? content = null)
+        : this(sessionId, actorId, type, payloadJson, moment, inputId, metadata, content, allowStoredImages: false)
+    {
+    }
+
+    private GameInput(
+        string sessionId,
+        string actorId,
+        string type,
+        string payloadJson,
+        GameMoment moment,
+        string? inputId,
+        IReadOnlyDictionary<string, string>? metadata,
+        IReadOnlyList<AgentContent>? content,
+        bool allowStoredImages)
     {
         SessionId = GameJson.RequireId(sessionId, nameof(sessionId));
         ActorId = GameJson.RequireId(actorId, nameof(actorId));
@@ -122,14 +136,37 @@ public sealed class GameInput
         }
 
         Metadata = new ReadOnlyDictionary<string, string>(copiedMetadata);
-        var copiedResources = (resources ?? Array.Empty<ResourceContent>()).ToArray();
-        if (copiedResources.Any(resource => resource is null))
+        var copiedContent = (content ?? Array.Empty<AgentContent>()).ToArray();
+        if (copiedContent.Any(part => part is null))
         {
-            throw new ArgumentException("Input resources cannot contain null values.", nameof(resources));
+            throw new ArgumentException("Input content cannot contain null values.", nameof(content));
         }
 
-        Resources = Array.AsReadOnly(copiedResources);
+        if (copiedContent.Any(part =>
+            part is not TextContent
+                and not JsonContent
+                and not ResourceContent
+                and not BinaryContent { MediaKind: AgentMediaKind.Image }
+            && !(allowStoredImages && part is ImageAttachmentContent)))
+        {
+            throw new ArgumentException(
+                "Game input content supports text, JSON, resources, and unsaved inline images only.",
+                nameof(content));
+        }
+
+        Content = Array.AsReadOnly(copiedContent);
     }
+
+    internal GameInput WithPersistedContent(IReadOnlyList<AgentContent> content) => new(
+        SessionId,
+        ActorId,
+        Type,
+        PayloadJson,
+        Moment,
+        InputId,
+        Metadata,
+        content,
+        allowStoredImages: true);
 
     public string InputId { get; }
 
@@ -145,7 +182,7 @@ public sealed class GameInput
 
     public IReadOnlyDictionary<string, string> Metadata { get; }
 
-    public IReadOnlyList<ResourceContent> Resources { get; }
+    public IReadOnlyList<AgentContent> Content { get; }
 }
 
 public sealed class GameContextSlice
@@ -179,7 +216,7 @@ public sealed class GameRuntimeLimits
 
     public int MaxMetadataEntries { get; set; } = 64;
 
-    public int MaxInputResources { get; set; } = 16;
+    public int MaxInputContentParts { get; set; } = 32;
 
     public int MaxMetadataKeyCharacters { get; set; } = 256;
 
@@ -221,7 +258,7 @@ public sealed class GameRuntimeLimits
         RequireRange(copy.MaxContextSlices, 0, 100_000, nameof(MaxContextSlices));
         RequireRange(copy.MaxContextJsonCharacters, 2, 100_000_000, nameof(MaxContextJsonCharacters));
         RequireRange(copy.MaxMetadataEntries, 0, 100_000, nameof(MaxMetadataEntries));
-        RequireRange(copy.MaxInputResources, 0, 10_000, nameof(MaxInputResources));
+        RequireRange(copy.MaxInputContentParts, 0, 10_000, nameof(MaxInputContentParts));
         RequireRange(copy.MaxMetadataKeyCharacters, 1, 100_000, nameof(MaxMetadataKeyCharacters));
         RequireRange(copy.MaxMetadataValueCharacters, 0, 100_000_000, nameof(MaxMetadataValueCharacters));
         RequireRange(copy.MaxIdentifierCharacters, 1, 16_384, nameof(MaxIdentifierCharacters));
@@ -258,9 +295,9 @@ public sealed class GameRuntimeLimits
             throw new GameRuntimeLimitException(nameof(MaxMetadataEntries), "The input has too many metadata entries.");
         }
 
-        if (input.Resources.Count > MaxInputResources)
+        if (input.Content.Count > MaxInputContentParts)
         {
-            throw new GameRuntimeLimitException(nameof(MaxInputResources), "The input has too many attached resources.");
+            throw new GameRuntimeLimitException(nameof(MaxInputContentParts), "The input has too many content parts.");
         }
 
         foreach (var value in new[] { input.InputId, input.SessionId, input.ActorId, input.Type, input.Moment.TimelineId })

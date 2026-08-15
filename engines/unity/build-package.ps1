@@ -63,6 +63,7 @@ DefaultImporter:
 $pluginFolderMeta | Set-Content -LiteralPath ($plugins + '.meta') -Encoding utf8NoBOM
 $buildOutput = Join-Path $engineRoot 'bin\Release\netstandard2.1'
 $assemblies = [ordered]@{
+    'OpenGameAgent.Attachments.dll' = '01b0c910bb244a64ba3d85bb66348656'
     'OpenGameAgent.Kernel.dll' = 'b62e147235cd4b60bf2b3ec44621214f'
     'OpenGameAgent.dll' = 'b8a23b387de04f5d8b59f0d59028cb6d'
     'OpenGameAgent.Client.dll' = '36eb78a2d19d407fbe9308d746ed42fd'

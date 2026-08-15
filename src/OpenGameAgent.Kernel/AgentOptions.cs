@@ -37,6 +37,14 @@ public sealed class AgentLimits
 
     public int MaxBinaryDataCharactersPerPart { get; set; } = 16_000_000;
 
+    public int MaxImagesPerMessage { get; set; } = 20;
+
+    public int MaxImageBytes { get; set; } = 5 * 1024 * 1024;
+
+    public int MaxImageBytesPerMessage { get; set; } = 100 * 1024 * 1024;
+
+    public long MaxImagePixels { get; set; } = 40_000_000;
+
     public int MaxToolCallsPerTurn { get; set; } = 32;
 
     public int MaxTools { get; set; } = 256;
@@ -91,6 +99,10 @@ public sealed class AgentLimits
         RequireRange(MaxJsonCharactersPerPart, 1, 100_000_000, nameof(MaxJsonCharactersPerPart));
         RequireRange(MaxResourceUriCharacters, 1, 1_000_000, nameof(MaxResourceUriCharacters));
         RequireRange(MaxBinaryDataCharactersPerPart, 1, 100_000_000, nameof(MaxBinaryDataCharactersPerPart));
+        RequireRange(MaxImagesPerMessage, 1, 1_024, nameof(MaxImagesPerMessage));
+        RequireRange(MaxImageBytes, 1, 512 * 1024 * 1024, nameof(MaxImageBytes));
+        RequireRange(MaxImageBytesPerMessage, MaxImageBytes, 1024 * 1024 * 1024, nameof(MaxImageBytesPerMessage));
+        RequireRange(MaxImagePixels, 1, 1_000_000_000, nameof(MaxImagePixels));
         RequireRange(MaxToolCallsPerTurn, 1, 10_000, nameof(MaxToolCallsPerTurn));
         RequireRange(MaxTools, 0, 100_000, nameof(MaxTools));
         RequireRange(MaxToolNameCharacters, 1, 4096, nameof(MaxToolNameCharacters));

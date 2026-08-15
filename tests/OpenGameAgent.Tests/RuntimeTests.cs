@@ -106,7 +106,7 @@ public sealed class RuntimeTests
             "observation",
             "{\"question\":\"what is visible?\"}",
             new GameMoment("world", 10),
-            resources: new[]
+            content: new AgentContent[]
             {
                 new ResourceContent("https://assets.example.test/frame.png", "image/png", "camera"),
             });

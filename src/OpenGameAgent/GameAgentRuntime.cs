@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent;
@@ -254,6 +255,8 @@ public sealed class GameAgentRuntimeOptions
 
     public IGameSessionStore SessionStore { get; set; } = new InMemoryGameSessionStore();
 
+    public IGameImageAttachmentStore? ImageAttachments { get; set; }
+
     public IGameContextProvider? ContextProvider { get; set; }
 
     public IGameSkillSource? SkillSource { get; set; }
@@ -329,6 +332,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly string _instructions;
     private readonly IGameRoutePolicy _routePolicy;
     private readonly IGameSessionStore _sessionStore;
+    private readonly IGameImageAttachmentStore? _imageAttachments;
     private readonly IGameContextProvider? _contextProvider;
     private readonly IGameSkillSource? _skillSource;
     private readonly GameToolProvider? _toolProvider;
@@ -368,6 +372,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             ?? throw new ArgumentException("A route policy is required.", nameof(options));
         _sessionStore = options.SessionStore
             ?? throw new ArgumentException("A session store is required.", nameof(options));
+        _imageAttachments = options.ImageAttachments;
         _contextProvider = options.ContextProvider;
         _skillSource = options.SkillSource;
         _toolProvider = options.ToolProvider;
@@ -501,6 +506,54 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             : new GameSessionUsageSnapshot(snapshot.Key, snapshot.Revision, snapshot.UsageLedger);
     }
 
+    /// <summary>
+    /// Reads an image only when its durable reference belongs to the requested session actor.
+    /// Server hosts must authorize the caller before invoking this method.
+    /// </summary>
+    public async ValueTask<StoredGameImageAttachment?> ReadImageAttachmentAsync(
+        GameSessionKey key,
+        string attachmentId,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValid(nameof(key));
+        if (string.IsNullOrWhiteSpace(attachmentId)
+            || attachmentId.Length > 256
+            || attachmentId.Any(static character => char.IsControl(character)))
+        {
+            throw new ArgumentException("A bounded attachment ID is required.", nameof(attachmentId));
+        }
+
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(GameAgentRuntime));
+        }
+
+        var store = _imageAttachments
+            ?? throw new InvalidOperationException("This runtime does not have an image attachment store.");
+        var snapshot = await _sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return null;
+        }
+
+        if (!snapshot.Key.Equals(key))
+        {
+            throw new InvalidOperationException("The game session store returned a snapshot for a different session key.");
+        }
+
+        var attachment = snapshot.Messages
+            .SelectMany(static message => message.Content)
+            .OfType<ImageAttachmentContent>()
+            .Select(static content => content.Attachment)
+            .FirstOrDefault(candidate => string.Equals(
+                candidate.AttachmentId,
+                attachmentId,
+                StringComparison.Ordinal));
+        return attachment is null
+            ? null
+            : await store.ReadImageAsync(attachment, cancellationToken).ConfigureAwait(false);
+    }
+
     public Task<GameAgentRunResult> RunAsync(
         GameInput input,
         GameAgentEventHandler? observer,
@@ -592,6 +645,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         GameAgentExtensionRunContext? failureContext = null;
         try
         {
+            input = await PersistInputImagesAsync(input, cancellationToken).ConfigureAwait(false);
             var key = new GameSessionKey(input.SessionId, input.ActorId);
             var loaded = await _sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false)
                 ?? new GameSessionSnapshot(key, 0);
@@ -838,6 +892,10 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             IReadOnlyList<GameSessionUsageRecord>? checkpointConflictUsageRecords = null;
             GameSessionUsageLedger? checkpointConflictUsageLedger = null;
             var recoverySafety = new GameModelRecoverySafety(resumingCheckpoint);
+            Func<IModelProvider, IModelProvider> wrapProvider = candidate =>
+                candidate is ImageResolvingModelProvider
+                    ? candidate
+                    : new ImageResolvingModelProvider(candidate, ResolveModelImagesAsync);
             Func<IModelProvider, IModelProvider>? wrapRecoveryProvider = null;
             if (_transcriptCompactor is not null && contextWindowTokens > 0)
             {
@@ -856,8 +914,12 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                         usageAccounting.Record,
                         usageAccounting.Record,
                         usageAccounting.ClearAssistantSuppression);
-                provider = wrapRecoveryProvider(provider);
+                var wrapImages = wrapProvider;
+                var wrapRecovery = wrapRecoveryProvider;
+                wrapProvider = candidate => wrapRecovery(wrapImages(candidate));
             }
+
+            provider = wrapProvider(provider);
 
             var runHooks = CreateRunHooks(
                 route.Route,
@@ -868,22 +930,19 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 contextWindowTokens,
                 maximumOutputTokens,
                 usageAccounting);
-            if (wrapRecoveryProvider is not null)
+            var configuredProviderUpdate = runHooks.PrepareNextTurnAsync;
+            runHooks.PrepareNextTurnAsync = async (turnContext, token) =>
             {
-                var configured = runHooks.PrepareNextTurnAsync;
-                runHooks.PrepareNextTurnAsync = async (turnContext, token) =>
+                var update = configuredProviderUpdate is null
+                    ? null
+                    : await configuredProviderUpdate(turnContext, token).ConfigureAwait(false);
+                if (update?.Provider is not null)
                 {
-                    var update = configured is null
-                        ? null
-                        : await configured(turnContext, token).ConfigureAwait(false);
-                    if (update?.Provider is not null)
-                    {
-                        update.Provider = wrapRecoveryProvider(update.Provider);
-                    }
+                    update.Provider = wrapProvider(update.Provider);
+                }
 
-                    return update;
-                };
-            }
+                return update;
+            };
 
             if (_persistToolTurnCheckpoints && route.Route == GameRouteKind.Agent)
             {
@@ -1381,11 +1440,11 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             ["game.timeline_id"] = input.Moment.TimelineId,
             ["game.tick"] = input.Moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
-        var content = new List<AgentContent>(input.Resources.Count + 1)
+        var content = new List<AgentContent>(input.Content.Count + 1)
         {
             new JsonContent(payload),
         };
-        content.AddRange(input.Resources);
+        content.AddRange(input.Content);
         return new AgentMessage(AgentRole.User, content, DateTimeOffset.UtcNow, metadata: metadata);
     }
 
@@ -1427,6 +1486,261 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         && left.Content.Count == right.Content.Count
         && left.Content.Zip(right.Content, GameAgentValueComparer.ContentEquals).All(equal => equal);
 
+    private async ValueTask<GameInput> PersistInputImagesAsync(
+        GameInput input,
+        CancellationToken cancellationToken)
+    {
+        if (!input.Content.Any(part => part is BinaryContent { MediaKind: AgentMediaKind.Image }))
+        {
+            return input;
+        }
+
+        var store = _imageAttachments
+            ?? throw new GameAttachmentException(
+                "ATTACHMENT_STORE_REQUIRED",
+                "Image input requires a durable image attachment store.");
+        var prepared = PrepareImageBatch(input.Content, store.ImageLimits);
+        foreach (var upload in prepared.Uploads)
+        {
+            await store.ValidateImageAsync(upload, cancellationToken).ConfigureAwait(false);
+        }
+
+        var replacements = new Queue<ImageAttachmentContent>();
+        foreach (var upload in prepared.Uploads)
+        {
+            var attachment = await store.SaveImageAsync(upload, cancellationToken).ConfigureAwait(false);
+            replacements.Enqueue(new ImageAttachmentContent(attachment));
+        }
+
+        var content = input.Content.Select(part =>
+                part is BinaryContent { MediaKind: AgentMediaKind.Image }
+                    ? (AgentContent)replacements.Dequeue()
+                    : part)
+            .ToArray();
+        return input.WithPersistedContent(content);
+    }
+
+    private async ValueTask<ToolResult> PersistToolImagesAsync(
+        ToolResult result,
+        CancellationToken cancellationToken)
+    {
+        if (!result.Content.Any(part => part is BinaryContent { MediaKind: AgentMediaKind.Image }
+            or ImageAttachmentContent))
+        {
+            return result;
+        }
+
+        var store = _imageAttachments
+            ?? throw new GameAttachmentException(
+                "ATTACHMENT_STORE_REQUIRED",
+                "Image tool results require a durable image attachment store.");
+        var prepared = PrepareImageBatch(result.Content, store.ImageLimits);
+        foreach (var upload in prepared.Uploads)
+        {
+            await store.ValidateImageAsync(upload, cancellationToken).ConfigureAwait(false);
+        }
+
+        var replacements = new Queue<ImageAttachmentContent>();
+        foreach (var upload in prepared.Uploads)
+        {
+            var attachment = await store.SaveImageAsync(upload, cancellationToken).ConfigureAwait(false);
+            replacements.Enqueue(new ImageAttachmentContent(attachment));
+        }
+
+        var content = result.Content.Select(part =>
+                part is BinaryContent { MediaKind: AgentMediaKind.Image }
+                    ? (AgentContent)replacements.Dequeue()
+                    : part)
+            .ToArray();
+        return new ToolResult(
+            content,
+            result.IsError,
+            result.DetailsJson,
+            result.Terminate,
+            result.Usage,
+            result.OutcomeUncertain,
+            result.AddedToolNames);
+    }
+
+    private async ValueTask<ModelRequest> ResolveModelImagesAsync(
+        ModelRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!request.Messages.Any(message => message.Content.Any(part => part is ImageAttachmentContent)))
+        {
+            return request;
+        }
+
+        var store = _imageAttachments
+            ?? throw new GameAttachmentException(
+                "ATTACHMENT_STORE_REQUIRED",
+                "Image history requires a durable image attachment store.");
+        var resolved = new Dictionary<string, StoredGameImageAttachment>(StringComparer.Ordinal);
+        var messages = new List<AgentMessage>(request.Messages.Count);
+        foreach (var message in request.Messages)
+        {
+            if (!message.Content.Any(part => part is ImageAttachmentContent))
+            {
+                messages.Add(message);
+                continue;
+            }
+
+            var content = new List<AgentContent>(message.Content.Count);
+            foreach (var part in message.Content)
+            {
+                if (part is not ImageAttachmentContent image)
+                {
+                    content.Add(part);
+                    continue;
+                }
+
+                if (!resolved.TryGetValue(image.Attachment.AttachmentId, out var stored))
+                {
+                    stored = await store.ReadImageAsync(image.Attachment, cancellationToken).ConfigureAwait(false);
+                    resolved.Add(image.Attachment.AttachmentId, stored);
+                }
+                content.Add(new BinaryContent(
+                    AgentMediaKind.Image,
+                    Convert.ToBase64String(stored.Data.ToArray()),
+                    stored.Attachment.MediaType,
+                    stored.Attachment.Name));
+            }
+
+            messages.Add(CloneMessageWithContent(message, content));
+        }
+
+        return new ModelRequest(
+            request.Model,
+            request.SystemPrompt,
+            messages,
+            request.Tools,
+            request.Parameters,
+            request.SessionId,
+            request.RunId,
+            request.Turn);
+    }
+
+    private static PreparedImageBatch PrepareImageBatch(
+        IReadOnlyList<AgentContent> content,
+        GameImageAttachmentLimits limits)
+    {
+        var uploads = new List<SaveGameImageAttachment>();
+        var imageCount = 0;
+        long imageBytes = 0;
+        foreach (var part in content)
+        {
+            switch (part)
+            {
+                case ImageAttachmentContent image:
+                    imageCount++;
+                    imageBytes += image.Attachment.Bytes;
+                    break;
+                case BinaryContent { MediaKind: AgentMediaKind.Image } binary:
+                    byte[] data;
+                    try
+                    {
+                        data = Convert.FromBase64String(binary.Data);
+                    }
+                    catch (FormatException exception)
+                    {
+                        throw new GameAttachmentException(
+                            "INVALID_IMAGE_ENCODING",
+                            "Inline image data is not valid base64.",
+                            exception);
+                    }
+
+                    imageCount++;
+                    imageBytes += data.Length;
+                    uploads.Add(new SaveGameImageAttachment(data, binary.MediaType, binary.Name));
+                    break;
+            }
+
+            if (imageCount > limits.MaxImagesPerMessage)
+            {
+                throw new GameAttachmentException(
+                    "TOO_MANY_IMAGES",
+                    "The message contains too many images.");
+            }
+
+            if (imageBytes > limits.MaxMessageImageBytes)
+            {
+                throw new GameAttachmentException(
+                    "TOO_MANY_IMAGE_BYTES",
+                    "The message contains too many image bytes.");
+            }
+        }
+
+        return new PreparedImageBatch(uploads);
+    }
+
+    private static AgentMessage CloneMessageWithContent(
+        AgentMessage message,
+        IReadOnlyList<AgentContent> content) => new(
+            message.Role,
+            content,
+            message.Timestamp,
+            customRole: message.Role == AgentRole.Custom ? message.CustomRole : null,
+            toolCallId: message.Role == AgentRole.Tool ? message.ToolCallId : null,
+            toolName: message.Role == AgentRole.Tool ? message.ToolName : null,
+            isError: message.Role == AgentRole.Tool && message.IsError,
+            detailsJson: message.Role == AgentRole.Tool ? message.DetailsJson : null,
+            metadata: message.Metadata,
+            model: message.Role == AgentRole.Assistant ? message.Model : null,
+            stopReason: message.Role == AgentRole.Assistant ? message.StopReason : null,
+            usage: message.Usage,
+            errorMessage: message.Role == AgentRole.Assistant ? message.ErrorMessage : null,
+            provider: message.Role == AgentRole.Assistant ? message.Provider : null,
+            api: message.Role == AgentRole.Assistant ? message.Api : null,
+            responseModel: message.Role == AgentRole.Assistant ? message.ResponseModel : null,
+            responseId: message.Role == AgentRole.Assistant ? message.ResponseId : null,
+            rawStopReason: message.Role == AgentRole.Assistant ? message.RawStopReason : null,
+            endTurn: message.Role == AgentRole.Assistant ? message.EndTurn : null,
+            diagnostics: message.Role == AgentRole.Assistant ? message.Diagnostics : null,
+            deferred: message.Role == AgentRole.Assistant ? message.Deferred : null,
+            addedToolNames: message.Role == AgentRole.Tool ? message.AddedToolNames : null);
+
+    private sealed class PreparedImageBatch
+    {
+        public PreparedImageBatch(IReadOnlyList<SaveGameImageAttachment> uploads)
+        {
+            Uploads = uploads;
+        }
+
+        public IReadOnlyList<SaveGameImageAttachment> Uploads { get; }
+    }
+
+    private sealed class ImageResolvingModelProvider : IModelProvider
+    {
+        private readonly IModelProvider _inner;
+        private readonly Func<ModelRequest, CancellationToken, ValueTask<ModelRequest>> _resolve;
+
+        public ImageResolvingModelProvider(
+            IModelProvider inner,
+            Func<ModelRequest, CancellationToken, ValueTask<ModelRequest>> resolve)
+        {
+            _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+            _resolve = resolve ?? throw new ArgumentNullException(nameof(resolve));
+        }
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            if (_inner is IModelRequestPreflight preflight)
+            {
+                await preflight.ValidateRequestAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+
+            var resolved = await _resolve(request, cancellationToken).ConfigureAwait(false);
+            await foreach (var streamEvent in _inner.StreamAsync(resolved, cancellationToken)
+                               .WithCancellation(cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                yield return streamEvent;
+            }
+        }
+    }
+
     private static AgentLimits CopyAgentLimits(AgentLimits value) => new()
     {
         MaxSystemPromptCharacters = value.MaxSystemPromptCharacters,
@@ -1439,6 +1753,11 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         MaxTextCharactersPerPart = value.MaxTextCharactersPerPart,
         MaxJsonCharactersPerPart = value.MaxJsonCharactersPerPart,
         MaxResourceUriCharacters = value.MaxResourceUriCharacters,
+        MaxBinaryDataCharactersPerPart = value.MaxBinaryDataCharactersPerPart,
+        MaxImagesPerMessage = value.MaxImagesPerMessage,
+        MaxImageBytes = value.MaxImageBytes,
+        MaxImageBytesPerMessage = value.MaxImageBytesPerMessage,
+        MaxImagePixels = value.MaxImagePixels,
         MaxToolCallsPerTurn = value.MaxToolCallsPerTurn,
         MaxTools = value.MaxTools,
         MaxToolNameCharacters = value.MaxToolNameCharacters,
@@ -1482,6 +1801,34 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
 
         hooks = _extensions.ComposeHooks(extensionContext, hooks);
+
+        var configuredAfterToolCall = hooks.AfterToolCallAsync;
+        hooks.AfterToolCallAsync = async (context, cancellationToken) =>
+        {
+            var result = context.Result;
+            OperationCanceledException? cancellation = null;
+            if (configuredAfterToolCall is not null)
+            {
+                try
+                {
+                    result = await configuredAfterToolCall(context, cancellationToken).ConfigureAwait(false)
+                        ?? context.Result;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    cancellation = new OperationCanceledException(cancellationToken);
+                }
+            }
+
+            using var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds);
+            var persisted = await PersistToolImagesAsync(result, settlementCancellation.Token).ConfigureAwait(false);
+            if (cancellation is not null)
+            {
+                throw cancellation;
+            }
+
+            return persisted;
+        };
 
         if (route == GameRouteKind.Agent && _refreshContextAfterToolTurns)
         {

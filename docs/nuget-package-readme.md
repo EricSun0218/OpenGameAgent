@@ -4,6 +4,7 @@ Open-source C# agent runtime for AI-native games, autonomous NPCs, and interacti
 
 - Small streaming model/tool-loop kernel
 - Arbitrary structured game inputs and game time
+- Durable screenshot/image input with content-addressed local storage and model-capability preflight
 - Durable game actions and workflows
 - Typed extension API plus official policy, catalog, interaction, goal, host-verified task-plan, memory, artifact, delegation, tracing, and workflow-graph extensions
 - Skills, scheduling, mailboxes, large-result spill, and multi-actor concurrency

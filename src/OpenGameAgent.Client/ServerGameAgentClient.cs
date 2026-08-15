@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
@@ -9,6 +10,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using OpenGameAgent.Attachments;
 
 namespace OpenGameAgent.Client;
 
@@ -99,6 +101,8 @@ public sealed class ServerGameAgentClientOptions
 
     public string AbortPath { get; set; } = "v1/control/abort";
 
+    public string AttachmentReadPath { get; set; } = "v1/attachments/read";
+
     public string? ApiKey { get; set; }
 
     public string ApiKeyHeader { get; set; } = "Authorization";
@@ -121,6 +125,7 @@ public sealed class ServerGameAgentClient
     private readonly Uri _streamEndpoint;
     private readonly Uri _steerEndpoint;
     private readonly Uri _abortEndpoint;
+    private readonly Uri _attachmentReadEndpoint;
     private readonly string? _apiKey;
     private readonly string _apiKeyHeader;
     private readonly string _apiKeyScheme;
@@ -198,6 +203,10 @@ public sealed class ServerGameAgentClient
         _streamEndpoint = CreateEndpoint(options.ServerBaseUri, options.StreamPath, nameof(options.StreamPath));
         _steerEndpoint = CreateEndpoint(options.ServerBaseUri, options.SteerPath, nameof(options.SteerPath));
         _abortEndpoint = CreateEndpoint(options.ServerBaseUri, options.AbortPath, nameof(options.AbortPath));
+        _attachmentReadEndpoint = CreateEndpoint(
+            options.ServerBaseUri,
+            options.AttachmentReadPath,
+            nameof(options.AttachmentReadPath));
         _apiKey = options.ApiKey;
         _apiKeyHeader = options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;
@@ -370,6 +379,114 @@ public sealed class ServerGameAgentClient
             actorId = key.ActorId,
         });
         return SendControlAsync(_abortEndpoint, json, cancellationToken);
+    }
+
+    public async Task<StoredGameImageAttachment?> ReadImageAttachmentAsync(
+        GameSessionKey key,
+        string attachmentId,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValidForClient(nameof(key));
+        if (string.IsNullOrWhiteSpace(attachmentId)
+            || attachmentId.Length > 256
+            || attachmentId.Any(static character => char.IsControl(character)))
+        {
+            throw new ArgumentException("A bounded attachment ID is required.", nameof(attachmentId));
+        }
+
+        var json = JsonSerializer.Serialize(new
+        {
+            sessionId = key.SessionId,
+            actorId = key.ActorId,
+            attachmentId,
+        });
+        using var request = CreateJsonRequest(_attachmentReadEndpoint, json);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var body = await ReadBoundedAsync(response.Content, _maxResponseCharacters, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        EnsureSuccess(response, body);
+        return ParseAttachment(body);
+    }
+
+    private static StoredGameImageAttachment ParseAttachment(string json)
+    {
+        using var document = RemoteJson.Parse(json, nameof(json));
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("attachment", out var descriptor)
+            || descriptor.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("data", out var dataElement)
+            || dataElement.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException("The attachment response does not match the expected shape.");
+        }
+
+        var attachmentId = RequireString(descriptor, "attachmentId");
+        var mediaType = RequireString(descriptor, "mediaType");
+        var bytes = RequireInt32(descriptor, "bytes");
+        var width = RequireInt32(descriptor, "width");
+        var height = RequireInt32(descriptor, "height");
+        string? name = null;
+        if (descriptor.TryGetProperty("name", out var nameElement)
+            && nameElement.ValueKind != JsonValueKind.Null)
+        {
+            if (nameElement.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidDataException("The attachment name must be a string or null.");
+            }
+
+            name = nameElement.GetString();
+        }
+
+        byte[] data;
+        try
+        {
+            data = Convert.FromBase64String(dataElement.GetString()!);
+        }
+        catch (FormatException exception)
+        {
+            throw new InvalidDataException("The attachment response contains invalid base64 data.", exception);
+        }
+
+        if (data.Length != bytes)
+        {
+            throw new InvalidDataException("The attachment response length does not match its descriptor.");
+        }
+
+        return new StoredGameImageAttachment(
+            new GameImageAttachment(attachmentId, mediaType, bytes, width, height, name),
+            data);
+    }
+
+    private static string RequireString(JsonElement value, string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(property.GetString()))
+        {
+            throw new InvalidDataException("The attachment response is missing '" + propertyName + "'.");
+        }
+
+        return property.GetString()!;
+    }
+
+    private static int RequireInt32(JsonElement value, string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property)
+            || !property.TryGetInt32(out var result)
+            || result <= 0)
+        {
+            throw new InvalidDataException("The attachment response has an invalid '" + propertyName + "'.");
+        }
+
+        return result;
     }
 
     private async Task<bool> SendControlAsync(

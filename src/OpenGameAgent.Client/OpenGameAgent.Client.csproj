@@ -9,5 +9,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Attachments\OpenGameAgent.Attachments.csproj" />
   </ItemGroup>
 </Project>

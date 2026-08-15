@@ -100,6 +100,39 @@ public ValueTask<IReadOnlyList<GameContextSlice>> GetContextAsync(
 
 Context is treated as data, not as a hidden state mutation channel.
 
+## Add image observations
+
+For screenshots or visual tool results, mount an `IGameImageAttachmentStore` and pass inline image bytes through `GameInput.Content`. The runtime validates and persists the whole batch, saves only immutable references in the transcript, preflights the selected model, and resolves bytes just before provider dispatch.
+
+```powershell
+dotnet add package OpenGameAgent.Attachments.Local --version 0.3.0-alpha.2
+```
+
+```csharp
+using OpenGameAgent.Attachments;
+using OpenGameAgent.Attachments.Local;
+
+options.ImageAttachments = new FileGameImageAttachmentStore(attachmentDirectory);
+
+var input = new GameInput(
+    "save-42",
+    "npc-scout",
+    "scene_changed",
+    """{"region":"north-gate"}""",
+    new GameMoment("main", 900),
+    "scene-900-scout",
+    content: new AgentContent[]
+    {
+        new BinaryContent(
+            AgentMediaKind.Image,
+            Convert.ToBase64String(pngBytes),
+            GameImageMediaTypes.Png,
+            "scout-view.png"),
+    });
+```
+
+Use a model whose catalog entry declares image input. Models that cannot consume the image fail explicitly; the runtime never drops it silently. For large voxel or open worlds, combine bounded structured state, a sparse BEV/topological summary, selective screenshots, and exact query tools instead of serializing every coordinate. See [Image input and game perception](image-input.md).
+
 ## Expose actions
 
 Create tools per input so they can carry the stable input identity and actor scope. Prefer `GameActionTool.Create` for state changes.

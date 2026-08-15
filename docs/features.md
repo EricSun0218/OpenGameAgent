@@ -44,6 +44,8 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Need | API |
 | --- | --- |
 | Submit non-language game data | `GameInput.PayloadJson` |
+| Attach screenshots or other visual observations | `GameInput.Content`, `BinaryContent`, `GameImageAttachment` |
+| Persist and resolve immutable image input | `IGameImageAttachmentStore`, `FileGameImageAttachmentStore` |
 | Express game time or save forks | `GameMoment` |
 | Supply current world state | `IGameContextProvider`, `GameContextSlice` |
 | Keep obvious dialogue fast | `AutomaticGameRoutePolicy`, `ModelGameRouteClassifier` |
@@ -112,6 +114,7 @@ In-memory implementations are useful for tests and short-lived sessions. The `Op
 - delegation records;
 - directory-backed skills;
 - directory-backed prompt templates.
+- content-addressed local image attachments (`OpenGameAgent.Attachments.Local`).
 
 File stores coordinate writers that use the same directory through cross-process leases, but they are not a distributed database. A multiplayer or multi-host service should implement the same interfaces using transactional shared storage and explicit actor ownership. Completed action, workflow, mailbox, and deduplication records are intentionally retained to preserve replay safety; long-running products should implement retention or archival in their game-owned stores rather than deleting evidence blindly.
 

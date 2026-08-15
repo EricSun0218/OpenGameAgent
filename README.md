@@ -22,7 +22,7 @@ OpenGameAgent is a compact, hackable C# runtime that lets game characters observ
 
 OpenGameAgent starts with a small, composable agent kernel. The stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use the kernel by itself, add the game runtime for game time and durable state, then opt into extensions for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
 
-Inputs are bounded JSON. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
+Inputs are bounded JSON plus optional durable image observations. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, screenshots, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
 
 ## A programmable agent runtime built for games
 
@@ -57,6 +57,7 @@ Install the complete game runtime from NuGet:
 ```bash
 dotnet add package OpenGameAgent --version 0.3.0-alpha.2
 dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # optional semantic memory
+dotnet add package OpenGameAgent.Attachments.Local --version 0.3.0-alpha.2 # optional durable image input
 ```
 
 The kernel, persistence, providers, and engine-compatible client are also published as separate `OpenGameAgent.*` packages. Godot, Unity, and portable server archives are available on the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
@@ -69,6 +70,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 
 - named timelines and integer ticks, with optional calendar JSON;
 - structured observations and context slices with floating-point values intact;
+- content-addressed screenshot/image input with decode validation, model-capability preflight, and session-authorized retrieval;
 - quick-response, full-agent, and deterministic-workflow routes;
 - per-actor serialization with bounded cross-actor concurrency;
 - journaled action intents and authoritative game receipts;
@@ -116,6 +118,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
 | Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
+| Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
 | World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
@@ -224,6 +227,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
 - [Generated media](docs/media.md)
+- [Image input and game perception](docs/image-input.md)
 
 ## Project boundary
 

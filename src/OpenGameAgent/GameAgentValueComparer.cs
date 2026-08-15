@@ -31,6 +31,13 @@ public static class GameAgentValueComparer
                 string.Equals(first.Uri, second.Uri, StringComparison.Ordinal)
                 && string.Equals(first.MediaType, second.MediaType, StringComparison.Ordinal)
                 && string.Equals(first.Name, second.Name, StringComparison.Ordinal),
+            (ImageAttachmentContent first, ImageAttachmentContent second) =>
+                string.Equals(first.Attachment.AttachmentId, second.Attachment.AttachmentId, StringComparison.Ordinal)
+                && string.Equals(first.Attachment.MediaType, second.Attachment.MediaType, StringComparison.Ordinal)
+                && first.Attachment.Bytes == second.Attachment.Bytes
+                && first.Attachment.Width == second.Attachment.Width
+                && first.Attachment.Height == second.Attachment.Height
+                && string.Equals(first.Attachment.Name, second.Attachment.Name, StringComparison.Ordinal),
             (ToolCallContent first, ToolCallContent second) =>
                 string.Equals(first.Id, second.Id, StringComparison.Ordinal)
                 && string.Equals(first.Name, second.Name, StringComparison.Ordinal)

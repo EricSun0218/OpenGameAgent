@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Extensions;
 using OpenGameAgent.Kernel;
 using Xunit;
@@ -22,6 +23,13 @@ public sealed class PersistenceTests
                     new TextContent("hello"),
                     new JsonContent("{\"value\":1.25}"),
                     new ResourceContent("game://asset/1", "application/game-object", "object"),
+                    new ImageAttachmentContent(new GameImageAttachment(
+                        "sha256:0123456789abcdef",
+                        GameImageMediaTypes.Png,
+                        123,
+                        32,
+                        16,
+                        "frame.png")),
                 },
                 DateTimeOffset.UnixEpoch,
                 metadata: new Dictionary<string, string> { ["kind"] = "input" }),
@@ -58,6 +66,10 @@ public sealed class PersistenceTests
         Assert.NotNull(loaded);
         Assert.Equal(3, loaded.Messages.Count);
         Assert.Equal("{\"value\":1.25}", Assert.IsType<JsonContent>(loaded.Messages[0].Content[1]).Json);
+        var image = Assert.IsType<ImageAttachmentContent>(loaded.Messages[0].Content[3]).Attachment;
+        Assert.Equal("sha256:0123456789abcdef", image.AttachmentId);
+        Assert.Equal(32, image.Width);
+        Assert.Equal("frame.png", image.Name);
         Assert.Equal("signature", Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Signature);
         Assert.True(Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Redacted);
         Assert.Equal(10, loaded.Messages[1].Usage!.InputTokens);

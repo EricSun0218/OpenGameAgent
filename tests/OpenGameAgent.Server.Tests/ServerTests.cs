@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
 using OpenGameAgent.Persistence;
@@ -96,7 +97,7 @@ public sealed class ServerTests
             "{}",
             new GameMoment("world", 1),
             "resource-input",
-            resources: new[]
+            content: new AgentContent[]
             {
                 new ResourceContent("game://capture/frame", "image/png", "frame"),
             });
@@ -376,13 +377,13 @@ public sealed class ServerTests
             "event",
             "{}",
             new GameMoment("world", 1),
-            resources: new[]
+            content: new AgentContent[]
             {
                 new ResourceContent("https://assets.example.test/frame.png", "image/png", "frame"),
             });
         var roundTrip = GameAgentWire.ParseInput(GameAgentWire.SerializeInput(input));
         Assert.Null(roundTrip.Moment.CalendarJson);
-        var roundTripResource = Assert.Single(roundTrip.Resources);
+        var roundTripResource = Assert.Single(roundTrip.Content.OfType<ResourceContent>());
         Assert.Equal("https://assets.example.test/frame.png", roundTripResource.Uri);
         Assert.Equal("image/png", roundTripResource.MediaType);
 
@@ -498,7 +499,7 @@ public sealed class ServerTests
             },
             TestContext.Current.CancellationToken);
 
-        Assert.True(result.Succeeded);
+        Assert.True(result.Succeeded, result.Error);
         Assert.Contains(events, item => item.Name == "agent" && item.Json.Contains("TextDelta", StringComparison.Ordinal));
         Assert.Equal("result", events.Last().Name);
     }
@@ -827,6 +828,7 @@ public sealed class ServerTests
         Assert.Contains("visible-answer", ownerJson, StringComparison.Ordinal);
         Assert.DoesNotContain("private-reasoning", ownerJson, StringComparison.Ordinal);
         Assert.DoesNotContain("reasoning-signature", ownerJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("text-signature", ownerJson, StringComparison.Ordinal);
         Assert.DoesNotContain("private-tool-result", ownerJson, StringComparison.Ordinal);
         Assert.DoesNotContain("private-tool-details", ownerJson, StringComparison.Ordinal);
         Assert.DoesNotContain("secret-argument", ownerJson, StringComparison.Ordinal);
@@ -851,6 +853,7 @@ public sealed class ServerTests
         internalResponse.EnsureSuccessStatusCode();
         Assert.Contains("private-reasoning", internalStream, StringComparison.Ordinal);
         Assert.Contains("reasoning-signature", internalStream, StringComparison.Ordinal);
+        Assert.Contains("text-signature", internalStream, StringComparison.Ordinal);
         Assert.Contains("private-tool-result", internalStream, StringComparison.Ordinal);
         Assert.Contains("private-tool-details", internalStream, StringComparison.Ordinal);
         Assert.Contains("secret-argument", internalStream, StringComparison.Ordinal);
@@ -874,6 +877,7 @@ public sealed class ServerTests
         Assert.Contains("visible-answer", publicStream, StringComparison.Ordinal);
         Assert.DoesNotContain("private-reasoning", publicStream, StringComparison.Ordinal);
         Assert.DoesNotContain("reasoning-signature", publicStream, StringComparison.Ordinal);
+        Assert.DoesNotContain("text-signature", publicStream, StringComparison.Ordinal);
         Assert.DoesNotContain("private-tool-result", publicStream, StringComparison.Ordinal);
         Assert.DoesNotContain("private-tool-details", publicStream, StringComparison.Ordinal);
         Assert.DoesNotContain("secret-argument", publicStream, StringComparison.Ordinal);
@@ -1159,6 +1163,117 @@ public sealed class ServerTests
         }));
     }
 
+    [Fact]
+    public async Task AttachmentReadIsSessionAuthorizedBeforeTheRuntimeOrStoreIsTouched()
+    {
+        var attachments = new ServerAttachmentStore();
+        var key = new GameSessionKey("image-session", "image-actor");
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "vision-model")
+        {
+            ImageAttachments = attachments,
+        });
+        var authorizer = new TestOwnerAuthorizer((subject, requested, _) =>
+            string.Equals(subject, "owner-a", StringComparison.Ordinal)
+            && requested.Equals(key));
+        await using var app = await CreateAppAsync(runtime, authorizer: authorizer);
+        using var client = app.GetTestClient();
+        var input = new GameInput(
+            key.SessionId,
+            key.ActorId,
+            "observe",
+            "{}",
+            new GameMoment("world", 1),
+            "image-input",
+            content: new AgentContent[]
+            {
+                new BinaryContent(AgentMediaKind.Image, "AQID", GameImageMediaTypes.Png, "frame.png"),
+            });
+        using var run = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/run",
+            "owner-a",
+            GameAgentWire.SerializeInput(input));
+        using var runResponse = await client.SendAsync(run, TestContext.Current.CancellationToken);
+        runResponse.EnsureSuccessStatusCode();
+        var attachment = Assert.IsType<GameImageAttachment>(attachments.LastAttachment);
+        var readsAfterRun = attachments.ReadCount;
+        var requestJson = JsonSerializer.Serialize(new
+        {
+            sessionId = key.SessionId,
+            actorId = key.ActorId,
+            attachmentId = attachment.AttachmentId,
+        });
+
+        using var forbidden = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/attachments/read",
+            "owner-b",
+            requestJson);
+        using var forbiddenResponse = await client.SendAsync(forbidden, TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, forbiddenResponse.StatusCode);
+        Assert.Equal(readsAfterRun, attachments.ReadCount);
+        Assert.Contains(authorizer.Calls, call => call.Operation == GameAgentServerOperation.ReadAttachment);
+
+        using var allowed = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/v1/attachments/read",
+            "owner-a",
+            requestJson);
+        using var allowedResponse = await client.SendAsync(allowed, TestContext.Current.CancellationToken);
+        var allowedJson = await allowedResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        allowedResponse.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(allowedJson);
+        Assert.Equal("AQID", document.RootElement.GetProperty("data").GetString());
+        Assert.Equal(attachment.AttachmentId, document.RootElement
+            .GetProperty("attachment")
+            .GetProperty("attachmentId")
+            .GetString());
+    }
+
+    [Fact]
+    public async Task ServerClientReadsOnlyAttachmentsReferencedByTheSession()
+    {
+        var attachments = new ServerAttachmentStore();
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "vision-model")
+        {
+            ImageAttachments = attachments,
+        });
+        await using var app = await CreateAppAsync(runtime);
+        using var http = app.GetTestClient();
+        var remote = new ServerGameAgentClient(new ServerGameAgentClientOptions(
+            http,
+            new Uri("http://localhost/")));
+        var input = new GameInput(
+            "client-image-session",
+            "client-image-actor",
+            "observe",
+            "{}",
+            new GameMoment("world", 1),
+            "client-image-input",
+            content: new AgentContent[]
+            {
+                new BinaryContent(AgentMediaKind.Image, "BAUG", GameImageMediaTypes.Png),
+            });
+
+        var result = await remote.RunAsync(input, TestContext.Current.CancellationToken);
+        var attachment = Assert.IsType<GameImageAttachment>(attachments.LastAttachment);
+        var stored = await remote.ReadImageAttachmentAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            attachment.AttachmentId,
+            TestContext.Current.CancellationToken);
+        var missing = await remote.ReadImageAttachmentAsync(
+            new GameSessionKey(input.SessionId, "another-actor"),
+            attachment.AttachmentId,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.NotNull(stored);
+        Assert.Equal(new byte[] { 4, 5, 6 }, stored.Data.ToArray());
+        Assert.Null(missing);
+    }
+
     private static async Task<WebApplication> CreateAppAsync(
         string? apiKey = null,
         int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)
@@ -1388,6 +1503,49 @@ public sealed class ServerTests
         }
     }
 
+    private sealed class ServerAttachmentStore : IGameImageAttachmentStore
+    {
+        private readonly Dictionary<string, StoredGameImageAttachment> _objects = new(StringComparer.Ordinal);
+        private int _readCount;
+
+        public GameImageAttachmentLimits ImageLimits { get; } = new();
+
+        public GameImageAttachment? LastAttachment { get; private set; }
+
+        public int ReadCount => Volatile.Read(ref _readCount);
+
+        public ValueTask ValidateImageAsync(
+            SaveGameImageAttachment input,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return default;
+        }
+
+        public ValueTask<GameImageAttachment> SaveImageAsync(
+            SaveGameImageAttachment input,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var data = input.Data.ToArray();
+            var id = "sha256:" + Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(data)).ToLowerInvariant();
+            var attachment = new GameImageAttachment(id, input.MediaType, input.Data.Length, 1, 1, input.Name);
+            _objects[id] = new StoredGameImageAttachment(attachment, data);
+            LastAttachment = attachment;
+            return new ValueTask<GameImageAttachment>(attachment);
+        }
+
+        public ValueTask<StoredGameImageAttachment> ReadImageAsync(
+            GameImageAttachment attachment,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _readCount);
+            return new ValueTask<StoredGameImageAttachment>(_objects[attachment.AttachmentId]);
+        }
+    }
+
     private sealed class ResourceCaptureProvider : IModelProvider
     {
         public System.Collections.Concurrent.ConcurrentQueue<ModelRequest> Requests { get; } = new();
@@ -1559,7 +1717,7 @@ public sealed class ServerTests
             }
 
             yield return ModelStreamEvent.Terminal(new ModelResponse(
-                new AgentContent[] { new TextContent("visible-answer") },
+                new AgentContent[] { new TextContent("visible-answer", "text-signature") },
                 ModelStopReason.Stop));
         }
     }
