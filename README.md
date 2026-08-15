@@ -52,15 +52,17 @@ The kernel boundary is intentionally small and designed to stabilize early. New 
 
 ## Install
 
-Install the complete game runtime from NuGet:
+Download versioned package artifacts, Godot and Unity archives, or the portable server from the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. For active development against a source checkout, reference only the projects your game needs:
 
-```bash
-dotnet add package OpenGameAgent --version 0.3.0-alpha.2
-dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # optional semantic memory
-dotnet add package OpenGameAgent.Attachments.Local --version 0.3.0-alpha.2 # optional durable image input
+```xml
+<ItemGroup>
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
+</ItemGroup>
 ```
 
-The kernel, persistence, providers, and engine-compatible client are also published as separate `OpenGameAgent.*` packages. Godot, Unity, and portable server archives are available on the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
+Adjust the paths relative to your game project and omit optional projects you do not use. The kernel, persistence, providers, memory, attachments, plugins, and engine-compatible client are also shipped as separate `OpenGameAgent.*` release artifacts. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
 
 ## Why game-specific?
 
