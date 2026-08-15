@@ -123,7 +123,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
-| World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
+| World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
