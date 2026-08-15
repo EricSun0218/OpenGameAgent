@@ -52,15 +52,17 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 
 ## 安装
 
-从 NuGet 安装完整的游戏 Runtime：
+可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 下载版本化包文件、Godot/Unity 压缩包或可移植服务端。若游戏需要持续跟随本地最新源码，请只引用实际使用的项目：
 
-```bash
-dotnet add package OpenGameAgent --version 0.3.0-alpha.2
-dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # 可选语义记忆
-dotnet add package OpenGameAgent.Attachments.Local --version 0.3.0-alpha.2 # 可选持久图片输入
+```xml
+<ItemGroup>
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
+</ItemGroup>
 ```
 
-内核、持久化、模型提供方和引擎兼容客户端也分别提供 `OpenGameAgent.*` 包。Godot、Unity 与可移植服务端压缩包可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 页面下载。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
+请根据游戏项目的位置调整相对路径，并删除没有使用的可选项目引用。内核、持久化、模型提供方、记忆、图片附件、插件和引擎兼容客户端也分别提供 `OpenGameAgent.*` Release 产物。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
 
 ## 为什么要做游戏专用层
 

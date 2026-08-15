@@ -102,11 +102,7 @@ Context is treated as data, not as a hidden state mutation channel.
 
 ## Add image observations
 
-For screenshots or visual tool results, mount an `IGameImageAttachmentStore` and pass inline image bytes through `GameInput.Content`. The runtime validates and persists the whole batch, saves only immutable references in the transcript, preflights the selected model, and resolves bytes just before provider dispatch.
-
-```powershell
-dotnet add package OpenGameAgent.Attachments.Local --version 0.3.0-alpha.2
-```
+For screenshots or visual tool results, mount an `IGameImageAttachmentStore` and pass inline image bytes through `GameInput.Content`. The runtime validates and persists the whole batch, saves only immutable references in the transcript, preflights the selected model, and resolves bytes just before provider dispatch. Reference `src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj` from a source checkout, or use its matching package artifact from the GitHub Release.
 
 ```csharp
 using OpenGameAgent.Attachments;
@@ -195,11 +191,7 @@ For game-specific selection, use `skill.json` with `id`, `name`, optional `input
 
 The directory loader scans nested skill folders, rejects paths that escape the selected skill directory, and loads instructions only for selected skills. Imported instructions are untrusted content; they do not install code or grant tool permission.
 
-To consume a portable Agent Plugins 1.0.0 package instead of a standalone skill directory, install `OpenGameAgent.Plugins` and load the package as one runtime extension:
-
-```powershell
-dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.2
-```
+To consume a portable Agent Plugins 1.0.0 package instead of a standalone skill directory, reference `src/OpenGameAgent.Plugins/OpenGameAgent.Plugins.csproj` from a source checkout, or use its matching package artifact from the GitHub Release, then load the package as one runtime extension:
 
 ```csharp
 using OpenGameAgent.Plugins;
