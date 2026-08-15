@@ -14,6 +14,8 @@ The game emits an observation when goals, threats, resources, or player orders c
 
 Use steering to inject urgent state changes during a long run. A steering message should identify the new observation version so the model can abandon a stale plan. Use conflict keys to prevent two simultaneous writes to the same companion or resource.
 
+For visual worlds, combine structured local state with a sparse BEV or topological map, then attach a screenshot or crop only when appearance or geometry matters. Do not serialize every voxel or pixel. Let the model select intent and targets, use read-only tools for exact follow-up queries, and leave pathfinding, placement, physics, and animation to deterministic game code. See [Image input and game perception](image-input.md).
+
 ## Interactive world and many NPCs
 
 Keep world simulation deterministic and cheap. Invoke a model only when a character needs semantic judgment, dialogue, planning, or content generation.

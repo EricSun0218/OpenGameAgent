@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Extensions;
 using OpenGameAgent.Kernel;
 using Xunit;
@@ -68,6 +69,43 @@ public sealed class ModelCatalogTests
             "provider",
             "model",
             requiredInput: GameModelInputCapabilities.Video));
+    }
+
+    [Fact]
+    public async Task DispatchProviderPreflightsImageCapabilityWithoutProviderIo()
+    {
+        var provider = new ScriptedProvider();
+        var catalog = Catalog(Registration("provider", provider, Model("provider", "text-only")));
+        var dispatch = catalog.CreateProvider("provider");
+        var preflight = Assert.IsAssignableFrom<IModelRequestPreflight>(dispatch);
+        var request = new ModelRequest(
+            "text-only",
+            "",
+            new[]
+            {
+                new AgentMessage(
+                    AgentRole.User,
+                    new AgentContent[]
+                    {
+                        new ImageAttachmentContent(new GameImageAttachment(
+                            "sha256:" + new string('a', 64),
+                            GameImageMediaTypes.Png,
+                            1,
+                            1,
+                            1)),
+                    },
+                    DateTimeOffset.UnixEpoch),
+            },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            "session",
+            "run",
+            1);
+
+        await Assert.ThrowsAsync<ModelProviderException>(() => preflight.ValidateRequestAsync(
+            request,
+            TestContext.Current.CancellationToken).AsTask());
+        Assert.Empty(provider.Requests);
     }
 
     [Fact]

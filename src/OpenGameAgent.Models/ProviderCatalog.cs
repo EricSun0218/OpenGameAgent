@@ -1075,7 +1075,7 @@ public sealed class GameModelCatalog
         && left.All(pair => right.TryGetValue(pair.Key, out var value)
             && EqualityComparer<TValue>.Default.Equals(pair.Value, value));
 
-    private sealed class CatalogDispatchProvider : IModelProvider
+    private sealed class CatalogDispatchProvider : IModelProvider, IModelRequestPreflight
     {
         private readonly GameModelCatalog _catalog;
         private readonly string _providerId;
@@ -1090,6 +1090,48 @@ public sealed class GameModelCatalog
             ModelRequest request,
             CancellationToken cancellationToken) =>
             _catalog.StreamAsync(_providerId, request, cancellationToken);
+
+        public ValueTask ValidateRequestAsync(
+            ModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var model = _catalog.GetModel(_providerId, request.Model)
+                ?? throw new ModelProviderException(
+                    $"Model '{_providerId}/{request.Model}' is not registered.",
+                    isTransient: false);
+            foreach (var part in request.Messages.SelectMany(message => message.Content))
+            {
+                var required = RequiredInput(part);
+                if (required != GameModelInputCapabilities.None
+                    && !model.Supports(required, GameModelOutputCapabilities.None))
+                {
+                    throw new ModelProviderException(
+                        $"Model '{_providerId}/{request.Model}' does not support {required.ToString().ToLowerInvariant()} input.",
+                        isTransient: false);
+                }
+            }
+
+            return default;
+        }
+
+        private static GameModelInputCapabilities RequiredInput(AgentContent part) => part switch
+        {
+            ImageAttachmentContent => GameModelInputCapabilities.Image,
+            BinaryContent { MediaKind: AgentMediaKind.Image } => GameModelInputCapabilities.Image,
+            BinaryContent { MediaKind: AgentMediaKind.Audio } => GameModelInputCapabilities.Audio,
+            BinaryContent { MediaKind: AgentMediaKind.Video } => GameModelInputCapabilities.Video,
+            ResourceContent resource when resource.MediaType.StartsWith(
+                "image/",
+                StringComparison.OrdinalIgnoreCase) => GameModelInputCapabilities.Image,
+            ResourceContent resource when resource.MediaType.StartsWith(
+                "audio/",
+                StringComparison.OrdinalIgnoreCase) => GameModelInputCapabilities.Audio,
+            ResourceContent resource when resource.MediaType.StartsWith(
+                "video/",
+                StringComparison.OrdinalIgnoreCase) => GameModelInputCapabilities.Video,
+            _ => GameModelInputCapabilities.None,
+        };
     }
 
     private sealed class Entry

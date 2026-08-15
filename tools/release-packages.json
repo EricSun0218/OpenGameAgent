@@ -2,6 +2,10 @@
   "schemaVersion": 1,
   "packages": [
     {
+      "id": "OpenGameAgent.Attachments",
+      "project": "src/OpenGameAgent.Attachments/OpenGameAgent.Attachments.csproj"
+    },
+    {
       "id": "OpenGameAgent.Kernel",
       "project": "src/OpenGameAgent.Kernel/OpenGameAgent.Kernel.csproj"
     },
@@ -84,6 +88,10 @@
     {
       "id": "OpenGameAgent.Persistence",
       "project": "src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Attachments.Local",
+      "project": "src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj"
     },
     {
       "id": "OpenGameAgent.Plugins",

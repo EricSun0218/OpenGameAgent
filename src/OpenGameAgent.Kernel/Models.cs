@@ -772,6 +772,15 @@ public interface IModelProvider
     IAsyncEnumerable<ModelStreamEvent> StreamAsync(ModelRequest request, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Validates a request before durable attachment bytes are loaded.
+/// Implementations must not dispatch a provider request or mutate external state.
+/// </summary>
+public interface IModelRequestPreflight
+{
+    ValueTask ValidateRequestAsync(ModelRequest request, CancellationToken cancellationToken);
+}
+
 public interface IDeferredModelProvider : IModelProvider
 {
     IAsyncEnumerable<ModelStreamEvent> FetchDeferredAsync(

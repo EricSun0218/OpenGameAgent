@@ -63,6 +63,9 @@
         "dependencies": {
           "System.Runtime.CompilerServices.Unsafe": "4.5.3"
         }
+      },
+      "opengameagent.attachments": {
+        "type": "Project"
       }
     }
   }

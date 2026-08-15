@@ -456,6 +456,24 @@ function Get-ReleasePackageLayers {
     })
 }
 
+function Test-SupportedPortableServerRuntimeAsset {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $AssetPath
+    )
+
+    $normalized = $AssetPath.Replace('\', '/').TrimStart('/')
+    if ([IO.Path]::GetExtension($normalized) -eq '.pdb') {
+        return $false
+    }
+    if ($normalized.StartsWith('runtimes/osx', [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    return $true
+}
+
 function Resolve-PortableServerRuntimeAssets {
     [CmdletBinding()]
     param(
@@ -488,7 +506,8 @@ function Resolve-PortableServerRuntimeAssets {
                 continue
             }
             foreach ($assetName in $section.Value.PSObject.Properties.Name) {
-                if ([IO.Path]::GetFileName([string]$assetName) -eq '_._') {
+                if ([IO.Path]::GetFileName([string]$assetName) -eq '_._' -or
+                    -not (Test-SupportedPortableServerRuntimeAsset -AssetPath ([string]$assetName))) {
                     continue
                 }
                 $null = $declaredAssets.Add([string]$assetName)
@@ -546,7 +565,8 @@ function Resolve-PortableServerRuntimeAssets {
         $null = $resolvedSources.Add([IO.Path]::GetFullPath($source))
     }
     $publishedRuntimeFiles = @(Get-ChildItem -LiteralPath $publishRoot -Recurse -File | Where-Object {
-        $_.Extension -in @('.dll', '.so', '.dylib')
+        $_.Extension -in @('.dll', '.so', '.dylib') -and
+        (Test-SupportedPortableServerRuntimeAsset -AssetPath ([IO.Path]::GetRelativePath($publishRoot, $_.FullName)))
     })
     foreach ($publishedRuntimeFile in $publishedRuntimeFiles) {
         if (-not $resolvedSources.Contains([IO.Path]::GetFullPath($publishedRuntimeFile.FullName))) {

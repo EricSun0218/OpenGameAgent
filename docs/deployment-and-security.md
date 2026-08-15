@@ -30,6 +30,7 @@ OpenGameAgent__ApiKey=provider-secret
 OpenGameAgent__ServerApiKey=game-to-agent-secret
 OpenGameAgent__DataDirectory=/var/lib/opengameagent/sessions
 OpenGameAgent__ActionDirectory=/var/lib/opengameagent/actions
+OpenGameAgent__AttachmentDirectory=/var/lib/opengameagent/attachments
 ```
 
 The included service exposes:
@@ -41,6 +42,7 @@ The included service exposes:
 - `POST /v1/control/steer`
 - `POST /v1/control/abort`
 - `POST /v1/usage`
+- `POST /v1/attachments/read`
 - `POST /v1/actions/claim`
 - `POST /v1/actions/stream` (Server-Sent Events over a JSON POST request)
 - `POST /v1/actions/receipt`
@@ -51,6 +53,8 @@ Mutation endpoints require a JSON content type, parse with a fixed depth limit, 
 When `ServerApiKey` is set, run and control endpoints require `Authorization: Bearer <key>`. The middleware supplies the stable authenticated subject `server-api-key` unless an upstream authentication system already supplied a principal. If the key is omitted, those endpoints are unauthenticated; only do that behind an already authenticated trusted boundary. Health and capability endpoints remain public.
 
 Register an `IGameAgentOwnerAuthorizer` for player-facing or multi-tenant deployments. Every run, stream, steer, and abort request is then authorized against the authenticated principal and the parsed `(session, actor)` resource before the runtime, session store, or active actor is touched. Anonymous requests receive `401`; authenticated principals that do not own the resource receive `403`. The same operation contract reserves usage and durable-action operations so those endpoints use the identical ownership decision. Derive ownership from authenticated claims or an authoritative host store—never from an owner field supplied in the request payload. Without a registered authorizer the endpoint is suitable only for a trusted single-owner deployment.
+
+Attachment reads use that same owner authorization before loading either the session or the content-addressed object. The requested attachment must also be referenced by the authorized session/actor transcript; knowing or guessing a SHA-256 ID is not sufficient. Inline upload bytes are validated and replaced with durable references before session persistence, and provider credentials never enter attachment metadata.
 
 Control requests only address an already active `(session, actor)` loop; they cannot register tools or mutate game state directly. Put TLS, request-rate limits, tenant quotas, and abuse protection at the gateway. The included shared-secret gate identifies one deployment-wide subject; it is not a multi-user account system.
 
@@ -188,7 +192,7 @@ The external-tool connector defaults to one on-demand search/describe/call tool,
 
 ## Data and retention
 
-The local stores are not encrypted. Put them in an access-controlled game save or service data directory. Decide which prompts, context, memories, artifacts, delegation records, generated assets, and provider identifiers may contain player data. Implement retention, export, deletion, consent, and regional handling for your product. The included stores retain completed records needed for deduplication and recovery and do not provide a generic purge policy; archive them only when the game can prove their replay-safety window has ended.
+The local stores are not encrypted. Put them in an access-controlled game save or service data directory. Decide which prompts, context, memories, image observations, artifacts, delegation records, generated assets, and provider identifiers may contain player data. Implement retention, export, deletion, consent, and regional handling for your product. Back up sessions and their attachment objects together. Content-addressed images may be referenced by several actors or branches; an orphan collector must enumerate all authoritative references before deletion. The included stores retain completed records needed for deduplication and recovery and do not provide a generic purge policy; archive them only when the game can prove their replay-safety window has ended.
 
 Never log credentials. Avoid logging full prompts and tool payloads in production unless the player has consented and access is controlled.
 

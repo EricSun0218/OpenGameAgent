@@ -64,6 +64,12 @@ foreach ($invalidVersion in @(
 
 $packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
 Assert-ReleasePackageManifestGraph -RepositoryRoot $repositoryRoot -Packages $packages
+if (-not (Test-SupportedPortableServerRuntimeAsset -AssetPath 'runtimes/linux-x64/native/libExample.so') -or
+    -not (Test-SupportedPortableServerRuntimeAsset -AssetPath 'runtimes/win-x64/native/Example.dll') -or
+    (Test-SupportedPortableServerRuntimeAsset -AssetPath 'runtimes/win-x64/native/Example.pdb') -or
+    (Test-SupportedPortableServerRuntimeAsset -AssetPath 'runtimes/osx/native/libExample.dylib')) {
+    throw 'Portable server asset filtering must retain Windows/Linux runtime files and exclude symbols/macOS assets.'
+}
 $godotDownloadPattern = "Godot_v4\.7\.1-stable_mono_win64\.zip'.*-MaximumRetryCount\s+4\s+-RetryIntervalSec\s+5"
 foreach ($workflowPath in @('.github\workflows\ci.yml', '.github\workflows\release.yml')) {
     $workflow = Get-Content -LiteralPath (Join-Path $repositoryRoot $workflowPath) -Raw

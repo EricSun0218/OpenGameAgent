@@ -22,7 +22,7 @@ OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够�
 
 OpenGameAgent 从小型、可组合的 Agent 内核出发。有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用内核，也可以叠加游戏 Runtime 获得游戏时间与可靠状态，再按需加入记忆、目标、宿主证据校验的任务清单、产物、委派、外部工具、结构化交互和工作流图等扩展。
 
-输入是有大小限制的 JSON，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
+输入是有大小限制的 JSON，并可携带持久化图片观察，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态、截图或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
 
 ## 为游戏构建的可编程 Agent Runtime
 
@@ -57,6 +57,7 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 ```bash
 dotnet add package OpenGameAgent --version 0.3.0-alpha.2
 dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # 可选语义记忆
+dotnet add package OpenGameAgent.Attachments.Local --version 0.3.0-alpha.2 # 可选持久图片输入
 ```
 
 内核、持久化、模型提供方和引擎兼容客户端也分别提供 `OpenGameAgent.*` 包。Godot、Unity 与可移植服务端压缩包可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 页面下载。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
@@ -69,6 +70,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 
 - 命名时间线、整数 Tick 和可选日历 JSON；
 - 保留浮点数的结构化观察与上下文；
+- 经真实解码校验、内容寻址持久化、模型能力预检与会话授权读取的截图/图片输入；
 - 快速回复、完整 Agent、确定性 Workflow 三种路由；
 - 同一角色串行、不同角色有界并行；
 - 先记日志的动作意图与游戏权威回执；
@@ -114,6 +116,7 @@ GameAgentRuntime
 | Agent 内核 | 流式类型化消息、工具循环、类型化工具中间结果、steering、follow-up、hooks、取消、严格会话校验、提供方错误结果化 |
 | 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、安全并行读、冲突键串行、策略拦截/终止、超时与写入结果未知语义 |
 | 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、快速/完整/Workflow 路由、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
+| 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；类型化生命周期事件与通道；命名空间持久状态 |
 | 官方扩展 | 工具策略与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、委派、追踪和可持久并行工作流图 |
 | 世界原语 | 可恢复动作、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
@@ -223,6 +226,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [引擎集成](docs/engine-integration.md)
 - [部署与安全](docs/deployment-and-security.md)
 - [生成式媒体](docs/media.md)
+- [图片输入与游戏感知](docs/image-input.md)
 
 ## 项目边界
 

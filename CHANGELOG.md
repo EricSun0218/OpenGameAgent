@@ -2,13 +2,16 @@
 
 ## Unreleased
 
-- Add the optional `TaskPlanExtension` for session/actor-scoped persistent ordered checklists, revision-checked mutations, host-validated evidence, per-input advancement guards, pending-work routing, typed UI projection events, and bounded terminal retention.
-- Add typed, model-free host queries for persisted goals and task plans, including session revisions, and scope goal-change events with their session/actor key and input ID.
-- Add batched, payload-free mailbox pending-status queries that distinguish ready work from active leases without claiming delivery or incrementing attempts.
-- Add backward-compatible durable task-plan pause/resume with revision checks, preserved in-progress steps, non-runnable paused routing, typed change reasons, and restart coverage.
+No changes yet.
 
 ## 0.3.0-alpha.2
 
+- Add durable image input for game observations: bounded PNG/JPEG/WebP/GIF decode admission, immutable content-addressed local objects, reference-only transcripts, provider/model preflight before reads, tool-result image persistence, JSON/SSE transport, and owner-authorized retrieval.
+- Document the recommended large-world perception stack: bounded structured state, sparse BEV/topological summaries, selective screenshots, exact query tools, and deterministic game-owned execution rather than raw voxel dumps.
+- Add the optional `TaskPlanExtension` for session/actor-scoped persistent ordered checklists, revision-checked mutations, host-validated evidence, per-input advancement guards, pending-work routing, typed UI projection events, and bounded terminal retention.
+- Add typed, model-free host queries for persisted goals and task plans, including session revisions, and scope goal-change events with their session/actor key and input ID.
+- Add batched, payload-free mailbox pending-status queries that distinguish ready work from active leases without claiming delivery or incrementing attempts.
+- Add durable task-plan pause/resume with revision checks, preserved in-progress steps, non-runnable paused routing, typed change reasons, and restart coverage.
 - Add the optional `OpenGameAgent.Memory` package with a model-agnostic embedding provider contract, authoritative-save verification, rebuildable local vector indexes, hybrid lexical/vector recall, structured diagnostics, and game-time-aware reranking.
 - Add deterministic authoritative memory snapshots for in-memory and local-file stores so derived indexes can be rebuilt explicitly after embedding model or preprocessing changes.
 - Document local source references and game-provided local embedding integration, including BGE-M3-compatible query/document adapters and save boundaries.
