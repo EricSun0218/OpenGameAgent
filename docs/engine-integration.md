@@ -82,14 +82,24 @@ Streaming `MessageUpdated` wire events carry only the new delta for that event. 
 
 ## Main-thread actions
 
-The adapters marshal public events, not arbitrary context providers or tool handlers. If a tool mutates a scene, create an `IGameActionHandler` that:
+The adapters marshal public events, not arbitrary context providers or tool handlers. If a tool mutates a scene, use `QueuedGameActionHandler` when the host needs a reusable bounded handoff from background work to its game thread:
 
-1. validates arguments without touching engine state;
-2. queues a command onto the engine thread;
-3. awaits a completion source;
-4. returns the game-generated `GameActionReceipt`.
+```csharp
+var actionHandler = new QueuedGameActionHandler(
+    intent =>
+    {
+        ValidateArguments(intent);
+        ValidateGeneration(intent.GenerationId);
+        return ExecuteOnGameThread(intent);
+    },
+    intent => RecoverOnGameThread(intent),
+    capacity: 256);
 
-Bound that queue and cancel waiting callers during scene or application shutdown. Keep the operation ID in the game save/command ledger so `RecoverAsync` can answer after a crash.
+// Call this from the engine's tick/update callback.
+actionHandler.Pump(maximumWorkItems: 32);
+```
+
+`ExecuteAsync` and `RecoverAsync` wait for the host thread without moving the game callback to a worker thread. Requests that have not started can be cancelled; a request already claimed by `Pump` is allowed to finish. Call `Stop` when a scene or application is shutting down so waiting requests fail and new requests are rejected. Keep the operation ID in the game save/command ledger so `RecoverAsync` can answer after a crash. The host remains responsible for authoritative rules and `generationId` validation.
 
 ## Versions
 
