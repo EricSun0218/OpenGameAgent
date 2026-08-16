@@ -176,6 +176,21 @@ public static class ApproximateGameTokenEstimator
                             + (resource.Name?.Length ?? 0));
                         tokens = checked(tokens + ResourceTokenEstimate);
                         break;
+                    case ImageAttachmentContent image:
+                        characters = checked(characters
+                            + image.Attachment.AttachmentId.Length
+                            + image.Attachment.MediaType.Length
+                            + (image.Attachment.Name?.Length ?? 0));
+                        tokens = checked(tokens + EstimateImageTokens(
+                            image.Attachment.Width,
+                            image.Attachment.Height));
+                        break;
+                    case BinaryContent binary:
+                        characters = checked(characters
+                            + binary.MediaType.Length
+                            + (binary.Name?.Length ?? 0));
+                        tokens = checked(tokens + ResourceTokenEstimate);
+                        break;
                     default:
                         throw new InvalidOperationException(
                             $"Unsupported agent content type '{content.GetType().FullName}'.");
@@ -190,6 +205,13 @@ public static class ApproximateGameTokenEstimator
 
     private static long DivideRoundUp(long value, long divisor) =>
         checked((value + divisor - 1) / divisor);
+
+    private static long EstimateImageTokens(int width, int height)
+    {
+        var horizontalTiles = Math.Max(1L, DivideRoundUp(width, 512));
+        var verticalTiles = Math.Max(1L, DivideRoundUp(height, 512));
+        return checked(85L + (170L * horizontalTiles * verticalTiles));
+    }
 }
 
 internal sealed class GameModelRecoverySafety
@@ -240,7 +262,7 @@ internal sealed class GameModelRecoveryCompaction
     public GameTranscriptCompactionResult Compaction { get; }
 }
 
-internal sealed class ContextOverflowRecoveryModelProvider : IModelProvider
+internal sealed class ContextOverflowRecoveryModelProvider : IModelProvider, IModelRequestPreflight
 {
     private readonly IModelProvider _inner;
     private readonly GameModelRecoverySafety _safety;
@@ -274,6 +296,11 @@ internal sealed class ContextOverflowRecoveryModelProvider : IModelProvider
         _clearAssistantSuppression = clearAssistantSuppression
             ?? throw new ArgumentNullException(nameof(clearAssistantSuppression));
     }
+
+    public ValueTask ValidateRequestAsync(ModelRequest request, CancellationToken cancellationToken) =>
+        _inner is IModelRequestPreflight preflight
+            ? preflight.ValidateRequestAsync(request, cancellationToken)
+            : default;
 
     public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
         ModelRequest request,

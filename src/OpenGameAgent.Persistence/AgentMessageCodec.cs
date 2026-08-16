@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent.Persistence;
@@ -86,6 +87,16 @@ internal static class AgentMessageCodec
             Redacted = reasoning.Redacted,
         },
         ResourceContent resource => new ContentDocument { Kind = "resource", Text = resource.Name, Reference = resource.Uri, Detail = resource.MediaType },
+        ImageAttachmentContent image => new ContentDocument
+        {
+            Kind = "image",
+            Text = image.Attachment.Name,
+            Reference = image.Attachment.AttachmentId,
+            Detail = image.Attachment.MediaType,
+            Bytes = image.Attachment.Bytes,
+            Width = image.Attachment.Width,
+            Height = image.Attachment.Height,
+        },
         ToolCallContent call => new ContentDocument { Kind = "tool_call", Text = call.Name, Reference = call.Id, Json = call.ArgumentsJson },
         _ => throw new InvalidOperationException("Unsupported agent content type."),
     };
@@ -99,6 +110,13 @@ internal static class AgentMessageCodec
             document.Reference ?? throw new PersistenceException("Persisted resource URI is missing."),
             document.Detail ?? throw new PersistenceException("Persisted resource media type is missing."),
             document.Text),
+        "image" => new ImageAttachmentContent(new GameImageAttachment(
+            document.Reference ?? throw new PersistenceException("Persisted image attachment ID is missing."),
+            document.Detail ?? throw new PersistenceException("Persisted image media type is missing."),
+            document.Bytes,
+            document.Width,
+            document.Height,
+            document.Text)),
         "tool_call" => new ToolCallContent(
             document.Reference ?? throw new PersistenceException("Persisted tool call ID is missing."),
             document.Text ?? throw new PersistenceException("Persisted tool call name is missing."),
@@ -149,6 +167,12 @@ internal sealed class ContentDocument
     public string? Detail { get; set; }
 
     public bool Redacted { get; set; }
+
+    public int Bytes { get; set; }
+
+    public int Width { get; set; }
+
+    public int Height { get; set; }
 }
 
 internal sealed class UsageDocument

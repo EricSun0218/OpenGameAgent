@@ -100,6 +100,35 @@ public ValueTask<IReadOnlyList<GameContextSlice>> GetContextAsync(
 
 Context is treated as data, not as a hidden state mutation channel.
 
+## Add image observations
+
+For screenshots or visual tool results, mount an `IGameImageAttachmentStore` and pass inline image bytes through `GameInput.Content`. The runtime validates and persists the whole batch, saves only immutable references in the transcript, preflights the selected model, and resolves bytes just before provider dispatch. Reference `src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj` from a source checkout, or use its matching package artifact from the GitHub Release.
+
+```csharp
+using OpenGameAgent.Attachments;
+using OpenGameAgent.Attachments.Local;
+
+options.ImageAttachments = new FileGameImageAttachmentStore(attachmentDirectory);
+
+var input = new GameInput(
+    "save-42",
+    "npc-scout",
+    "scene_changed",
+    """{"region":"north-gate"}""",
+    new GameMoment("main", 900),
+    "scene-900-scout",
+    content: new AgentContent[]
+    {
+        new BinaryContent(
+            AgentMediaKind.Image,
+            Convert.ToBase64String(pngBytes),
+            GameImageMediaTypes.Png,
+            "scout-view.png"),
+    });
+```
+
+Use a model whose catalog entry declares image input. Models that cannot consume the image fail explicitly; the runtime never drops it silently. For large voxel or open worlds, combine bounded structured state, a sparse BEV/topological summary, selective screenshots, and exact query tools instead of serializing every coordinate. See [Image input and game perception](image-input.md).
+
 ## Expose actions
 
 Create tools per input so they can carry the stable input identity and actor scope. Prefer `GameActionTool.Create` for state changes.
@@ -123,6 +152,29 @@ ValueTask<IReadOnlyList<AgentTool>> Tools(GameInput input, CancellationToken _)
 ```
 
 `IGameActionHandler.ExecuteAsync` must recheck visibility, permission, resources, expected revision, and all game rules. Return `Rejected` for a legal request that cannot commit. Implement `RecoverAsync` using the game's operation ledger or transaction log.
+
+When the model loop runs off the engine thread, wrap that authoritative handler in
+`QueuedGameActionHandler` and pump it from the engine thread. The durable dispatcher remains the
+only action journal; the queue is a bounded, process-local handoff:
+
+```csharp
+var engineActions = new QueuedGameActionHandler(
+    new AuthoritativeGameActionHandler(world),
+    maximumPendingActions: 256,
+    maximumActiveActions: 16);
+var dispatcher = new DurableGameActionDispatcher(actionJournal, engineActions);
+
+// Unity Update, Godot _Process, or the equivalent host-owned main-thread callback.
+engineActions.Pump(maximumWorkItems: 16);
+```
+
+The first `Pump` call binds the instance to that managed thread. Cancellation removes an action
+only while it is still queued. Once the host starts an action, caller timeout no longer cancels the
+mutation blindly; its receipt is allowed to settle. `Stop` rejects new work and faults queued work,
+while `DisposeAsync` additionally waits for already-started work. The wrapped authoritative handler
+must validate `GenerationId` against the currently loaded save/world generation because only the
+game knows which generation is active. Pending durable journal entries are recovered through the
+same pump after restart.
 
 ## Select routes
 
@@ -162,11 +214,7 @@ For game-specific selection, use `skill.json` with `id`, `name`, optional `input
 
 The directory loader scans nested skill folders, rejects paths that escape the selected skill directory, and loads instructions only for selected skills. Imported instructions are untrusted content; they do not install code or grant tool permission.
 
-To consume a portable Agent Plugins 1.0.0 package instead of a standalone skill directory, install `OpenGameAgent.Plugins` and load the package as one runtime extension:
-
-```powershell
-dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.2
-```
+To consume a portable Agent Plugins 1.0.0 package instead of a standalone skill directory, reference `src/OpenGameAgent.Plugins/OpenGameAgent.Plugins.csproj` from a source checkout, or use its matching package artifact from the GitHub Release, then load the package as one runtime extension:
 
 ```csharp
 using OpenGameAgent.Plugins;

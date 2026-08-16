@@ -2,7 +2,7 @@
 
 ## 0.3.0-alpha.2
 
-- Add the optional source/NuGet vector-memory package and authoritative memory snapshot contract.
+- Add the optional vector-memory package and authoritative memory snapshot contract.
 
 ## 0.3.0-alpha.1
 

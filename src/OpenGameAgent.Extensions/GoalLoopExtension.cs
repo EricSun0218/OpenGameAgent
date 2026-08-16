@@ -75,6 +75,7 @@ public sealed class GameGoalSnapshot
         Status = document.Status;
         Revision = document.Revision;
         NonProgressUpdates = document.NonProgressUpdates;
+        TerminalSequence = document.TerminalSequence;
         LastTimelineId = document.LastTimelineId;
         LastTick = document.LastTick;
         Error = document.Error;
@@ -95,6 +96,8 @@ public sealed class GameGoalSnapshot
 
     public int NonProgressUpdates { get; }
 
+    internal long TerminalSequence { get; }
+
     public string LastTimelineId { get; }
 
     public long LastTick { get; }
@@ -106,19 +109,89 @@ public sealed class GameGoalSnapshot
 
 public sealed class GameGoalChanged
 {
-    public GameGoalChanged(GameGoalSnapshot goal, string reason)
+    public GameGoalChanged(
+        GameSessionKey session,
+        string inputId,
+        GameGoalSnapshot goal,
+        string reason)
     {
+        Session = new GameSessionKey(session.SessionId, session.ActorId);
+        InputId = string.IsNullOrWhiteSpace(inputId) || inputId.Length > 1_024
+            ? throw new ArgumentException("An input ID must contain 1 to 1024 characters.", nameof(inputId))
+            : inputId;
         Goal = goal ?? throw new ArgumentNullException(nameof(goal));
         Reason = reason ?? string.Empty;
     }
+
+    public GameSessionKey Session { get; }
+
+    public string InputId { get; }
 
     public GameGoalSnapshot Goal { get; }
 
     public string Reason { get; }
 }
 
+public sealed class GameGoalQueryResult
+{
+    internal GameGoalQueryResult(
+        GameSessionKey session,
+        long sessionRevision,
+        IEnumerable<GameGoalSnapshot> goals)
+    {
+        Session = new GameSessionKey(session.SessionId, session.ActorId);
+        SessionRevision = sessionRevision >= 0
+            ? sessionRevision
+            : throw new ArgumentOutOfRangeException(nameof(sessionRevision));
+        var copy = (goals ?? throw new ArgumentNullException(nameof(goals))).ToArray();
+        if (copy.Any(goal => goal is null))
+        {
+            throw new ArgumentException("Goal query results cannot contain null goals.", nameof(goals));
+        }
+
+        Goals = Array.AsReadOnly(copy);
+    }
+
+    public GameSessionKey Session { get; }
+
+    public long SessionRevision { get; }
+
+    public IReadOnlyList<GameGoalSnapshot> Goals { get; }
+}
+
+public sealed class GoalLoopOptions
+{
+    public int MaximumActiveGoals { get; set; } = 64;
+
+    public int MaximumRetainedTerminalGoals { get; set; } = 64;
+
+    public int MaximumNonProgressUpdates { get; set; } = 3;
+
+    internal GoalLoopOptions CopyAndValidate()
+    {
+        var copy = (GoalLoopOptions)MemberwiseClone();
+        if (copy.MaximumActiveGoals < 1 || copy.MaximumActiveGoals > 1_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumActiveGoals));
+        }
+
+        if (copy.MaximumRetainedTerminalGoals < 0 || copy.MaximumRetainedTerminalGoals > 1_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumRetainedTerminalGoals));
+        }
+
+        if (copy.MaximumNonProgressUpdates < 1 || copy.MaximumNonProgressUpdates > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumNonProgressUpdates));
+        }
+
+        return copy;
+    }
+}
+
 public sealed class GoalLoopExtension : IGameAgentExtension
 {
+    private const string ExtensionId = "opengameagent.goals";
     private const string GoalPrefix = "goal/";
     private const string ManageSchema = """
         {
@@ -141,32 +214,51 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         {"type":"object","properties":{"includeTerminal":{"type":"boolean"}},"additionalProperties":false}
         """;
 
-    private readonly int _maximumGoals;
-    private readonly int _maximumNonProgressUpdates;
+    private readonly GoalLoopOptions _options;
 
-    public GoalLoopExtension(int maximumGoals = 64, int maximumNonProgressUpdates = 3)
+    public GoalLoopExtension(GoalLoopOptions? options = null)
     {
-        if (maximumGoals < 1 || maximumGoals > 1_000)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumGoals));
-        }
-
-        if (maximumNonProgressUpdates < 1 || maximumNonProgressUpdates > 100)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumNonProgressUpdates));
-        }
-
-        _maximumGoals = maximumGoals;
-        _maximumNonProgressUpdates = maximumNonProgressUpdates;
+        _options = (options ?? new GoalLoopOptions()).CopyAndValidate();
     }
 
     public static GameAgentExtensionChannel<GameGoalChanged> GoalChanged { get; } = new("goal.changed");
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
-        "opengameagent.goals",
+        ExtensionId,
         "1.0.0",
         "Durable goal state that can wait on game time or game events and resume on later inputs.",
         new[] { "goals", "durable-loop", "game-time", "game-events" });
+
+    public static async ValueTask<GameGoalQueryResult> ReadAsync(
+        IGameSessionStore sessionStore,
+        GameSessionKey session,
+        bool includeTerminal = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionStore is null)
+        {
+            throw new ArgumentNullException(nameof(sessionStore));
+        }
+
+        var key = new GameSessionKey(session.SessionId, session.ActorId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var snapshot = await sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return new GameGoalQueryResult(key, 0, Array.Empty<GameGoalSnapshot>());
+        }
+
+        if (snapshot.Key != key)
+        {
+            throw new InvalidOperationException("The session store returned a different session key.");
+        }
+
+        var goals = ReadAll(StoredExtensionStateReader.Read(snapshot, ExtensionId))
+            .Where(goal => includeTerminal || goal.Status is GameGoalStatus.Active or GameGoalStatus.Waiting)
+            .OrderBy(goal => goal.Id, StringComparer.Ordinal)
+            .ToArray();
+        return new GameGoalQueryResult(key, snapshot.Revision, goals);
+    }
 
     public void Configure(GameAgentExtensionApi api)
     {
@@ -191,6 +283,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         GameAgentExtensionRunContext context,
         CancellationToken cancellationToken)
     {
+        PruneTerminalGoals(context.State);
         var pending = false;
         foreach (var storedGoal in ReadAll(context.State))
         {
@@ -210,7 +303,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                 goal = new GameGoalSnapshot(resumed);
                 await api.PublishAsync(
                     GoalChanged,
-                    new GameGoalChanged(goal, "resumed"),
+                    new GameGoalChanged(
+                        new GameSessionKey(context.Input.SessionId, context.Input.ActorId),
+                        context.Input.InputId,
+                        goal,
+                        "resumed"),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -238,9 +335,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                         return ToolResult.Error($"Goal '{goalId}' already exists.");
                     }
 
-                    if (ReadAll(context.State).Count >= _maximumGoals)
+                    var activeGoalCount = ReadAll(context.State).Count(goal => !IsTerminal(goal.Status));
+                    if (activeGoalCount >= _options.MaximumActiveGoals)
                     {
-                        return ToolResult.Error($"At most {_maximumGoals} goals may be stored in one actor session.");
+                        return ToolResult.Error(
+                            $"At most {_options.MaximumActiveGoals} active or waiting goals may exist in one actor session.");
                     }
 
                     if (!arguments.TryGetProperty("objective", out var objective))
@@ -295,7 +394,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                             document.NonProgressUpdates = string.Equals(document.ProgressJson, nextProgress, StringComparison.Ordinal)
                                 ? checked(document.NonProgressUpdates + 1)
                                 : 0;
-                            if (document.NonProgressUpdates >= _maximumNonProgressUpdates)
+                            if (document.NonProgressUpdates >= _options.MaximumNonProgressUpdates)
                             {
                                 return ToolResult.Error("The goal repeated the same progress without advancing.");
                             }
@@ -326,15 +425,18 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                             break;
                         case "complete":
                             document.Status = GameGoalStatus.Completed;
+                            document.TerminalSequence = NextTerminalSequence(context.State);
                             document.Wait = null;
                             break;
                         case "fail":
                             document.Status = GameGoalStatus.Failed;
+                            document.TerminalSequence = NextTerminalSequence(context.State);
                             document.Error = ReadReason(arguments, "The goal failed.");
                             document.Wait = null;
                             break;
                         case "cancel":
                             document.Status = GameGoalStatus.Cancelled;
+                            document.TerminalSequence = NextTerminalSequence(context.State);
                             document.Error = ReadReason(arguments, "The goal was cancelled.");
                             document.Wait = null;
                             break;
@@ -344,10 +446,18 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                 }
 
                 Write(context.State, document);
+                if (IsTerminal(document.Status))
+                {
+                    PruneTerminalGoals(context.State);
+                }
                 var snapshot = new GameGoalSnapshot(document);
                 await api.PublishAsync(
                     GoalChanged,
-                    new GameGoalChanged(snapshot, action),
+                    new GameGoalChanged(
+                        new GameSessionKey(context.Input.SessionId, context.Input.ActorId),
+                        context.Input.InputId,
+                        snapshot,
+                        action),
                     cancellationToken).ConfigureAwait(false);
                 return JsonResult(snapshot);
             },
@@ -376,6 +486,35 @@ public sealed class GoalLoopExtension : IGameAgentExtension
             ? reason.GetString()!
             : fallback;
 
+    private static bool IsTerminal(GameGoalStatus status) =>
+        status is GameGoalStatus.Completed or GameGoalStatus.Failed or GameGoalStatus.Cancelled;
+
+    private static long NextTerminalSequence(GameAgentExtensionState state)
+    {
+        var maximum = ReadAll(state)
+            .Where(goal => IsTerminal(goal.Status))
+            .Select(goal => goal.TerminalSequence)
+            .DefaultIfEmpty()
+            .Max();
+        return checked(maximum + 1);
+    }
+
+    private void PruneTerminalGoals(GameAgentExtensionState state)
+    {
+        var expired = ReadAll(state)
+            .Where(goal => IsTerminal(goal.Status))
+            .OrderByDescending(goal => goal.TerminalSequence)
+            .ThenByDescending(goal => goal.LastTimelineId, StringComparer.Ordinal)
+            .ThenByDescending(goal => goal.LastTick)
+            .ThenBy(goal => goal.Id, StringComparer.Ordinal)
+            .Skip(_options.MaximumRetainedTerminalGoals)
+            .ToArray();
+        foreach (var goal in expired)
+        {
+            state.Remove(GoalPrefix + goal.Id);
+        }
+    }
+
     private static GoalDocument? Read(GameAgentExtensionState state, string goalId)
     {
         var json = state.Get(GoalPrefix + goalId);
@@ -385,8 +524,11 @@ public sealed class GoalLoopExtension : IGameAgentExtension
     }
 
     private static IReadOnlyList<GameGoalSnapshot> ReadAll(GameAgentExtensionState state)
+        => ReadAll(state.Snapshot());
+
+    private static IReadOnlyList<GameGoalSnapshot> ReadAll(IReadOnlyDictionary<string, string> state)
     {
-        var goals = state.Snapshot()
+        var goals = state
             .Where(pair => pair.Key.StartsWith(GoalPrefix, StringComparison.Ordinal))
             .Select(pair => Decode(pair.Value, pair.Key.Substring(GoalPrefix.Length)))
             .Select(document => new GameGoalSnapshot(document))
@@ -424,6 +566,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
             || !string.Equals(document.Id, expectedId, StringComparison.Ordinal)
             || document.Revision < 1
             || document.NonProgressUpdates < 0
+            || document.TerminalSequence < 0
             || string.IsNullOrWhiteSpace(document.LastTimelineId)
             || !Enum.IsDefined(typeof(GameGoalStatus), document.Status)
             || (document.Error?.Length ?? 0) > 4_096)
@@ -456,6 +599,10 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         {
             throw new InvalidOperationException("Only a waiting goal can contain a wait condition.");
         }
+        if (IsTerminal(document.Status) != (document.TerminalSequence > 0))
+        {
+            throw new InvalidOperationException("Terminal goal state and terminal sequence must agree.");
+        }
     }
 
     private static void Write(GameAgentExtensionState state, GoalDocument document) =>
@@ -472,6 +619,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         Status = goal.Status,
         Revision = goal.Revision,
         NonProgressUpdates = goal.NonProgressUpdates,
+        TerminalSequence = goal.TerminalSequence,
         LastTimelineId = goal.LastTimelineId,
         LastTick = goal.LastTick,
         Error = goal.Error,
@@ -499,6 +647,8 @@ internal sealed class GoalDocument
     public long Revision { get; set; }
 
     public int NonProgressUpdates { get; set; }
+
+    public long TerminalSequence { get; set; }
 
     public string LastTimelineId { get; set; } = string.Empty;
 

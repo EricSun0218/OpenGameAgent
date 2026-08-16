@@ -1,16 +1,50 @@
-# OpenGameAgent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/opengameagent-mark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/opengameagent-mark-light.svg">
+    <img src="docs/brand/opengameagent-mark-light.svg" alt="OpenGameAgent OGA monogram" width="112">
+  </picture>
+</p>
 
-[简体中文](README.zh-CN.md)
+<h1 align="center">OpenGameAgent</h1>
 
-**The agent kernel for games.** A compact, hackable C# runtime for building AI-native games, autonomous NPCs, and interactive worlds in Godot, Unity, or .NET services.
+<p align="center"><strong>Open-source agent runtime for AI-native games, autonomous NPCs, and interactive worlds.</strong></p>
 
-[![CI](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
+<p align="center"><a href="README.zh-CN.md">简体中文</a></p>
 
-OpenGameAgent brings the small, composable agent-kernel model to game development. Its stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use that kernel by itself, add the game layer for game time and durable state, then opt into extension packages for memory, goals, artifacts, delegation, external tools, structured interaction, and workflow graphs.
+OpenGameAgent is a compact, hackable C# runtime that lets game characters observe structured state, plan, call tools, inspect authoritative results, remember, and continue toward goals. It runs inside Godot, Unity, or .NET services while game code remains authoritative over every state change.
 
-Inputs are bounded JSON. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
+<p align="center">
+  <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
+</p>
+
+OpenGameAgent starts with a small, composable agent kernel. The stateful core streams model output, executes validated tools, accepts steering while running, and continues the model/tool loop until work is complete. Use the kernel by itself, add the game runtime for game time and durable state, then opt into extensions for memory, goals, host-verified task plans, artifacts, delegation, external tools, structured interaction, and workflow graphs.
+
+Inputs are bounded JSON plus optional durable image observations. They may represent dialogue, combat observations, simulation ticks, UI events, plans, sensor state, screenshots, or any other game-owned data; natural language is optional. No model is bundled. Cloud and local API endpoints are both supported.
+
+## A programmable agent runtime built for games
+
+Developers choose a model, register game-owned tools, compose extensions, stream events, steer an active run, and let the model/tool loop continue until the task is finished. The kernel remains useful on its own as a general agent loop. The optional game runtime adds the coordinates an interactive simulation needs: sessions and actors, game timelines and ticks, structured world context, bounded multi-NPC concurrency, persistent memory and tasks, engine-thread handoff, and durable action receipts. These capabilities are composed through typed interfaces instead of being hard-coded into one genre or world model.
+
+## Beyond dialogue: observe, decide, act, and continue
+
+A dialogue-only character receives a prompt and returns a line. An agent-driven character receives a goal and the current environment, chooses tools, performs work, observes the result, and continues until it reaches a terminal outcome. In OpenGameAgent, those tools are ordinary game-owned operations: move, inspect, trade, build, schedule, recruit, investigate, or any other capability the developer exposes.
+
+| Dialogue-only character | Agent-driven character |
+| --- | --- |
+| Reads the latest dialogue | Observes bounded JSON containing dialogue, world state, events, UI input, sensor data, or simulation ticks |
+| Produces the next line of text | Streams text and typed tool calls, then consumes structured tool results |
+| Stops after one model response | Can observe → decide → act → inspect the result → continue across multiple turns |
+| Treats generated text as the outcome | Requests actions while game code validates permissions, rules, revisions, and state changes |
+| Usually follows wall-clock chat history | Can reason against game time, timelines, save/session identity, actor identity, and scoped memory |
+| Models one conversation at a time | Serializes each actor while allowing bounded concurrency across many NPCs |
+| May repeat a write after a timeout | Can journal state-changing intents and reconcile authoritative receipts before retrying |
+
+OpenGameAgent is model- and provider-neutral. Characters operate through developer-defined tools; a model never directly controls game state. The game remains authoritative at every mutation boundary.
+
+Not every interaction needs the full loop. A game can route greetings and other simple inputs through the quick-response path, use the complete agent loop for open-ended tasks, and use deterministic workflows where the execution graph should be fixed.
 
 > Current version: `0.3.0-alpha.2`. Public APIs can change before `1.0`.
 
@@ -18,14 +52,17 @@ The kernel boundary is intentionally small and designed to stabilize early. New 
 
 ## Install
 
-Install the complete game runtime from NuGet:
+Download versioned package artifacts, Godot and Unity archives, or the portable server from the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. For active development against a source checkout, reference only the projects your game needs:
 
-```bash
-dotnet add package OpenGameAgent --version 0.3.0-alpha.2
-dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # optional semantic memory
+```xml
+<ItemGroup>
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
+</ItemGroup>
 ```
 
-The kernel, persistence, providers, and engine-compatible client are also published as separate `OpenGameAgent.*` packages. Godot, Unity, and portable server archives are available on the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
+Adjust the paths relative to your game project and omit optional projects you do not use. The kernel, persistence, providers, memory, attachments, plugins, and engine-compatible client are also shipped as separate `OpenGameAgent.*` release artifacts. See [Getting started](docs/getting-started.md) and [Engine integration](docs/engine-integration.md) before connecting a game.
 
 ## Why game-specific?
 
@@ -35,13 +72,14 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 
 - named timelines and integer ticks, with optional calendar JSON;
 - structured observations and context slices with floating-point values intact;
+- content-addressed screenshot/image input with decode validation, model-capability preflight, and session-authorized retrieval;
 - quick-response, full-agent, and deterministic-workflow routes;
 - per-actor serialization with bounded cross-actor concurrency;
 - journaled action intents and authoritative game receipts;
 - game-time memory filtering, expiry, and optional custom ranking;
 - optional local/remote embeddings, rebuildable vector indexes, and lexical/vector hybrid recall;
 - skills selected by input type and available tools;
-- recurring game-time triggers and persistent actor mailboxes;
+- recurring game-time triggers and persistent actor mailboxes with payload-free backlog queries;
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
 - capability-aware model catalogs and developer-hosted short-lived credentials;
 - lazy external-tool discovery and large-result artifact spill;
@@ -82,9 +120,10 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
 | Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
+| Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
-| Official extensions | Tool policy and search, structured player questions/recommended replies, goals, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
-| World primitives | Durable actions, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes |
+| Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
+| World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
@@ -190,10 +229,15 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
 - [Generated media](docs/media.md)
+- [Image input and game perception](docs/image-input.md)
 
 ## Project boundary
 
 This repository is a developer framework. It does not define a universal character sheet, combat model, world-package format, visual editor, or end-user game. Those belong to each game. The framework provides the agent loop and game-aware primitives needed to build conversational characters, autonomous companions, social simulations, AI directors, generated quests and items, strategy agents, construction agents, and persistent interactive worlds.
+
+## Attribution
+
+OpenGameAgent is licensed under Apache-2.0. An in-game logo or credit is not required, but games and mods are welcome to write **“Powered by OpenGameAgent | opengameagent.com”** in Credits, About, or third-party notices. Preserve [LICENSE](LICENSE) and [NOTICE](NOTICE) when the license requires it. See the [brand assets and usage guidance](docs/brand/README.md).
 
 ## License
 

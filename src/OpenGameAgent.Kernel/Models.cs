@@ -45,33 +45,14 @@ public sealed class ModelCost
         double input = 0,
         double output = 0,
         double cacheRead = 0,
-        double cacheWrite = 0)
-        : this(
-            input,
-            output,
-            cacheRead,
-            cacheWrite,
-            input != 0 || output != 0 || cacheRead != 0 || cacheWrite != 0)
-    {
-    }
-
-    public ModelCost(bool isKnown)
-        : this(0, 0, 0, 0, isKnown)
-    {
-    }
-
-    public ModelCost(
-        double input,
-        double output,
-        double cacheRead,
-        double cacheWrite,
-        bool isKnown)
+        double cacheWrite = 0,
+        bool? isKnown = null)
     {
         Input = RequireAmount(input, nameof(input));
         Output = RequireAmount(output, nameof(output));
         CacheRead = RequireAmount(cacheRead, nameof(cacheRead));
         CacheWrite = RequireAmount(cacheWrite, nameof(cacheWrite));
-        IsKnown = isKnown;
+        IsKnown = isKnown ?? (input != 0 || output != 0 || cacheRead != 0 || cacheWrite != 0);
     }
 
     public double Input { get; }
@@ -789,6 +770,15 @@ public sealed class ModelStreamEvent
 public interface IModelProvider
 {
     IAsyncEnumerable<ModelStreamEvent> StreamAsync(ModelRequest request, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Validates a request before durable attachment bytes are loaded.
+/// Implementations must not dispatch a provider request or mutate external state.
+/// </summary>
+public interface IModelRequestPreflight
+{
+    ValueTask ValidateRequestAsync(ModelRequest request, CancellationToken cancellationToken);
 }
 
 public interface IDeferredModelProvider : IModelProvider

@@ -410,7 +410,7 @@ public sealed class BuiltInGameModelRuntimeTests
     }
 
     [Fact]
-    public async Task BundledAudioCapabilityIsDowngradedBeforeGoogleWireSerialization()
+    public async Task BundledModelRejectsUnsupportedAudioBeforeGoogleWireSerialization()
     {
         var handler = new RecordingHandler(BuiltInGameModelApis.GoogleGenerativeAi);
         using var client = new HttpClient(handler);
@@ -445,8 +445,10 @@ public sealed class BuiltInGameModelRuntimeTests
             request,
             TestContext.Current.CancellationToken));
 
-        Assert.Equal(ModelStreamEventKind.Completed, Assert.Single(events, item => item.IsTerminal).Kind);
-        Assert.Contains("[audio omitted: model does not support this input]", handler.Body, StringComparison.Ordinal);
+        var terminal = Assert.Single(events, item => item.IsTerminal);
+        Assert.Equal(ModelStreamEventKind.Failed, terminal.Kind);
+        Assert.Contains("does not declare audio input support", terminal.Response!.ErrorMessage, StringComparison.Ordinal);
+        Assert.Empty(handler.Body);
         Assert.DoesNotContain("YXVkaW8=", handler.Body, StringComparison.Ordinal);
     }
 
@@ -869,7 +871,7 @@ public sealed class BuiltInGameModelRuntimeTests
     }
 
     [Fact]
-    public async Task UnsupportedUserAndToolImagesBecomeStableTextBeforeProviderSerialization()
+    public async Task UnsupportedUserAndToolImagesFailBeforeProviderSerialization()
     {
         var handler = new RecordingHandler(BuiltInGameModelApis.OpenAiCompletions);
         using var client = new HttpClient(handler);
@@ -924,10 +926,9 @@ public sealed class BuiltInGameModelRuntimeTests
             TestContext.Current.CancellationToken));
 
         var terminal = Assert.Single(events, item => item.IsTerminal);
-        Assert.True(
-            terminal.Kind == ModelStreamEventKind.Completed,
-            terminal.Response?.ErrorMessage ?? "The provider did not complete.");
-        Assert.Equal(2, Occurrences(handler.Body, "[image omitted: model does not support this input]"));
+        Assert.Equal(ModelStreamEventKind.Failed, terminal.Kind);
+        Assert.Contains("does not declare image input support", terminal.Response!.ErrorMessage, StringComparison.Ordinal);
+        Assert.Empty(handler.Body);
         Assert.DoesNotContain("aW1hZ2U=", handler.Body, StringComparison.Ordinal);
         Assert.DoesNotContain("dG9vbA==", handler.Body, StringComparison.Ordinal);
     }

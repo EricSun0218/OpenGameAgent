@@ -29,10 +29,12 @@ Legacy HTTP+SSE is optional in Agent Plugins 1.0.0 and is not implemented. Its e
 
 ## Load and compose
 
-Install the optional adapter package alongside the core runtime:
+From a source checkout, reference the optional adapter project alongside the core runtime. A matching versioned package artifact is also available on the GitHub Releases page.
 
-```powershell
-dotnet add package OpenGameAgent.Plugins --version 0.3.0-alpha.2
+```xml
+<ItemGroup>
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Plugins/OpenGameAgent.Plugins.csproj" />
+</ItemGroup>
 ```
 
 ```csharp

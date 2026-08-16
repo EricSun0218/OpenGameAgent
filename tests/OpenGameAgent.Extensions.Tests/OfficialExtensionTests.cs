@@ -210,7 +210,7 @@ public sealed class OfficialExtensionTests
             _ => TextResponse("complete"),
         });
         var store = new InMemoryGameSessionStore();
-        var changes = new ConcurrentQueue<string>();
+        var changes = new ConcurrentQueue<GameGoalChanged>();
         await using var runtime = new GameAgentBuilder(provider, "model")
             .UseSessionStore(store)
             .UseExtension(new GoalLoopExtension())
@@ -219,7 +219,7 @@ public sealed class OfficialExtensionTests
                 "1",
                 api => api.Subscribe(GoalLoopExtension.GoalChanged, (change, _) =>
                 {
-                    changes.Enqueue(change.Reason);
+                    changes.Enqueue(change);
                     return ValueTask.CompletedTask;
                 }))
             .Build();
@@ -241,7 +241,118 @@ public sealed class OfficialExtensionTests
         using var document = System.Text.Json.JsonDocument.Parse(stateJson);
         Assert.Equal("Completed", document.RootElement.GetProperty("Status").GetString());
         Assert.Equal(4, document.RootElement.GetProperty("Revision").GetInt64());
-        Assert.Contains("resumed", changes);
+        Assert.All(changes, change => Assert.Equal(new GameSessionKey("session", "actor"), change.Session));
+        Assert.Contains(changes, change => change.Reason == "resumed" && change.InputId == "three");
+    }
+
+    [Fact]
+    public async Task GoalLoopRetainsActiveAndWaitingGoalsWhileBoundingTerminalAuditHistory()
+    {
+        var provider = new ScriptedProvider(call => call switch
+        {
+            1 => ToolCall("create-waiting", "manage_goal", "{\"action\":\"create\",\"goalId\":\"waiting\",\"objective\":{}}"),
+            2 => ToolCall("wait", "manage_goal", "{\"action\":\"wait\",\"goalId\":\"waiting\",\"expectedRevision\":1,\"eventTypes\":[\"future\"]}"),
+            3 => ToolCall("create-old", "manage_goal", "{\"action\":\"create\",\"goalId\":\"old\",\"objective\":{}}"),
+            4 => ToolCall("complete-old", "manage_goal", "{\"action\":\"complete\",\"goalId\":\"old\",\"expectedRevision\":1}"),
+            5 => ToolCall("create-recent", "manage_goal", "{\"action\":\"create\",\"goalId\":\"recent\",\"objective\":{}}"),
+            6 => ToolCall("complete-recent", "manage_goal", "{\"action\":\"complete\",\"goalId\":\"recent\",\"expectedRevision\":1}"),
+            7 => ToolCall("create-active", "manage_goal", "{\"action\":\"create\",\"goalId\":\"active\",\"objective\":{}}"),
+            _ => TextResponse("created"),
+        });
+        var store = new InMemoryGameSessionStore();
+        await using var runtime = new GameAgentBuilder(provider, "model")
+            .UseSessionStore(store)
+            .UseExtension(new GoalLoopExtension(new GoalLoopOptions
+            {
+                MaximumActiveGoals = 2,
+                MaximumRetainedTerminalGoals = 1,
+            }))
+            .Build();
+
+        var result = await runtime.RunAsync(Input(), TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        var snapshot = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+        var goals = snapshot!.ExtensionState.Values
+            .Select(json =>
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                return (
+                    Id: document.RootElement.GetProperty("Id").GetString(),
+                    Status: document.RootElement.GetProperty("Status").GetString());
+            })
+            .ToDictionary(goal => goal.Id!, goal => goal.Status, StringComparer.Ordinal);
+        Assert.Equal(3, goals.Count);
+        Assert.Equal("Active", goals["active"]);
+        Assert.Equal("Waiting", goals["waiting"]);
+        Assert.Equal("Completed", goals["recent"]);
+        Assert.DoesNotContain("old", goals);
+    }
+
+    [Fact]
+    public async Task ConcurrentGoalUpdatesUseSessionCasWithoutLosingExistingActiveGoals()
+    {
+        var store = new InMemoryGameSessionStore();
+        await using (var seedRuntime = new GameAgentBuilder(
+                new ScriptedProvider(call => call == 1
+                    ? ToolCall("create-base", "manage_goal", "{\"action\":\"create\",\"goalId\":\"base\",\"objective\":{}}")
+                    : TextResponse("seeded")),
+                "model")
+            .UseSessionStore(store)
+            .UseExtension(new GoalLoopExtension())
+            .Build())
+        {
+            Assert.True((await seedRuntime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
+        }
+
+        var gate = new ConcurrentRunGate(2);
+        await using var leftRuntime = new GameAgentBuilder(
+                new FirstCallBarrierProvider(
+                    gate,
+                    ToolCall("create-left", "manage_goal", "{\"action\":\"create\",\"goalId\":\"left\",\"objective\":{}}")),
+                "model")
+            .UseSessionStore(store)
+            .UseExtension(new GoalLoopExtension())
+            .Build();
+        await using var rightRuntime = new GameAgentBuilder(
+                new FirstCallBarrierProvider(
+                    gate,
+                    ToolCall("create-right", "manage_goal", "{\"action\":\"create\",\"goalId\":\"right\",\"objective\":{}}")),
+                "model")
+            .UseSessionStore(store)
+            .UseExtension(new GoalLoopExtension())
+            .Build();
+
+        var results = await Task.WhenAll(
+            leftRuntime.RunAsync(
+                new GameInput("session", "actor", "request", "{}", new GameMoment("world", 6), "left-input"),
+                TestContext.Current.CancellationToken),
+            rightRuntime.RunAsync(
+                new GameInput("session", "actor", "request", "{}", new GameMoment("world", 6), "right-input"),
+                TestContext.Current.CancellationToken));
+
+        // A winning tool checkpoint can commit before a later usage settlement advances the
+        // session again, so both callers may conservatively report a conflict under load.
+        Assert.Contains(results, result => result.Status == GameAgentRunStatus.SessionConflict);
+        Assert.All(
+            results,
+            result => Assert.True(
+                result.Status is GameAgentRunStatus.Completed or GameAgentRunStatus.SessionConflict,
+                $"Unexpected concurrent run status '{result.Status}'."));
+        var snapshot = await store.LoadAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+        var goalIds = snapshot!.ExtensionState.Values
+            .Select(json =>
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                return document.RootElement.GetProperty("Id").GetString();
+            })
+            .ToArray();
+        Assert.Contains("base", goalIds);
+        Assert.True(goalIds.Contains("left", StringComparer.Ordinal) ^ goalIds.Contains("right", StringComparer.Ordinal));
     }
 
     [Fact]
@@ -1504,6 +1615,57 @@ public sealed class OfficialExtensionTests
             var call = Interlocked.Increment(ref _calls);
             yield return ModelStreamEvent.Terminal(_response(call, request));
             await Task.CompletedTask;
+        }
+    }
+
+    private sealed class ConcurrentRunGate
+    {
+        private readonly int _participantCount;
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _arrivals;
+
+        public ConcurrentRunGate(int participantCount)
+        {
+            _participantCount = participantCount;
+        }
+
+        public async Task ArriveAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _arrivals) == _participantCount)
+            {
+                _release.TrySetResult();
+            }
+
+            await _release.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    private sealed class FirstCallBarrierProvider : IModelProvider
+    {
+        private readonly ConcurrentRunGate _gate;
+        private readonly ModelResponse _firstResponse;
+        private int _calls;
+
+        public FirstCallBarrierProvider(ConcurrentRunGate gate, ModelResponse firstResponse)
+        {
+            _gate = gate;
+            _firstResponse = firstResponse;
+        }
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var call = Interlocked.Increment(ref _calls);
+            if (call == 1)
+            {
+                await _gate.ArriveAsync(cancellationToken);
+                yield return ModelStreamEvent.Terminal(_firstResponse);
+                yield break;
+            }
+
+            yield return ModelStreamEvent.Terminal(TextResponse("done"));
         }
     }
 

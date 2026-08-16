@@ -40,11 +40,14 @@ public sealed class ProjectDependencyBoundaryTests
     }
 
     [Fact]
-    public void KernelIsDependencyFreeAndModelsOnlyDependsOnKernel()
+    public void AttachmentContractsAreDependencyFreeAndKernelUsesOnlyAttachmentContracts()
     {
         var root = FindRepositoryRoot();
 
-        Assert.Empty(ReadProjectReferences(root, "OpenGameAgent.Kernel"));
+        Assert.Empty(ReadProjectReferences(root, "OpenGameAgent.Attachments"));
+        Assert.Equal(
+            new[] { "OpenGameAgent.Attachments" },
+            ReadProjectReferences(root, "OpenGameAgent.Kernel"));
         Assert.Equal(
             new[] { "OpenGameAgent.Kernel" },
             ReadProjectReferences(root, "OpenGameAgent.Models"));

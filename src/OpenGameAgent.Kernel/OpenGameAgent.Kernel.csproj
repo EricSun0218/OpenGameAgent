@@ -7,4 +7,7 @@
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.6" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Attachments\OpenGameAgent.Attachments.csproj" />
+  </ItemGroup>
 </Project>

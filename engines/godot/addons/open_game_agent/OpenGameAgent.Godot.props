@@ -1,5 +1,9 @@
 <Project>
   <ItemGroup>
+    <Reference Include="OpenGameAgent.Attachments">
+      <HintPath>$(MSBuildThisFileDirectory)lib\OpenGameAgent.Attachments.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <Reference Include="OpenGameAgent.Kernel">
       <HintPath>$(MSBuildThisFileDirectory)lib\OpenGameAgent.Kernel.dll</HintPath>
       <Private>true</Private>

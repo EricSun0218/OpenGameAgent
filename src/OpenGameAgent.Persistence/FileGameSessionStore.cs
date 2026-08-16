@@ -10,6 +10,7 @@ namespace OpenGameAgent.Persistence;
 
 public sealed class FileGameSessionStore : IGameSessionStore
 {
+    private const int CurrentFormatVersion = 4;
     private const string Suffix = ".session.json";
     private readonly FileStore _files;
 
@@ -98,7 +99,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
 
     private static SessionDocument Encode(GameSessionSnapshot snapshot) => new()
     {
-        FormatVersion = 4,
+        FormatVersion = CurrentFormatVersion,
         SessionId = snapshot.Key.SessionId,
         ActorId = snapshot.Key.ActorId,
         Revision = snapshot.Revision,
@@ -138,7 +139,7 @@ public sealed class FileGameSessionStore : IGameSessionStore
             return null;
         }
 
-        if (document.FormatVersion is not (1 or 2 or 3 or 4))
+        if (document.FormatVersion != CurrentFormatVersion)
         {
             throw new PersistenceException($"Unsupported session format version '{document.FormatVersion}'.");
         }
@@ -148,42 +149,34 @@ public sealed class FileGameSessionStore : IGameSessionStore
             () => new GameSessionSnapshot(
                 new GameSessionKey(document.SessionId, document.ActorId),
                 document.Revision,
-                (document.Messages ?? new List<MessageDocument>()).Select(AgentMessageCodec.Decode).ToArray(),
-                document.ProcessedInputIds ?? new List<string>(),
+                (document.Messages ?? throw new PersistenceException("Session messages are missing."))
+                    .Select(AgentMessageCodec.Decode)
+                    .ToArray(),
+                document.ProcessedInputIds ?? throw new PersistenceException("Processed input IDs are missing."),
                 document.LastMoment?.Decode(),
-                document.ExtensionState ?? new Dictionary<string, string>(StringComparer.Ordinal),
-                document.FormatVersion >= 2 ? document.PendingInputId : null,
-                document.FormatVersion >= 3
-                    ? DecodeUsageLedger(document)
-                    : null));
+                document.ExtensionState ?? throw new PersistenceException("Extension state is missing."),
+                document.PendingInputId,
+                DecodeUsageLedger(document)));
     }
 
     private static GameSessionUsageLedger DecodeUsageLedger(SessionDocument document)
     {
-        var records = (document.UsageRecords ?? new List<UsageRecordDocument>())
+        var records = (document.UsageRecords ?? throw new PersistenceException("Usage records are missing."))
             .Select(record => record.Decode())
             .ToArray();
-        var capacity = document.UsageRecentRecordCapacity > 0
-            ? document.UsageRecentRecordCapacity
-            : GameSessionUsageLedger.DefaultRecentRecordCapacity;
-        if (document.UsageTotals is null && document.UsageTotalRecordCount == 0)
-        {
-            // Early v3 previews persisted only raw records. Fold them into the bounded representation.
-            return new GameSessionUsageLedger(records, capacity);
-        }
-
         return GameSessionUsageLedger.Restore(
             records,
-            DecodeUsageTotals(document.UsageTotals),
+            DecodeUsageTotals(document.UsageTotals
+                ?? throw new PersistenceException("Usage totals are missing.")),
             document.UsageTotalRecordCount,
-            capacity);
+            document.UsageRecentRecordCapacity);
     }
 
     private static IReadOnlyDictionary<GameSessionUsageCause, GameSessionUsageTotals> DecodeUsageTotals(
-        IReadOnlyList<UsageTotalsDocument>? documents)
+        IReadOnlyList<UsageTotalsDocument> documents)
     {
         var totals = new Dictionary<GameSessionUsageCause, GameSessionUsageTotals>();
-        foreach (var document in documents ?? Array.Empty<UsageTotalsDocument>())
+        foreach (var document in documents)
         {
             var cause = (GameSessionUsageCause)document.Cause;
             if (!totals.TryAdd(cause, document.Decode()))
