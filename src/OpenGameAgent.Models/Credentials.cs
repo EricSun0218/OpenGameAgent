@@ -218,6 +218,7 @@ public sealed class InMemoryGameCredentialStore : IGameCredentialStore
         CancellationToken cancellationToken)
     {
         using var lease = await AcquireAsync(key, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         GameCredential? current;
         lock (_stateGate)
         {

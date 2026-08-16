@@ -56,7 +56,8 @@ public static partial class ServerEndpoints
             if (!context.Request.Path.StartsWithSegments("/v1/run")
                 && !context.Request.Path.StartsWithSegments("/v1/control")
                 && !context.Request.Path.StartsWithSegments("/v1/actions")
-                && !context.Request.Path.StartsWithSegments("/v1/usage"))
+                && !context.Request.Path.StartsWithSegments("/v1/usage")
+                && !context.Request.Path.StartsWithSegments("/v1/attachments"))
             {
                 await next(context);
                 return;
@@ -115,13 +116,14 @@ public static partial class ServerEndpoints
             name = "OpenGameAgent",
             protocolVersion = "1",
             transports = new[] { "json", "sse" },
-            input = new[] { "text", "json", "resource-reference" },
+            input = new[] { "text", "json", "resource-reference", "image" },
             routes = new[] { "quick", "agent", "workflow" },
             execution = new[] { "in-process", "server" },
             control = new[] { "steer", "abort" },
             audience = new[] { "internal", "owner", "public", "recipient" },
             actions = new[] { "claim", "stream", "receipt", "reconcile" },
             usage = new[] { "session-ledger", "by-cause", "itemized-cost" },
+            attachments = new[] { "content-addressed-images", "session-authorized-read" },
         }));
         endpoints.MapPost(
             "/v1/run",
@@ -143,8 +145,82 @@ public static partial class ServerEndpoints
             "/v1/usage",
             (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
                 ReadUsageAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/attachments/read",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                ReadAttachmentAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
         MapGameActionExchangeEndpoints(endpoints, maximumRequestBodyBytes);
         return endpoints;
+    }
+
+    private static async Task<IResult> ReadAttachmentAsync(
+        HttpRequest httpRequest,
+        GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
+    {
+        AttachmentReadRequest request;
+        GameSessionKey key;
+        try
+        {
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            request = ParseRequest<AttachmentReadRequest>(requestDocument.RootElement);
+            key = request.ToKey();
+            request.EnsureValid();
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            return RequestError(StatusCodes.Status400BadRequest, "invalid_request", exception.Message);
+        }
+
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            request.Credential,
+            key,
+            GameAgentServerOperation.ReadAttachment,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.ReadAttachment,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        var stored = await runtime.ReadImageAttachmentAsync(key, request.AttachmentId, cancellationToken);
+        return stored is null
+            ? Results.NotFound(new { error = "attachment_not_found" })
+            : Results.Json(new
+            {
+                attachment = new
+                {
+                    attachmentId = stored.Attachment.AttachmentId,
+                    mediaType = stored.Attachment.MediaType,
+                    bytes = stored.Attachment.Bytes,
+                    width = stored.Attachment.Width,
+                    height = stored.Attachment.Height,
+                    name = stored.Attachment.Name,
+                },
+                data = Convert.ToBase64String(stored.Data.ToArray()),
+            });
     }
 
     private static async Task<IResult> ReadUsageAsync(
@@ -827,4 +903,28 @@ public sealed class ControlRequest
 
     public string GetPayloadJson() =>
         Payload.ValueKind == JsonValueKind.Undefined ? "{}" : Payload.GetRawText();
+}
+
+public sealed class AttachmentReadRequest
+{
+    public string? Credential { get; set; }
+
+    public string SessionId { get; set; } = string.Empty;
+
+    public string ActorId { get; set; } = string.Empty;
+
+    public string AttachmentId { get; set; } = string.Empty;
+
+    public GameSessionKey ToKey() => new(SessionId, ActorId);
+
+    public void EnsureValid()
+    {
+        _ = ToKey();
+        if (string.IsNullOrWhiteSpace(AttachmentId)
+            || AttachmentId.Length > 256
+            || AttachmentId.Any(static character => char.IsControl(character)))
+        {
+            throw new ArgumentException("A bounded attachment ID is required.", nameof(AttachmentId));
+        }
+    }
 }

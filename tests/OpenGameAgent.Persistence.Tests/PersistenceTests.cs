@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Extensions;
 using OpenGameAgent.Kernel;
 using Xunit;
@@ -22,6 +23,13 @@ public sealed class PersistenceTests
                     new TextContent("hello"),
                     new JsonContent("{\"value\":1.25}"),
                     new ResourceContent("game://asset/1", "application/game-object", "object"),
+                    new ImageAttachmentContent(new GameImageAttachment(
+                        "sha256:0123456789abcdef",
+                        GameImageMediaTypes.Png,
+                        123,
+                        32,
+                        16,
+                        "frame.png")),
                 },
                 DateTimeOffset.UnixEpoch,
                 metadata: new Dictionary<string, string> { ["kind"] = "input" }),
@@ -58,6 +66,10 @@ public sealed class PersistenceTests
         Assert.NotNull(loaded);
         Assert.Equal(3, loaded.Messages.Count);
         Assert.Equal("{\"value\":1.25}", Assert.IsType<JsonContent>(loaded.Messages[0].Content[1]).Json);
+        var image = Assert.IsType<ImageAttachmentContent>(loaded.Messages[0].Content[3]).Attachment;
+        Assert.Equal("sha256:0123456789abcdef", image.AttachmentId);
+        Assert.Equal(32, image.Width);
+        Assert.Equal("frame.png", image.Name);
         Assert.Equal("signature", Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Signature);
         Assert.True(Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Redacted);
         Assert.Equal(10, loaded.Messages[1].Usage!.InputTokens);
@@ -226,49 +238,6 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task VersionTwoSessionMigratesToAnEmptyLedgerAndCanUpgrade()
-    {
-        using var directory = new TemporaryDirectory();
-        var key = new GameSessionKey("session", "actor");
-        var store = new FileGameSessionStore(directory.Path);
-        await store.SaveAsync(
-            new GameSessionSnapshot(key, 1, new[] { AgentMessage.User("legacy") }),
-            0,
-            TestContext.Current.CancellationToken);
-        var file = Assert.Single(Directory.GetFiles(directory.Path, "*.session.json"));
-        var document = JsonNode.Parse(await File.ReadAllTextAsync(
-            file,
-            TestContext.Current.CancellationToken))!.AsObject();
-        document["FormatVersion"] = 2;
-        Assert.True(document.Remove("UsageRecords"));
-        await File.WriteAllTextAsync(file, document.ToJsonString(), TestContext.Current.CancellationToken);
-
-        var restarted = new FileGameSessionStore(directory.Path);
-        var legacy = await restarted.LoadAsync(key, TestContext.Current.CancellationToken);
-        Assert.NotNull(legacy);
-        Assert.Empty(legacy.UsageLedger.Records);
-
-        var record = new GameSessionUsageRecord(
-            "upgraded-usage",
-            GameSessionUsageCause.Assistant,
-            new ModelUsage(2, 1));
-        Assert.True((await restarted.SaveAsync(
-            new GameSessionSnapshot(
-                key,
-                2,
-                legacy.Messages,
-                usageLedger: legacy.UsageLedger.Append(new[] { record })),
-            1,
-            TestContext.Current.CancellationToken)).Saved);
-        var upgraded = await new FileGameSessionStore(directory.Path)
-            .LoadAsync(key, TestContext.Current.CancellationToken);
-
-        Assert.NotNull(upgraded);
-        Assert.Single(upgraded.UsageLedger.Records);
-        Assert.Equal(3, upgraded.UsageLedger.Stats.TotalTokens);
-    }
-
-    [Fact]
     public async Task SessionStoreRejectsUsageLedgerRemovalOrRewrite()
     {
         using var directory = new TemporaryDirectory();
@@ -308,6 +277,51 @@ public sealed class PersistenceTests
         Assert.NotNull(loaded);
         Assert.Equal(1, loaded.Revision);
         Assert.Equal(3, loaded.UsageLedger.Stats.TotalTokens);
+    }
+
+    [Fact]
+    public async Task NonCurrentPersistenceFormatsAreRejectedInsteadOfSilentlyMigrated()
+    {
+        using (var sessionDirectory = new TemporaryDirectory())
+        {
+            var key = new GameSessionKey("session", "actor");
+            var store = new FileGameSessionStore(sessionDirectory.Path);
+            await store.SaveAsync(
+                new GameSessionSnapshot(key, 1),
+                0,
+                TestContext.Current.CancellationToken);
+            var path = Assert.Single(Directory.GetFiles(sessionDirectory.Path, "*.session.json"));
+            await SetFormatVersionAsync(path, 3);
+
+            await Assert.ThrowsAsync<PersistenceException>(async () =>
+                await store.LoadAsync(key, TestContext.Current.CancellationToken));
+        }
+
+        using (var actionDirectory = new TemporaryDirectory())
+        {
+            var intent = Intent("pre-release-action");
+            var journal = new FileGameActionJournal(actionDirectory.Path);
+            await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
+            var path = Assert.Single(Directory.GetFiles(actionDirectory.Path, "*.action.json"));
+            await SetFormatVersionAsync(path, 1);
+
+            await Assert.ThrowsAsync<PersistenceException>(async () =>
+                await journal.FindAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        }
+
+        using (var workflowDirectory = new TemporaryDirectory())
+        {
+            var store = new FileGameWorkflowCheckpointStore(workflowDirectory.Path);
+            await store.SaveAsync(
+                new GameWorkflowCheckpoint("instance", "workflow", 1, 0, "{}"),
+                0,
+                TestContext.Current.CancellationToken);
+            var path = Assert.Single(Directory.GetFiles(workflowDirectory.Path, "*.workflow.json"));
+            await SetFormatVersionAsync(path, 1);
+
+            await Assert.ThrowsAsync<PersistenceException>(async () =>
+                await store.LoadAsync("instance", TestContext.Current.CancellationToken));
+        }
     }
 
     [Fact]
@@ -434,27 +448,6 @@ public sealed class PersistenceTests
             await new FileGameActionJournal(directory.Path).ReserveAsync(
                 conflicting,
                 TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task VersionOneActionJournalRemainsReadableWithoutGenerationBinding()
-    {
-        using var directory = new TemporaryDirectory();
-        var intent = Intent("legacy-action");
-        await new FileGameActionJournal(directory.Path).ReserveAsync(
-            intent,
-            TestContext.Current.CancellationToken);
-        var path = Assert.Single(Directory.GetFiles(directory.Path, "*.action.json"));
-        var document = JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!.AsObject();
-        document["FormatVersion"] = 1;
-        document["Intent"]!.AsObject().Remove("GenerationId");
-        await File.WriteAllTextAsync(path, document.ToJsonString(), TestContext.Current.CancellationToken);
-
-        var restored = await new FileGameActionJournal(directory.Path).FindAsync(
-            intent.OperationId,
-            TestContext.Current.CancellationToken);
-
-        Assert.Null(restored!.Intent.GenerationId);
     }
 
     [Fact]
@@ -1074,6 +1067,143 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task FileMailboxPendingStatusIsReadOnlyAndSurvivesRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var mailbox = new FileGameMailbox(directory.Path);
+        var recipient = new GameMailboxRecipientKey("session", "npc");
+        var other = new GameMailboxRecipientKey("session", "other");
+        var missing = new GameMailboxRecipientKey("missing", "npc");
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail-a", "session", "npc", "event", "{\"secret\":1}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail-b", "session", "npc", "event", "{\"secret\":2}", new GameMoment("world", 2)),
+            TestContext.Current.CancellationToken);
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail-c", "session", "other", "event", "{}", new GameMoment("world", 3)),
+            TestContext.Current.CancellationToken);
+
+        var requested = new[] { recipient, other, missing };
+        var initial = await mailbox.GetPendingStatusAsync(
+            requested,
+            now,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, initial[0].ReadyCount);
+        Assert.Equal(1, initial[1].ReadyCount);
+        Assert.Equal(0, initial[2].IncompleteCount);
+
+        var delivery = Assert.Single(await mailbox.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            1,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, delivery.Attempt);
+
+        var restarted = new FileGameMailbox(directory.Path);
+        var activeLease = await restarted.GetPendingStatusAsync(
+            requested,
+            now.AddSeconds(30),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(1, activeLease[0].ReadyCount);
+        Assert.Equal(1, activeLease[0].LeasedCount);
+        Assert.Equal(2, activeLease[0].IncompleteCount);
+        Assert.Equal(1, activeLease[1].ReadyCount);
+
+        await restarted.AbandonAsync(
+            delivery.Message.MessageId,
+            delivery.LeaseToken,
+            TestContext.Current.CancellationToken);
+        var abandoned = Assert.Single(await restarted.GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(2, abandoned.ReadyCount);
+        Assert.Equal(0, abandoned.LeasedCount);
+
+        var claimed = await restarted.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            2,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, claimed.Count);
+        Assert.Contains(claimed, item => item.Message.MessageId == delivery.Message.MessageId && item.Attempt == 2);
+        Assert.Contains(claimed, item => item.Message.MessageId != delivery.Message.MessageId && item.Attempt == 1);
+        foreach (var item in claimed)
+        {
+            await restarted.CompleteAsync(
+                item.Message.MessageId,
+                item.LeaseToken,
+                TestContext.Current.CancellationToken);
+        }
+
+        var completed = Assert.Single(await new FileGameMailbox(directory.Path).GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(0, completed.IncompleteCount);
+    }
+
+    [Fact]
+    public async Task FileMailboxPendingBatchReturnsEveryRequestedRecipient()
+    {
+        using var directory = new TemporaryDirectory();
+        var mailbox = new FileGameMailbox(directory.Path, capacity: 512);
+        var recipients = Enumerable.Range(0, 128)
+            .Select(index => new GameMailboxRecipientKey("session", "npc-" + index))
+            .ToArray();
+        for (var index = 0; index < recipients.Length; index++)
+        {
+            await mailbox.EnqueueAsync(
+                new GameMailboxMessage(
+                    "mail-" + index,
+                    recipients[index].SessionId,
+                    recipients[index].RecipientId,
+                    "event",
+                    "{}",
+                    new GameMoment("world", index)),
+                TestContext.Current.CancellationToken);
+        }
+
+        var statuses = await mailbox.GetPendingStatusAsync(
+            recipients,
+            DateTimeOffset.UnixEpoch,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(recipients.Length, statuses.Count);
+        Assert.All(statuses, status =>
+        {
+            Assert.Equal(1, status.ReadyCount);
+            Assert.Equal(0, status.LeasedCount);
+            Assert.Equal(1, status.IncompleteCount);
+        });
+        Assert.Equal(recipients, statuses.Select(status => status.Recipient));
+    }
+
+    [Fact]
+    public async Task FileMailboxPendingStatusRejectsCorruptState()
+    {
+        using var directory = new TemporaryDirectory();
+        var mailbox = new FileGameMailbox(directory.Path);
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage("mail", "session", "npc", "event", "{}", new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        var path = Assert.Single(Directory.GetFiles(directory.Path, "*.mailbox.json"));
+        await File.WriteAllTextAsync(path, "{\"formatVersion\":1", TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<PersistenceException>(async () =>
+            await mailbox.GetPendingStatusAsync(
+                new[] { new GameMailboxRecipientKey("session", "npc") },
+                DateTimeOffset.UnixEpoch,
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task IndependentMailboxWorkersCannotClaimTheSameMessageLease()
     {
         using var directory = new TemporaryDirectory();
@@ -1246,6 +1376,18 @@ public sealed class PersistenceTests
 
     private static GameActionIntent Intent(string operationId) =>
         new(operationId, "input", "session", "actor", "move", "{\"x\":1.5}", new GameMoment("world", 4));
+
+    private static async Task SetFormatVersionAsync(string path, int formatVersion)
+    {
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(
+            path,
+            TestContext.Current.CancellationToken))!.AsObject();
+        document["FormatVersion"] = formatVersion;
+        await File.WriteAllTextAsync(
+            path,
+            document.ToJsonString(),
+            TestContext.Current.CancellationToken);
+    }
 
     private sealed class CallbackActionHandler : IGameActionHandler
     {

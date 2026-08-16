@@ -1,4 +1,6 @@
 using OpenGameAgent;
+using OpenGameAgent.Attachments;
+using OpenGameAgent.Attachments.Local;
 using OpenGameAgent.Persistence;
 using OpenGameAgent.Providers.OpenAICompatible;
 using OpenGameAgent.Server;
@@ -6,6 +8,13 @@ using OpenGameAgent.Server;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpClient("model");
+builder.Services.AddSingleton<IGameImageAttachmentStore>(serviceProvider =>
+{
+    var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+    var attachmentDirectory = configuration["OpenGameAgent:AttachmentDirectory"]
+        ?? Path.Combine(AppContext.BaseDirectory, "data", "attachments");
+    return new FileGameImageAttachmentStore(attachmentDirectory);
+});
 builder.Services.AddSingleton<IGameActionJournal>(serviceProvider =>
 {
     var configuration = serviceProvider.GetRequiredService<IConfiguration>();
@@ -46,6 +55,7 @@ builder.Services.AddSingleton(serviceProvider =>
     }
 
     runtimeOptions.Instructions = configuration["OpenGameAgent:Instructions"] ?? string.Empty;
+    runtimeOptions.ImageAttachments = serviceProvider.GetRequiredService<IGameImageAttachmentStore>();
     runtimeOptions.SessionStore = new FileGameSessionStore(
         configuration["OpenGameAgent:DataDirectory"] ?? Path.Combine(AppContext.BaseDirectory, "data", "sessions"));
     return new GameAgentRuntime(runtimeOptions);

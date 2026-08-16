@@ -1,16 +1,50 @@
-# OpenGameAgent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/opengameagent-mark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/brand/opengameagent-mark-light.svg">
+    <img src="docs/brand/opengameagent-mark-light.svg" alt="OpenGameAgent OGA monogram" width="112">
+  </picture>
+</p>
 
-[English](README.md)
+<h1 align="center">OpenGameAgent</h1>
 
-**为游戏而生的 Agent 内核。** 一个紧凑、可修改的 C# Runtime，用于在 Godot、Unity 或 .NET 服务端构建 AI 原生游戏、自主 NPC 与互动世界。
+<p align="center"><strong>面向 AI 原生游戏、自主 NPC 与互动世界的开源 Agent Runtime。</strong></p>
 
-[![CI](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](CHANGELOG.md)
+<p align="center"><a href="README.md">English</a></p>
 
-OpenGameAgent 把小型、可组合的 Agent 内核带进游戏开发。它的有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用这个内核，也可以叠加游戏层获得游戏时间与可靠状态，再按需加入记忆、目标、产物、委派、外部工具、结构化交互和工作流图等扩展。
+OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够观察结构化状态、制定计划、调用工具、检查权威结果、形成记忆并持续完成目标。它可以运行在 Godot、Unity 或 .NET 服务端中，而每次状态变更仍由游戏代码裁决。
 
-输入是有大小限制的 JSON，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
+<p align="center">
+  <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
+</p>
+
+OpenGameAgent 从小型、可组合的 Agent 内核出发。有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用内核，也可以叠加游戏 Runtime 获得游戏时间与可靠状态，再按需加入记忆、目标、宿主证据校验的任务清单、产物、委派、外部工具、结构化交互和工作流图等扩展。
+
+输入是有大小限制的 JSON，并可携带持久化图片观察，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态、截图或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
+
+## 为游戏构建的可编程 Agent Runtime
+
+开发者可以选择模型、注册游戏自有工具、组合扩展、订阅流式事件、在运行中 steering，并让模型/工具循环持续执行到任务结束。内核本身可以作为通用 Agent Loop 单独使用。可选的游戏 Runtime 则增加互动模拟真正需要的坐标：会话与角色、游戏时间线与 Tick、结构化世界上下文、多 NPC 有界并发、持久记忆与任务、引擎主线程交接，以及可恢复的动作回执。这些能力通过类型化接口组合，不绑定某一种玩法、题材或世界数据模型。
+
+## 不止对话：观察、决策、行动并持续推进
+
+仅对话角色接收一段提示词，然后返回一句对话。Agent 驱动的角色接收目标和当前环境，选择工具、执行工作、观察结果，并持续行动直到得到明确结果。在 OpenGameAgent 中，这些工具就是普通的游戏业务能力：移动、观察、交易、建造、安排日程、招募、调查，或开发者允许角色使用的任何操作。
+
+| 仅对话角色 | Agent 驱动角色 |
+| --- | --- |
+| 主要读取最近的对话 | 观察有界 JSON，其中可以包含对话、世界状态、事件、UI 输入、传感数据或模拟 Tick |
+| 生成下一句文本 | 流式生成文本和类型化工具调用，并读取结构化工具结果 |
+| 一次模型回复后结束 | 可以“观察 → 决策 → 行动 → 检查结果 → 继续”，跨多轮完成任务 |
+| 把生成文本本身当作结果 | 只提出动作请求，由游戏代码校验权限、规则、版本和状态变更 |
+| 通常依赖现实时间与聊天记录 | 可以使用游戏时间、时间线、存档/会话身份、角色身份和作用域记忆 |
+| 一次处理一段对话 | 同一角色串行，不同 NPC 之间有界并发 |
+| 超时后重试可能重复写入 | 可以先记录状态变更意图，并在重试前核对游戏返回的权威回执 |
+
+OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的工具行动，模型不能直接控制游戏状态；所有状态变更始终由游戏裁决。
+
+也不是每次互动都必须运行完整 Agent Loop。问候等简单输入可以走快速回复路由，开放式任务使用完整循环，需要固定执行图的场景则可以使用确定性 Workflow。
 
 > 当前版本：`0.3.0-alpha.2`。在 `1.0` 前公开 API 仍可能调整。
 
@@ -18,14 +52,17 @@ OpenGameAgent 把小型、可组合的 Agent 内核带进游戏开发。它的�
 
 ## 安装
 
-从 NuGet 安装完整的游戏 Runtime：
+可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 下载版本化包文件、Godot/Unity 压缩包或可移植服务端。若游戏需要持续跟随本地最新源码，请只引用实际使用的项目：
 
-```bash
-dotnet add package OpenGameAgent --version 0.3.0-alpha.2
-dotnet add package OpenGameAgent.Memory --version 0.3.0-alpha.2 # 可选语义记忆
+```xml
+<ItemGroup>
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
+</ItemGroup>
 ```
 
-内核、持久化、模型提供方和引擎兼容客户端也分别提供 `OpenGameAgent.*` 包。Godot、Unity 与可移植服务端压缩包可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 页面下载。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
+请根据游戏项目的位置调整相对路径，并删除没有使用的可选项目引用。内核、持久化、模型提供方、记忆、图片附件、插件和引擎兼容客户端也分别提供 `OpenGameAgent.*` Release 产物。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
 
 ## 为什么要做游戏专用层
 
@@ -35,13 +72,14 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 
 - 命名时间线、整数 Tick 和可选日历 JSON；
 - 保留浮点数的结构化观察与上下文；
+- 经真实解码校验、内容寻址持久化、模型能力预检与会话授权读取的截图/图片输入；
 - 快速回复、完整 Agent、确定性 Workflow 三种路由；
 - 同一角色串行、不同角色有界并行；
 - 先记日志的动作意图与游戏权威回执；
 - 按游戏时间过滤、过期并可自定义排序的记忆；
 - 可选本地/远程嵌入、可重建向量索引与词法/向量混合召回；
 - 根据输入类型和可用工具选择的 Skills；
-- 游戏时间触发器与持久邮箱；
+- 游戏时间触发器，以及支持无 payload 积压查询的持久邮箱；
 - 可扩展工具、Skills、路由、Workflow、Hooks、事件与服务的类型化接口；
 - 能力感知模型目录与开发者托管的短期凭证；
 - 外部工具按需发现与大型结果产物化；
@@ -80,9 +118,10 @@ GameAgentRuntime
 | Agent 内核 | 流式类型化消息、工具循环、类型化工具中间结果、steering、follow-up、hooks、取消、严格会话校验、提供方错误结果化 |
 | 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、安全并行读、冲突键串行、策略拦截/终止、超时与写入结果未知语义 |
 | 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、快速/完整/Workflow 路由、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
+| 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；类型化生命周期事件与通道；命名空间持久状态 |
-| 官方扩展 | 工具策略与搜索、玩家结构化提问/推荐回复、目标、记忆、产物、外部知识、委派、追踪和可持久并行工作流图 |
-| 世界原语 | 可恢复动作、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、角色邮箱 |
+| 官方扩展 | 工具策略与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、委派、追踪和可持久并行工作流图 |
+| 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
 | 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
@@ -189,10 +228,15 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [引擎集成](docs/engine-integration.md)
 - [部署与安全](docs/deployment-and-security.md)
 - [生成式媒体](docs/media.md)
+- [图片输入与游戏感知](docs/image-input.md)
 
 ## 项目边界
 
 这是面向开发者的框架，不是通用人物卡、战斗系统、世界包格式、可视化编辑器或 C 端游戏。具体玩法属于每一个游戏。框架提供构建对话角色、自主伙伴、社会模拟、AI 导演、动态任务与道具、策略 Agent、建造 Agent 和持续互动世界所需的 Agent Loop 与游戏原语。
+
+## 署名
+
+OpenGameAgent 使用 Apache-2.0 许可证，不强制游戏展示 Logo 或额外署名。我们欢迎游戏和 Mod 在 Credits、关于或第三方许可中写上：**“Powered by OpenGameAgent | opengameagent.com”**，或 **“本游戏使用 OpenGameAgent 构建游戏角色的 Agent 能力。”** 在许可证要求的情况下，请保留 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。Logo 与品牌使用方式见[品牌资源说明](docs/brand/README.md)。
 
 ## 协议
 

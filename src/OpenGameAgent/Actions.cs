@@ -29,30 +29,8 @@ public sealed class GameActionIntent
         string action,
         string argumentsJson,
         GameMoment moment,
-        long? expectedRevision = null)
-        : this(
-            operationId,
-            inputId,
-            sessionId,
-            actorId,
-            action,
-            argumentsJson,
-            moment,
-            expectedRevision,
-            generationId: null)
-    {
-    }
-
-    public GameActionIntent(
-        string operationId,
-        string inputId,
-        string sessionId,
-        string actorId,
-        string action,
-        string argumentsJson,
-        GameMoment moment,
-        long? expectedRevision,
-        string? generationId)
+        long? expectedRevision = null,
+        string? generationId = null)
     {
         OperationId = GameJson.RequireId(operationId, nameof(operationId));
         InputId = GameJson.RequireId(inputId, nameof(inputId));
@@ -307,46 +285,6 @@ public static class GameActionOperationIds
         using var algorithm = SHA256.Create();
         var hash = algorithm.ComputeHash(canonical);
         return Version2Prefix + BitConverter.ToString(hash).Replace("-", string.Empty).ToLowerInvariant();
-    }
-
-    /// <summary>
-    /// Reproduces the pre-v2 default ID for a controlled migration window. Do not use it for new
-    /// save namespaces because it does not isolate sessions, actors, timelines, or actions.
-    /// </summary>
-    public static string CreateLegacyV1(
-        GameInput input,
-        JsonElement arguments,
-        ToolExecutionContext execution)
-    {
-        if (input is null)
-        {
-            throw new ArgumentNullException(nameof(input));
-        }
-
-        if (execution is null)
-        {
-            throw new ArgumentNullException(nameof(execution));
-        }
-        _ = arguments;
-        return CreateLegacyV1(input.InputId, execution.Turn, execution.ToolCallIndex);
-    }
-
-    public static string CreateLegacyV1(string inputId, int turn, int toolCallIndex)
-    {
-        if (turn < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(turn));
-        }
-
-        if (toolCallIndex < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(toolCallIndex));
-        }
-
-        return GameJson.JoinIds(
-            RequireComponent(inputId, nameof(inputId)),
-            turn.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            toolCallIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
     }
 
     public static bool IsVersion2(string operationId) =>
@@ -909,30 +847,8 @@ public static class GameActionTool
         ToolRisk risk = ToolRisk.NonIdempotentWrite,
         Func<JsonElement, string?>? conflictKey = null,
         long? expectedRevision = null,
-        GameActionOperationIdFactory? operationIdFactory = null)
-        => Create(
-            input,
-            action,
-            description,
-            inputSchemaJson,
-            dispatcher,
-            risk,
-            conflictKey,
-            expectedRevision,
-            operationIdFactory,
-            generationId: null);
-
-    public static AgentTool Create(
-        GameInput input,
-        string action,
-        string description,
-        string inputSchemaJson,
-        DurableGameActionDispatcher dispatcher,
-        ToolRisk risk,
-        Func<JsonElement, string?>? conflictKey,
-        long? expectedRevision,
-        GameActionOperationIdFactory? operationIdFactory,
-        string? generationId)
+        GameActionOperationIdFactory? operationIdFactory = null,
+        string? generationId = null)
     {
         if (input is null)
         {

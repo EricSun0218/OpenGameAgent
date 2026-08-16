@@ -22,6 +22,8 @@ $required = @(
     'Runtime\OpenGameAgentBehaviour.cs',
     'Runtime\OpenGameAgentBehaviour.cs.meta',
     'Runtime\Plugins.meta',
+    'Runtime\Plugins\OpenGameAgent.Attachments.dll',
+    'Runtime\Plugins\OpenGameAgent.Attachments.dll.meta',
     'Runtime\Plugins\OpenGameAgent.Kernel.dll',
     'Runtime\Plugins\OpenGameAgent.Kernel.dll.meta',
     'Runtime\Plugins\OpenGameAgent.dll',

@@ -132,7 +132,7 @@ $releaseNotes = @(
     "dotnet add package OpenGameAgent --version $Version",
     '```',
     '',
-    'Use the versioned Godot or Unity archive below for engine integration. The portable server archive runs with `dotnet OpenGameAgent.Server.dll` on a .NET 8 host.',
+    'Use the versioned Godot or Unity archive below for engine integration. The portable server archive runs with `dotnet OpenGameAgent.Server.dll` on a Windows or Linux .NET 8 host.',
     '',
     (Get-ReleaseStabilityNotice -VersionInfo $versionInfo)
 ) -join [Environment]::NewLine

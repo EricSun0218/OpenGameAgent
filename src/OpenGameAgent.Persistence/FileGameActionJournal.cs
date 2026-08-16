@@ -9,6 +9,7 @@ namespace OpenGameAgent.Persistence;
 
 public sealed class FileGameActionJournal : IGameActionJournal
 {
+    private const int CurrentFormatVersion = 2;
     private const string Suffix = ".action.json";
     private readonly FileStore _files;
     private readonly int _maximumEntries;
@@ -265,7 +266,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         GameActionReceipt? receipt,
         bool dispatched) => new()
         {
-            FormatVersion = 2,
+            FormatVersion = CurrentFormatVersion,
             Dispatched = dispatched,
             Intent = new IntentDocument
             {
@@ -296,7 +297,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
 
     private static GameActionJournalEntry DecodeCore(ActionDocument document)
     {
-        if (document.FormatVersion is not (1 or 2) || document.Intent is null)
+        if (document.FormatVersion != CurrentFormatVersion || document.Intent is null)
         {
             throw new PersistenceException("The action journal document has an unsupported format.");
         }
@@ -310,7 +311,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
             document.Intent.ArgumentsJson,
             document.Intent.Moment?.Decode() ?? throw new PersistenceException("The action intent moment is missing."),
             document.Intent.ExpectedRevision,
-            document.FormatVersion >= 2 ? document.Intent.GenerationId : null);
+            document.Intent.GenerationId);
         GameActionReceipt? receipt = null;
         if (document.Receipt is not null)
         {

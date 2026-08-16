@@ -14,6 +14,8 @@ The game emits an observation when goals, threats, resources, or player orders c
 
 Use steering to inject urgent state changes during a long run. A steering message should identify the new observation version so the model can abandon a stale plan. Use conflict keys to prevent two simultaneous writes to the same companion or resource.
 
+For visual worlds, combine structured local state with a sparse BEV or topological map, then attach a screenshot or crop only when appearance or geometry matters. Do not serialize every voxel or pixel. Let the model select intent and targets, use read-only tools for exact follow-up queries, and leave pathfinding, placement, physics, and animation to deterministic game code. See [Image input and game perception](image-input.md).
+
 ## Interactive world and many NPCs
 
 Keep world simulation deterministic and cheap. Invoke a model only when a character needs semantic judgment, dialogue, planning, or content generation.
@@ -30,7 +32,87 @@ game tick / month advance
 
 `MultiActorScheduler` gives per-actor ordering and global concurrency. `GameTimeScheduler` emits bounded recurring occurrences. `IGameMailbox` carries durable work to actors that are not currently resident. The game supplies activation, distance, importance, and budget policy.
 
-Use `GoalLoopExtension` when an actor owns semantic goals that can wait for a tick or event and continue later. Use `AgentDelegationExtension` when one actor needs bounded background research or planning without sharing its mutable transcript. Delegates still receive explicitly scoped context and tools; delegation is not permission escalation. Delegation status can be persisted, but the included local executor runs child work in the current process and does not automatically resume an in-flight child after a process restart. Use a host-owned durable workflow or executor when child execution itself must survive restarts.
+When an AI budget ends exactly at a game-time boundary, inspect mailbox backlog without claiming work or invoking a model:
+
+```csharp
+var recipients = activeActors
+    .Select(actorId => new GameMailboxRecipientKey(sessionId, actorId))
+    .ToArray();
+var pending = await mailbox.GetPendingStatusAsync(
+    recipients,
+    DateTimeOffset.UtcNow,
+    cancellationToken);
+
+var mustPauseAtBoundary = pending.Any(status => status.IncompleteCount > 0);
+var canRunImmediately = pending.Any(status => status.ReadyCount > 0);
+```
+
+`GetPendingStatusAsync` is a typed, read-only snapshot. It returns one result per requested key in input order, including zero counts for missing mailboxes, and never returns message payloads. `ReadyCount` includes unleased messages and messages whose operational lease has expired; `LeasedCount` contains incomplete messages whose operational lease is still active; `IncompleteCount` is their sum. Querying does not acquire a lease, increment `Attempt`, complete or abandon a message, or call the model. The built-in file store evaluates the whole recipient batch in one directory pass rather than scanning all mailbox files once per NPC. Supply the same trusted operational clock used for `ClaimAsync`. A concurrent claim or settlement may make any snapshot stale, so use it for scheduling and causal-boundary admission, not as authority to complete a specific message.
+
+Use `GoalLoopExtension` when an actor owns semantic goals that can wait for a tick or event and continue later. `GoalLoopOptions.MaximumActiveGoals` bounds active and waiting work, while `MaximumRetainedTerminalGoals` independently retains only the most recent completed, failed, or cancelled records for audit. Terminal retention never removes active or waiting goals, so long-running sessions do not exhaust their future goal capacity. Use `AgentDelegationExtension` when one actor needs bounded background research or planning without sharing its mutable transcript. Delegates still receive explicitly scoped context and tools; delegation is not permission escalation. Delegation status can be persisted, but the included local executor runs child work in the current process and does not automatically resume an in-flight child after a process restart. Use a host-owned durable workflow or executor when child execution itself must survive restarts.
+
+The host can project goals and task plans after loading a save without invoking a model and without parsing extension-owned JSON keys:
+
+```csharp
+var authorizedSession = new GameSessionKey(sessionId, actorId);
+var goals = await GoalLoopExtension.ReadAsync(
+    sessionStore,
+    authorizedSession,
+    includeTerminal: true,
+    cancellationToken);
+var taskPlans = await TaskPlanExtension.ReadAsync(
+    sessionStore,
+    authorizedSession,
+    cancellationToken: cancellationToken);
+
+ui.Render(goals.SessionRevision, goals.Goals, taskPlans.Plans);
+```
+
+These readers are read-only projections over `IGameSessionStore`. They do not run routing, providers, tools, pruning, or other extension lifecycle work. A missing session returns revision `0` and an empty collection. The caller must authorize the `GameSessionKey` before querying it; the readers deliberately do not replace host ownership policy.
+
+Use `TaskPlanExtension` for an ordered checklist that must survive later inputs. It is separate from `GoalLoopExtension`: goals describe durable intent and game-time waits, while a task plan records an ordered execution path. An active or paused plan always retains one `InProgress` step, a completed prefix, and a pending suffix. The model cannot advance a step merely by claiming success; the host-supplied `GameTaskPlanEvidenceValidator` must accept the evidence against the current input, plan, and step.
+
+```csharp
+var plans = new TaskPlanExtension(
+    async (request, cancellationToken) =>
+        await receipts.ExistsAsync(
+            request.Input.SessionId,
+            request.Input.ActorId,
+            request.Reference,
+            cancellationToken),
+    new TaskPlanOptions
+    {
+        MaximumActivePlans = 8,
+        MaximumRetainedTerminalPlans = 32,
+    });
+
+var runtime = new GameAgentBuilder(provider, model)
+    .UseSessionStore(sessionStore)
+    .UseExtension(plans)
+    .UseExtension("plan-ui", "1", api =>
+        api.Subscribe(TaskPlanExtension.PlanChanged, (change, _) =>
+        {
+            ui.Enqueue(change.Session, change.Plan);
+            return ValueTask.CompletedTask;
+        }))
+    .Build();
+```
+
+`advance` requires the plan revision and accepted evidence and can succeed only once per input. `replace_remaining` preserves completed steps and replaces only unfinished work. `pause` changes `Active` to `Paused` without changing any step, and `resume` restores that same plan to `Active`; both require `expectedRevision`. A repeated pause of an already paused plan, or resume of an already active plan, is an idempotent success only when the supplied revision still matches: it does not write state, increment the revision, or emit another change event. A stale revision is always a conflict. `fail` and `cancel` remain terminal and terminal plans cannot resume.
+
+Paused plans remain visible through `list_task_plans` and `TaskPlanExtension.ReadAsync` without requesting terminal records. They continue to count toward `MaximumActivePlans`, but do not contribute pending work. While paused, every mutation except idempotent `pause` and `resume` is rejected; the checklist must resume before it can advance, replan, fail, or cancel. A successful transition increments the plan revision, persists the current game moment, and publishes `GameTaskPlanChanged` with reason `pause` or `resume`; as with every extension change event, wait for the matching `SessionSaved` event before treating it as committed UI state. State is namespaced by the runtime's session/actor key and persists through any `IGameSessionStore`.
+
+The tool payload cannot select an owner, session, or actor scope. Plans always use the already-authorized `GameInput`/`GameSessionKey`; a server host must resolve and authorize that key before invoking the runtime.
+
+The evidence validator is a read-only authority check, not another world mutation hook. Validate a receipt, observation revision, or game-owned fact there; perform actual state changes through ordinary authoritative tools and durable actions.
+
+`PlanChanged` and `GoalChanged` carry the session/actor key and input ID. A UI that must show only committed state should buffer those channels and finalize them after the matching `SessionSaved` lifecycle event; a run that loses session CAS must not become authoritative UI state.
+
+### Host query migration
+
+Hosts that previously inspected `GameSessionSnapshot.ExtensionState` should migrate to `GoalLoopExtension.ReadAsync` and `TaskPlanExtension.ReadAsync`. Treat extension-state key encoding and JSON documents as private storage details. `GameGoalChanged` now follows `GameTaskPlanChanged`: its constructor and every published event include `GameSessionKey` and `InputId`, so event consumers should correlate the change with the matching saved input before updating authoritative UI.
+
+Existing task-plan documents remain valid without migration. `Paused` was appended to the public status enum and is serialized by name; the numeric values and stored JSON names of `Active`, `Completed`, `Failed`, and `Cancelled` are unchanged. Hosts that switch exhaustively on plan status should add `Paused` as a visible, non-terminal, non-runnable state.
 
 ## Monthly or turn-based evolution
 

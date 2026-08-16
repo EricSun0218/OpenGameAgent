@@ -1201,14 +1201,14 @@ public sealed class BuiltInGameModelRuntime
     {
         if (content is BinaryContent binary && !Supports(binary.MediaKind, capabilities))
         {
-            return UnsupportedMediaPlaceholder(binary.MediaKind);
+            throw UnsupportedMedia(binary.MediaKind);
         }
 
         if (content is ResourceContent resource
             && MediaKind(resource.MediaType) is { } mediaKind
             && !Supports(mediaKind, capabilities))
         {
-            return UnsupportedMediaPlaceholder(mediaKind);
+            throw UnsupportedMedia(mediaKind);
         }
 
         if (content is JsonContent json
@@ -1249,8 +1249,10 @@ public sealed class BuiltInGameModelRuntime
         return null;
     }
 
-    private static TextContent UnsupportedMediaPlaceholder(AgentMediaKind kind) =>
-        new($"[{kind.ToString().ToLowerInvariant()} omitted: model does not support this input]");
+    private static ModelProviderException UnsupportedMedia(AgentMediaKind kind) =>
+        new(
+            $"The selected model does not declare {kind.ToString().ToLowerInvariant()} input support.",
+            isTransient: false);
 
     private static AgentMessage CopyMessage(AgentMessage message, IReadOnlyList<AgentContent> content) => new(
         message.Role,

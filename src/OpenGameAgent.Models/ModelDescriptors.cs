@@ -48,33 +48,8 @@ public sealed class GameModelCost
         decimal outputPerMillionTokens = 0,
         decimal cacheReadPerMillionTokens = 0,
         decimal cacheWritePerMillionTokens = 0,
-        IReadOnlyCollection<GameModelCostTier>? tiers = null)
-        : this(
-            inputPerMillionTokens,
-            outputPerMillionTokens,
-            cacheReadPerMillionTokens,
-            cacheWritePerMillionTokens,
-            tiers,
-            inputPerMillionTokens != 0
-            || outputPerMillionTokens != 0
-            || cacheReadPerMillionTokens != 0
-            || cacheWritePerMillionTokens != 0
-            || (tiers?.Count ?? 0) != 0)
-    {
-    }
-
-    public GameModelCost(bool isKnown)
-        : this(0, 0, 0, 0, null, isKnown)
-    {
-    }
-
-    public GameModelCost(
-        decimal inputPerMillionTokens,
-        decimal outputPerMillionTokens,
-        decimal cacheReadPerMillionTokens,
-        decimal cacheWritePerMillionTokens,
-        IReadOnlyCollection<GameModelCostTier>? tiers,
-        bool isKnown)
+        IReadOnlyCollection<GameModelCostTier>? tiers = null,
+        bool? isKnown = null)
     {
         InputPerMillionTokens = RequireCost(inputPerMillionTokens, nameof(inputPerMillionTokens));
         OutputPerMillionTokens = RequireCost(outputPerMillionTokens, nameof(outputPerMillionTokens));
@@ -89,7 +64,12 @@ public sealed class GameModelCost
             throw new ArgumentException("Cost tiers must be non-null and use unique thresholds.", nameof(tiers));
         }
 
-        IsKnown = isKnown;
+        IsKnown = isKnown
+            ?? (inputPerMillionTokens != 0
+                || outputPerMillionTokens != 0
+                || cacheReadPerMillionTokens != 0
+                || cacheWritePerMillionTokens != 0
+                || copiedTiers.Length != 0);
         Tiers = Array.AsReadOnly(copiedTiers);
     }
 
