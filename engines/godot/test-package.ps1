@@ -18,6 +18,7 @@ $required = @(
     'addons\open_game_agent\plugin.cfg',
     'addons\open_game_agent\OpenGameAgent.Godot.props',
     'addons\open_game_agent\runtime\OpenGameAgentNode.cs',
+    'addons\open_game_agent\lib\OpenGameAgent.Attachments.dll',
     'addons\open_game_agent\lib\OpenGameAgent.Kernel.dll',
     'addons\open_game_agent\lib\OpenGameAgent.dll',
     'addons\open_game_agent\lib\OpenGameAgent.Client.dll'

@@ -8,6 +8,7 @@ namespace OpenGameAgent.Persistence;
 
 public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointStore
 {
+    private const int CurrentFormatVersion = 2;
     private const string Suffix = ".workflow.json";
     private readonly FileStore _files;
 
@@ -113,7 +114,7 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
 
     private static CheckpointDocument Encode(GameWorkflowCheckpoint checkpoint) => new()
     {
-        FormatVersion = 2,
+        FormatVersion = CurrentFormatVersion,
         InstanceId = checkpoint.InstanceId,
         Workflow = checkpoint.Workflow,
         Revision = checkpoint.Revision,
@@ -133,7 +134,7 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
 
     private static GameWorkflowCheckpoint Decode(CheckpointDocument document)
     {
-        if (document.FormatVersion is not (1 or 2))
+        if (document.FormatVersion != CurrentFormatVersion)
         {
             throw new PersistenceException("The workflow checkpoint has an unsupported format.");
         }
@@ -148,7 +149,7 @@ public sealed class FileGameWorkflowCheckpointStore : IGameWorkflowCheckpointSto
                 document.StateJson,
                 document.Completed,
                 document.Error,
-                document.FormatVersion >= 2 && document.Invocation is not null
+                document.Invocation is not null
                     ? new GameWorkflowInvocationResult(
                         document.Invocation.InputId,
                         (document.Invocation.Messages ?? throw new PersistenceException("Workflow invocation messages are missing."))

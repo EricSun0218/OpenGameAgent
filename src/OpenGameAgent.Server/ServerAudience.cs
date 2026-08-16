@@ -393,7 +393,13 @@ internal sealed class GameAgentAudienceProjection
                 var kind = part?["kind"]?.GetValue<string>();
                 if (kind is not ("reasoning" or "tool_call"))
                 {
-                    safe.Add(part?.DeepClone());
+                    var visible = part?.DeepClone();
+                    if (visible is JsonObject visibleObject)
+                    {
+                        visibleObject["signature"] = null;
+                    }
+
+                    safe.Add(visible);
                 }
             }
 

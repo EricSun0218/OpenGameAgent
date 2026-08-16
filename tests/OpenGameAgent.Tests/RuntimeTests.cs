@@ -106,7 +106,7 @@ public sealed class RuntimeTests
             "observation",
             "{\"question\":\"what is visible?\"}",
             new GameMoment("world", 10),
-            resources: new[]
+            content: new AgentContent[]
             {
                 new ResourceContent("https://assets.example.test/frame.png", "image/png", "camera"),
             });
@@ -231,9 +231,6 @@ public sealed class RuntimeTests
         Assert.Equal(
             GameActionOperationIds.Version2Prefix.Length + 64,
             Create(session: new string('s', 16_384)).Length);
-        Assert.Equal("input:1:0", GameActionOperationIds.CreateLegacyV1("input", 1, 0));
-        GameActionOperationIdFactory legacyFactory = GameActionOperationIds.CreateLegacyV1;
-        Assert.NotNull(legacyFactory);
     }
 
     [Fact]
@@ -2088,52 +2085,6 @@ public sealed class RuntimeTests
     }
 
     [Fact]
-    public async Task LegacyMessageUsageIsBootstrappedBeforeCompactionRemovesHistory()
-    {
-        static AgentMessage LegacyAssistant(string text, ModelUsage usage) => new(
-            AgentRole.Assistant,
-            new AgentContent[] { new TextContent(text) },
-            DateTimeOffset.UnixEpoch,
-            model: "legacy-model",
-            stopReason: ModelStopReason.Stop,
-            usage: usage);
-
-        var store = new InMemoryGameSessionStore();
-        var key = new GameSessionKey("session", "actor");
-        await store.SaveAsync(
-            new GameSessionSnapshot(key, 1, new AgentMessage[]
-            {
-                AgentMessage.User("one"),
-                LegacyAssistant("one", new ModelUsage(3, 1)),
-                AgentMessage.User("two"),
-                LegacyAssistant("two", new ModelUsage(4, 2)),
-            }),
-            0,
-            TestContext.Current.CancellationToken);
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(
-            new RecordingProvider(_ => Text("answer")),
-            "model")
-        {
-            SessionStore = store,
-            AgentLimits = new AgentLimits { MaxMessages = 5 },
-            TranscriptCompactor = new SummarizingGameTranscriptCompactor((_, _, _) =>
-                new ValueTask<GameTranscriptSummaryResult>(
-                    new GameTranscriptSummaryResult("summary", new ModelUsage(2, 1)))),
-        });
-
-        Assert.True((await runtime.RunAsync(
-            Input("chat", "{}", "legacy-compaction"),
-            TestContext.Current.CancellationToken)).Succeeded);
-        var saved = await store.LoadAsync(key, TestContext.Current.CancellationToken);
-
-        Assert.NotNull(saved);
-        Assert.Equal(4, saved.UsageLedger.Records.Count);
-        Assert.Equal(15, saved.UsageLedger.Stats.TotalTokens);
-        Assert.Contains(saved.UsageLedger.Records, record => record.RecordId == "legacy-message-1");
-        Assert.Contains(saved.UsageLedger.Records, record => record.RecordId == "legacy-message-3");
-    }
-
-    [Fact]
     public async Task AppliedCasConflictRetryDoesNotDuplicateUsage()
     {
         var store = new AppliedButReportedConflictSessionStore();
@@ -3141,6 +3092,124 @@ public sealed class RuntimeTests
             TimeSpan.FromSeconds(1),
             TestContext.Current.CancellationToken));
         Assert.Equal(1, delivery.Attempt);
+    }
+
+    [Fact]
+    public async Task MailboxPendingStatusIsReadOnlyAndTracksLeaseLifecycle()
+    {
+        var mailbox = new InMemoryGameMailbox();
+        var recipient = new GameMailboxRecipientKey("session", "npc");
+        var missing = new GameMailboxRecipientKey("session", "missing");
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        await mailbox.EnqueueAsync(
+            new GameMailboxMessage(
+                "mail",
+                recipient.SessionId,
+                recipient.RecipientId,
+                "event",
+                "{\"private\":\"not returned\"}",
+                new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+
+        var requested = new[] { recipient, missing, recipient };
+        var initial = await mailbox.GetPendingStatusAsync(
+            requested,
+            now,
+            TestContext.Current.CancellationToken);
+        var repeated = await mailbox.GetPendingStatusAsync(
+            requested,
+            now,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, initial.Count);
+        Assert.Equal(1, initial[0].ReadyCount);
+        Assert.Equal(0, initial[0].LeasedCount);
+        Assert.Equal(1, initial[0].IncompleteCount);
+        Assert.Equal(0, initial[1].IncompleteCount);
+        Assert.Equal(initial[0].IncompleteCount, initial[2].IncompleteCount);
+        Assert.Equal(initial.Select(StatusTuple), repeated.Select(StatusTuple));
+
+        var delivery = Assert.Single(await mailbox.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            1,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, delivery.Attempt);
+
+        var leased = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now.AddSeconds(30),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(0, leased.ReadyCount);
+        Assert.Equal(1, leased.LeasedCount);
+        Assert.Equal(1, leased.IncompleteCount);
+
+        var expired = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now.AddMinutes(2),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, expired.ReadyCount);
+        Assert.Equal(0, expired.LeasedCount);
+
+        await mailbox.AbandonAsync(
+            delivery.Message.MessageId,
+            delivery.LeaseToken,
+            TestContext.Current.CancellationToken);
+        var abandoned = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(1, abandoned.ReadyCount);
+        Assert.Equal(0, abandoned.LeasedCount);
+
+        var reclaimed = Assert.Single(await mailbox.ClaimAsync(
+            recipient.SessionId,
+            recipient.RecipientId,
+            1,
+            now,
+            TimeSpan.FromMinutes(1),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(2, reclaimed.Attempt);
+        await mailbox.CompleteAsync(
+            reclaimed.Message.MessageId,
+            reclaimed.LeaseToken,
+            TestContext.Current.CancellationToken);
+
+        var completed = Assert.Single(await mailbox.GetPendingStatusAsync(
+            new[] { recipient },
+            now,
+            TestContext.Current.CancellationToken));
+        Assert.Equal(0, completed.IncompleteCount);
+
+        static (GameMailboxRecipientKey Recipient, int Ready, int Leased, int Incomplete) StatusTuple(
+            GameMailboxPendingStatus status) =>
+            (status.Recipient, status.ReadyCount, status.LeasedCount, status.IncompleteCount);
+    }
+
+    [Fact]
+    public async Task MailboxPendingStatusValidatesBoundsAndCancellation()
+    {
+        var mailbox = new InMemoryGameMailbox();
+        var recipients = Enumerable.Range(0, 4_097)
+            .Select(index => new GameMailboxRecipientKey("session", "npc-" + index))
+            .ToArray();
+
+        var limit = await Assert.ThrowsAsync<GameRuntimeLimitException>(async () =>
+            await mailbox.GetPendingStatusAsync(
+                recipients,
+                DateTimeOffset.UnixEpoch,
+                TestContext.Current.CancellationToken));
+        Assert.Equal("MaximumRecipients", limit.Limit);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await mailbox.GetPendingStatusAsync(
+                new[] { new GameMailboxRecipientKey("session", "npc") },
+                DateTimeOffset.UnixEpoch,
+                cancellation.Token));
     }
 
     [Fact]

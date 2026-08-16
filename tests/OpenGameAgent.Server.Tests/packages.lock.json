@@ -121,6 +121,30 @@
           "System.Security.Principal.Windows": "5.0.0"
         }
       },
+      "SkiaSharp": {
+        "type": "Transitive",
+        "resolved": "4.150.1",
+        "contentHash": "5v3T8X1N62Dp+AkPO70GNBNS/NRBPGMOTiN+Prg33sZAcm/Ug3YOAH+3RTj/jxJV8NGTJs2idGpC2Qdae2mGLQ==",
+        "dependencies": {
+          "SkiaSharp.NativeAssets.Win32": "4.150.1",
+          "SkiaSharp.NativeAssets.macOS": "4.150.1"
+        }
+      },
+      "SkiaSharp.NativeAssets.Linux.NoDependencies": {
+        "type": "Transitive",
+        "resolved": "4.150.1",
+        "contentHash": "2KVadgDky2xQw7lEMRT/u0ftX5K1u8X7MhCN47Em22Z6VM6JJg1c9cwfGuSPAt1oY6+GjGHH18vkeev+nqT9Kw=="
+      },
+      "SkiaSharp.NativeAssets.macOS": {
+        "type": "Transitive",
+        "resolved": "4.150.1",
+        "contentHash": "r755HVwaHZhyf1clWjrM2/RoOZYCzkQEmE9pu/mVsebPejWu52niNPUwtfyf112qoF0PIk6OndqVOUoITj6TwQ=="
+      },
+      "SkiaSharp.NativeAssets.Win32": {
+        "type": "Transitive",
+        "resolved": "4.150.1",
+        "contentHash": "qrLSL8OonbkMJdSH8heK0Jl39Y2xxZGdd7Ru4cyBXk2ITdx+Fu1sCFLmvCKmnMaYs//mlN/YSpSpOurEXErcQw=="
+      },
       "System.Collections.Immutable": {
         "type": "Transitive",
         "resolved": "8.0.0",
@@ -223,10 +247,22 @@
           "System.Text.Json": "[8.0.6, )"
         }
       },
+      "opengameagent.attachments": {
+        "type": "Project"
+      },
+      "opengameagent.attachments.local": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
+          "SkiaSharp": "[4.150.1, )",
+          "SkiaSharp.NativeAssets.Linux.NoDependencies": "[4.150.1, )"
+        }
+      },
       "opengameagent.client": {
         "type": "Project",
         "dependencies": {
           "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
@@ -240,6 +276,7 @@
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
@@ -272,6 +309,8 @@
         "type": "Project",
         "dependencies": {
           "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Attachments.Local": "[0.3.0-alpha.2, )",
           "OpenGameAgent.Persistence": "[0.3.0-alpha.2, )",
           "OpenGameAgent.Providers.OpenAICompatible": "[0.3.0-alpha.2, )"
         }

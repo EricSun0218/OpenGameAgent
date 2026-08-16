@@ -261,6 +261,9 @@
           "System.Text.Json": "[8.0.6, )"
         }
       },
+      "opengameagent.attachments": {
+        "type": "Project"
+      },
       "opengameagent.connectors.mcp": {
         "type": "Project",
         "dependencies": {
@@ -278,6 +281,7 @@
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },

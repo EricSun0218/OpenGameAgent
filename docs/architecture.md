@@ -17,7 +17,7 @@ The kernel owns one stateful model/tool loop:
 7. apply steering or follow-up messages;
 8. continue until the model stops, a hook stops the run, cancellation occurs, or a limit is reached.
 
-It knows nothing about NPCs, worlds, inventories, or engines. Its canonical values are typed content parts (`text`, `json`, `resource`, `reasoning`, and `tool_call`), messages, model requests, tools, and events.
+It knows nothing about NPCs, worlds, inventories, or engines. Its canonical values are typed content parts (`text`, `json`, `resource`, durable `image_attachment`, `reasoning`, and `tool_call`), messages, model requests, tools, and events. Inline image bytes are request-boundary input; canonical history stores only immutable attachment references.
 
 `Agent` owns mutable transcript and queue state. `AgentLoop` is the lower-level execution function. A host that already owns state can call the loop directly; most integrations should keep an `Agent` or use `GameAgentRuntime`.
 
@@ -40,11 +40,12 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 
 ### Optional packages
 
-- `OpenGameAgent.Extensions` adds policy, searchable tools, structured player interaction, goals, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
+- `OpenGameAgent.Extensions` adds policy, searchable tools, structured player interaction, goals, host-verified task plans, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
 - `OpenGameAgent.Memory` adds an optional, model-agnostic embedding contract, rebuildable vector index, lexical/vector hybrid recall, structured diagnostics, and game-time reranking. It never replaces the authoritative memory save.
 - `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
 - `OpenGameAgent.Models.BuiltIn` turns the bundled directory into an executable multi-provider model runtime; `OpenGameAgent.Models.Auth.BuiltIn` adds explicitly configured browser and device authorization flows.
 - `OpenGameAgent.ProviderTransport` centralizes bounded response observations, header guards, and retry metadata without adding HTTP concepts to the kernel.
+- `OpenGameAgent.Attachments` defines immutable image references and storage admission; `OpenGameAgent.Attachments.Local` provides a content-addressed local implementation with real decode and integrity checks.
 - `OpenGameAgent.Media` routes image, audio, and video generation by provider/model capability while keeping generation jobs outside the text/tool protocol.
 - `OpenGameAgent.Connectors.Mcp` exposes external tool servers through one lazy, searchable tool by default. Direct tool exposure is an explicit opt-in.
 - Provider, persistence, engine, client, and server packages stay replaceable and do not change kernel semantics.
@@ -105,6 +106,8 @@ Skills are bounded instruction packages selected by input type and required tool
 Transcript compaction is also a provider-view operation. The included summarizing compactor keeps complete conversational suffixes and never splits a tool exchange. If no complete suffix fits the requested target, it summarizes the whole prior transcript into one canonical summary message. Games that need tokenizer-aware or domain-specific summaries can replace the compactor.
 
 Context admission runs before the first request, after tool turns, and again after final request hooks. A hook therefore cannot accidentally bypass the configured context window. Large text or JSON tool results can be moved into the artifact store and replaced with a bounded handle and preview. This keeps canonical results recoverable without repeatedly paying their full context cost.
+
+Image admission follows the same canonical/request-view split. Inline user or tool-result images are fully validated and persisted before they enter session history. The active provider/model is preflighted, then immutable references are resolved into bytes only for the outgoing model request. System and assistant images are rejected; generated assets use the media pipeline. See [Image input and game perception](image-input.md).
 
 The system prompt keeps the most reusable bytes first: base instructions, then selected skills, then mutable authoritative game context. This ordering preserves the longest possible provider-cache prefix when world state changes, without moving dynamic state out of the game-owned context boundary.
 

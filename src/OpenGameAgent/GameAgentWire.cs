@@ -28,12 +28,7 @@ public static class GameAgentWire
                 ? (JsonElement?)null
                 : ParseElement(input.Moment.CalendarJson),
             metadata = input.Metadata,
-            resources = input.Resources.Select(resource => new
-            {
-                uri = resource.Uri,
-                mediaType = resource.MediaType,
-                name = resource.Name,
-            }).ToArray(),
+            content = input.Content.Select(ProjectInputContent).ToArray(),
         }, JsonOptions);
     }
 
@@ -276,13 +271,79 @@ public static class GameAgentWire
             or ModelStreamEventKind.ReasoningDelta
             or ModelStreamEventKind.ToolCallDelta;
 
+    private static object ProjectInputContent(AgentContent content) => content switch
+    {
+        TextContent text => new { kind = "text", text = text.Text },
+        JsonContent json => new { kind = "json", data = (object)ParseElement(json.Json) },
+        ResourceContent resource => new
+        {
+            kind = "resource",
+            uri = resource.Uri,
+            mediaType = resource.MediaType,
+            name = resource.Name,
+        },
+        BinaryContent { MediaKind: AgentMediaKind.Image } image => new
+        {
+            kind = "image",
+            data = image.Data,
+            mediaType = image.MediaType,
+            name = image.Name,
+        },
+        ImageAttachmentContent => throw new ArgumentException(
+            "Durable image references cannot be submitted on the input wire; send the image bytes instead.",
+            nameof(content)),
+        _ => throw new ArgumentException($"Unsupported game input content type '{content.GetType().FullName}'.", nameof(content)),
+    };
+
     private static object ProjectContent(AgentContent content) => content switch
     {
-        TextContent text => new ContentDocument("text", text.Text, null, null, null),
-        ReasoningContent reasoning => new ContentDocument("reasoning", reasoning.Text, null, null, reasoning.Signature),
-        JsonContent json => new ContentDocument("json", null, ParseElement(json.Json), null, null),
-        ResourceContent resource => new ContentDocument("resource", resource.Name, null, resource.Uri, resource.MediaType),
-        ToolCallContent call => new ContentDocument("tool_call", call.Name, ParseElement(call.ArgumentsJson), call.Id, null),
+        TextContent text => new
+        {
+            kind = "text",
+            text = text.Text,
+            signature = text.Signature,
+            phase = text.Phase?.ToString(),
+        },
+        ReasoningContent reasoning => new
+        {
+            kind = "reasoning",
+            text = reasoning.Text,
+            signature = reasoning.Signature,
+            redacted = reasoning.Redacted,
+        },
+        JsonContent json => new { kind = "json", data = (object)ParseElement(json.Json) },
+        ResourceContent resource => new
+        {
+            kind = "resource",
+            uri = resource.Uri,
+            mediaType = resource.MediaType,
+            name = resource.Name,
+        },
+        ImageAttachmentContent image => new
+        {
+            kind = "image",
+            attachment = new
+            {
+                attachmentId = image.Attachment.AttachmentId,
+                mediaType = image.Attachment.MediaType,
+                bytes = image.Attachment.Bytes,
+                width = image.Attachment.Width,
+                height = image.Attachment.Height,
+                name = image.Attachment.Name,
+            },
+        },
+        BinaryContent => throw new ArgumentException(
+            "Inline binary content cannot be projected to a public event; persist it as an attachment first.",
+            nameof(content)),
+        ToolCallContent call => new
+        {
+            kind = "tool_call",
+            id = call.Id,
+            name = call.Name,
+            arguments = (object)ParseElement(call.ArgumentsJson),
+            thoughtSignature = call.ThoughtSignature,
+            toolNamespace = call.Namespace,
+        },
         _ => throw new ArgumentException($"Unsupported agent content type '{content.GetType().FullName}'.", nameof(content)),
     };
 
@@ -314,7 +375,7 @@ public static class GameAgentWire
 
         public Dictionary<string, string>? Metadata { get; set; }
 
-        public List<InputResourceDocument>? Resources { get; set; }
+        public List<InputContentDocument>? Content { get; set; }
 
         public GameInput ToInput() => new(
             SessionId,
@@ -329,41 +390,54 @@ public static class GameAgentWire
                     : null),
             InputId,
             Metadata,
-            (Resources ?? new List<InputResourceDocument>())
-                .Select(resource => resource.ToResource())
+            (Content ?? new List<InputContentDocument>())
+                .Select(part => part.ToContent())
                 .ToArray());
     }
 
-    private sealed class InputResourceDocument
+    private sealed class InputContentDocument
     {
+        public string Kind { get; set; } = string.Empty;
+
+        public string? Text { get; set; }
+
+        public JsonElement Data { get; set; }
+
         public string Uri { get; set; } = string.Empty;
 
         public string MediaType { get; set; } = string.Empty;
 
         public string? Name { get; set; }
 
-        public ResourceContent ToResource() => new(Uri, MediaType, Name);
-    }
-
-    private sealed class ContentDocument
-    {
-        public ContentDocument(string kind, string? text, JsonElement? data, string? reference, string? detail)
+        public AgentContent ToContent()
         {
-            Kind = kind;
-            Text = text;
-            Data = data;
-            Reference = reference;
-            Detail = detail;
+            switch (Kind)
+            {
+                case "text":
+                    return new TextContent(Text ?? throw new ArgumentException("Text input content requires text."));
+                case "json":
+                    if (Data.ValueKind == JsonValueKind.Undefined)
+                    {
+                        throw new ArgumentException("JSON input content requires data.");
+                    }
+
+                    return new JsonContent(Data.GetRawText());
+                case "resource":
+                    return new ResourceContent(Uri, MediaType, Name);
+                case "image":
+                    if (Data.ValueKind != JsonValueKind.String)
+                    {
+                        throw new ArgumentException("Image input content requires base64 string data.");
+                    }
+
+                    return new BinaryContent(
+                        AgentMediaKind.Image,
+                        Data.GetString() ?? string.Empty,
+                        MediaType,
+                        Name);
+                default:
+                    throw new ArgumentException($"Unsupported game input content kind '{Kind}'.");
+            }
         }
-
-        public string Kind { get; }
-
-        public string? Text { get; }
-
-        public JsonElement? Data { get; }
-
-        public string? Reference { get; }
-
-        public string? Detail { get; }
     }
 }

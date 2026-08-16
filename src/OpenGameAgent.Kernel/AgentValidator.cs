@@ -245,6 +245,15 @@ internal static class AgentValidator
             ValidateContent(content, limits);
         }
 
+        ValidateImageCollection(message.Content, limits);
+        if (message.Role is not AgentRole.User and not AgentRole.Tool
+            && message.Content.Any(IsImageContent))
+        {
+            throw new ArgumentException(
+                "Images are supported only in user input and tool results.",
+                nameof(message));
+        }
+
         if (message.DetailsJson is { } details && details.Length > limits.MaxJsonCharactersPerPart)
         {
             throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Tool result details are too large.");
@@ -323,6 +332,14 @@ internal static class AgentValidator
             ValidateContent(content, limits);
         }
 
+        ValidateImageCollection(response.Content, limits);
+        if (response.Content.Any(IsImageContent))
+        {
+            throw new ArgumentException(
+                "Model responses cannot contain images. Use the media generation pipeline for generated assets.",
+                nameof(response));
+        }
+
         var calls = response.Content.Count(part => part is ToolCallContent);
         if (calls > limits.MaxToolCallsPerTurn)
         {
@@ -399,6 +416,8 @@ internal static class AgentValidator
             ValidateContent(content, limits);
         }
 
+        ValidateImageCollection(result.Content, limits);
+
         if (result.DetailsJson is { } details && details.Length > limits.MaxJsonCharactersPerPart)
         {
             throw new AgentLimitException(nameof(limits.MaxJsonCharactersPerPart), "Tool result details are too large.");
@@ -448,6 +467,8 @@ internal static class AgentValidator
         {
             ValidateContent(content, limits);
         }
+
+        ValidateImageCollection(progress.Content, limits);
     }
 
     public static void ValidateRequest(
@@ -533,6 +554,14 @@ internal static class AgentValidator
                 throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "A resource media type is too large.");
             case ResourceContent resource when (resource.Name?.Length ?? 0) > limits.MaxTextCharactersPerPart:
                 throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A resource name is too large.");
+            case ImageAttachmentContent image when image.Attachment.AttachmentId.Length > limits.MaxResourceUriCharacters:
+                throw new AgentLimitException(nameof(limits.MaxResourceUriCharacters), "An image attachment ID is too large.");
+            case ImageAttachmentContent image when image.Attachment.Bytes > limits.MaxImageBytes:
+                throw new AgentLimitException(nameof(limits.MaxImageBytes), "An image attachment is too large.");
+            case ImageAttachmentContent image when (long)image.Attachment.Width * image.Attachment.Height > limits.MaxImagePixels:
+                throw new AgentLimitException(nameof(limits.MaxImagePixels), "An image attachment has too many pixels.");
+            case ImageAttachmentContent image when (image.Attachment.Name?.Length ?? 0) > 255:
+                throw new AgentLimitException(nameof(limits.MaxMetadataValueCharacters), "An image attachment name is too large.");
             case BinaryContent binary when binary.Data.Length > limits.MaxBinaryDataCharactersPerPart:
                 throw new AgentLimitException(nameof(limits.MaxBinaryDataCharactersPerPart), "An inline media part is too large.");
             case BinaryContent binary when binary.MediaType.Length > limits.MaxMetadataValueCharacters:
@@ -549,12 +578,62 @@ internal static class AgentValidator
                 throw new AgentLimitException(nameof(limits.MaxTextCharactersPerPart), "A tool-call thought signature is too large.");
             case ToolCallContent call when (call.Namespace?.Length ?? 0) > limits.MaxToolNameCharacters:
                 throw new AgentLimitException(nameof(limits.MaxToolNameCharacters), "A tool-call namespace is too large.");
-            case TextContent or ReasoningContent or JsonContent or ResourceContent or BinaryContent or ToolCallContent:
+            case TextContent or ReasoningContent or JsonContent or ResourceContent or ImageAttachmentContent or BinaryContent or ToolCallContent:
                 break;
             default:
                 throw new ArgumentException($"Unsupported content type '{content.GetType().FullName}'.", nameof(content));
         }
     }
+
+    private static void ValidateImageCollection(IReadOnlyList<AgentContent> content, AgentLimits limits)
+    {
+        var count = 0;
+        long bytes = 0;
+        foreach (var part in content)
+        {
+            long imageBytes;
+            switch (part)
+            {
+                case ImageAttachmentContent image:
+                    imageBytes = image.Attachment.Bytes;
+                    break;
+                case BinaryContent { MediaKind: AgentMediaKind.Image } image:
+                    try
+                    {
+                        imageBytes = Convert.FromBase64String(image.Data).LongLength;
+                    }
+                    catch (FormatException exception)
+                    {
+                        throw new ArgumentException("Inline image data is not valid base64.", nameof(content), exception);
+                    }
+
+                    if (imageBytes > limits.MaxImageBytes)
+                    {
+                        throw new AgentLimitException(nameof(limits.MaxImageBytes), "An inline image is too large.");
+                    }
+
+                    break;
+                default:
+                    continue;
+            }
+
+            count++;
+            bytes += imageBytes;
+            if (count > limits.MaxImagesPerMessage)
+            {
+                throw new AgentLimitException(nameof(limits.MaxImagesPerMessage), "A message contains too many images.");
+            }
+
+            if (bytes > limits.MaxImageBytesPerMessage)
+            {
+                throw new AgentLimitException(nameof(limits.MaxImageBytesPerMessage), "A message contains too many image bytes.");
+            }
+        }
+    }
+
+    private static bool IsImageContent(AgentContent content) =>
+        content is ImageAttachmentContent
+            or BinaryContent { MediaKind: AgentMediaKind.Image };
 
     private static void ValidateDiagnostic(ModelDiagnostic diagnostic, AgentLimits limits)
     {

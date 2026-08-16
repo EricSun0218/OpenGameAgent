@@ -203,6 +203,64 @@ public sealed class FileGameMailbox : IGameMailbox
     public ValueTask AbandonAsync(string messageId, string leaseToken, CancellationToken cancellationToken) =>
         SettleAsync(messageId, leaseToken, complete: false, cancellationToken);
 
+    public async ValueTask<IReadOnlyList<GameMailboxPendingStatus>> GetPendingStatusAsync(
+        IReadOnlyList<GameMailboxRecipientKey> recipients,
+        DateTimeOffset operationalNow,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var requested = GameMailboxPendingQuery.Validate(recipients);
+        var counts = new Dictionary<GameMailboxRecipientKey, GameMailboxPendingQuery.Counts>();
+        foreach (var recipient in requested)
+        {
+            counts[recipient] = default;
+        }
+
+        if (counts.Count == 0)
+        {
+            return Array.Empty<GameMailboxPendingStatus>();
+        }
+
+        // A batch is deliberately evaluated with one directory pass. Hosts can inspect
+        // many actors without turning recipient count into recipient count x file count.
+        foreach (var path in Directory.EnumerateFiles(_files.DirectoryPath, "*" + Suffix, SearchOption.TopDirectoryOnly)
+                     .Take(_capacity))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var document = await _files.ReadAsync<MailboxDocument>(path, cancellationToken).ConfigureAwait(false);
+            if (document is null)
+            {
+                continue;
+            }
+
+            _files.EnsurePathFor(path, document.MessageId, Suffix, "mailbox message");
+            var message = DecodeMessage(document);
+            if (document.Completed)
+            {
+                continue;
+            }
+
+            var recipient = new GameMailboxRecipientKey(message.SessionId, message.RecipientId);
+            if (!counts.TryGetValue(recipient, out var count))
+            {
+                continue;
+            }
+
+            if (document.LeaseToken is not null && document.OperationalLeaseExpiresAt > operationalNow)
+            {
+                count.Leased = checked(count.Leased + 1);
+            }
+            else
+            {
+                count.Ready = checked(count.Ready + 1);
+            }
+
+            counts[recipient] = count;
+        }
+
+        return GameMailboxPendingQuery.Materialize(requested, counts);
+    }
+
     private async ValueTask SettleAsync(
         string messageId,
         string leaseToken,

@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json;
+using OpenGameAgent.Attachments;
 
 namespace OpenGameAgent.Kernel;
 
@@ -8,6 +9,7 @@ public enum AgentContentKind
     Text,
     Json,
     Resource,
+    ImageAttachment,
     Binary,
     Reasoning,
     ToolCall,
@@ -97,6 +99,17 @@ public sealed class ResourceContent : AgentContent
     public string MediaType { get; }
 
     public string? Name { get; }
+}
+
+public sealed class ImageAttachmentContent : AgentContent
+{
+    public ImageAttachmentContent(GameImageAttachment attachment)
+        : base(AgentContentKind.ImageAttachment)
+    {
+        Attachment = attachment ?? throw new ArgumentNullException(nameof(attachment));
+    }
+
+    public GameImageAttachment Attachment { get; }
 }
 
 public sealed class BinaryContent : AgentContent

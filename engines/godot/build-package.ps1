@@ -51,7 +51,7 @@ $plugin = $plugin -replace 'version="[^"]+"', ('version="' + $Version + '"')
 $plugin | Set-Content -LiteralPath (Join-Path $packagedAddon 'plugin.cfg') -Encoding utf8NoBOM
 
 $buildOutput = Join-Path $addonRoot 'bin\Release\net8.0'
-foreach ($assembly in @('OpenGameAgent.Kernel.dll', 'OpenGameAgent.dll', 'OpenGameAgent.Client.dll')) {
+foreach ($assembly in @('OpenGameAgent.Attachments.dll', 'OpenGameAgent.Kernel.dll', 'OpenGameAgent.dll', 'OpenGameAgent.Client.dll')) {
     $source = Join-Path $buildOutput $assembly
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Required Godot assembly '$assembly' is missing."

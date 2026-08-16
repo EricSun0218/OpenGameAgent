@@ -8,7 +8,7 @@ using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent;
 
-public sealed class RetryingModelProvider : IModelProvider
+public sealed class RetryingModelProvider : IModelProvider, IModelRequestPreflight
 {
     private readonly IModelProvider _inner;
     private readonly int _maximumAttempts;
@@ -39,6 +39,11 @@ public sealed class RetryingModelProvider : IModelProvider
             throw new ArgumentOutOfRangeException(nameof(maximumDelay));
         }
     }
+
+    public ValueTask ValidateRequestAsync(ModelRequest request, CancellationToken cancellationToken) =>
+        _inner is IModelRequestPreflight preflight
+            ? preflight.ValidateRequestAsync(request, cancellationToken)
+            : default;
 
     public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
         ModelRequest request,
@@ -158,7 +163,7 @@ public sealed class RetryingModelProvider : IModelProvider
     }
 }
 
-public sealed class FallbackModelProvider : IModelProvider
+public sealed class FallbackModelProvider : IModelProvider, IModelRequestPreflight
 {
     private readonly IReadOnlyList<IModelProvider> _providers;
     private readonly Func<Exception, bool> _canFallback;
@@ -181,6 +186,17 @@ public sealed class FallbackModelProvider : IModelProvider
         _providers = new ReadOnlyCollection<IModelProvider>(copied);
         _canFallback = canFallback ?? (exception =>
             exception is not ModelProviderException providerFailure || providerFailure.IsTransient);
+    }
+
+    public async ValueTask ValidateRequestAsync(ModelRequest request, CancellationToken cancellationToken)
+    {
+        foreach (var provider in _providers)
+        {
+            if (provider is IModelRequestPreflight preflight)
+            {
+                await preflight.ValidateRequestAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
