@@ -5,7 +5,7 @@
     <Description>Native Amazon Bedrock ConverseStream transport for OpenGameAgent.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="AWSSDK.BedrockRuntime" Version="4.0.101" />
+    <PackageReference Include="AWSSDK.BedrockRuntime" Version="4.0.101.1" />
     <PackageReference Include="System.Text.Json" Version="8.0.6" />
   </ItemGroup>
   <ItemGroup>
