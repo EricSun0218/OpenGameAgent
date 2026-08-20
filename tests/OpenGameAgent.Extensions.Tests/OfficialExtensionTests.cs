@@ -1281,7 +1281,18 @@ public sealed class OfficialExtensionTests
     [Fact]
     public async Task TracingRecordsLifecycleWithoutInputPayloadByDefault()
     {
-        var provider = new ScriptedProvider(_ => TextResponse("done"));
+        var provider = new ScriptedProvider(_ => new ModelResponse(
+            new AgentContent[] { new TextContent("done") },
+            ModelStopReason.Stop,
+            new ModelUsage(
+                inputTokens: 20,
+                outputTokens: 5,
+                reasoningTokens: 2,
+                cost: new ModelCost(input: 0.01, output: 0.02, isKnown: true)),
+            provider: "test-provider",
+            api: "test-api",
+            responseModel: "test-response-model",
+            responseId: "response-1"));
         var sink = new InMemoryGameAgentTraceSink();
         await using var runtime = new GameAgentBuilder(provider, "model")
             .UseExtension(new GameAgentTracingExtension(sink))
@@ -1302,6 +1313,13 @@ public sealed class OfficialExtensionTests
         Assert.Contains(traces, trace => trace.Kind == "input.received");
         Assert.Contains(traces, trace => trace.Kind == "kernel.runstarted");
         Assert.Contains(traces, trace => trace.Kind == "run.completed");
+        Assert.Contains(traces, trace => trace.Kind == "session.saved");
+        var completed = traces.Single(trace => trace.Kind == "run.completed");
+        Assert.Contains("\"reasoningTokens\":2", completed.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("\"responseId\":\"response-1\"", completed.DetailsJson, StringComparison.Ordinal);
+        var saved = traces.Single(trace => trace.Kind == "session.saved");
+        Assert.Contains("\"usageRecords\":1", saved.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("\"totalTokens\":25", saved.DetailsJson, StringComparison.Ordinal);
         Assert.All(traces, trace => Assert.DoesNotContain("not-for-traces", trace.DetailsJson));
         Assert.All(traces, trace => Assert.Equal(12, trace.Moment.Tick));
     }

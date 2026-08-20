@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Add the optional `OpenGameAgent.DevTools` package and CLI for bounded append-only JSONL trace
+  recording, crash-tail recovery, observation-only HTML playback, run summaries, and strict offline
+  evaluation suitable for local debugging and CI gates.
+- Enrich the tracing extension with complete model-usage, resolved-provider, response, and persisted
+  per-cause usage-ledger metadata without recording prompts, tool arguments, credentials, or reasoning
+  text by default.
+- Document bounded NPC adaptation as an opt-in host policy built from immutable memories, skills,
+  receipts, traces, and evaluations; generated proposals never gain authority to modify code,
+  permissions, game rules, or world state directly.
+- Change the project license to MIT and align the Unity package, citation metadata, contribution terms,
+  README attribution guidance, and package metadata. Redistributions must retain the copyright and MIT
+  license notice; displaying the project logo is not required.
 - Add `QueuedGameActionHandler`, a bounded engine-thread action handoff with FIFO pumping,
   queued cancellation, active-action settlement, shutdown cleanup, and main-thread recovery over
   the existing durable action journal and receipt protocol.

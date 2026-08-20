@@ -66,6 +66,10 @@
       "project": "src/OpenGameAgent.Extensions/OpenGameAgent.Extensions.csproj"
     },
     {
+      "id": "OpenGameAgent.DevTools",
+      "project": "src/OpenGameAgent.DevTools/OpenGameAgent.DevTools.csproj"
+    },
+    {
       "id": "OpenGameAgent.Media",
       "project": "src/OpenGameAgent.Media/OpenGameAgent.Media.csproj"
     },

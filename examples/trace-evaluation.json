@@ -1,0 +1,11 @@
+{
+  "maximumFailedRuns": 0,
+  "maximumToolErrors": 0,
+  "maximumRunDurationMilliseconds": 30000,
+  "requiredEventKinds": [
+    "input.received",
+    "run.completed",
+    "session.saved"
+  ],
+  "forbiddenTools": []
+}

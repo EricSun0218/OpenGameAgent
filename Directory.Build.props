@@ -12,7 +12,7 @@
     <Authors>Eric Sun</Authors>
     <Company>Eric Sun</Company>
     <Copyright>Copyright © 2026 Eric Sun</Copyright>
-    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/EricSun0218/OpenGameAgent</PackageProjectUrl>
     <RepositoryUrl>https://github.com/EricSun0218/OpenGameAgent.git</RepositoryUrl>
@@ -34,11 +34,6 @@
       Visible="false" />
     <None
       Include="$(MSBuildThisFileDirectory)LICENSE"
-      Pack="true"
-      PackagePath=""
-      Visible="false" />
-    <None
-      Include="$(MSBuildThisFileDirectory)NOTICE"
       Pack="true"
       PackagePath=""
       Visible="false" />

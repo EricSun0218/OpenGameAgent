@@ -37,6 +37,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Delegate bounded foreground or background work | `AgentDelegationExtension` |
 | Query a game-owned knowledge source | `ExternalKnowledgeExtension` |
 | Capture bounded lifecycle traces | `GameAgentTracingExtension` |
+| Persist, inspect, and evaluate traces without replaying side effects | `JsonLinesGameAgentTraceSink`, `GameAgentTraceHtmlReport`, `GameAgentTraceEvaluator` |
 | Load a portable package of skills and MCP servers | `AgentPluginLoader`, `AgentPluginPackage` |
 
 ## Game integration

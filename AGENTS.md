@@ -11,6 +11,7 @@ This repository is a framework, not a game, world editor, content marketplace, o
 - `src/OpenGameAgent.Kernel`: engine-neutral stateful model/tool loop.
 - `src/OpenGameAgent`: game coordinates, runtime composition, actions, routing, sessions, workflows, memory, skills, scheduling, mailboxes, and media contracts.
 - `src/OpenGameAgent.Persistence`: crash-tolerant local-file implementations.
+- `src/OpenGameAgent.DevTools`: bounded trace recording, observation-only playback, and offline evaluation.
 - `src/OpenGameAgent.Providers.OpenAICompatible`: streaming chat-completions transport.
 - `src/OpenGameAgent.Providers.MediaHttp`: generic remote or local media-generation transport.
 - `src/OpenGameAgent.Client`: engine-compatible JSON/SSE service client.
@@ -18,6 +19,7 @@ This repository is a framework, not a game, world editor, content marketplace, o
 - `engines/godot`: Godot .NET package and tests.
 - `engines/unity`: Unity UPM package and tests.
 - `examples`: buildable integration examples.
+- `tools/OpenGameAgent.DevTools.Cli`: local trace inspection and CI evaluation CLI.
 - `tests`: focused unit and integration tests.
 
 ## Non-negotiable boundaries

@@ -16,7 +16,7 @@ OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够�
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
 </p>
 
@@ -85,6 +85,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 外部工具按需发现与大型结果产物化；
 - 包含可移植 Skills 与 MCP Server 的 Agent Plugins 1.0.0 插件包；
 - 通过可替换 API 生成图片、语音和视频。
+- 追加式轨迹、仅观察回放和离线 CI 评测。
 
 Runtime **不会**判断攻击是否合法、物品能否使用、资源够不够或 NPC 有没有权限。游戏只暴露窄而明确的工具，校验每次变更请求，在正确线程或服务端执行，并返回权威回执。
 
@@ -121,6 +122,7 @@ GameAgentRuntime
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；类型化生命周期事件与通道；命名空间持久状态 |
 | 官方扩展 | 工具策略与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、委派、追踪和可持久并行工作流图 |
+| 开发工具 | 有界 JSONL 轨迹、本地仅观察 HTML 回放、统计摘要与离线/CI 评测规则 |
 | 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
@@ -229,6 +231,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [部署与安全](docs/deployment-and-security.md)
 - [生成式媒体](docs/media.md)
 - [图片输入与游戏感知](docs/image-input.md)
+- [轨迹、回放与离线评测](docs/devtools.md)
 
 ## 项目边界
 
@@ -236,8 +239,8 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 
 ## 署名
 
-OpenGameAgent 使用 Apache-2.0 许可证，不强制游戏展示 Logo 或额外署名。我们欢迎游戏和 Mod 在 Credits、关于或第三方许可中写上：**“Powered by OpenGameAgent | opengameagent.com”**，或 **“本游戏使用 OpenGameAgent 构建游戏角色的 Agent 能力。”** 在许可证要求的情况下，请保留 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。Logo 与品牌使用方式见[品牌资源说明](docs/brand/README.md)。
+任何包含 OpenGameAgent 并对外分发的游戏、Mod、应用或产品，都需要在 Credits、关于、第三方许可证、文档或随附许可证文件中提供 OpenGameAgent 的版权与 MIT 许可证声明。可以同时使用简洁署名：**“Powered by OpenGameAgent | opengameagent.com”**，或 **“本游戏使用 OpenGameAgent 构建游戏角色的 Agent 能力。”** 具体内容见 [LICENSE](LICENSE) 与[品牌资源和署名说明](docs/brand/README.md)。
 
 ## 协议
 
-[Apache License 2.0](LICENSE)。可以基于框架制作闭源商业游戏或托管产品。参见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
+[MIT License](LICENSE)。可以基于框架制作闭源商业游戏或托管产品；分发副本时必须包含版权与许可声明。参见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。

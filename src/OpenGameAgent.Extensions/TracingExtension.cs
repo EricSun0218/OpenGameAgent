@@ -160,6 +160,10 @@ public sealed class GameAgentTracingOptions
 
 public sealed class GameAgentTracingExtension : IGameAgentExtension
 {
+    private static readonly JsonSerializerOptions TraceJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
     private readonly IGameAgentTraceSink _sink;
     private readonly GameAgentTracingOptions _options;
     private long _sequence;
@@ -230,6 +234,36 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                     succeeded = value.Result.Succeeded,
                     turns = value.Result.AgentResult?.Turns,
                     toolCalls = value.Result.AgentResult?.ToolCalls,
+                    usage = ProjectUsage(value.Result.AgentResult?.Usage),
+                    responses = value.Result.AgentResult?.NewMessages
+                        .Where(message => message.Role == AgentRole.Assistant)
+                        .Select(message => new
+                        {
+                            message.Provider,
+                            message.Api,
+                            requestedModel = message.Model,
+                            responseModel = message.ResponseModel,
+                            message.ResponseId,
+                            stopReason = message.StopReason?.ToString(),
+                            message.RawStopReason,
+                        })
+                        .ToArray(),
+                },
+                token));
+        api.On(GameAgentExtensionEvents.SessionSaved, (value, context, token) =>
+            WriteAsync(
+                "session.saved",
+                context,
+                new
+                {
+                    revision = value.Session.Revision,
+                    messages = value.Session.Messages.Count,
+                    usageRecords = value.Session.UsageLedger.TotalRecordCount,
+                    usage = ProjectUsage(value.Session.UsageLedger.Stats.Total),
+                    usageByCause = value.Session.UsageLedger.TotalsByCause
+                        .OrderBy(pair => pair.Key)
+                        .Select(pair => new { cause = pair.Key.ToString(), usage = ProjectUsage(pair.Value) })
+                        .ToArray(),
                 },
                 token));
         api.On(GameAgentExtensionEvents.RunFailed, (value, context, token) =>
@@ -246,7 +280,7 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
         object details,
         CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.Serialize(details);
+        var json = JsonSerializer.Serialize(details, TraceJsonOptions);
         if (json.Length > _options.MaximumDetailsCharacters)
         {
             json = JsonSerializer.Serialize(new { truncated = true, originalCharacters = json.Length });
@@ -279,6 +313,48 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
         contentParts = value.Message?.Content.Count,
         progressMessage = value.Progress?.Message,
         toolError = value.ToolResult?.IsError,
+    };
+
+    private static object? ProjectUsage(ModelUsage? usage) => usage is null
+        ? null
+        : new
+        {
+            usage.InputTokens,
+            usage.OutputTokens,
+            usage.CacheReadTokens,
+            usage.CacheWriteTokens,
+            usage.ReasoningTokens,
+            usage.CacheWriteOneHourTokens,
+            usage.TotalTokens,
+            cost = new
+            {
+                known = usage.Cost.IsKnown,
+                input = usage.Cost.IsKnown ? usage.Cost.Input : (double?)null,
+                output = usage.Cost.IsKnown ? usage.Cost.Output : (double?)null,
+                cacheRead = usage.Cost.IsKnown ? usage.Cost.CacheRead : (double?)null,
+                cacheWrite = usage.Cost.IsKnown ? usage.Cost.CacheWrite : (double?)null,
+                total = usage.Cost.TotalIfKnown,
+            },
+        };
+
+    private static object ProjectUsage(GameSessionUsageTotals usage) => new
+    {
+        usage.InputTokens,
+        usage.OutputTokens,
+        usage.CacheReadTokens,
+        usage.CacheWriteTokens,
+        usage.ReasoningTokens,
+        usage.CacheWriteOneHourTokens,
+        usage.TotalTokens,
+        cost = new
+        {
+            known = usage.CostKnown,
+            input = usage.CostKnown ? usage.InputCost : (double?)null,
+            output = usage.CostKnown ? usage.OutputCost : (double?)null,
+            cacheRead = usage.CostKnown ? usage.CacheReadCost : (double?)null,
+            cacheWrite = usage.CostKnown ? usage.CacheWriteCost : (double?)null,
+            total = usage.CostTotalIfKnown,
+        },
     };
 
     private static JsonElement Parse(string json)

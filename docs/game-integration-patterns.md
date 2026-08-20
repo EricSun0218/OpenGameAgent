@@ -163,6 +163,26 @@ For a very large event or command catalog, expose `ToolCatalogExtension` instead
 
 Reinforcement-learning controllers, motion matching, perception networks, and low-level bots are outside the language-agent loop. They can coexist with it: learned systems produce observations or execute a high-level tool, while OpenGameAgent handles language, semantic planning, memory, and tool orchestration.
 
+## Bounded NPC adaptation
+
+Long-lived NPCs can improve without allowing a model to rewrite code or game rules. Keep two kinds of adaptation separate:
+
+- experiences, relationships, preferences, and world facts belong in scoped `GameMemory` records;
+- reusable procedures belong in versioned `GameSkill` instructions selected for that actor's input and available tools.
+
+Implement adaptation as an optional game extension or tool pipeline:
+
+1. the NPC proposes a bounded memory or procedure revision;
+2. the proposal cites game-owned evidence such as input IDs, committed action operation IDs, receipts, or offline evaluation findings;
+3. a host validator checks that evidence and verifies the proposal cannot add tools, permissions, executable code, credentials, or hidden world data;
+4. the host activates a new immutable version for that session/actor scope;
+5. older versions remain available for audit and rollback, while rejected and obsolete proposals have bounded retention;
+6. later traces and evaluations can demote or roll back a version that performs worse.
+
+The model may propose; the host decides what becomes active. A learned instruction never changes the authority of the tools available to the NPC. Prefer dry-run evaluation before activation, require explicit approval for shared or global behavior, and keep per-NPC learning isolated unless the game deliberately publishes a reviewed common skill.
+
+OpenGameAgent already supplies the composition points for this pattern: persistent memory, dynamic skill providers, namespaced extension state, durable action receipts, lifecycle traces, and offline evaluation rules. The framework does not automatically turn private reasoning or an unverified successful-looking response into a learned rule. This keeps adaptation optional and avoids adding a self-modifying policy engine to the stable kernel.
+
 ## Save and replay
 
 Use stable session, actor, input, operation, and timeline IDs. After loading a save fork that can coexist with its source, assign both a new session/save namespace and a new timeline ID. Persist game state and OpenGameAgent stores in the same save transaction when possible. If that is impossible, reconcile pending action journal entries before accepting new inputs.

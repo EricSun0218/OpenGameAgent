@@ -2,7 +2,7 @@
 
 OpenGameAgent is alpha software. For a large public API or persistence change, open an issue first so its game/runtime boundary and migration cost can be discussed.
 
-By intentionally submitting a contribution, you license it under Apache License 2.0 as described by section 5 of [LICENSE](LICENSE), unless you explicitly state otherwise. Submit only work you have the right to license.
+By intentionally submitting a contribution, you agree to license it under the repository's [MIT License](LICENSE), unless you explicitly state otherwise. Submit only work you have the right to license.
 
 ## Development
 

@@ -16,7 +16,7 @@ OpenGameAgent is a compact, hackable C# runtime that lets game characters observ
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
 </p>
 
@@ -85,6 +85,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - lazy external-tool discovery and large-result artifact spill;
 - Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
 - image, audio, and video generation through replaceable APIs.
+- append-only traces, observation-only playback, and offline CI evaluation.
 
 The runtime does **not** decide combat legality, inventory rules, economy changes, NPC permissions, or other business rules. The game exposes narrow tools, validates every requested mutation, performs it on the correct thread or server, and returns the authoritative receipt.
 
@@ -123,6 +124,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
+| DevTools | Bounded JSONL recordings, local observation-only HTML playback, summaries, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
@@ -230,6 +232,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Deployment and security](docs/deployment-and-security.md)
 - [Generated media](docs/media.md)
 - [Image input and game perception](docs/image-input.md)
+- [Traces, playback, and offline evaluation](docs/devtools.md)
 
 ## Project boundary
 
@@ -237,8 +240,8 @@ This repository is a developer framework. It does not define a universal charact
 
 ## Attribution
 
-OpenGameAgent is licensed under Apache-2.0. An in-game logo or credit is not required, but games and mods are welcome to write **“Powered by OpenGameAgent | opengameagent.com”** in Credits, About, or third-party notices. Preserve [LICENSE](LICENSE) and [NOTICE](NOTICE) when the license requires it. See the [brand assets and usage guidance](docs/brand/README.md).
+Every distributed game, mod, application, or product that includes OpenGameAgent must make the OpenGameAgent copyright and MIT license notice available in Credits, About, Third-party Licenses, documentation, or an accompanying license file. The following concise credit may be used alongside the license notice: **“Powered by OpenGameAgent | opengameagent.com”**. See the [license](LICENSE) and [brand assets and attribution guidance](docs/brand/README.md).
 
 ## License
 
-[Apache License 2.0](LICENSE). You may build proprietary games and hosted products with the framework. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+[MIT License](LICENSE). You may build proprietary games and hosted products with the framework. Distributed copies must include the copyright and permission notice. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
