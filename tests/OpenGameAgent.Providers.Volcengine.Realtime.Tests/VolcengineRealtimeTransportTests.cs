@@ -121,6 +121,116 @@ public sealed class VolcengineRealtimeTransportTests
     }
 
     [Fact]
+    public async Task ConcurrentSessionsSnapshotDifferentConversationVoices()
+    {
+        var firstConnection = new FakeConnection();
+        var secondConnection = new FakeConnection();
+        var connections = new ConcurrentQueue<FakeConnection>(new[]
+        {
+            firstConnection,
+            secondConnection,
+        });
+        var transport = new VolcengineRealtimeTransport(new VolcengineRealtimeTransportOptions
+        {
+            InputMode = VolcengineRealtimeInputMode.Disabled,
+            ApiKey = "test-credential",
+            Speaker = "fallback-speaker",
+            ConnectionFactory = (_, _) => new ValueTask<IVolcengineWebSocketConnection>(
+                connections.TryDequeue(out var connection)
+                    ? connection
+                    : throw new InvalidOperationException("Unexpected connection.")),
+        });
+
+        var firstTask = transport.ConnectAsync(
+            new RealtimeConversationOptions { Voice = "npc-speaker-a" },
+            TestContext.Current.CancellationToken).AsTask();
+        var secondTask = transport.ConnectAsync(
+            new RealtimeConversationOptions { Voice = "npc-speaker-b" },
+            TestContext.Current.CancellationToken).AsTask();
+        await Task.WhenAll(firstTask, secondTask);
+        await using var first = await firstTask;
+        await using var second = await secondTask;
+
+        await Task.WhenAll(
+            first.SendHandoffAsync(
+                "handoff-a",
+                "first voice",
+                RealtimeHandoffPhase.Final,
+                completed: true,
+                TestContext.Current.CancellationToken).AsTask(),
+            second.SendHandoffAsync(
+                "handoff-b",
+                "second voice",
+                RealtimeHandoffPhase.Final,
+                completed: true,
+                TestContext.Current.CancellationToken).AsTask());
+
+        var speakers = new[] { firstConnection, secondConnection }
+            .Select(connection => connection.Sent
+                .Select(ParseClient)
+                .Where(frame => frame.Event == VolcengineEvents.StartSession)
+                .Select(frame =>
+                {
+                    using var payload = JsonDocument.Parse(frame.Payload);
+                    return payload.RootElement
+                        .GetProperty("req_params")
+                        .GetProperty("speaker")
+                        .GetString();
+                })
+                .Single())
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(new[] { "npc-speaker-a", "npc-speaker-b" }, speakers);
+    }
+
+    [Fact]
+    public async Task PlaceholderVoiceUsesTransportFallbackAndInvalidVoiceFailsBeforeDispatch()
+    {
+        var connection = new FakeConnection();
+        var calls = 0;
+        var transport = new VolcengineRealtimeTransport(new VolcengineRealtimeTransportOptions
+        {
+            InputMode = VolcengineRealtimeInputMode.Disabled,
+            ApiKey = "test-credential",
+            Speaker = "configured-fallback",
+            ConnectionFactory = (_, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                return new ValueTask<IVolcengineWebSocketConnection>(connection);
+            },
+        });
+
+        await using (var session = await transport.ConnectAsync(
+            new RealtimeConversationOptions { Voice = "alloy" },
+            TestContext.Current.CancellationToken))
+        {
+            await session.SendHandoffAsync(
+                "fallback-handoff",
+                "fallback voice",
+                RealtimeHandoffPhase.Final,
+                completed: true,
+                TestContext.Current.CancellationToken);
+        }
+
+        var start = connection.Sent
+            .Select(ParseClient)
+            .Single(frame => frame.Event == VolcengineEvents.StartSession);
+        using (var payload = JsonDocument.Parse(start.Payload))
+        {
+            Assert.Equal(
+                "configured-fallback",
+                payload.RootElement.GetProperty("req_params").GetProperty("speaker").GetString());
+        }
+
+        var beforeInvalid = calls;
+        await Assert.ThrowsAsync<ArgumentException>(() => transport.ConnectAsync(
+            new RealtimeConversationOptions { Voice = new string('x', 257) },
+            TestContext.Current.CancellationToken).AsTask());
+        Assert.Equal(beforeInvalid, calls);
+    }
+
+    [Fact]
     public async Task BargeInCancelsTheTtsSubSessionAndDropsLateAudio()
     {
         var dialogue = new FakeConnection();

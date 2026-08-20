@@ -226,6 +226,8 @@ public sealed class VolcengineRealtimeTransport : IRealtimeTransport, IRealtimeT
             throw new ArgumentNullException(nameof(options));
         }
 
+        var speaker = ResolveSpeaker(options.Voice);
+
         using var timeout = new CancellationTokenSource(_options.ConnectTimeoutMilliseconds);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
@@ -262,6 +264,7 @@ public sealed class VolcengineRealtimeTransport : IRealtimeTransport, IRealtimeT
                 dialogue,
                 tts,
                 dialogueSessionId,
+                speaker,
                 _options,
                 redactor);
         }
@@ -279,6 +282,24 @@ public sealed class VolcengineRealtimeTransport : IRealtimeTransport, IRealtimeT
             throw new InvalidOperationException(
                 redactor.Sanitize("Volcengine realtime setup failed: " + exception.Message));
         }
+    }
+
+    private string ResolveSpeaker(string? conversationVoice)
+    {
+        if (string.IsNullOrWhiteSpace(conversationVoice)
+            || conversationVoice.Equals("alloy", StringComparison.OrdinalIgnoreCase))
+        {
+            return _options.Speaker;
+        }
+
+        if (conversationVoice.Length > 256 || conversationVoice.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                "A bounded provider voice identifier is required.",
+                nameof(RealtimeConversationOptions.Voice));
+        }
+
+        return conversationVoice;
     }
 
     private async ValueTask<string> ResolveApiKeyAsync(CancellationToken cancellationToken)

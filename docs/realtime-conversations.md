@@ -90,6 +90,8 @@ var transport = new VolcengineRealtimeTransport(new VolcengineRealtimeTransportO
 
 The Volcengine adapter accepts mono PCM16 at 16 kHz and emits mono PCM16 at the configured output rate (24 kHz by default). It maps provider speech boundaries and input transcripts into standard handoffs, exposes word-level subtitle timing when returned, and streams OGA handoff text into bounded TTS sub-sessions. Set `InputMode = VolcengineRealtimeInputMode.Disabled` for TTS-only use.
 
+Set `RealtimeConversationOptions.Voice` to a registered Volcengine speaker ID when an NPC needs a per-session voice. The framework placeholder `alloy` (or an empty value when calling the transport directly) falls back to `VolcengineRealtimeTransportOptions.Speaker`. The selected speaker is snapshotted per connection, so concurrent NPC sessions cannot overwrite each other's voice.
+
 Transports may implement `IRealtimeTransportCapabilities`. Hosts can use its flags to select UI and fallbacks without provider-name checks. Capability flags describe executable behavior, not merely fields accepted by an options object.
 
 ## Interruption semantics

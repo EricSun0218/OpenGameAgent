@@ -10,6 +10,7 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
     private readonly IVolcengineWebSocketConnection? _dialogue;
     private readonly IVolcengineWebSocketConnection _tts;
     private readonly VolcengineRealtimeTransportOptions _options;
+    private readonly string _speaker;
     private readonly VolcengineSecretRedactor _redactor;
     private readonly VolcengineBoundedQueue<RealtimeConversationEvent> _events;
     private readonly CancellationTokenSource _lifetime = new();
@@ -36,11 +37,15 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
         IVolcengineWebSocketConnection? dialogue,
         IVolcengineWebSocketConnection tts,
         string? dialogueSessionId,
+        string speaker,
         VolcengineRealtimeTransportOptions options,
         VolcengineSecretRedactor redactor)
     {
         _dialogue = dialogue;
         _tts = tts ?? throw new ArgumentNullException(nameof(tts));
+        _speaker = !string.IsNullOrWhiteSpace(speaker)
+            ? speaker
+            : throw new ArgumentException("A speaker is required.", nameof(speaker));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _redactor = redactor ?? throw new ArgumentNullException(nameof(redactor));
         _events = new VolcengineBoundedQueue<RealtimeConversationEvent>(options.EventQueueCapacity);
@@ -758,7 +763,7 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
             req_params = new
             {
                 model = _options.TtsModel,
-                speaker = _options.Speaker,
+                speaker = _speaker,
                 audio_params = new
                 {
                     format = "pcm",
