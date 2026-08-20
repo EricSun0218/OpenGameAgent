@@ -219,6 +219,7 @@ public sealed class ToolExecutionContext
         int turn,
         int toolCallIndex,
         ToolCallContent call,
+        string? conflictKey,
         Func<ToolProgress, CancellationToken, ValueTask> reportProgress)
     {
         RunId = runId;
@@ -227,6 +228,7 @@ public sealed class ToolExecutionContext
             ? toolCallIndex
             : throw new ArgumentOutOfRangeException(nameof(toolCallIndex));
         Call = call;
+        ConflictKey = conflictKey;
         _reportProgress = reportProgress;
     }
 
@@ -237,6 +239,12 @@ public sealed class ToolExecutionContext
     public int ToolCallIndex { get; }
 
     public ToolCallContent Call { get; }
+
+    /// <summary>
+    /// The conflict key resolved during tool preparation. Tool implementations that persist work
+    /// can carry this exact value into their durable intent instead of evaluating the resolver again.
+    /// </summary>
+    public string? ConflictKey { get; }
 
     public ValueTask ReportProgressAsync(ToolProgress progress, CancellationToken cancellationToken = default) =>
         _reportProgress(progress ?? throw new ArgumentNullException(nameof(progress)), cancellationToken);

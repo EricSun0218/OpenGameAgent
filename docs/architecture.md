@@ -93,6 +93,10 @@ Timeline IDs make save forks and simulations explicit. Moments from different ti
 
 Inside one model turn, `SafeParallel` executes compatible tool calls concurrently. Read-only calls can overlap. Write calls sharing a conflict key are serialized. Results are appended in model source order, so completion timing does not scramble the transcript.
 
+For durable game actions, the same resolved conflict key is copied into `GameActionIntent`. Official in-memory and file journals implement `IGameActionConflictJournal`, so matching writes are also serialized across different actors, sessions, and model runs while model inference remains concurrent. The durable scope is `(timelineId, generationId, conflictKey)`. A final committed, rejected, or failed receipt releases the scope for the next claimant. An uncertain dispatched action keeps the scope blocked until authoritative reconciliation records a final receipt; caller cancellation cannot release it. The current contract intentionally supports one key per action. Hosts that need several resources should derive one canonical composite key or serialize the mutation in their authoritative transaction.
+
+Existing `IGameActionJournal` implementations remain usable for actions whose `ConflictKey` is null. A conflict-bearing action fails closed unless the configured journal also implements `IGameActionConflictJournal`; it never silently falls back to process-local locking.
+
 Large worlds should not invoke every NPC on every frame. Let deterministic game simulation decide which actors need inference, then enqueue those actors. `GameTimeScheduler`, `GameSignal`, and `IGameMailbox` are building blocks for this admission layer; they are not a hidden global simulation policy. `GameTimeScheduler.CaptureState()` provides a saveable recurring-trigger position so loading a game does not replay already emitted occurrences.
 
 ## Context, memory, and skills

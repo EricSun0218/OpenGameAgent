@@ -284,6 +284,7 @@ public static partial class ServerEndpoints
         tick = intent.Moment.Tick,
         calendar = intent.Moment.CalendarJson is null ? (JsonElement?)null : ParseJsonElement(intent.Moment.CalendarJson),
         generationId = intent.GenerationId,
+        conflictKey = intent.ConflictKey,
         expectedRevision = intent.ExpectedRevision,
         requiresReconciliation,
     };

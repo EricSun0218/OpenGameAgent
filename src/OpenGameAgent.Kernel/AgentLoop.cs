@@ -1152,6 +1152,7 @@ public static class AgentLoop
             turn,
             prepared.Index,
             prepared.Call,
+            prepared.ConflictKey,
             async (progress, progressCancellation) =>
             {
                 progressCancellation.ThrowIfCancellationRequested();

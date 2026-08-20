@@ -21,6 +21,8 @@ public enum GameActionStatus
 
 public sealed class GameActionIntent
 {
+    public const int MaximumConflictKeyCharacters = 1_024;
+
     public GameActionIntent(
         string operationId,
         string inputId,
@@ -30,7 +32,8 @@ public sealed class GameActionIntent
         string argumentsJson,
         GameMoment moment,
         long? expectedRevision = null,
-        string? generationId = null)
+        string? generationId = null,
+        string? conflictKey = null)
     {
         OperationId = GameJson.RequireId(operationId, nameof(operationId));
         InputId = GameJson.RequireId(inputId, nameof(inputId));
@@ -48,6 +51,17 @@ public sealed class GameActionIntent
         GenerationId = generationId is null
             ? null
             : GameJson.RequireId(generationId, nameof(generationId));
+        if (conflictKey is { Length: > MaximumConflictKeyCharacters })
+        {
+            throw new ArgumentException("The action conflict key is too large.", nameof(conflictKey));
+        }
+
+        if (conflictKey is not null && conflictKey.Any(char.IsControl))
+        {
+            throw new ArgumentException("The action conflict key cannot contain control characters.", nameof(conflictKey));
+        }
+
+        ConflictKey = string.IsNullOrEmpty(conflictKey) ? null : conflictKey;
     }
 
     public string OperationId { get; }
@@ -72,6 +86,36 @@ public sealed class GameActionIntent
     /// external receipt unsafe to apply.
     /// </summary>
     public string? GenerationId { get; }
+
+    /// <summary>
+    /// Serializes durable actions that address the same authoritative resource. The scope is the
+    /// combination of this key, <see cref="GameMoment.TimelineId"/>, and <see cref="GenerationId"/>.
+    /// A single action has at most one conflict key.
+    /// </summary>
+    public string? ConflictKey { get; }
+}
+
+internal static class GameActionConflicts
+{
+    public static bool Match(GameActionIntent left, GameActionIntent right) =>
+        left.ConflictKey is not null
+        && right.ConflictKey is not null
+        && string.Equals(left.ConflictKey, right.ConflictKey, StringComparison.Ordinal)
+        && string.Equals(left.Moment.TimelineId, right.Moment.TimelineId, StringComparison.Ordinal)
+        && string.Equals(left.GenerationId, right.GenerationId, StringComparison.Ordinal);
+
+    public static string ScopeIdentity(GameActionIntent intent)
+    {
+        if (intent.ConflictKey is null)
+        {
+            throw new ArgumentException("An action without a conflict key has no conflict scope.", nameof(intent));
+        }
+
+        return "action-conflict-v1\n"
+            + intent.Moment.TimelineId + "\n"
+            + (intent.GenerationId is null ? "0" : "1" + intent.GenerationId) + "\n"
+            + intent.ConflictKey;
+    }
 }
 
 public sealed class GameActionReceipt
@@ -187,6 +231,65 @@ public sealed class GameActionJournalEntry
     public bool Dispatched { get; }
 }
 
+public enum GameActionDispatchClaimStatus
+{
+    Claimed,
+    AlreadyDispatched,
+    Completed,
+    Blocked,
+}
+
+public sealed class GameActionDispatchClaim
+{
+    public GameActionDispatchClaim(
+        GameActionDispatchClaimStatus status,
+        GameActionJournalEntry entry,
+        string? blockingOperationId = null)
+    {
+        if (!Enum.IsDefined(typeof(GameActionDispatchClaimStatus), status))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status));
+        }
+
+        Entry = entry ?? throw new ArgumentNullException(nameof(entry));
+        if (status == GameActionDispatchClaimStatus.Completed && entry.Receipt is null)
+        {
+            throw new ArgumentException("A completed dispatch claim requires a final receipt.", nameof(entry));
+        }
+
+        if (status is GameActionDispatchClaimStatus.Claimed or GameActionDispatchClaimStatus.AlreadyDispatched
+            && (!entry.Dispatched || entry.Receipt is not null))
+        {
+            throw new ArgumentException("A dispatched claim requires an open dispatched journal entry.", nameof(entry));
+        }
+
+        if (status == GameActionDispatchClaimStatus.Blocked
+            && (entry.Dispatched || entry.Receipt is not null))
+        {
+            throw new ArgumentException("A blocked dispatch claim requires an open prepared journal entry.", nameof(entry));
+        }
+
+        if (status == GameActionDispatchClaimStatus.Blocked)
+        {
+            BlockingOperationId = GameJson.RequireId(
+                blockingOperationId ?? throw new ArgumentNullException(nameof(blockingOperationId)),
+                nameof(blockingOperationId));
+        }
+        else if (blockingOperationId is not null)
+        {
+            throw new ArgumentException("Only a blocked dispatch claim can identify a blocking operation.", nameof(blockingOperationId));
+        }
+
+        Status = status;
+    }
+
+    public GameActionDispatchClaimStatus Status { get; }
+
+    public GameActionJournalEntry Entry { get; }
+
+    public string? BlockingOperationId { get; }
+}
+
 public interface IGameActionJournal
 {
     ValueTask<GameActionJournalEntry> ReserveAsync(GameActionIntent intent, CancellationToken cancellationToken);
@@ -198,6 +301,70 @@ public interface IGameActionJournal
     ValueTask SaveReceiptAsync(GameActionReceipt receipt, CancellationToken cancellationToken);
 
     ValueTask<IReadOnlyList<GameActionIntent>> ListPendingAsync(int limit, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Adds an atomic, durable conflict-aware dispatch claim to an action journal. Journals that only
+/// implement <see cref="IGameActionJournal"/> remain valid for actions without a conflict key.
+/// </summary>
+public interface IGameActionConflictJournal : IGameActionJournal
+{
+    ValueTask<GameActionDispatchClaim> ClaimDispatchAsync(
+        string operationId,
+        CancellationToken cancellationToken);
+}
+
+public static class GameActionJournalDispatchExtensions
+{
+    public static async ValueTask<GameActionDispatchClaim> ClaimDispatchAsync(
+        this IGameActionJournal journal,
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        if (journal is null)
+        {
+            throw new ArgumentNullException(nameof(journal));
+        }
+
+        if (journal is IGameActionConflictJournal conflictJournal)
+        {
+            return await conflictJournal.ClaimDispatchAsync(operationId, cancellationToken).ConfigureAwait(false);
+        }
+
+        var current = await journal.FindAsync(operationId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Cannot dispatch an action without a matching intent.");
+        if (current.Intent.ConflictKey is not null)
+        {
+            throw new InvalidOperationException(
+                "The configured action journal does not support durable conflict keys.");
+        }
+
+        if (current.Receipt is not null)
+        {
+            return new GameActionDispatchClaim(GameActionDispatchClaimStatus.Completed, current);
+        }
+
+        if (current.Dispatched)
+        {
+            return new GameActionDispatchClaim(GameActionDispatchClaimStatus.AlreadyDispatched, current);
+        }
+
+        if (await journal.MarkDispatchedAsync(operationId, cancellationToken).ConfigureAwait(false))
+        {
+            var claimed = await journal.FindAsync(operationId, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The action journal lost the operation after dispatch.");
+            return new GameActionDispatchClaim(GameActionDispatchClaimStatus.Claimed, claimed);
+        }
+
+        var settled = await journal.FindAsync(operationId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The action journal lost the operation after rejecting dispatch.");
+        return settled.Receipt is not null
+            ? new GameActionDispatchClaim(GameActionDispatchClaimStatus.Completed, settled)
+            : settled.Dispatched
+                ? new GameActionDispatchClaim(GameActionDispatchClaimStatus.AlreadyDispatched, settled)
+                : throw new InvalidOperationException(
+                    "The action journal rejected dispatch without recording another dispatcher or receipt.");
+    }
 }
 
 public interface IGameActionHandler
@@ -322,7 +489,7 @@ public static class GameActionOperationIds
     }
 }
 
-public sealed class InMemoryGameActionJournal : IGameActionJournal
+public sealed class InMemoryGameActionJournal : IGameActionConflictJournal
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, MutableEntry> _entries = new(StringComparer.Ordinal);
@@ -392,7 +559,7 @@ public sealed class InMemoryGameActionJournal : IGameActionJournal
         }
     }
 
-    public ValueTask<bool> MarkDispatchedAsync(
+    public ValueTask<GameActionDispatchClaim> ClaimDispatchAsync(
         string operationId,
         CancellationToken cancellationToken)
     {
@@ -406,14 +573,59 @@ public sealed class InMemoryGameActionJournal : IGameActionJournal
                 throw new InvalidOperationException("Cannot dispatch an action without a matching intent.");
             }
 
-            if (entry.Receipt is not null || entry.Dispatched)
+            var snapshot = new GameActionJournalEntry(
+                entry.Intent,
+                entry.Receipt,
+                created: false,
+                dispatched: entry.Dispatched);
+            if (entry.Receipt is not null)
             {
-                return new ValueTask<bool>(false);
+                return new ValueTask<GameActionDispatchClaim>(new GameActionDispatchClaim(
+                    GameActionDispatchClaimStatus.Completed,
+                    snapshot));
+            }
+
+            if (entry.Dispatched)
+            {
+                return new ValueTask<GameActionDispatchClaim>(new GameActionDispatchClaim(
+                    GameActionDispatchClaimStatus.AlreadyDispatched,
+                    snapshot));
+            }
+
+            if (entry.Intent.ConflictKey is not null)
+            {
+                var blocker = _entries.Values
+                    .Where(candidate => candidate.Dispatched && candidate.Receipt is null)
+                    .Select(candidate => candidate.Intent)
+                    .Where(candidate => GameActionConflicts.Match(candidate, entry.Intent))
+                    .OrderBy(candidate => candidate.OperationId, StringComparer.Ordinal)
+                    .FirstOrDefault();
+                if (blocker is not null)
+                {
+                    return new ValueTask<GameActionDispatchClaim>(new GameActionDispatchClaim(
+                        GameActionDispatchClaimStatus.Blocked,
+                        snapshot,
+                        blocker.OperationId));
+                }
             }
 
             entry.Dispatched = true;
-            return new ValueTask<bool>(true);
+            return new ValueTask<GameActionDispatchClaim>(new GameActionDispatchClaim(
+                GameActionDispatchClaimStatus.Claimed,
+                new GameActionJournalEntry(
+                    entry.Intent,
+                    receipt: null,
+                    created: false,
+                    dispatched: true)));
         }
+    }
+
+    public async ValueTask<bool> MarkDispatchedAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        var claim = await ClaimDispatchAsync(operationId, cancellationToken).ConfigureAwait(false);
+        return claim.Status == GameActionDispatchClaimStatus.Claimed;
     }
 
     public ValueTask SaveReceiptAsync(GameActionReceipt receipt, CancellationToken cancellationToken)
@@ -486,7 +698,8 @@ public sealed class InMemoryGameActionJournal : IGameActionJournal
             || !string.Equals(expected.ArgumentsJson, actual.ArgumentsJson, StringComparison.Ordinal)
             || expected.Moment != actual.Moment
             || expected.ExpectedRevision != actual.ExpectedRevision
-            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal))
+            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal)
+            || !string.Equals(expected.ConflictKey, actual.ConflictKey, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The operation ID is already reserved for a different action intent.");
         }
@@ -530,12 +743,14 @@ public sealed class DurableGameActionDispatcher
     private readonly IGameActionHandler _handler;
     private readonly SemaphoreSlim[] _operationGates;
     private readonly int _receiptCommitTimeoutMilliseconds;
+    private readonly int _conflictPollIntervalMilliseconds;
 
     public DurableGameActionDispatcher(
         IGameActionJournal journal,
         IGameActionHandler handler,
         int concurrencyStripes = 64,
-        int receiptCommitTimeoutMilliseconds = 10_000)
+        int receiptCommitTimeoutMilliseconds = 10_000,
+        int conflictPollIntervalMilliseconds = 25)
     {
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
         _handler = handler ?? throw new ArgumentNullException(nameof(handler));
@@ -549,10 +764,16 @@ public sealed class DurableGameActionDispatcher
             throw new ArgumentOutOfRangeException(nameof(receiptCommitTimeoutMilliseconds));
         }
 
+        if (conflictPollIntervalMilliseconds < 1 || conflictPollIntervalMilliseconds > 60_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(conflictPollIntervalMilliseconds));
+        }
+
         _operationGates = Enumerable.Range(0, concurrencyStripes)
             .Select(_ => new SemaphoreSlim(1, 1))
             .ToArray();
         _receiptCommitTimeoutMilliseconds = receiptCommitTimeoutMilliseconds;
+        _conflictPollIntervalMilliseconds = conflictPollIntervalMilliseconds;
     }
 
     public async ValueTask<GameActionReceipt> ExecuteAsync(
@@ -581,22 +802,24 @@ public sealed class DurableGameActionDispatcher
                 return await TryRecoverAsync(reservation.Intent, cancellationToken).ConfigureAwait(false);
             }
 
-            var claimed = await _journal.MarkDispatchedAsync(
+            var claim = await ClaimDispatchWhenAvailableAsync(
                 reservation.Intent.OperationId,
                 cancellationToken).ConfigureAwait(false);
-            if (!claimed)
+            ValidateEntry(claim.Entry, intent);
+            if (claim.Status == GameActionDispatchClaimStatus.Completed)
             {
-                var current = await _journal.FindAsync(
-                    reservation.Intent.OperationId,
-                    cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("The reserved action disappeared from its journal.");
-                ValidateEntry(current, intent);
-                if (!current.Dispatched && current.Receipt is null)
-                {
-                    throw new InvalidOperationException("The action journal rejected dispatch without recording another dispatcher or receipt.");
-                }
+                return claim.Entry.Receipt
+                    ?? throw new InvalidOperationException("A completed dispatch claim did not contain its receipt.");
+            }
 
-                return current.Receipt ?? await TryRecoverAsync(current.Intent, cancellationToken).ConfigureAwait(false);
+            if (claim.Status == GameActionDispatchClaimStatus.AlreadyDispatched)
+            {
+                return await TryRecoverAsync(claim.Entry.Intent, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (claim.Status != GameActionDispatchClaimStatus.Claimed)
+            {
+                throw new InvalidOperationException("The action journal returned an invalid dispatch claim state.");
             }
 
             try
@@ -639,10 +862,17 @@ public sealed class DurableGameActionDispatcher
 
             if (!entry.Dispatched)
             {
-                var claimed = await _journal.MarkDispatchedAsync(
+                var claim = await ClaimDispatchWhenAvailableAsync(
                     entry.Intent.OperationId,
                     cancellationToken).ConfigureAwait(false);
-                if (claimed)
+                ValidateEntry(claim.Entry, entry.Intent);
+                if (claim.Status == GameActionDispatchClaimStatus.Completed)
+                {
+                    return claim.Entry.Receipt
+                        ?? throw new InvalidOperationException("A completed dispatch claim did not contain its receipt.");
+                }
+
+                if (claim.Status == GameActionDispatchClaimStatus.Claimed)
                 {
                     try
                     {
@@ -661,18 +891,12 @@ public sealed class DurableGameActionDispatcher
                     }
                 }
 
-                var current = await _journal.FindAsync(operationId, cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("The reserved action disappeared from its journal.");
-                ValidateEntry(current, entry.Intent);
-                if (current.Receipt is not null)
+                if (claim.Status == GameActionDispatchClaimStatus.AlreadyDispatched)
                 {
-                    return current.Receipt;
+                    return await TryRecoverAsync(claim.Entry.Intent, cancellationToken).ConfigureAwait(false);
                 }
 
-                if (!current.Dispatched)
-                {
-                    throw new InvalidOperationException("The action journal rejected dispatch without recording another dispatcher or receipt.");
-                }
+                throw new InvalidOperationException("The action journal returned an invalid dispatch claim state.");
             }
 
             return await TryRecoverAsync(entry.Intent, cancellationToken).ConfigureAwait(false);
@@ -777,6 +1001,30 @@ public sealed class DurableGameActionDispatcher
         }
     }
 
+    private async ValueTask<GameActionDispatchClaim> ClaimDispatchWhenAvailableAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var claim = await _journal.ClaimDispatchAsync(operationId, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The action journal returned no dispatch claim.");
+            ValidateEntry(claim.Entry, expectedIntent: null);
+            if (claim.Status != GameActionDispatchClaimStatus.Blocked)
+            {
+                return claim;
+            }
+
+            if (claim.Entry.Intent.ConflictKey is null
+                || string.IsNullOrWhiteSpace(claim.BlockingOperationId))
+            {
+                throw new InvalidOperationException("A blocked dispatch claim did not identify its durable conflict.");
+            }
+
+            await Task.Delay(_conflictPollIntervalMilliseconds, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private SemaphoreSlim SelectGate(string operationId)
     {
         var hash = StringComparer.Ordinal.GetHashCode(operationId) & int.MaxValue;
@@ -820,7 +1068,8 @@ public sealed class DurableGameActionDispatcher
             || !string.Equals(left.ArgumentsJson, right.ArgumentsJson, StringComparison.Ordinal)
             || left.Moment != right.Moment
             || left.ExpectedRevision != right.ExpectedRevision
-            || !string.Equals(left.GenerationId, right.GenerationId, StringComparison.Ordinal))
+            || !string.Equals(left.GenerationId, right.GenerationId, StringComparison.Ordinal)
+            || !string.Equals(left.ConflictKey, right.ConflictKey, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The action journal returned a different reserved intent.");
         }
@@ -881,7 +1130,8 @@ public static class GameActionTool
                     argumentsJson: arguments.GetRawText(),
                     moment: input.Moment,
                     expectedRevision: expectedRevision,
-                    generationId: generationId);
+                    generationId: generationId,
+                    conflictKey: execution.ConflictKey);
                 var receipt = await dispatcher.ExecuteAsync(intent, cancellationToken).ConfigureAwait(false);
                 var json = JsonSerializer.Serialize(new ReceiptPayload(receipt), ReceiptJsonOptions);
                 return new ToolResult(

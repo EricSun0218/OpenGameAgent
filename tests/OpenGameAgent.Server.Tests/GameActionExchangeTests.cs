@@ -57,7 +57,8 @@ public sealed class GameActionExchangeTests
         var intent = Intent("operation-restart");
         var firstJournal = new Persistence.FileGameActionJournal(directory.Path);
         await firstJournal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await firstJournal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await firstJournal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
 
         var restartedJournal = new Persistence.FileGameActionJournal(directory.Path);
         var restartedExchange = new GameActionExchange(restartedJournal);
@@ -100,7 +101,8 @@ public sealed class GameActionExchangeTests
         var exchange = new GameActionExchange(journal);
         var intent = Intent("operation-bindings");
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         var receipt = GameActionReceipt.Committed(intent, "{}", 8);
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await exchange.SubmitReceiptAsync(
@@ -133,7 +135,8 @@ public sealed class GameActionExchangeTests
         var journal = new CountingJournal(innerJournal);
         var intent = Intent("operation-http");
         await innerJournal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await innerJournal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await innerJournal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         await using var app = await CreateAppAsync(
             journal,
             new PairingAuthenticator(),
@@ -147,6 +150,7 @@ public sealed class GameActionExchangeTests
         var allowedJson = await allowed.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
         allowed.EnsureSuccessStatusCode();
         Assert.Contains(intent.OperationId, allowedJson, StringComparison.Ordinal);
+        Assert.Contains("\"conflictKey\":\"world:resource\"", allowedJson, StringComparison.Ordinal);
         Assert.DoesNotContain("pair-owner-a", allowedJson, StringComparison.Ordinal);
 
         var scansBeforeDenial = journal.ListPendingCalls;
@@ -246,7 +250,8 @@ public sealed class GameActionExchangeTests
         var journal = new InMemoryGameActionJournal();
         var intent = Intent("operation-stream");
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         await using var app = await CreateAppAsync(journal, new PairingAuthenticator(), new OwnerAuthorizer());
         using var client = app.GetTestClient();
         using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/actions/stream")
@@ -282,7 +287,8 @@ public sealed class GameActionExchangeTests
         "{\"x\":1}",
         new GameMoment("world", 42, "{\"month\":3}"),
         expectedRevision: 7,
-        generationId: "save-generation-3");
+        generationId: "save-generation-3",
+        conflictKey: "world:resource");
 
     private static async Task<GameActionDelivery> WaitForDeliveryAsync(
         GameActionExchange exchange,

@@ -351,7 +351,8 @@ public sealed class GameActionExchange : IGameActionHandler
             || !string.Equals(expected.ArgumentsJson, actual.ArgumentsJson, StringComparison.Ordinal)
             || expected.Moment != actual.Moment
             || expected.ExpectedRevision != actual.ExpectedRevision
-            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal))
+            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal)
+            || !string.Equals(expected.ConflictKey, actual.ConflictKey, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The external action intent does not match its durable reservation.");
         }

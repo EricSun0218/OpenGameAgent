@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Carry tool conflict keys into durable action intents and journals, and atomically coordinate matching
+  writes across actors, sessions, runs, and process restarts within a timeline/save generation. An
+  uncertain dispatch blocks the key until authoritative reconciliation; unrelated keys and generations
+  remain concurrent, and legacy journals continue to serve actions without conflict keys.
 - Add optional provider-neutral realtime conversations with bounded PCM16 queues, live transcript and
   audio events, barge-in cancellation/truncation, non-blocking background-agent handoff and steering,
   200 ms streamed-output forwarding, and cancel-replace presentation behavior channels.

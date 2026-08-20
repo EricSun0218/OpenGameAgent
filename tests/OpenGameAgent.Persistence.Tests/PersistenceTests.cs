@@ -397,7 +397,8 @@ public sealed class PersistenceTests
 
         var restarted = new FileGameActionJournal(directory.Path);
         var pending = await restarted.ListPendingAsync(10, TestContext.Current.CancellationToken);
-        Assert.True(await restarted.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await restarted.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         await restarted.SaveReceiptAsync(
             GameActionReceipt.Committed(intent, "{\"value\":4.75}", 2),
             TestContext.Current.CancellationToken);
@@ -510,7 +511,8 @@ public sealed class PersistenceTests
         var intent = Intent("operation");
         var journal = new FileGameActionJournal(directory.Path);
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         await journal.SaveReceiptAsync(
             GameActionReceipt.Committed(intent, "{\"value\":1}"),
             TestContext.Current.CancellationToken);
@@ -535,7 +537,8 @@ public sealed class PersistenceTests
         foreach (var journal in journals)
         {
             await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-            Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+            Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+                (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
             var mismatched = new GameActionReceipt(
                 intent.OperationId,
                 GameActionStatus.Committed,
@@ -554,7 +557,8 @@ public sealed class PersistenceTests
         var intent = Intent("operation");
         var journal = new FileGameActionJournal(directory.Path);
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         await journal.SaveReceiptAsync(GameActionReceipt.Committed(intent, "{}"), TestContext.Current.CancellationToken);
         var path = Assert.Single(Directory.GetFiles(directory.Path, "*.action.json"));
         var text = await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken);
@@ -608,7 +612,8 @@ public sealed class PersistenceTests
         var intent = Intent("dispatched-operation");
         var journal = new FileGameActionJournal(directory.Path);
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         var executeCount = 0;
         var recoverCount = 0;
         var dispatcher = new DurableGameActionDispatcher(
@@ -1374,8 +1379,101 @@ public sealed class PersistenceTests
                 TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task ActionConflictClaimSurvivesRestartAndReleasesOnlyAfterFinalReceipt()
+    {
+        using var directory = new TemporaryDirectory();
+        var first = ConflictIntent("first", "session-a", "actor-a");
+        var second = ConflictIntent("second", "session-b", "actor-b");
+        var journal = new FileGameActionJournal(directory.Path);
+        await journal.ReserveAsync(first, TestContext.Current.CancellationToken);
+        await journal.ReserveAsync(second, TestContext.Current.CancellationToken);
+        Assert.Equal(
+            GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(first.OperationId, TestContext.Current.CancellationToken)).Status);
+
+        var restarted = new FileGameActionJournal(directory.Path);
+        var blocked = await restarted.ClaimDispatchAsync(second.OperationId, TestContext.Current.CancellationToken);
+        Assert.Equal(GameActionDispatchClaimStatus.Blocked, blocked.Status);
+        Assert.Equal(first.OperationId, blocked.BlockingOperationId);
+
+        await restarted.SaveReceiptAsync(
+            GameActionReceipt.Committed(first, "{}", 1),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(
+            GameActionDispatchClaimStatus.Claimed,
+            (await restarted.ClaimDispatchAsync(second.OperationId, TestContext.Current.CancellationToken)).Status);
+    }
+
+    [Fact]
+    public async Task ConcurrentFileJournalsAtomicallyClaimOneConflictOwner()
+    {
+        using var directory = new TemporaryDirectory();
+        var firstJournal = new FileGameActionJournal(directory.Path);
+        var secondJournal = new FileGameActionJournal(directory.Path);
+        var first = ConflictIntent("first", "session-a", "actor-a");
+        var second = ConflictIntent("second", "session-b", "actor-b");
+        await firstJournal.ReserveAsync(first, TestContext.Current.CancellationToken);
+        await secondJournal.ReserveAsync(second, TestContext.Current.CancellationToken);
+
+        var claims = await Task.WhenAll(
+            firstJournal.ClaimDispatchAsync(first.OperationId, TestContext.Current.CancellationToken).AsTask(),
+            secondJournal.ClaimDispatchAsync(second.OperationId, TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Single(claims, claim => claim.Status == GameActionDispatchClaimStatus.Claimed);
+        Assert.Single(claims, claim => claim.Status == GameActionDispatchClaimStatus.Blocked);
+    }
+
+    [Fact]
+    public async Task ActionConflictStateRejectsCorruptionAndReadsPreviousIntentFormatAsUnscoped()
+    {
+        using var directory = new TemporaryDirectory();
+        var first = ConflictIntent("first", "session-a", "actor-a");
+        var second = ConflictIntent("second", "session-b", "actor-b");
+        var journal = new FileGameActionJournal(directory.Path);
+        await journal.ReserveAsync(first, TestContext.Current.CancellationToken);
+        var firstPath = Assert.Single(Directory.GetFiles(directory.Path, "*.action.json"));
+        var previous = JsonNode.Parse(await File.ReadAllTextAsync(
+            firstPath,
+            TestContext.Current.CancellationToken))!.AsObject();
+        previous["FormatVersion"] = 2;
+        previous["Intent"]!.AsObject().Remove("ConflictKey");
+        await File.WriteAllTextAsync(
+            firstPath,
+            previous.ToJsonString(),
+            TestContext.Current.CancellationToken);
+        Assert.Null((await new FileGameActionJournal(directory.Path).FindAsync(
+            first.OperationId,
+            TestContext.Current.CancellationToken))!.Intent.ConflictKey);
+
+        using var corruptDirectory = new TemporaryDirectory();
+        var corruptJournal = new FileGameActionJournal(corruptDirectory.Path);
+        await corruptJournal.ReserveAsync(first, TestContext.Current.CancellationToken);
+        await corruptJournal.ReserveAsync(second, TestContext.Current.CancellationToken);
+        await corruptJournal.ClaimDispatchAsync(first.OperationId, TestContext.Current.CancellationToken);
+        var conflictPath = Assert.Single(Directory.GetFiles(corruptDirectory.Path, "*.action-conflict.json"));
+        await File.WriteAllTextAsync(conflictPath, "{broken", TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<PersistenceException>(async () =>
+            await new FileGameActionJournal(corruptDirectory.Path).ClaimDispatchAsync(
+                second.OperationId,
+                TestContext.Current.CancellationToken));
+    }
+
     private static GameActionIntent Intent(string operationId) =>
         new(operationId, "input", "session", "actor", "move", "{\"x\":1.5}", new GameMoment("world", 4));
+
+    private static GameActionIntent ConflictIntent(string operationId, string sessionId, string actorId) =>
+        new(
+            operationId,
+            "input-" + operationId,
+            sessionId,
+            actorId,
+            "move",
+            "{\"x\":1.5}",
+            new GameMoment("world", 4),
+            generationId: "save",
+            conflictKey: "world:resource");
 
     private static async Task SetFormatVersionAsync(string path, int formatVersion)
     {

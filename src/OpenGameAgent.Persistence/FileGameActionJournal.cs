@@ -7,10 +7,13 @@ using System.Threading.Tasks;
 
 namespace OpenGameAgent.Persistence;
 
-public sealed class FileGameActionJournal : IGameActionJournal
+public sealed class FileGameActionJournal : IGameActionConflictJournal
 {
-    private const int CurrentFormatVersion = 2;
+    private const int CurrentFormatVersion = 3;
+    private const int PreviousFormatVersion = 2;
+    private const int ConflictFormatVersion = 1;
     private const string Suffix = ".action.json";
+    private const string ConflictSuffix = ".action-conflict.json";
     private readonly FileStore _files;
     private readonly int _maximumEntries;
     private readonly SemaphoreSlim _capacityGate = new(1, 1);
@@ -137,7 +140,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
         }
     }
 
-    public async ValueTask<bool> MarkDispatchedAsync(
+    public async ValueTask<GameActionDispatchClaim> ClaimDispatchAsync(
         string operationId,
         CancellationToken cancellationToken)
     {
@@ -146,6 +149,30 @@ public sealed class FileGameActionJournal : IGameActionJournal
             throw new ArgumentException("An operation ID is required.", nameof(operationId));
         }
 
+        var initial = await FindAsync(operationId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Cannot dispatch an action without a matching intent.");
+        if (initial.Receipt is not null)
+        {
+            return new GameActionDispatchClaim(GameActionDispatchClaimStatus.Completed, initial);
+        }
+
+        return initial.Intent.ConflictKey is null
+            ? await ClaimUnscopedDispatchAsync(operationId, cancellationToken).ConfigureAwait(false)
+            : await ClaimConflictDispatchAsync(initial.Intent, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<bool> MarkDispatchedAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        var claim = await ClaimDispatchAsync(operationId, cancellationToken).ConfigureAwait(false);
+        return claim.Status == GameActionDispatchClaimStatus.Claimed;
+    }
+
+    private async ValueTask<GameActionDispatchClaim> ClaimUnscopedDispatchAsync(
+        string operationId,
+        CancellationToken cancellationToken)
+    {
         var gate = _files.GateFor(operationId);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -160,16 +187,95 @@ public sealed class FileGameActionJournal : IGameActionJournal
                 throw new PersistenceException("The action journal identity does not match the requested operation.");
             }
 
-            if (entry.Receipt is not null || entry.Dispatched)
+            if (entry.Receipt is not null)
             {
-                return false;
+                return new GameActionDispatchClaim(GameActionDispatchClaimStatus.Completed, entry);
+            }
+
+            if (entry.Dispatched)
+            {
+                return new GameActionDispatchClaim(GameActionDispatchClaimStatus.AlreadyDispatched, entry);
             }
 
             await _files.WriteAtomicAsync(
                 path,
                 Encode(entry.Intent, null, dispatched: true),
                 cancellationToken).ConfigureAwait(false);
-            return true;
+            return new GameActionDispatchClaim(
+                GameActionDispatchClaimStatus.Claimed,
+                new GameActionJournalEntry(entry.Intent, null, created: false, dispatched: true));
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async ValueTask<GameActionDispatchClaim> ClaimConflictDispatchAsync(
+        GameActionIntent expectedIntent,
+        CancellationToken cancellationToken)
+    {
+        var scopeIdentity = GameActionConflicts.ScopeIdentity(expectedIntent);
+        var gate = _files.GateFor(scopeIdentity + ConflictSuffix);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var processLease = await _files.AcquireProcessLeaseAsync(
+                scopeIdentity + ConflictSuffix,
+                cancellationToken).ConfigureAwait(false);
+            var targetPath = _files.PathFor(expectedIntent.OperationId, Suffix);
+            var targetDocument = await _files.ReadAsync<ActionDocument>(targetPath, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Cannot dispatch an action without a matching intent.");
+            var target = Decode(targetDocument);
+            EnsureSameIntent(target.Intent, expectedIntent);
+            if (target.Receipt is not null)
+            {
+                return new GameActionDispatchClaim(GameActionDispatchClaimStatus.Completed, target);
+            }
+
+            if (target.Dispatched)
+            {
+                return new GameActionDispatchClaim(GameActionDispatchClaimStatus.AlreadyDispatched, target);
+            }
+
+            var conflictPath = _files.PathFor(scopeIdentity, ConflictSuffix);
+            var conflictDocument = await _files.ReadAsync<ConflictDocument>(
+                conflictPath,
+                cancellationToken).ConfigureAwait(false);
+            if (conflictDocument is not null)
+            {
+                var ownerOperationId = DecodeConflict(conflictDocument, expectedIntent, conflictPath);
+                var ownerDocument = await _files.ReadAsync<ActionDocument>(
+                    _files.PathFor(ownerOperationId, Suffix),
+                    cancellationToken).ConfigureAwait(false)
+                    ?? throw new PersistenceException("A durable action conflict points to a missing operation.");
+                var owner = Decode(ownerDocument);
+                if (!GameActionConflicts.Match(owner.Intent, expectedIntent))
+                {
+                    throw new PersistenceException("A durable action conflict points to an operation in another scope.");
+                }
+
+                if (owner.Receipt is null
+                    && !string.Equals(owner.Intent.OperationId, expectedIntent.OperationId, StringComparison.Ordinal))
+                {
+                    return new GameActionDispatchClaim(
+                        GameActionDispatchClaimStatus.Blocked,
+                        target,
+                        owner.Intent.OperationId);
+                }
+            }
+
+            await _files.WriteAtomicAsync(
+                conflictPath,
+                EncodeConflict(expectedIntent),
+                cancellationToken).ConfigureAwait(false);
+            await _files.WriteAtomicAsync(
+                targetPath,
+                Encode(target.Intent, null, dispatched: true),
+                cancellationToken).ConfigureAwait(false);
+            return new GameActionDispatchClaim(
+                GameActionDispatchClaimStatus.Claimed,
+                new GameActionJournalEntry(target.Intent, null, created: false, dispatched: true));
         }
         finally
         {
@@ -279,6 +385,7 @@ public sealed class FileGameActionJournal : IGameActionJournal
                 Moment = MomentDocument.Encode(intent.Moment),
                 ExpectedRevision = intent.ExpectedRevision,
                 GenerationId = intent.GenerationId,
+                ConflictKey = intent.ConflictKey,
             },
             Receipt = receipt is null ? null : new ReceiptDocument
             {
@@ -297,7 +404,8 @@ public sealed class FileGameActionJournal : IGameActionJournal
 
     private static GameActionJournalEntry DecodeCore(ActionDocument document)
     {
-        if (document.FormatVersion != CurrentFormatVersion || document.Intent is null)
+        if (document.FormatVersion is not CurrentFormatVersion and not PreviousFormatVersion
+            || document.Intent is null)
         {
             throw new PersistenceException("The action journal document has an unsupported format.");
         }
@@ -311,7 +419,8 @@ public sealed class FileGameActionJournal : IGameActionJournal
             document.Intent.ArgumentsJson,
             document.Intent.Moment?.Decode() ?? throw new PersistenceException("The action intent moment is missing."),
             document.Intent.ExpectedRevision,
-            document.Intent.GenerationId);
+            document.Intent.GenerationId,
+            document.FormatVersion >= CurrentFormatVersion ? document.Intent.ConflictKey : null);
         GameActionReceipt? receipt = null;
         if (document.Receipt is not null)
         {
@@ -357,7 +466,8 @@ public sealed class FileGameActionJournal : IGameActionJournal
             || !string.Equals(expected.ArgumentsJson, actual.ArgumentsJson, StringComparison.Ordinal)
             || expected.Moment != actual.Moment
             || expected.ExpectedRevision != actual.ExpectedRevision
-            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal))
+            || !string.Equals(expected.GenerationId, actual.GenerationId, StringComparison.Ordinal)
+            || !string.Equals(expected.ConflictKey, actual.ConflictKey, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The operation ID is already reserved for a different action intent.");
         }
@@ -379,6 +489,40 @@ public sealed class FileGameActionJournal : IGameActionJournal
         && string.Equals(left.ResultJson, right.ResultJson, StringComparison.Ordinal)
         && string.Equals(left.Code, right.Code, StringComparison.Ordinal)
         && string.Equals(left.Message, right.Message, StringComparison.Ordinal);
+
+    private static ConflictDocument EncodeConflict(GameActionIntent intent) => new()
+    {
+        FormatVersion = ConflictFormatVersion,
+        OperationId = intent.OperationId,
+        TimelineId = intent.Moment.TimelineId,
+        GenerationId = intent.GenerationId,
+        ConflictKey = intent.ConflictKey,
+    };
+
+    private string DecodeConflict(
+        ConflictDocument document,
+        GameActionIntent expectedIntent,
+        string path) => FileStore.DecodeDocument("action conflict document", () =>
+    {
+        if (document.FormatVersion != ConflictFormatVersion
+            || string.IsNullOrWhiteSpace(document.OperationId)
+            || string.IsNullOrWhiteSpace(document.TimelineId)
+            || string.IsNullOrWhiteSpace(document.ConflictKey))
+        {
+            throw new PersistenceException("The action conflict document has an unsupported format.");
+        }
+
+        var scopeIdentity = GameActionConflicts.ScopeIdentity(expectedIntent);
+        _files.EnsurePathFor(path, scopeIdentity, ConflictSuffix, "action conflict document");
+        if (!string.Equals(document.TimelineId, expectedIntent.Moment.TimelineId, StringComparison.Ordinal)
+            || !string.Equals(document.GenerationId, expectedIntent.GenerationId, StringComparison.Ordinal)
+            || !string.Equals(document.ConflictKey, expectedIntent.ConflictKey, StringComparison.Ordinal))
+        {
+            throw new PersistenceException("The action conflict document does not match its storage scope.");
+        }
+
+        return document.OperationId;
+    });
 
     private sealed class ActionDocument
     {
@@ -410,6 +554,21 @@ public sealed class FileGameActionJournal : IGameActionJournal
         public long? ExpectedRevision { get; set; }
 
         public string? GenerationId { get; set; }
+
+        public string? ConflictKey { get; set; }
+    }
+
+    private sealed class ConflictDocument
+    {
+        public int FormatVersion { get; set; }
+
+        public string OperationId { get; set; } = string.Empty;
+
+        public string TimelineId { get; set; } = string.Empty;
+
+        public string? GenerationId { get; set; }
+
+        public string? ConflictKey { get; set; }
     }
 
     private sealed class ReceiptDocument

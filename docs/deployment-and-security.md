@@ -138,7 +138,7 @@ GameActionTool.Create(
     generationId: saveGeneration);
 ```
 
-The external host calls `claim` or `stream`, reconciles every delivered `operationId` against its own authoritative operation log, and only then executes or resumes it. It submits a final receipt containing the same session, actor, timeline, tick, generation, and expected revision. A repeated claim returns the same durable operation; a service restart after delivery but before receipt leaves it `Dispatched` and requires reconciliation instead of blind replay.
+The external host calls `claim` or `stream`, reconciles every delivered `operationId` against its own authoritative operation log, and only then executes or resumes it. It submits a final receipt containing the same session, actor, timeline, tick, generation, and expected revision. A repeated claim returns the same durable operation; a service restart after delivery but before receipt leaves it `Dispatched` and requires reconciliation instead of blind replay. The delivery also includes `conflictKey` when the tool supplied one. Official journals persist the owner of `(timelineId, generationId, conflictKey)` before dispatch, so another actor cannot receive a conflicting action until the first operation has a final receipt. An uncertain operation remains the owner across process restarts.
 
 The minimal JSON exchange is:
 

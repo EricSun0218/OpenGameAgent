@@ -679,7 +679,9 @@ public sealed class RuntimeTests
         var journal = new InMemoryGameActionJournal();
         var intent = Intent("recover-failure");
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken);
+        Assert.Equal(
+            GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         var dispatcher = new DurableGameActionDispatcher(
             journal,
             new TestActionHandler(recover: (_, _) => throw new InvalidOperationException("store offline")));
@@ -832,7 +834,9 @@ public sealed class RuntimeTests
         var journal = new InMemoryGameActionJournal();
         var intent = Intent("dispatched-operation");
         await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
-        Assert.True(await journal.MarkDispatchedAsync(intent.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(
+            GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
         var handler = new TestActionHandler(
             recover: (candidate, _) => new ValueTask<GameActionReceipt?>(
                 GameActionReceipt.Committed(candidate, "{\"recovered\":true}")));
@@ -4212,9 +4216,7 @@ public sealed class RuntimeTests
             CancellationToken cancellationToken) =>
             _inner.FindAsync(operationId, cancellationToken);
 
-        public ValueTask<bool> MarkDispatchedAsync(
-            string operationId,
-            CancellationToken cancellationToken) =>
+        public ValueTask<bool> MarkDispatchedAsync(string operationId, CancellationToken cancellationToken) =>
             _inner.MarkDispatchedAsync(operationId, cancellationToken);
 
         public ValueTask SaveReceiptAsync(GameActionReceipt receipt, CancellationToken cancellationToken)
