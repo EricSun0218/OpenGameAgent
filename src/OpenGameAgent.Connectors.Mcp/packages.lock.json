@@ -4,9 +4,9 @@
     ".NETStandard,Version=v2.1": {
       "ModelContextProtocol.Core": {
         "type": "Direct",
-        "requested": "[2.1.0, )",
-        "resolved": "2.1.0",
-        "contentHash": "cU/urrhRxE4/iSyBIJI7QOaFqSP1FOEnwEHsct9n6t6/XluCAFD9iqnrPkBAsEYr+f/G4tVQ21U+6wN/6fQvOg==",
+        "requested": "[2.2.0, )",
+        "resolved": "2.2.0",
+        "contentHash": "FeBfXU6T8k+jw4afg4sfxdEX2rL/e5oKOk9ROOGztu9k47+7Bz08sdaToYt2XvMY1opNbwxYQOFMj6wH9TInhA==",
         "dependencies": {
           "Microsoft.Bcl.Memory": "10.0.10",
           "Microsoft.Extensions.AI.Abstractions": "10.8.3",

@@ -56,8 +56,8 @@
       },
       "ModelContextProtocol.Core": {
         "type": "Transitive",
-        "resolved": "2.1.0",
-        "contentHash": "cU/urrhRxE4/iSyBIJI7QOaFqSP1FOEnwEHsct9n6t6/XluCAFD9iqnrPkBAsEYr+f/G4tVQ21U+6wN/6fQvOg==",
+        "resolved": "2.2.0",
+        "contentHash": "FeBfXU6T8k+jw4afg4sfxdEX2rL/e5oKOk9ROOGztu9k47+7Bz08sdaToYt2XvMY1opNbwxYQOFMj6wH9TInhA==",
         "dependencies": {
           "Microsoft.Bcl.Memory": "10.0.10",
           "Microsoft.Extensions.AI.Abstractions": "10.8.3",
@@ -156,7 +156,7 @@
       "opengameagent.connectors.mcp": {
         "type": "Project",
         "dependencies": {
-          "ModelContextProtocol.Core": "[2.1.0, )",
+          "ModelContextProtocol.Core": "[2.2.0, )",
           "OpenGameAgent.Extensions": "[0.3.0-alpha.2, )"
         }
       },

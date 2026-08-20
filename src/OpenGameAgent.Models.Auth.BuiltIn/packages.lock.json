@@ -4,16 +4,16 @@
     ".NETStandard,Version=v2.1": {
       "AWSSDK.BedrockRuntime": {
         "type": "Transitive",
-        "resolved": "4.0.101",
-        "contentHash": "vBUUBQOwhEd75Zy5b5pDE+Yp5kTSb7WkE8pfpKa/ePk6WV748zqTQnObdFYBfrI3ASyXwCVV4LFDVbkgDBzOeA==",
+        "resolved": "4.0.101.1",
+        "contentHash": "4rZxsM0r6ytFa3iho83osE01yGuLB0gouTrMkUd8+PawFzZ5SBIR45TL5z7EFi3HLFX914boPipQEw8rMJBmtA==",
         "dependencies": {
-          "AWSSDK.Core": "[4.0.100.9, 5.0.0)"
+          "AWSSDK.Core": "[4.0.101, 5.0.0)"
         }
       },
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "4.0.100.9",
-        "contentHash": "OPYy41jZjXwxxcYRotaq24HDrwUnVtBB/mvg1IwB9D1ICXAtHqMa1sp2hpmlVJCZwjlcrPcTCJIejInvV1vp5g==",
+        "resolved": "4.0.101",
+        "contentHash": "7Q0z0fLpy+w6h4G5z/qZ6PYGzZ0DgYjYkVdGMnhtjkgQaKX+Sjm0YxfFxFILRewxC4o6wwnrbvwaSj41LgRRfg==",
         "dependencies": {
           "Microsoft.Bcl.AsyncInterfaces": "8.0.0",
           "System.Buffers": "4.5.1",
@@ -166,7 +166,7 @@
       "opengameagent.providers.bedrock": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.BedrockRuntime": "[4.0.101, )",
+          "AWSSDK.BedrockRuntime": "[4.0.101.1, )",
           "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
           "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
