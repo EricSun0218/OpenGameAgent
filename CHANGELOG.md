@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add input-aware tool visibility policies that filter collected tool definitions before every model
+  request, plus independent visibility predicates for the memory append and search tools.
 - Add official OpenAI Images and Volcengine Ark/Seedream image providers with bounded reference-image
   inputs, credential isolation, validated image outputs, and model-registry integration.
 - Add an authorized, cursor-paged durable transcript read API for runtimes, the stock server, and remote

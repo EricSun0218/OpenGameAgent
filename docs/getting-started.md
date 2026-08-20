@@ -80,6 +80,31 @@ var runtime = new GameAgentBuilder(provider, modelName)
 
 The builder can only build once. Extensions can contribute prompt fragments, context, tools, skills, routes, workflows, hooks, providers, services, and typed lifecycle handlers without changing the kernel. Register optional features this way rather than adding them to every run.
 
+Tool visibility and tool execution authorization are separate boundaries. A visibility policy runs
+after static and dynamic tools are collected but before each model request, so a disabled tool is not
+advertised to the model:
+
+```csharp
+.UseExtension("game.tool-visibility", "1", api =>
+    api.RegisterToolVisibilityPolicy("player-settings", (context, cancellationToken) =>
+    {
+        var disabled = settings.GetDisabledTools(
+            context.Input.SessionId,
+            context.Input.ActorId,
+            context.Input.Type);
+        return new ValueTask<bool>(!disabled.Contains(context.Tool.Name));
+    }))
+```
+
+The policy sees the current `GameInput`, the stable `ToolDefinition`, risk, and contributor ID.
+All registered visibility policies must allow a tool. An exception stops the run before provider
+dispatch. Keep `ToolPolicyExtension` or equivalent game authority checks as well: hiding a schema
+reduces model access but does not authorize a later call.
+
+`GameMemoryExtension` also accepts independent `rememberToolVisibility` and
+`searchToolVisibility` predicates. This lets one runtime expose both tools during ordinary inputs,
+hide both for a specialized input, or honor per-player settings without duplicating the agent loop.
+
 ## Supply context
 
 Implement `IGameContextProvider`. Return only data this actor is allowed to observe, and include versions when they help the model reason about freshness.

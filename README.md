@@ -79,6 +79,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - game-time memory filtering, expiry, and optional custom ranking;
 - optional local/remote embeddings, rebuildable vector indexes, and lexical/vector hybrid recall;
 - skills selected by input type and available tools;
+- input-aware tool visibility resolved before every model request;
 - recurring game-time triggers and persistent actor mailboxes with payload-free backlog queries;
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
 - capability-aware model catalogs and developer-hosted short-lived credentials;
@@ -124,7 +125,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, subtitle timing, barge-in cancellation/truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
-| Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
+| Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; per-input tool visibility; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
 | DevTools | Bounded JSONL recordings, local observation-only HTML playback, summaries, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |

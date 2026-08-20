@@ -193,6 +193,14 @@ Use a separate director actor rather than mixing director privileges into every 
 
 For a very large event or command catalog, expose `ToolCatalogExtension` instead of placing every schema in every request. For external catalogs, the default on-demand connector lets the model search, inspect, and then call a selected tool. `ToolPolicyExtension` remains the authorization layer regardless of how a tool was discovered.
 
+When a mode or player setting disables a tool, hide it during collection with
+`RegisterToolVisibilityPolicy`. The policy is recomputed from the current `GameInput` for every model
+request and sees each collected `ToolDefinition`, including tools supplied by another extension or by
+the runtime host. Multiple policies form an allow-list intersection. This is distinct from
+`ToolPolicyExtension`: visibility prevents the model from seeing or choosing a schema, while the
+execution policy still validates any call that reaches the authority boundary. Use both for
+world-changing operations.
+
 ## Learned runtime AI
 
 Reinforcement-learning controllers, motion matching, perception networks, and low-level bots are outside the language-agent loop. They can coexist with it: learned systems produce observations or execute a high-level tool, while OpenGameAgent handles language, semantic planning, memory, and tool orchestration.

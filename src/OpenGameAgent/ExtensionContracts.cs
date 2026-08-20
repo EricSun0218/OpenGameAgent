@@ -72,6 +72,7 @@ public enum GameAgentExtensionResourceKind
     ContextProvider,
     Tool,
     ToolProvider,
+    ToolVisibilityPolicy,
     SkillProvider,
     RouteRule,
     PendingWorkProvider,
@@ -422,6 +423,50 @@ public delegate ValueTask<IReadOnlyList<AgentTool>> GameExtensionToolProvider(
     GameAgentExtensionRunContext context,
     CancellationToken cancellationToken);
 
+/// <summary>
+/// Describes one collected tool while its visibility is being resolved for the current input.
+/// The run context belongs to the extension that registered the visibility policy, while
+/// <see cref="ToolSourceId"/> identifies the tool contributor.
+/// </summary>
+public sealed class GameToolVisibilityContext
+{
+    internal GameToolVisibilityContext(
+        GameAgentExtensionRunContext runContext,
+        ToolDefinition tool,
+        ToolRisk risk,
+        string toolSourceId)
+    {
+        RunContext = runContext ?? throw new ArgumentNullException(nameof(runContext));
+        Tool = tool ?? throw new ArgumentNullException(nameof(tool));
+        if (!Enum.IsDefined(typeof(ToolRisk), risk))
+        {
+            throw new ArgumentOutOfRangeException(nameof(risk));
+        }
+
+        Risk = risk;
+        ToolSourceId = GameJson.RequireId(toolSourceId, nameof(toolSourceId));
+    }
+
+    public GameAgentExtensionRunContext RunContext { get; }
+
+    public GameInput Input => RunContext.Input;
+
+    public ToolDefinition Tool { get; }
+
+    public ToolRisk Risk { get; }
+
+    public string ToolSourceId { get; }
+}
+
+/// <summary>
+/// Returns whether a collected tool is visible to the model for the current game input.
+/// All registered policies must allow a tool. Policies run before the model request and do not
+/// replace execution-time authorization.
+/// </summary>
+public delegate ValueTask<bool> GameExtensionToolVisibilityPolicy(
+    GameToolVisibilityContext context,
+    CancellationToken cancellationToken);
+
 public delegate ValueTask<IReadOnlyList<GameSkill>> GameExtensionSkillProvider(
     GameAgentExtensionRunContext context,
     IReadOnlyCollection<string> activeToolNames,
@@ -498,6 +543,18 @@ public sealed class GameAgentExtensionApi
         GameExtensionToolProvider provider,
         int priority = 0) =>
         _host.Register(_extensionId, name, GameAgentExtensionResourceKind.ToolProvider, provider, priority, unique: true);
+
+    public IGameAgentExtensionRegistration RegisterToolVisibilityPolicy(
+        string name,
+        GameExtensionToolVisibilityPolicy policy,
+        int priority = 0) =>
+        _host.Register(
+            _extensionId,
+            name,
+            GameAgentExtensionResourceKind.ToolVisibilityPolicy,
+            policy,
+            priority,
+            unique: true);
 
     public IGameAgentExtensionRegistration RegisterSkillProvider(
         string name,

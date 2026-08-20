@@ -111,6 +111,7 @@ public sealed class OfficialExtensionTests
         var result = await runtime.RunAsync(Input(), TestContext.Current.CancellationToken);
 
         Assert.True(result.Succeeded);
+        Assert.Contains(provider.Requests.First().Tools, tool => tool.Name == "delete_world");
         Assert.Equal(0, Volatile.Read(ref executed));
         var audit = Assert.Single(audits);
         Assert.Equal(GameToolPolicyOutcome.Deny, audit.Outcome);
@@ -976,6 +977,79 @@ public sealed class OfficialExtensionTests
         var memory = Assert.Single(document.RootElement.GetProperty("memories").EnumerateArray());
         Assert.Equal(0.75, memory.GetProperty("payload").GetProperty("affinity").GetDouble());
         Assert.Equal(5, memory.GetProperty("tick").GetInt64());
+    }
+
+    [Fact]
+    public async Task MemoryToolVisibilityCanBeScopedByInputAndConfiguredPerTool()
+    {
+        var provider = new ScriptedProvider(_ => TextResponse("done"));
+        await using var runtime = new GameAgentBuilder(provider, "model")
+            .UseExtension(
+                "game.image-tools",
+                "1",
+                api => api.RegisterTool(new AgentTool(
+                    new ToolDefinition(
+                        "generate_image",
+                        "Generate an image.",
+                        "{\"type\":\"object\",\"additionalProperties\":false}"),
+                    (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                        new AgentContent[] { new TextContent("generated") })))))
+            .UseExtension(new GameMemoryExtension(
+                new InMemoryGameMemoryStore(),
+                rememberToolVisibility: (context, _) =>
+                    new ValueTask<bool>(IsMemoryToolEnabled(context.Input, "remember_game_memory")),
+                searchToolVisibility: (context, _) =>
+                    new ValueTask<bool>(IsMemoryToolEnabled(context.Input, "search_game_memory"))))
+            .Build();
+
+        await runtime.RunAsync(
+            new GameInput("session", "actor", "chat", "{}", new GameMoment("world", 1), "ordinary"),
+            TestContext.Current.CancellationToken);
+        await runtime.RunAsync(
+            new GameInput("session", "actor", "image", "{}", new GameMoment("world", 2), "image-only"),
+            TestContext.Current.CancellationToken);
+        await runtime.RunAsync(
+            new GameInput(
+                "session",
+                "actor",
+                "chat",
+                "{\"disabledTools\":[\"remember_game_memory\"]}",
+                new GameMoment("world", 3),
+                "remember-disabled"),
+            TestContext.Current.CancellationToken);
+        await runtime.RunAsync(
+            new GameInput(
+                "session",
+                "actor",
+                "chat",
+                "{\"disabledTools\":[\"search_game_memory\"]}",
+                new GameMoment("world", 4),
+                "search-disabled"),
+            TestContext.Current.CancellationToken);
+
+        var requests = provider.Requests.ToArray();
+        Assert.Equal(
+            new[] { "generate_image", "remember_game_memory", "search_game_memory" },
+            requests[0].Tools.Select(tool => tool.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+        Assert.Equal("generate_image", Assert.Single(requests[1].Tools).Name);
+        Assert.Equal(
+            new[] { "generate_image", "search_game_memory" },
+            requests[2].Tools.Select(tool => tool.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+        Assert.Equal(
+            new[] { "generate_image", "remember_game_memory" },
+            requests[3].Tools.Select(tool => tool.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+
+        static bool IsMemoryToolEnabled(GameInput input, string toolName)
+        {
+            if (string.Equals(input.Type, "image", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            using var document = System.Text.Json.JsonDocument.Parse(input.PayloadJson);
+            return !document.RootElement.TryGetProperty("disabledTools", out var disabled)
+                   || !disabled.EnumerateArray().Any(value => string.Equals(value.GetString(), toolName, StringComparison.Ordinal));
+        }
     }
 
     [Fact]

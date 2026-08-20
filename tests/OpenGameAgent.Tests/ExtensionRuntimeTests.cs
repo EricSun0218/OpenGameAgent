@@ -274,6 +274,97 @@ public sealed class ExtensionRuntimeTests
     }
 
     [Fact]
+    public async Task ToolVisibilityPoliciesFilterCollectedDefinitionsBeforeEachModelRequest()
+    {
+        var provider = new CaptureProvider();
+        var observed = new ConcurrentQueue<(string InputId, string ToolName, string SourceId, ToolRisk Risk)>();
+        await using var runtime = new GameAgentBuilder(provider, "model")
+            .UseExtension(
+                "game.tools",
+                "1",
+                api =>
+                {
+                    api.RegisterTool(new AgentTool(
+                        new ToolDefinition("inspect", "Inspect state.", "{\"type\":\"object\",\"additionalProperties\":false}"),
+                        (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                            new AgentContent[] { new TextContent("inspected") }))));
+                    api.RegisterTool(new AgentTool(
+                        new ToolDefinition("change", "Change state.", "{\"type\":\"object\",\"additionalProperties\":false}"),
+                        (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                            new AgentContent[] { new TextContent("changed") })),
+                        ToolRisk.IdempotentWrite));
+                })
+            .UseExtension(
+                "host.tool-settings",
+                "1",
+                api => api.RegisterToolVisibilityPolicy(
+                    "input-tool-settings",
+                    (context, _) =>
+                    {
+                        observed.Enqueue((
+                            context.Input.InputId,
+                            context.Tool.Name,
+                            context.ToolSourceId,
+                            context.Risk));
+                        using var document = JsonDocument.Parse(context.Input.PayloadJson);
+                        var visible = !document.RootElement.TryGetProperty("disabledTools", out var disabled)
+                                      || !disabled.EnumerateArray().Any(
+                                          value => string.Equals(value.GetString(), context.Tool.Name, StringComparison.Ordinal));
+                        return new ValueTask<bool>(visible);
+                    }))
+            .Build();
+
+        await runtime.RunAsync(Input("chat", "all-tools"), TestContext.Current.CancellationToken);
+        await runtime.RunAsync(
+            new GameInput(
+                "session",
+                "actor",
+                "chat",
+                "{\"disabledTools\":[\"change\"]}",
+                new GameMoment("world", 2),
+                "write-hidden"),
+            TestContext.Current.CancellationToken);
+
+        var requests = provider.Requests.ToArray();
+        Assert.Equal(
+            new[] { "change", "inspect" },
+            requests[0].Tools.Select(tool => tool.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
+        Assert.Equal("inspect", Assert.Single(requests[1].Tools).Name);
+        Assert.Contains(observed, value =>
+            value.InputId == "write-hidden"
+            && value.ToolName == "change"
+            && value.SourceId == "game.tools"
+            && value.Risk == ToolRisk.IdempotentWrite);
+    }
+
+    [Fact]
+    public async Task ToolVisibilityPolicyFailuresStopBeforeProviderDispatch()
+    {
+        var provider = new CaptureProvider();
+        await using var runtime = new GameAgentBuilder(provider, "model")
+            .UseExtension(
+                "game.tools",
+                "1",
+                api => api.RegisterTool(new AgentTool(
+                    new ToolDefinition("inspect", "Inspect state.", "{\"type\":\"object\",\"additionalProperties\":false}"),
+                    (_, _, _) => new ValueTask<ToolResult>(new ToolResult(
+                        new AgentContent[] { new TextContent("inspected") })))))
+            .UseExtension(
+                "broken.tool-settings",
+                "1",
+                api => api.RegisterToolVisibilityPolicy(
+                    "broken",
+                    (_, _) => throw new InvalidOperationException("settings unavailable")))
+            .Build();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await runtime.RunAsync(Input("chat", "visibility-failure"), TestContext.Current.CancellationToken));
+
+        Assert.Empty(provider.Requests);
+        Assert.Contains("settings unavailable", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HigherPriorityRouteRuleWinsDeterministically()
     {
         var provider = new CaptureProvider();

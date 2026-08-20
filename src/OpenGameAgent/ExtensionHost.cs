@@ -527,7 +527,38 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
             throw new InvalidOperationException(message);
         }
 
-        return Array.AsReadOnly(values.Select(value => value.Tool).ToArray());
+        var policies = GetEntries(GameAgentExtensionResourceKind.ToolVisibilityPolicy);
+        if (policies.Count == 0)
+        {
+            return Array.AsReadOnly(values.Select(value => value.Tool).ToArray());
+        }
+
+        var visible = new List<AgentTool>(values.Count);
+        foreach (var value in values)
+        {
+            var accepted = true;
+            foreach (var entry in policies)
+            {
+                var policy = (GameExtensionToolVisibilityPolicy)entry.Value;
+                var policyContext = new GameToolVisibilityContext(
+                    ForOwner(baseContext, entry.Resource.ExtensionId),
+                    value.Tool.Definition,
+                    value.Tool.Risk,
+                    value.Owner);
+                if (!await policy(policyContext, cancellationToken).ConfigureAwait(false))
+                {
+                    accepted = false;
+                    break;
+                }
+            }
+
+            if (accepted)
+            {
+                visible.Add(value.Tool);
+            }
+        }
+
+        return Array.AsReadOnly(visible.ToArray());
     }
 
     public async ValueTask<IReadOnlyList<GameSkill>> CollectSkillsAsync(

@@ -27,12 +27,16 @@ public sealed class GameMemoryExtension : IGameAgentExtension
     private readonly GameMemoryRecallQueryFactory? _recall;
     private readonly bool _allowCrossActorSearch;
     private readonly int _maximumResultCharacters;
+    private readonly GameExtensionToolVisibilityPolicy? _rememberToolVisibility;
+    private readonly GameExtensionToolVisibilityPolicy? _searchToolVisibility;
 
     public GameMemoryExtension(
         IGameMemoryStore store,
         GameMemoryRecallQueryFactory? recall = null,
         bool allowCrossActorSearch = false,
-        int maximumResultCharacters = 262_144)
+        int maximumResultCharacters = 262_144,
+        GameExtensionToolVisibilityPolicy? rememberToolVisibility = null,
+        GameExtensionToolVisibilityPolicy? searchToolVisibility = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _recall = recall;
@@ -43,6 +47,8 @@ public sealed class GameMemoryExtension : IGameAgentExtension
         }
 
         _maximumResultCharacters = maximumResultCharacters;
+        _rememberToolVisibility = rememberToolVisibility;
+        _searchToolVisibility = searchToolVisibility;
     }
 
     public static GameAgentExtensionChannel<GameMemory> MemoryAppended { get; } = new("memory.appended");
@@ -62,6 +68,26 @@ public sealed class GameMemoryExtension : IGameAgentExtension
                 CreateRememberTool(api, context),
                 CreateSearchTool(context),
             }));
+        if (_rememberToolVisibility is not null)
+        {
+            api.RegisterToolVisibilityPolicy(
+                "remember-memory-tool-visibility",
+                (context, cancellationToken) =>
+                    string.Equals(context.Tool.Name, "remember_game_memory", StringComparison.Ordinal)
+                        ? _rememberToolVisibility(context, cancellationToken)
+                        : new ValueTask<bool>(true));
+        }
+
+        if (_searchToolVisibility is not null)
+        {
+            api.RegisterToolVisibilityPolicy(
+                "search-memory-tool-visibility",
+                (context, cancellationToken) =>
+                    string.Equals(context.Tool.Name, "search_game_memory", StringComparison.Ordinal)
+                        ? _searchToolVisibility(context, cancellationToken)
+                        : new ValueTask<bool>(true));
+        }
+
         if (_recall is not null)
         {
             api.RegisterContextProvider("memory-recall", RecallAsync, priority: 20);

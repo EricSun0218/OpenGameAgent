@@ -33,6 +33,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Exchange typed extension messages | `GameAgentExtensionChannel<T>` |
 | Keep per-session extension state | `GameAgentExtensionState` |
 | Inspect registrations and conflicts | `GameAgentExtensionHost.GetResources`, `GetDiagnostics` |
+| Hide collected tools per input before model dispatch | `GameAgentExtensionApi.RegisterToolVisibilityPolicy`, `GameToolVisibilityContext` |
 | Gate, deny, or rewrite a tool call | `ToolPolicyExtension`, `IGameToolPolicy` |
 | Search a large tool catalog on demand | `ToolCatalogExtension`, `IGameToolCatalog` |
 | Ask the player structured questions and recommend choices | `StructuredInteractionExtension`, `IGameInteractionBroker` |
