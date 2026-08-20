@@ -64,6 +64,14 @@ public delegate ValueTask<IOpenAIWebSocketConnection> OpenAIWebSocketConnectionF
     OpenAIWebSocketConnectRequest request,
     CancellationToken cancellationToken);
 
+public static class OpenAIWebSocketConnections
+{
+    public static ValueTask<IOpenAIWebSocketConnection> ConnectAsync(
+        OpenAIWebSocketConnectRequest request,
+        CancellationToken cancellationToken = default) =>
+        ClientOpenAIWebSocketConnection.ConnectAsync(request, cancellationToken);
+}
+
 public sealed class OpenAIWebSocketStatistics
 {
     internal OpenAIWebSocketStatistics(

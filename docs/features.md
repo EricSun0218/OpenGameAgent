@@ -18,6 +18,10 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Retry transient model failures | `RetryingModelProvider` |
 | Fall back across endpoints/models | `FallbackModelProvider` |
 | Compact before exceeding context | `IGameTranscriptCompactor`, model context-window settings |
+| Run low-latency speech without blocking the agent loop | `RealtimeConversationManager` |
+| Hand complex speech turns to the authoritative game agent | `GameRealtimeAgentBridge` |
+| Cancel played audio when the player interrupts | `IRealtimeTransportSession.TruncateAudioAsync` |
+| Run replaceable gaze/gesture/expression behaviors | `IRealtimeBehaviorHandler` |
 
 ## Composition and extensions
 

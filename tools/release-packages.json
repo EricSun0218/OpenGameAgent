@@ -18,6 +18,10 @@
       "project": "src/OpenGameAgent/OpenGameAgent.csproj"
     },
     {
+      "id": "OpenGameAgent.Realtime",
+      "project": "src/OpenGameAgent.Realtime/OpenGameAgent.Realtime.csproj"
+    },
+    {
       "id": "OpenGameAgent.Memory",
       "project": "src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj"
     },
@@ -48,6 +52,10 @@
     {
       "id": "OpenGameAgent.Providers.OpenAI",
       "project": "src/OpenGameAgent.Providers.OpenAI/OpenGameAgent.Providers.OpenAI.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.OpenAI.Realtime",
+      "project": "src/OpenGameAgent.Providers.OpenAI.Realtime/OpenGameAgent.Providers.OpenAI.Realtime.csproj"
     },
     {
       "id": "OpenGameAgent.Providers.OpenAICompatible",

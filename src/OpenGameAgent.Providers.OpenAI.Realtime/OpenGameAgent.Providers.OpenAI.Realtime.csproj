@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>OpenGameAgent.Providers.OpenAI.Realtime</RootNamespace>
+    <Description>OpenAI Realtime WebSocket transport for OpenGameAgent realtime conversations.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Realtime\OpenGameAgent.Realtime.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.OpenAI\OpenGameAgent.Providers.OpenAI.csproj" />
+  </ItemGroup>
+</Project>

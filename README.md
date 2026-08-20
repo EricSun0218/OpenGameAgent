@@ -86,6 +86,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
 - image, audio, and video generation through replaceable APIs.
 - append-only traces, observation-only playback, and offline CI evaluation.
+- realtime speech with barge-in, background-agent handoff, and replaceable presentation behaviors.
 
 The runtime does **not** decide combat legality, inventory rules, economy changes, NPC permissions, or other business rules. The game exposes narrow tools, validates every requested mutation, performs it on the correct thread or server, and returns the authoritative receipt.
 
@@ -121,6 +122,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
 | Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
+| Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, barge-in truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
@@ -135,6 +137,8 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service and engine client |
 | Engines | Godot 4.7 .NET and Unity 6 packages, both exercised in real Windows editors |
+
+Realtime speech is an optional layer rather than a second game-authority path. The realtime model can converse and request reversible gaze, gesture, expression, or movement presentation. Planning and durable world mutations are handed to the same `GameAgentRuntime` and game-owned tools used by non-voice inputs. See [Realtime conversations](docs/realtime-conversations.md).
 
 Run inputs, model content, tool catalogs, loops, queues, progress, and concurrency are bounded by explicit limits. Context admission runs before every model request, model and tool calls have deadlines, and large tool results can be retained as artifacts instead of repeatedly filling the prompt. Game-owned stores and rankers can replace the included in-memory or local-file implementations.
 

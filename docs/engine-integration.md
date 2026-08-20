@@ -80,6 +80,14 @@ Use `GameAgentWire.SerializeInput` and `ParseInput` when crossing an engine's dy
 
 Streaming `MessageUpdated` wire events carry only the new delta for that event. Accumulate deltas for transient UI text and treat `MessageEnded` or the terminal run result as the canonical complete message. Engine queues may drop intermediate events under pressure, so gameplay correctness must never depend on receiving every visual streaming delta.
 
+## Realtime speech and behavior
+
+Add `OpenGameAgent.Realtime` for the engine-neutral conversation manager and bridge. Add a provider package such as `OpenGameAgent.Providers.OpenAI.Realtime` only in the process that owns the provider credential. Audio capture calls `TrySendAudio`; a saturated audio queue drops the newest frame instead of blocking the engine capture callback. Audio output, transcripts, and behavior events must be marshalled through the same bounded engine callback queue described above.
+
+`IRealtimeBehaviorHandler` is for reversible presentation state such as gaze, gesture, facial expression, or a replaceable locomotion intent. A new request on the same behavior channel cancels the previous request. Implement the handler by queueing work to the engine thread. Inventory changes, construction, combat results, quest state, and other authoritative mutations must remain ordinary game tools backed by `DurableGameActionDispatcher`.
+
+The realtime speech loop remains responsive while `GameRealtimeAgentBridge` starts a full agent run. A later handoff steers that active actor instead of starting a competing run. Streamed agent text is returned to speech in bounded time slices. Player barge-in cancels the current response and truncates only the audio already played, so the provider transcript does not claim unheard speech.
+
 ## Main-thread actions
 
 The adapters marshal public events, not arbitrary context providers or tool handlers. If a tool mutates a scene, create an `IGameActionHandler` that:

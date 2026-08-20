@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>OpenGameAgent.Realtime</RootNamespace>
+    <Description>Realtime speech, handoff, interruption, and concurrent behavior orchestration for OpenGameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+  </ItemGroup>
+</Project>

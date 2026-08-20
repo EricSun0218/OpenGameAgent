@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add optional provider-neutral realtime conversations with bounded PCM16 queues, live transcript and
+  audio events, barge-in cancellation/truncation, non-blocking background-agent handoff and steering,
+  200 ms streamed-output forwarding, and cancel-replace presentation behavior channels.
+- Add an OpenAI Realtime WebSocket adapter with bounded wire parsing, credential-only handshake
+  headers, transcript/handoff/behavior mapping, and remote plaintext rejection.
 - Add the optional `OpenGameAgent.DevTools` package and CLI for bounded append-only JSONL trace
   recording, crash-tail recovery, observation-only HTML playback, run summaries, and strict offline
   evaluation suitable for local debugging and CI gates.
