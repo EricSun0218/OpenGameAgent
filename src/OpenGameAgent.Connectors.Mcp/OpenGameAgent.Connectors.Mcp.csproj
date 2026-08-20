@@ -5,7 +5,7 @@
     <PackageId>OpenGameAgent.Connectors.Mcp</PackageId>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="ModelContextProtocol.Core" Version="2.1.0" />
+    <PackageReference Include="ModelContextProtocol.Core" Version="2.2.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Extensions\OpenGameAgent.Extensions.csproj" />
