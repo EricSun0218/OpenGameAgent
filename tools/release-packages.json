@@ -58,6 +58,10 @@
       "project": "src/OpenGameAgent.Providers.OpenAI.Realtime/OpenGameAgent.Providers.OpenAI.Realtime.csproj"
     },
     {
+      "id": "OpenGameAgent.Providers.Volcengine.Realtime",
+      "project": "src/OpenGameAgent.Providers.Volcengine.Realtime/OpenGameAgent.Providers.Volcengine.Realtime.csproj"
+    },
+    {
       "id": "OpenGameAgent.Providers.OpenAICompatible",
       "project": "src/OpenGameAgent.Providers.OpenAICompatible/OpenGameAgent.Providers.OpenAICompatible.csproj"
     },

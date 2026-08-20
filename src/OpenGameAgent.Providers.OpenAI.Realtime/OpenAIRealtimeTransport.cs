@@ -115,7 +115,7 @@ public sealed class OpenAIRealtimeTransportOptions
     }
 }
 
-public sealed class OpenAIRealtimeTransport : IRealtimeTransport
+public sealed class OpenAIRealtimeTransport : IRealtimeTransport, IRealtimeTransportCapabilities
 {
     private readonly OpenAIRealtimeTransportOptions _options;
 
@@ -123,6 +123,17 @@ public sealed class OpenAIRealtimeTransport : IRealtimeTransport
     {
         _options = (options ?? throw new ArgumentNullException(nameof(options))).Snapshot();
     }
+
+    public RealtimeTransportFeatures Features =>
+        RealtimeTransportFeatures.AudioInput
+        | RealtimeTransportFeatures.InputTranscription
+        | RealtimeTransportFeatures.AudioOutput
+        | RealtimeTransportFeatures.OutputTranscription
+        | RealtimeTransportFeatures.SpeechBoundaries
+        | RealtimeTransportFeatures.ResponseCancellation
+        | RealtimeTransportFeatures.AudioTruncation
+        | RealtimeTransportFeatures.Handoff
+        | RealtimeTransportFeatures.BehaviorRequests;
 
     public async ValueTask<IRealtimeTransportSession> ConnectAsync(
         RealtimeConversationOptions options,

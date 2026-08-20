@@ -2,6 +2,21 @@ using System.Collections.ObjectModel;
 
 namespace OpenGameAgent.Realtime;
 
+[Flags]
+public enum RealtimeTransportFeatures
+{
+    None = 0,
+    AudioInput = 1 << 0,
+    InputTranscription = 1 << 1,
+    AudioOutput = 1 << 2,
+    OutputTranscription = 1 << 3,
+    SpeechBoundaries = 1 << 4,
+    ResponseCancellation = 1 << 5,
+    AudioTruncation = 1 << 6,
+    Handoff = 1 << 7,
+    BehaviorRequests = 1 << 8,
+}
+
 public enum RealtimeConversationState
 {
     Idle,
@@ -29,6 +44,7 @@ public enum RealtimeConversationEventKind
 {
     SessionUpdated,
     InputSpeechStarted,
+    InputSpeechStopped,
     InputTranscriptDelta,
     InputTranscriptDone,
     OutputTranscriptDelta,
@@ -42,6 +58,40 @@ public enum RealtimeConversationEventKind
     BehaviorCancelled,
     Error,
     Closed,
+}
+
+public sealed class RealtimeTranscriptTiming
+{
+    public RealtimeTranscriptTiming(
+        int startMilliseconds,
+        int endMilliseconds,
+        double? confidence = null,
+        bool wordLevel = false)
+    {
+        if (startMilliseconds < 0 || endMilliseconds < startMilliseconds)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startMilliseconds));
+        }
+
+        if (confidence is { } value
+            && (!double.IsFinite(value) || value < 0 || value > 1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(confidence));
+        }
+
+        StartMilliseconds = startMilliseconds;
+        EndMilliseconds = endMilliseconds;
+        Confidence = confidence;
+        WordLevel = wordLevel;
+    }
+
+    public int StartMilliseconds { get; }
+
+    public int EndMilliseconds { get; }
+
+    public double? Confidence { get; }
+
+    public bool WordLevel { get; }
 }
 
 public enum RealtimeHandoffPhase
@@ -310,7 +360,8 @@ public sealed class RealtimeConversationEvent
         RealtimeBehaviorRequest? behavior = null,
         string? itemId = null,
         string? responseId = null,
-        string? error = null)
+        string? error = null,
+        RealtimeTranscriptTiming? timing = null)
     {
         if (!Enum.IsDefined(typeof(RealtimeConversationEventKind), kind))
         {
@@ -325,6 +376,7 @@ public sealed class RealtimeConversationEvent
         ItemId = itemId;
         ResponseId = responseId;
         Error = error;
+        Timing = timing;
     }
 
     public RealtimeConversationEventKind Kind { get; }
@@ -342,6 +394,8 @@ public sealed class RealtimeConversationEvent
     public string? ResponseId { get; }
 
     public string? Error { get; }
+
+    public RealtimeTranscriptTiming? Timing { get; }
 }
 
 public sealed class RealtimeBehaviorResult
@@ -420,4 +474,14 @@ public interface IRealtimeTransport
     ValueTask<IRealtimeTransportSession> ConnectAsync(
         RealtimeConversationOptions options,
         CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Optional capability surface for transports whose provider protocol does not
+/// implement every realtime operation. Hosts can query this without changing
+/// the provider-neutral transport contract.
+/// </summary>
+public interface IRealtimeTransportCapabilities
+{
+    RealtimeTransportFeatures Features { get; }
 }

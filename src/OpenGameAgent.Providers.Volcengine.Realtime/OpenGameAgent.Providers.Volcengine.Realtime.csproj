@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>OpenGameAgent.Providers.Volcengine.Realtime</RootNamespace>
+    <Description>Volcengine duplex speech transport for OpenGameAgent realtime conversations.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Realtime\OpenGameAgent.Realtime.csproj" />
+  </ItemGroup>
+</Project>

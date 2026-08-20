@@ -120,7 +120,7 @@ GameAgentRuntime
 | Agent 内核 | 流式类型化消息、工具循环、类型化工具中间结果、steering、follow-up、hooks、取消、严格会话校验、提供方错误结果化 |
 | 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、安全并行读、冲突键串行、策略拦截/终止、超时与写入结果未知语义 |
 | 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、快速/完整/Workflow 路由、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
-| 实时对话 | 有界 PCM16 流、实时转写/音频事件、插话截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
+| 实时对话 | 有界 PCM16 流、实时转写/音频事件、字幕时间、插话取消/截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；类型化生命周期事件与通道；命名空间持久状态 |
 | 官方扩展 | 工具策略与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、委派、追踪和可持久并行工作流图 |
@@ -129,14 +129,14 @@ GameAgentRuntime
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
 | 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
-| 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、远程网关和消息网关；重试与回退包装器 |
+| 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务，以及带渐进预览的专用图片适配器 |
 | 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端与引擎客户端 |
 | 引擎 | Godot 4.7 .NET 与 Unity 6 包，均已在 Windows 真实编辑器中通过测试 |
 
-实时语音是可选层，不是第二条游戏权威通道。实时模型可以对话，并请求视线、手势、表情或移动意图等可逆表现；规划和持久世界变更仍交给同一个 `GameAgentRuntime` 与游戏自有工具。详见[实时对话](docs/realtime-conversations.md)。
+实时语音是可选层，不是第二条游戏权威通道。实时传输可以负责对话或转写，并请求视线、手势、表情或移动意图等可逆表现；规划和持久世界变更仍交给同一个 `GameAgentRuntime` 与游戏自有工具。可选的 OpenAI 与火山适配器使用同一契约；火山适配器把对话/VAD、流式 TTS 与权威 Agent 循环明确分开。详见[实时对话](docs/realtime-conversations.md)。
 
 运行输入、模型内容、工具目录、循环、队列、进度事件与并发都有明确上限。每次模型调用前都会执行上下文准入，模型与工具调用都有截止时间，大型工具结果可以保存为产物而不是反复占满提示词。游戏可以替换内置的内存或本地文件实现。
 

@@ -24,6 +24,7 @@ This is intentionally two loops. The realtime model owns turn-taking, transcript
 
 - `OpenGameAgent.Realtime`: provider-neutral contracts, bounded conversation manager, behavior channel orchestration, and `GameAgentRuntime` handoff bridge.
 - `OpenGameAgent.Providers.OpenAI.Realtime`: OpenAI Realtime WebSocket wire adapter. Credentials are used only during the WebSocket handshake.
+- `OpenGameAgent.Providers.Volcengine.Realtime`: Volcengine duplex speech adapter. Dialogue audio is used for VAD/transcription and handed to the OGA agent; agent text is streamed through a separate bidirectional TTS session. The provider's own chat output never becomes a second game-action loop.
 
 Both target `netstandard2.1`. They can run in a Godot/Unity process, a local sidecar, or a .NET service. A shipped client still must not contain a permanent developer API key.
 
@@ -72,9 +73,28 @@ await conversation.StartAsync(new RealtimeConversationOptions
 conversation.TrySendAudio(new RealtimeAudioFrame(pcm16Bytes, 24_000, 1));
 ```
 
+For Volcengine, replace only the transport. The API key is sent in the WebSocket handshake and is never copied into events, exceptions, transcripts, or saved state:
+
+```csharp
+using OpenGameAgent.Providers.Volcengine.Realtime;
+
+var transport = new VolcengineRealtimeTransport(new VolcengineRealtimeTransportOptions
+{
+    ApiKey = Environment.GetEnvironmentVariable("VOLCENGINE_TTS_API_KEY"),
+    DialogueResourceId = "volc.speech.dialog",
+    TtsResourceId = "seed-tts-2.0",
+    TtsModel = "seed-tts-2.0-standard",
+    Speaker = "your-registered-voice-id",
+});
+```
+
+The Volcengine adapter accepts mono PCM16 at 16 kHz and emits mono PCM16 at the configured output rate (24 kHz by default). It maps provider speech boundaries and input transcripts into standard handoffs, exposes word-level subtitle timing when returned, and streams OGA handoff text into bounded TTS sub-sessions. Set `InputMode = VolcengineRealtimeInputMode.Disabled` for TTS-only use.
+
+Transports may implement `IRealtimeTransportCapabilities`. Hosts can use its flags to select UI and fallbacks without provider-name checks. Capability flags describe executable behavior, not merely fields accepted by an options object.
+
 ## Interruption semantics
 
-When input speech begins during output, the manager cancels the active response and truncates the provider conversation item at the duration of audio emitted so far. Speech that the player did not hear is therefore not retained as if it had been heard.
+When input speech begins during output, the manager cancels the active response. A transport with remote conversation items can also truncate the item at the duration of audio emitted so far. The Volcengine adapter has no provider-owned OGA conversation item to truncate: it cancels the TTS sub-session and drops late audio while the authoritative agent transcript remains in OGA.
 
 Audio capture uses a bounded drop-on-full queue. Text, handoff output, and control commands use bounded backpressure. Incoming provider events are drained independently from background agent work, so a handoff cannot stop microphone forwarding.
 
@@ -88,6 +108,6 @@ Do not use this path for a committed mutation. A build operation, inventory tran
 
 ## Placement and transport
 
-`IRealtimeTransport` is provider-neutral. The included OpenAI adapter uses a credential-free `wss` endpoint plus an authorization handshake header, validates and bounds JSON/audio, and rejects remote plaintext WebSockets. A game can implement the same contract for a local model, WebRTC session, platform voice SDK, or developer-hosted gateway without changing the conversation manager or bridge.
+`IRealtimeTransport` is provider-neutral. The included OpenAI and Volcengine adapters use authorization handshake headers, validate and bound JSON/audio, redact configured secrets, and reject remote plaintext WebSockets. A game can implement the same contract for a local model, WebRTC session, platform voice SDK, or developer-hosted gateway without changing the conversation manager or bridge.
 
 The included adapter is WebSocket-based. Browser or platform WebRTC negotiation remains transport-specific and should be implemented behind `IRealtimeTransport`; it is not emulated by the runtime.

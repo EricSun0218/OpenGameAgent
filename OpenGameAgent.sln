@@ -122,6 +122,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Ope
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Realtime.Tests", "tests\OpenGameAgent.Realtime.Tests\OpenGameAgent.Realtime.Tests.csproj", "{0F35EE05-19B9-46AF-A84D-23597CBF215E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Volcengine.Realtime", "src\OpenGameAgent.Providers.Volcengine.Realtime\OpenGameAgent.Providers.Volcengine.Realtime.csproj", "{7DD18736-C1C1-4BE4-AEF3-96CF528909F5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Volcengine.Realtime.Tests", "tests\OpenGameAgent.Providers.Volcengine.Realtime.Tests\OpenGameAgent.Providers.Volcengine.Realtime.Tests.csproj", "{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -356,6 +360,14 @@ Global
 		{0F35EE05-19B9-46AF-A84D-23597CBF215E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0F35EE05-19B9-46AF-A84D-23597CBF215E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0F35EE05-19B9-46AF-A84D-23597CBF215E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7DD18736-C1C1-4BE4-AEF3-96CF528909F5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7DD18736-C1C1-4BE4-AEF3-96CF528909F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7DD18736-C1C1-4BE4-AEF3-96CF528909F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7DD18736-C1C1-4BE4-AEF3-96CF528909F5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
@@ -399,5 +411,7 @@ Global
 		{6CF7E6C5-7D41-486C-BA9C-4DD901F495CE} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{30DA85BA-8567-44A1-9491-6BD3D2929D6A} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{0F35EE05-19B9-46AF-A84D-23597CBF215E} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{7DD18736-C1C1-4BE4-AEF3-96CF528909F5} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 	EndGlobalSection
 EndGlobal
