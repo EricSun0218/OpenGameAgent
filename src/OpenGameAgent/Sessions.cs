@@ -703,6 +703,78 @@ public sealed class GameSessionUsageSnapshot
     public GameSessionUsageLedger Ledger { get; }
 }
 
+/// <summary>
+/// One stable page from the active durable transcript of a session actor. A compaction summary is
+/// part of the active transcript; messages replaced by compaction are not exposed as a second history.
+/// </summary>
+public sealed class GameSessionTranscriptPage
+{
+    public GameSessionTranscriptPage(
+        GameSessionKey key,
+        long sessionRevision,
+        int startIndex,
+        int totalMessages,
+        IReadOnlyList<AgentMessage> messages,
+        string? nextCursor)
+    {
+        Key = key.EnsureValid(nameof(key));
+        SessionRevision = sessionRevision >= 0
+            ? sessionRevision
+            : throw new ArgumentOutOfRangeException(nameof(sessionRevision));
+        if (startIndex < 0 || totalMessages < 0 || startIndex > totalMessages)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startIndex));
+        }
+
+        var copied = (messages ?? throw new ArgumentNullException(nameof(messages))).ToArray();
+        if (copied.Any(static message => message is null) || startIndex + copied.Length > totalMessages)
+        {
+            throw new ArgumentException("The transcript page messages do not fit its declared range.", nameof(messages));
+        }
+
+        if (nextCursor is not null
+            && (string.IsNullOrWhiteSpace(nextCursor)
+                || nextCursor.Length > 256
+                || nextCursor.Any(char.IsControl)))
+        {
+            throw new ArgumentException("The transcript cursor is invalid.", nameof(nextCursor));
+        }
+
+        StartIndex = startIndex;
+        TotalMessages = totalMessages;
+        Messages = Array.AsReadOnly(copied);
+        NextCursor = nextCursor;
+    }
+
+    public GameSessionKey Key { get; }
+
+    public long SessionRevision { get; }
+
+    public int StartIndex { get; }
+
+    public int TotalMessages { get; }
+
+    public IReadOnlyList<AgentMessage> Messages { get; }
+
+    public string? NextCursor { get; }
+}
+
+public sealed class GameSessionTranscriptChangedException : InvalidOperationException
+{
+    public GameSessionTranscriptChangedException()
+        : base("The session transcript changed while it was being paged; restart from the first page.")
+    {
+    }
+}
+
+public sealed class GameSessionTranscriptPageTooLargeException : InvalidOperationException
+{
+    public GameSessionTranscriptPageTooLargeException()
+        : base("A single transcript message exceeds the maximum serialized page size.")
+    {
+    }
+}
+
 public sealed class GameSessionSnapshot
 {
     public GameSessionSnapshot(

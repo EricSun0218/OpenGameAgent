@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
 
@@ -8,6 +10,8 @@ namespace OpenGameAgent;
 
 public static class GameAgentWire
 {
+    public const int MaximumTranscriptPageUtf8Bytes = 8_000_000;
+
     public static string SerializeInput(GameInput input)
     {
         if (input is null)
@@ -200,6 +204,56 @@ public static class GameAgentWire
             }).ToArray(),
         }, JsonOptions);
     }
+
+    public static string SerializeTranscriptPage(GameSessionTranscriptPage page)
+    {
+        if (page is null)
+        {
+            throw new ArgumentNullException(nameof(page));
+        }
+
+        using var stream = new BoundedMemoryStream(MaximumTranscriptPageUtf8Bytes);
+        try
+        {
+            JsonSerializer.Serialize(stream, CreateTranscriptProjection(page), JsonOptions);
+        }
+        catch (TranscriptPageLimitExceededException)
+        {
+            throw new GameSessionTranscriptPageTooLargeException();
+        }
+
+        return Encoding.UTF8.GetString(stream.GetBuffer(), 0, checked((int)stream.Length));
+    }
+
+    internal static bool FitsTranscriptPage(GameSessionTranscriptPage page)
+    {
+        if (page is null)
+        {
+            throw new ArgumentNullException(nameof(page));
+        }
+
+        using var stream = new BoundedCountingStream(MaximumTranscriptPageUtf8Bytes);
+        try
+        {
+            JsonSerializer.Serialize(stream, CreateTranscriptProjection(page), JsonOptions);
+            return true;
+        }
+        catch (TranscriptPageLimitExceededException)
+        {
+            return false;
+        }
+    }
+
+    private static object CreateTranscriptProjection(GameSessionTranscriptPage page) => new
+    {
+        sessionId = page.Key.SessionId,
+        actorId = page.Key.ActorId,
+        sessionRevision = page.SessionRevision,
+        startIndex = page.StartIndex,
+        totalMessages = page.TotalMessages,
+        nextCursor = page.NextCursor,
+        messages = page.Messages.Select(ProjectMessage),
+    };
 
     private static object ProjectMessage(AgentMessage message) => new
     {
@@ -438,6 +492,85 @@ public static class GameAgentWire
                 default:
                     throw new ArgumentException($"Unsupported game input content kind '{Kind}'.");
             }
+        }
+    }
+
+    private sealed class TranscriptPageLimitExceededException : IOException
+    {
+    }
+
+    private class BoundedCountingStream : Stream
+    {
+        private readonly long _maximumBytes;
+        private long _length;
+
+        public BoundedCountingStream(long maximumBytes)
+        {
+            _maximumBytes = maximumBytes;
+        }
+
+        public override bool CanRead => false;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => _length;
+
+        public override long Position
+        {
+            get => _length;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (count < 0 || _length > _maximumBytes - count)
+            {
+                throw new TranscriptPageLimitExceededException();
+            }
+
+            WriteCore(buffer, offset, count);
+            _length += count;
+        }
+
+        protected virtual void WriteCore(byte[] buffer, int offset, int count)
+        {
+        }
+    }
+
+    private sealed class BoundedMemoryStream : BoundedCountingStream
+    {
+        private readonly MemoryStream _stream = new();
+
+        public BoundedMemoryStream(long maximumBytes)
+            : base(maximumBytes)
+        {
+        }
+
+        public byte[] GetBuffer() => _stream.GetBuffer();
+
+        protected override void WriteCore(byte[] buffer, int offset, int count) =>
+            _stream.Write(buffer, offset, count);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _stream.Dispose();
+            }
+
+            base.Dispose(disposing);
         }
     }
 }

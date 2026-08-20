@@ -73,8 +73,10 @@ foreach ($package in $packages) {
 
 $godotSource = Join-Path $artifactsRoot 'godot\open-game-agent-godot'
 $unitySource = Join-Path $artifactsRoot 'unity\com.opengameagent.runtime'
+$unrealSource = Join-Path $artifactsRoot 'unreal\OpenGameAgent'
 New-DirectoryArchive -Source $godotSource -Destination (Join-Path $outputRoot "OpenGameAgent.Godot-$Version.zip")
 New-DirectoryArchive -Source $unitySource -Destination (Join-Path $outputRoot "OpenGameAgent.Unity-$Version.zip")
+New-DirectoryArchive -Source $unrealSource -Destination (Join-Path $outputRoot "OpenGameAgent.Unreal-$Version.zip")
 
 $serverSource = Join-Path $artifactsRoot 'server'
 $serverBundleName = "OpenGameAgent.Server-$Version-portable"
@@ -132,7 +134,7 @@ $releaseNotes = @(
     "dotnet add package OpenGameAgent --version $Version",
     '```',
     '',
-    'Use the versioned Godot or Unity archive below for engine integration. The portable server archive runs with `dotnet OpenGameAgent.Server.dll` on a Windows or Linux .NET 8 host.',
+    'Use the versioned Godot, Unity, or Unreal archive below for engine integration. The Unreal archive is a native C++ source plugin for remote placement. The portable server archive runs with `dotnet OpenGameAgent.Server.dll` on a Windows or Linux .NET 8 host.',
     '',
     (Get-ReleaseStabilityNotice -VersionInfo $versionInfo)
 ) -join [Environment]::NewLine

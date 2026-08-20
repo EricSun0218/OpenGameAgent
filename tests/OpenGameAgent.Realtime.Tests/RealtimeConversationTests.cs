@@ -429,6 +429,11 @@ public sealed class RealtimeConversationTests
         session.Emit(new RealtimeConversationEvent(
             RealtimeConversationEventKind.HandoffRequested,
             handoff: new RealtimeHandoffRequest("second", "change the plan")));
+        Assert.Equal(
+            "second",
+            await session.HandoffAcknowledged.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken));
         Assert.True(manager.TrySendAudio(new RealtimeAudioFrame(new byte[480])));
         await session.AudioReceived.Task.WaitAsync(
             TimeSpan.FromSeconds(5),
@@ -578,6 +583,9 @@ public sealed class RealtimeConversationTests
         public TaskCompletionSource<(string, string)> HandoffProgress { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public TaskCompletionSource<string> HandoffAcknowledged { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public void Emit(RealtimeConversationEvent value) => _events.Enqueue(value);
 
         public async IAsyncEnumerable<RealtimeConversationEvent> ReadEventsAsync(
@@ -604,6 +612,7 @@ public sealed class RealtimeConversationTests
 
         public ValueTask SendHandoffAsync(string handoffId, string text, RealtimeHandoffPhase phase, bool completed, CancellationToken cancellationToken)
         {
+            HandoffAcknowledged.TrySetResult(handoffId);
             if (!completed && text.Length > 0)
             {
                 HandoffProgress.TrySetResult((handoffId, text));

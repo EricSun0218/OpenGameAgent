@@ -17,6 +17,7 @@ public enum GameAgentServerOperation
     SubmitActionReceipt = 7,
     ReconcileAction = 8,
     ReadAttachment = 9,
+    ReadTranscript = 10,
 }
 
 /// <summary>

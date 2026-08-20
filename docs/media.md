@@ -16,6 +16,10 @@ OpenGameAgent defines provider-neutral image, audio, and video generation contra
 
 `OpenGameAgent.Providers.OpenRouter` is a dedicated image-generation adapter with model discovery, text and image references, buffered or SSE results, progressive previews, usage metadata, and the same unified provider authentication used by the media registry. It is separate from the generic HTTP adapter because its wire contract is different.
 
+`OpenGameAgent.Providers.OpenAI.Images` calls the official Images generation/edit endpoints. It sends one or more resolved `GameMediaGenerationRequest.Sources` as multipart `image[]` fields for edits and returns validated inline PNG, JPEG, or WebP resources. `OpenGameAgent.Providers.Volcengine.Images` calls the Ark/Seedream generations endpoint, sends references as a bounded data-URL array, defaults to `stream=false` and `watermark=false`, and supports explicit sizes such as `2048x1152`. Both adapters use `IGameProviderAuthentication`; prompts, credentials, and reference bytes are excluded from returned metadata and error messages.
+
+Both direct adapters accept only inline PNG, JPEG, or WebP sources whose MIME type matches their bytes. Resolve attachment IDs or game-owned files before invoking the provider. Their default HTTP transport disables redirects, remote endpoints require HTTPS, and explicitly enabled plaintext HTTP is limited to loopback development endpoints. OpenAI sizes are strictly limited to `auto`, `1024x1024`, `1024x1536`, and `1536x1024`; `2048x1152` is rejected rather than fabricated. Seedream accepts an explicit `2048x1152` request. A game that needs an OpenAI result in that canvas should perform a deterministic post-generation letterbox or other game-owned transform.
+
 Use `GetApiKeyAsync` when credentials rotate or expire during long-running jobs. Status URLs are restricted to the submission endpoint's origin by default. If cross-origin polling is enabled, authorization is still withheld from the other origin unless `SendAuthorizationToCrossOriginStatusUrls` is explicitly enabled.
 
 ## Recommended flow

@@ -57,6 +57,7 @@ public static partial class ServerEndpoints
                 && !context.Request.Path.StartsWithSegments("/v1/control")
                 && !context.Request.Path.StartsWithSegments("/v1/actions")
                 && !context.Request.Path.StartsWithSegments("/v1/usage")
+                && !context.Request.Path.StartsWithSegments("/v1/transcript")
                 && !context.Request.Path.StartsWithSegments("/v1/attachments"))
             {
                 await next(context);
@@ -123,6 +124,7 @@ public static partial class ServerEndpoints
             audience = new[] { "internal", "owner", "public", "recipient" },
             actions = new[] { "claim", "stream", "receipt", "reconcile" },
             usage = new[] { "session-ledger", "by-cause", "itemized-cost" },
+            transcript = new[] { "bounded-pages", "revision-bound-cursors", "attachment-metadata" },
             attachments = new[] { "content-addressed-images", "session-authorized-read" },
         }));
         endpoints.MapPost(
@@ -145,6 +147,10 @@ public static partial class ServerEndpoints
             "/v1/usage",
             (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
                 ReadUsageAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
+        endpoints.MapPost(
+            "/v1/transcript",
+            (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
+                ReadTranscriptAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
         endpoints.MapPost(
             "/v1/attachments/read",
             (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
@@ -280,6 +286,93 @@ public static partial class ServerEndpoints
         return usage is null
             ? Results.NotFound(new { error = "session_not_found" })
             : Results.Text(GameAgentWire.SerializeUsage(usage), "application/json", Encoding.UTF8);
+    }
+
+    private static async Task<IResult> ReadTranscriptAsync(
+        HttpRequest httpRequest,
+        GameAgentRuntime runtime,
+        int maximumRequestBodyBytes,
+        CancellationToken cancellationToken)
+    {
+        TranscriptReadRequest request;
+        GameSessionKey key;
+        try
+        {
+            using var requestDocument = await ReadRequestDocumentAsync(
+                httpRequest,
+                maximumRequestBodyBytes,
+                cancellationToken);
+            request = ParseRequest<TranscriptReadRequest>(requestDocument.RootElement);
+            key = request.ToKey();
+            request.EnsureValid();
+        }
+        catch (RequestBodyTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "request_too_large", exception.Message);
+        }
+        catch (UnsupportedRequestContentTypeException exception)
+        {
+            return RequestError(StatusCodes.Status415UnsupportedMediaType, "unsupported_media_type", exception.Message);
+        }
+        catch (Exception exception) when (exception is ArgumentException or JsonException)
+        {
+            return RequestError(StatusCodes.Status400BadRequest, "invalid_request", exception.Message);
+        }
+
+        var authenticationFailure = await AuthenticatePresentedCredentialAsync(
+            httpRequest.HttpContext,
+            request.Credential,
+            key,
+            GameAgentServerOperation.ReadTranscript,
+            cancellationToken);
+        if (authenticationFailure is not null)
+        {
+            return authenticationFailure;
+        }
+
+        var authorizationFailure = await GetAuthorizationFailureAsync(
+            httpRequest.HttpContext,
+            key,
+            GameAgentServerOperation.ReadTranscript,
+            cancellationToken);
+        if (authorizationFailure is not null)
+        {
+            return authorizationFailure;
+        }
+
+        try
+        {
+            var page = await runtime.ReadTranscriptAsync(
+                key,
+                request.PageSize,
+                request.Cursor,
+                cancellationToken);
+            if (page is null)
+            {
+                return Results.NotFound(new { error = "session_not_found" });
+            }
+
+            var projection = await CreateAudienceProjectionAsync(
+                httpRequest.HttpContext,
+                key,
+                cancellationToken);
+            var json = projection is null
+                ? GameAgentWire.SerializeTranscriptPage(page)
+                : await projection.ProjectTranscriptAsync(page, cancellationToken);
+            return Results.Text(json, "application/json", Encoding.UTF8);
+        }
+        catch (GameSessionTranscriptChangedException exception)
+        {
+            return RequestError(StatusCodes.Status409Conflict, "transcript_changed", exception.Message);
+        }
+        catch (GameSessionTranscriptPageTooLargeException exception)
+        {
+            return RequestError(StatusCodes.Status413PayloadTooLarge, "transcript_message_too_large", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return RequestError(StatusCodes.Status400BadRequest, "invalid_cursor", exception.Message);
+        }
     }
 
     private static async Task<IResult> SteerAsync(
@@ -925,6 +1018,35 @@ public sealed class AttachmentReadRequest
             || AttachmentId.Any(static character => char.IsControl(character)))
         {
             throw new ArgumentException("A bounded attachment ID is required.", nameof(AttachmentId));
+        }
+    }
+}
+
+public sealed class TranscriptReadRequest
+{
+    public string? Credential { get; set; }
+
+    public string SessionId { get; set; } = string.Empty;
+
+    public string ActorId { get; set; } = string.Empty;
+
+    public int PageSize { get; set; } = 50;
+
+    public string? Cursor { get; set; }
+
+    public GameSessionKey ToKey() => new(SessionId, ActorId);
+
+    public void EnsureValid()
+    {
+        _ = ToKey();
+        if (PageSize is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(PageSize));
+        }
+
+        if (Cursor is { Length: > 256 } || Cursor?.Any(char.IsControl) == true)
+        {
+            throw new ArgumentException("The transcript cursor is invalid.", nameof(Cursor));
         }
     }
 }

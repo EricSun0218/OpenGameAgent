@@ -332,6 +332,42 @@ internal sealed class GameAgentAudienceProjection
         return root.ToJsonString(JsonOptions);
     }
 
+    public async ValueTask<string> ProjectTranscriptAsync(
+        GameSessionTranscriptPage page,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        var root = JsonNode.Parse(GameAgentWire.SerializeTranscriptPage(page))?.AsObject()
+            ?? throw new InvalidOperationException("The game transcript projection was not an object.");
+        if (root["messages"] is not JsonArray serializedMessages)
+        {
+            throw new InvalidOperationException("The game transcript projection did not contain messages.");
+        }
+
+        var projected = new JsonArray();
+        for (var index = 0; index < page.Messages.Count; index++)
+        {
+            var message = page.Messages[index];
+            var audience = await _policy.ResolveAudienceAsync(
+                new GameAgentAudienceContext(_key, GameAgentAudienceOutputKind.Message, message, null),
+                cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The game audience policy returned null.");
+            if (!audience.IsVisibleTo(_viewer))
+            {
+                continue;
+            }
+
+            var node = serializedMessages[index]?.DeepClone() as JsonObject;
+            if (node is not null && (_viewer.IsInternal || SanitizeMessage(node)))
+            {
+                projected.Add(node);
+            }
+        }
+
+        root["messages"] = projected;
+        return root.ToJsonString(JsonOptions);
+    }
+
     public async ValueTask<string?> ProjectEventAsync(
         AgentEvent agentEvent,
         CancellationToken cancellationToken)

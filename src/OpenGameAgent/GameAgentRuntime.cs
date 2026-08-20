@@ -507,6 +507,126 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Reads a bounded page from the active durable transcript. The cursor binds subsequent pages to
+    /// the same session revision so a concurrent run cannot silently mix two transcript versions.
+    /// Server hosts must authorize the caller before invoking this method.
+    /// </summary>
+    public async ValueTask<GameSessionTranscriptPage?> ReadTranscriptAsync(
+        GameSessionKey key,
+        int pageSize = 50,
+        string? cursor = null,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValid(nameof(key));
+        if (pageSize is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize), "Transcript pages contain between 1 and 256 messages.");
+        }
+
+        if (cursor is { Length: > 256 } || cursor?.Any(char.IsControl) == true)
+        {
+            throw new ArgumentException("The transcript cursor is invalid.", nameof(cursor));
+        }
+
+        var start = 0;
+        long? cursorRevision = null;
+        if (!string.IsNullOrEmpty(cursor))
+        {
+            var parts = cursor.Split('.');
+            if (parts.Length != 3
+                || !string.Equals(parts[0], "v1", StringComparison.Ordinal)
+                || !long.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var revision)
+                || revision < 0
+                || !int.TryParse(parts[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out start)
+                || start < 0)
+            {
+                throw new ArgumentException("The transcript cursor is invalid.", nameof(cursor));
+            }
+
+            cursorRevision = revision;
+        }
+
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(GameAgentRuntime));
+        }
+
+        var snapshot = await _sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return null;
+        }
+
+        if (!snapshot.Key.Equals(key))
+        {
+            throw new InvalidOperationException("The game session store returned a snapshot for a different session key.");
+        }
+
+        if (cursorRevision is not null)
+        {
+            if (cursorRevision.Value != snapshot.Revision)
+            {
+                throw new GameSessionTranscriptChangedException();
+            }
+        }
+
+        if (start > snapshot.Messages.Count)
+        {
+            throw new ArgumentException("The transcript cursor is outside the active transcript.", nameof(cursor));
+        }
+
+        var maximumCount = Math.Min(pageSize, snapshot.Messages.Count - start);
+        if (maximumCount == 0)
+        {
+            return CreateTranscriptPage(snapshot, start, 0);
+        }
+
+        var low = 1;
+        var high = maximumCount;
+        var accepted = 0;
+        while (low <= high)
+        {
+            var candidate = low + ((high - low) / 2);
+            if (GameAgentWire.FitsTranscriptPage(CreateTranscriptPage(snapshot, start, candidate)))
+            {
+                accepted = candidate;
+                low = candidate + 1;
+            }
+            else
+            {
+                high = candidate - 1;
+            }
+        }
+
+        if (accepted == 0)
+        {
+            throw new GameSessionTranscriptPageTooLargeException();
+        }
+
+        return CreateTranscriptPage(snapshot, start, accepted);
+    }
+
+    private static GameSessionTranscriptPage CreateTranscriptPage(
+        GameSessionSnapshot snapshot,
+        int start,
+        int count)
+    {
+        var next = start + count < snapshot.Messages.Count
+            ? "v1."
+              + snapshot.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)
+              + "."
+              + (start + count).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : null;
+        return new GameSessionTranscriptPage(
+            snapshot.Key,
+            snapshot.Revision,
+            start,
+            snapshot.Messages.Count,
+            snapshot.Messages.Skip(start).Take(count).ToArray(),
+            next);
+    }
+
+    /// <summary>
     /// Reads an image only when its durable reference belongs to the requested session actor.
     /// Server hosts must authorize the caller before invoking this method.
     /// </summary>

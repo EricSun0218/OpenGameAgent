@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Volcengine Ark and Doubao Seedream image provider for OpenGameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent.Media\OpenGameAgent.Media.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\OpenGameAgent.Providers.ImageCommon\ImageProviderCommon.cs" Link="Internal\ImageProviderCommon.cs" />
+  </ItemGroup>
+</Project>

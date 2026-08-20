@@ -94,6 +94,17 @@ $requiresGodotMarker = $godotSmokeScript -match 'OPENGAMEAGENT_GODOT_SMOKE_OK'
 if (-not ($startsGodotProcess -and $waitsForGodotProcess -and $requiresGodotMarker)) {
     throw 'The Godot real-editor gate must wait for the editor process and require the runtime smoke marker.'
 }
+$unrealPackageScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engines\unreal\test-package.ps1') -Raw
+$unrealSmokeScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engines\unreal\test-plugin.ps1') -Raw
+$releaseWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw
+$releaseBundle = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tools\New-ReleaseBundle.ps1') -Raw
+if ($unrealPackageScript -notmatch 'OpenGameAgent\.uplugin' -or
+    $unrealSmokeScript -notmatch 'OpenGameAgent\.Unreal\.Tests' -or
+    $unrealSmokeScript -notmatch 'OPENGAMEAGENT_UNREAL_SMOKE_OK' -or
+    $releaseWorkflow -notmatch 'engines/unreal/test-package\.ps1' -or
+    $releaseBundle -notmatch 'OpenGameAgent\.Unreal-\$Version\.zip') {
+    throw 'The Unreal source plugin must be validated and included in release assets.'
+}
 $packageLayers = @(Get-ReleasePackageLayers -Packages $packages)
 $layeredPackages = @($packageLayers | ForEach-Object { $_.Packages })
 if ($packageLayers.Count -eq 0 -or $layeredPackages.Count -ne $packages.Count) {

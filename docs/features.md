@@ -59,6 +59,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Run many NPCs concurrently | `GameRuntimeLimits.MaxConcurrentActors`, `MultiActorScheduler` |
 | Correct or cancel an active NPC run | `GameAgentRuntime.TrySteer`, `GameAgentRuntime.TryAbort` |
 | Persist transcripts and deduplicate inputs | `IGameSessionStore` |
+| Read the current persisted transcript without parsing a store | `GameAgentRuntime.ReadTranscriptAsync`, `ServerGameAgentClient.ReadTranscriptAsync` |
 | Build a standalone append-only branch/lane audit history | `IGameSessionHistoryRepository`, `GameSessionHistory` |
 | Fork, search, page, or project that explicit history | `GameSessionHistory`, `GameHistoryContextProjection` |
 | Compact a long transcript | `IGameTranscriptCompactor` |
@@ -79,10 +80,16 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Load reusable prompt templates with bounded arguments | `FileGamePromptTemplateLoader`, `GamePromptTemplate` |
 | Trigger and save monthly/daily/turn events | `GameTimeScheduler`, `CaptureState` |
 | Send work between persistent actors | `IGameMailbox` |
+| Keep a semantic action alive across game-time ticks | `TaskPlanExtension`, `GoalLoopExtension`, `GameTimeScheduler`, `IGameMailbox` |
+| Narrate long-running action progress without replaying its mutation | durable action receipt plus later structured `GameInput` observations |
 | Resume fixed multi-stage logic | `DurableGameWorkflow` |
 | Run durable dependency graphs with bounded parallel branches | `DurableGameWorkflowGraph` |
+| Compose review, draft, validation, repair, and publication stages | `DurableGameWorkflowGraph`, game-owned validators and commit tools |
+| Generate a planner graph or behavior asset | structured model output, game-owned compiler/validator, durable publication tool |
 | Generate images/audio/video | `IGameMediaGenerator`, `GameMediaGenerationTool` |
 | Route generation by provider/model and media capability | `GameMediaModelRegistry` |
+| Call official OpenAI image generation/edit endpoints | `OpenAIImageProvider` |
+| Call Volcengine Ark/Seedream with reference images and explicit sizes | `VolcengineImageProvider` |
 | Spill large tool output and retrieve it later | `ArtifactExtension`, `IGameAgentArtifactStore` |
 | Recall scoped memory through an extension | `GameMemoryExtension` |
 

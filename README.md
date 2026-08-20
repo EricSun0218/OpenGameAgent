@@ -132,11 +132,11 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
 | Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators |
-| Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, and a dedicated OpenRouter image adapter with progressive previews |
+| Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, OpenRouter previews, official OpenAI Images, and Volcengine Ark/Seedream image generation and editing |
 | Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
 | Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
-| Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service and engine client |
-| Engines | Godot 4.7 .NET and Unity 6 packages, both exercised in real Windows editors |
+| Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service with C# and native C++ clients |
+| Engines | Godot 4.7 .NET and Unity 6 in-process packages; Unreal Engine 5.8 native C++ sidecar plugin |
 
 Realtime speech is an optional layer rather than a second game-authority path. The realtime transport can converse or transcribe, and can request reversible gaze, gesture, expression, or movement presentation. Planning and durable world mutations are handed to the same `GameAgentRuntime` and game-owned tools used by non-voice inputs. Optional OpenAI and Volcengine adapters share this contract; the Volcengine adapter keeps dialogue/VAD and streaming TTS separate from the authoritative agent loop. See [Realtime conversations](docs/realtime-conversations.md).
 
@@ -202,9 +202,9 @@ See the buildable [living-world example](examples/OpenGameAgent.Example/Program.
 
 ## Choose where it runs
 
-- **Inside the engine:** simplest single-player deployment, direct access to game context, no extra agent server. Suitable for BYOK or local endpoints. A provider key shipped in a client can be extracted.
+- **Inside a C# engine host:** simplest single-player deployment for Godot .NET or Unity, with direct access to game context and no extra agent server. Suitable for BYOK or local endpoints. A provider key shipped in a client can be extracted.
 - **In the game server:** best when the game already has an authoritative server. Run the same C# runtime beside game rules and persistence.
-- **Separate agent service:** useful for centrally paid inference, secrets, scaling, or independent updates. Engine adapters call `OpenGameAgent.Server` over JSON/SSE and can steer or abort an active actor through authenticated control endpoints.
+- **Separate agent service:** useful for Unreal, centrally paid inference, secrets, scaling, or independent updates. C# and native engine adapters call `OpenGameAgent.Server` over JSON/SSE and can steer or abort an active actor through authenticated control endpoints.
 
 For developer-funded client inference, use a developer-controlled gateway that issues short-lived scoped credentials. The permanent upstream provider key stays on developer infrastructure; the framework supplies the client credential flow, while the game owns login, quotas, revocation, and abuse controls.
 
@@ -222,6 +222,8 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 ./engines/godot/test-engine.ps1 -Godot <godot_console.exe> -GodotSharpDir <GodotSharp/Api/Debug>
 ./engines/unity/test-package.ps1 -UnityManagedDir <Unity/Editor/Data/Managed/UnityEngine>
 ./engines/unity/test-editor.ps1 -UnityEditor <Unity.exe> -UnityManagedDir <Unity/Editor/Data/Managed/UnityEngine>
+./engines/unreal/test-package.ps1
+./engines/unreal/test-plugin.ps1 -UnrealRoot <UE_5.8>
 ```
 
 Real-editor gates are documented in [Engine integration](docs/engine-integration.md).

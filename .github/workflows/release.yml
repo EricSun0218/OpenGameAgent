@@ -72,6 +72,9 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $root
           $sharp = Split-Path -Parent (Get-ChildItem -LiteralPath $root -Recurse -Filter GodotSharp.dll | Where-Object FullName -like '*Api*Debug*' | Select-Object -First 1 -ExpandProperty FullName)
           ./engines/godot/test-package.ps1 -GodotSharpDir $sharp -Version $env:RELEASE_VERSION
+      - name: Build Unreal source plugin
+        shell: pwsh
+        run: ./engines/unreal/test-package.ps1 -Version $env:RELEASE_VERSION
       - name: Validate public tree
         shell: pwsh
         run: ./tools/Test-PublicTree.ps1
@@ -110,7 +113,7 @@ jobs:
           set -euo pipefail
           tag="v${RELEASE_VERSION}"
           package_count="$(jq -r '.packages | length' tools/release-packages.json)"
-          expected_asset_count="$((package_count + 4))"
+          expected_asset_count="$((package_count + 5))"
           prerelease_args=()
           expected_prerelease=false
           if [[ "${RELEASE_VERSION}" == *-* ]]; then

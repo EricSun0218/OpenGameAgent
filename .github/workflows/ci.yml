@@ -70,6 +70,9 @@ jobs:
       - name: Verify Unity package
         shell: pwsh
         run: ./engines/unity/test-package.ps1 -UnityManagedDir artifacts/unity-stubs
+      - name: Verify Unreal source plugin
+        shell: pwsh
+        run: ./engines/unreal/test-package.ps1
       - name: Download Godot .NET
         shell: pwsh
         run: |

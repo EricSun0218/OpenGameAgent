@@ -14,10 +14,13 @@ This repository is a framework, not a game, world editor, content marketplace, o
 - `src/OpenGameAgent.DevTools`: bounded trace recording, observation-only playback, and offline evaluation.
 - `src/OpenGameAgent.Providers.OpenAICompatible`: streaming chat-completions transport.
 - `src/OpenGameAgent.Providers.MediaHttp`: generic remote or local media-generation transport.
+- `src/OpenGameAgent.Providers.OpenAI.Images`: official OpenAI image generation/edit transport.
+- `src/OpenGameAgent.Providers.Volcengine.Images`: Volcengine Ark/Seedream image generation/edit transport.
 - `src/OpenGameAgent.Client`: engine-compatible JSON/SSE service client.
 - `src/OpenGameAgent.Server`: optional C# .NET 8 host.
 - `engines/godot`: Godot .NET package and tests.
 - `engines/unity`: Unity UPM package and tests.
+- `engines/unreal`: native Unreal Engine C++ plugin for the remote JSON/SSE placement.
 - `examples`: buildable integration examples.
 - `tools/OpenGameAgent.DevTools.Cli`: local trace inspection and CI evaluation CLI.
 - `tests`: focused unit and integration tests.
@@ -53,6 +56,7 @@ Package gates:
 ```powershell
 ./engines/godot/test-package.ps1 -GodotSharpDir <GodotSharp/Api/Debug>
 ./engines/unity/test-package.ps1 -UnityManagedDir <Unity/Editor/Data/Managed/UnityEngine>
+./engines/unreal/test-package.ps1
 ```
 
 Real-editor gates are in `docs/engine-integration.md`.

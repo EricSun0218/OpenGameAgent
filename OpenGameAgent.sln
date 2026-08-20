@@ -126,6 +126,14 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Vol
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Volcengine.Realtime.Tests", "tests\OpenGameAgent.Providers.Volcengine.Realtime.Tests\OpenGameAgent.Providers.Volcengine.Realtime.Tests.csproj", "{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.OpenAI.Images", "src\OpenGameAgent.Providers.OpenAI.Images\OpenGameAgent.Providers.OpenAI.Images.csproj", "{B743932A-1A14-4A54-BE93-99CB17EA793E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Volcengine.Images", "src\OpenGameAgent.Providers.Volcengine.Images\OpenGameAgent.Providers.Volcengine.Images.csproj", "{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.OpenAI.Images.Tests", "tests\OpenGameAgent.Providers.OpenAI.Images.Tests\OpenGameAgent.Providers.OpenAI.Images.Tests.csproj", "{37D1CEEC-F5B8-48C5-9325-C571E45B66FE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Volcengine.Images.Tests", "tests\OpenGameAgent.Providers.Volcengine.Images.Tests\OpenGameAgent.Providers.Volcengine.Images.Tests.csproj", "{2B46350B-92E9-424D-A3D7-215309C8EDDE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -368,6 +376,22 @@ Global
 		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B743932A-1A14-4A54-BE93-99CB17EA793E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B743932A-1A14-4A54-BE93-99CB17EA793E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B743932A-1A14-4A54-BE93-99CB17EA793E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B743932A-1A14-4A54-BE93-99CB17EA793E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39}.Release|Any CPU.Build.0 = Release|Any CPU
+		{37D1CEEC-F5B8-48C5-9325-C571E45B66FE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{37D1CEEC-F5B8-48C5-9325-C571E45B66FE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{37D1CEEC-F5B8-48C5-9325-C571E45B66FE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{37D1CEEC-F5B8-48C5-9325-C571E45B66FE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
@@ -413,5 +437,9 @@ Global
 		{0F35EE05-19B9-46AF-A84D-23597CBF215E} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 		{7DD18736-C1C1-4BE4-AEF3-96CF528909F5} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{AB233708-F2A0-4A4E-8766-CDE4EA68BC13} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{B743932A-1A14-4A54-BE93-99CB17EA793E} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{37D1CEEC-F5B8-48C5-9325-C571E45B66FE} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{2B46350B-92E9-424D-A3D7-215309C8EDDE} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 	EndGlobalSection
 EndGlobal

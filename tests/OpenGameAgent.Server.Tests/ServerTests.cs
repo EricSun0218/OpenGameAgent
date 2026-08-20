@@ -1274,6 +1274,162 @@ public sealed class ServerTests
         Assert.Null(missing);
     }
 
+    [Fact]
+    public async Task TranscriptReadIsAuthorizedPagedAndProjectsAttachmentMetadataWithoutPrivateParts()
+    {
+        var key = new GameSessionKey("transcript-session", "npc-a");
+        var store = new CountingGameSessionStore();
+        var attachment = new GameImageAttachment("sha256:frame", "image/png", 123, 640, 360, "frame");
+        await store.SeedAsync(new GameSessionSnapshot(
+            key,
+            1,
+            new AgentMessage[]
+            {
+                new(AgentRole.User, new AgentContent[] { new TextContent("first") }, DateTimeOffset.UnixEpoch),
+                new(
+                    AgentRole.Assistant,
+                    new AgentContent[]
+                    {
+                        new ReasoningContent("private reasoning", redacted: false),
+                        new TextContent("visible answer", signature: "private-signature"),
+                        new ImageAttachmentContent(attachment),
+                    },
+                    DateTimeOffset.UnixEpoch),
+                new(AgentRole.User, new AgentContent[] { new TextContent("third") }, DateTimeOffset.UnixEpoch),
+            }));
+        store.ResetCounters();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")
+        {
+            SessionStore = store,
+        });
+        var authorizer = new TestOwnerAuthorizer((subject, requested, operation) =>
+            subject == "owner-a"
+            && requested.Equals(key)
+            && operation == GameAgentServerOperation.ReadTranscript);
+        await using var app = await CreateAppAsync(
+            runtime,
+            authorizer: authorizer,
+            audiencePolicy: CreateAudiencePolicy(GameAgentAudience.Owner));
+        using var client = app.GetTestClient();
+
+        using var denied = await client.SendAsync(
+            CreateOwnedRequest(
+                HttpMethod.Post,
+                "/v1/transcript",
+                "owner-b",
+                "{\"sessionId\":\"transcript-session\",\"actorId\":\"npc-a\",\"pageSize\":2}"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, denied.StatusCode);
+        Assert.Equal(0, store.LoadCalls);
+
+        using var firstResponse = await client.SendAsync(
+            CreateOwnedRequest(
+                HttpMethod.Post,
+                "/v1/transcript",
+                "owner-a",
+                "{\"sessionId\":\"transcript-session\",\"actorId\":\"npc-a\",\"pageSize\":2}"),
+            TestContext.Current.CancellationToken);
+        var firstJson = await firstResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+        firstResponse.EnsureSuccessStatusCode();
+        using var first = JsonDocument.Parse(firstJson);
+        var messages = first.RootElement.GetProperty("messages");
+        Assert.Equal(2, messages.GetArrayLength());
+        var assistant = messages[1];
+        Assert.DoesNotContain(
+            assistant.GetProperty("content").EnumerateArray(),
+            content => content.GetProperty("kind").GetString() == "reasoning");
+        Assert.Null(assistant.GetProperty("details").GetString());
+        var image = Assert.Single(
+            assistant.GetProperty("content").EnumerateArray(),
+            content => content.GetProperty("kind").GetString() == "image");
+        Assert.Equal("sha256:frame", image.GetProperty("attachment").GetProperty("attachmentId").GetString());
+        Assert.False(image.GetProperty("attachment").TryGetProperty("data", out _));
+        var cursor = first.RootElement.GetProperty("nextCursor").GetString();
+
+        using var remoteHttp = app.GetTestClient();
+        remoteHttp.DefaultRequestHeaders.Add("X-Test-Subject", "owner-a");
+        var remote = new ServerGameAgentClient(new ServerGameAgentClientOptions(remoteHttp, new Uri("http://localhost")));
+        var second = await remote.ReadTranscriptAsync(
+            key,
+            pageSize: 2,
+            cursor: cursor,
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.NotNull(second);
+        Assert.Equal(1, second.MessageCount);
+        Assert.Null(second.NextCursor);
+        Assert.Contains(authorizer.Calls, call => call.Operation == GameAgentServerOperation.ReadTranscript);
+    }
+
+    [Fact]
+    public async Task TranscriptReadRejectsInvalidKeyAndOversizedPageBeforeLoadingTheSession()
+    {
+        var store = new CountingGameSessionStore();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")
+        {
+            SessionStore = store,
+        });
+        await using var app = await CreateAppAsync(runtime);
+        using var client = app.GetTestClient();
+        using var response = await client.PostAsync(
+            "/v1/transcript",
+            new StringContent(
+                "{\"sessionId\":\"session\",\"actorId\":\"actor\",\"pageSize\":257}",
+                Encoding.UTF8,
+                "application/json"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, store.LoadCalls);
+
+        using var invalidKey = await client.PostAsync(
+            "/v1/transcript",
+            new StringContent(
+                "{\"sessionId\":\"session\",\"actorId\":\"\",\"pageSize\":1}",
+                Encoding.UTF8,
+                "application/json"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, invalidKey.StatusCode);
+        Assert.Equal(0, store.LoadCalls);
+    }
+
+    [Fact]
+    public async Task TranscriptReadRejectsASingleMessageThatExceedsTheWireLimit()
+    {
+        var key = new GameSessionKey("large-transcript", "actor");
+        var store = new CountingGameSessionStore();
+        await store.SeedAsync(new GameSessionSnapshot(
+            key,
+            1,
+            new[]
+            {
+                new AgentMessage(
+                    AgentRole.User,
+                    new AgentContent[]
+                    {
+                        new TextContent(new string('x', GameAgentWire.MaximumTranscriptPageUtf8Bytes)),
+                    },
+                    DateTimeOffset.UnixEpoch),
+            }));
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")
+        {
+            SessionStore = store,
+        });
+        await using var app = await CreateAppAsync(runtime);
+        using var client = app.GetTestClient();
+
+        using var response = await client.PostAsync(
+            "/v1/transcript",
+            new StringContent(
+                "{\"sessionId\":\"large-transcript\",\"actorId\":\"actor\",\"pageSize\":1}",
+                Encoding.UTF8,
+                "application/json"),
+            TestContext.Current.CancellationToken);
+        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+        Assert.Contains("transcript_message_too_large", body, StringComparison.Ordinal);
+    }
+
     private static async Task<WebApplication> CreateAppAsync(
         string? apiKey = null,
         int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)

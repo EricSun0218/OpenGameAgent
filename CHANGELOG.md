@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add official OpenAI Images and Volcengine Ark/Seedream image providers with bounded reference-image
+  inputs, credential isolation, validated image outputs, and model-registry integration.
+- Add an authorized, cursor-paged durable transcript read API for runtimes, the stock server, and remote
+  clients, including attachment metadata without inline binary payloads and bounded UTF-8 responses.
+- Add a native Unreal Engine 5.8 remote adapter with JSON/SSE control, game-thread event dispatch, bounded
+  response streaming, source packaging, and real-editor automation coverage.
 - Carry tool conflict keys into durable action intents and journals, and atomically coordinate matching
   writes across actors, sessions, runs, and process restarts within a timeline/save generation. An
   uncertain dispatch blocks the key until authoritative reconciliation; unrelated keys and generations

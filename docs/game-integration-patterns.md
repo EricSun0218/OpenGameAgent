@@ -128,6 +128,40 @@ Workflow checkpoints allow a wait between steps without losing progress. Use `ag
 
 When independent monthly branches may run together, use `DurableGameWorkflowGraph`. Dependencies are explicit, ready nodes run with bounded concurrency, joined outputs are presented in declaration order, and completed nodes are not rerun after a wait. A node that changes the world should use the durable action dispatcher with a stable operation ID because workflow and game-state storage are not automatically one transaction.
 
+## Long-running world actions and narrated progress
+
+Do not keep one model call or tool invocation open for an action that lasts several game hours, days, or turns. Split semantic intent from world execution:
+
+1. the agent proposes or selects a bounded action through a typed tool;
+2. the authoritative game validates it and durably commits either the action itself or a scheduled action record;
+3. the receipt closes that exact mutation attempt;
+4. `TaskPlanExtension` or `GoalLoopExtension` retains the actor's semantic objective;
+5. game-time triggers enqueue bounded progress, interruption, success, or failure observations;
+6. later agent runs may narrate progress, revise the remaining plan, or write a memory without replaying the original mutation.
+
+Use stable action, schedule, mailbox, and input IDs. A progress observation is not another receipt for the original action and must not reuse its operation ID. If a progress update changes the world, expose that change as its own durable action with its own authority check and receipt.
+
+This pattern supports journeys, construction, research, employment, trade routes, rescues, faction campaigns, and other multi-tick activities. The game owns simulation and completion conditions; the model handles semantic planning, explanation, negotiation, and adaptation. A save should persist the game action record together with the relevant workflow/plan checkpoint, scheduler state, and mailbox state, or reconcile them before admitting new work.
+
+## Multi-stage dialogue and generated content
+
+Use ordinary agent turns for open conversation and a fixed workflow when the product requires explicit stages such as inspect context, draft, validate references, calculate game values, repair invalid output, localize, and publish. Each stage receives bounded structured data. Only the final game-owned commit tool may create quests, items, rules, policies, rumors, histories, or ending records.
+
+Different dialogue modes—negotiation, argument, friendship, recruitment, voting, trade, surrender, or advice—are route, prompt, context, tool, and policy compositions rather than separate runtime subsystems. Keep the actor identity, visible facts, allowed tools, and audience policy authoritative at every stage. A workflow may return structured interaction choices for the UI, but those choices do not gain permission merely because the model generated them.
+
+## Generated plans and behavior assets
+
+An agent may draft a goal graph, utility plan, behavior tree, schedule, quest graph, policy, or another game-native asset. Keep that asset format in game code instead of making it a runtime schema. A safe pipeline is:
+
+1. expose the allowed node/action catalog as bounded structured context or a searchable read-only tool;
+2. request a closed structured draft rather than executable code;
+3. compile and validate references, cycles, depth, costs, permissions, and game-specific invariants in deterministic code;
+4. return bounded validation diagnostics for repair;
+5. publish the accepted asset through a durable game action;
+6. let the authoritative simulation execute it and feed observations back to later agent turns.
+
+The generated asset can persist and run without another model call. Model output never becomes a new tool or permission by itself, and a generated node can invoke only actions that the game already registered and authorized. Use a fixed workflow when draft/validate/repair stages must be reproducible, and store the published asset as an artifact or game save record according to the game's ownership model.
+
 ## Social deduction and group scenes
 
 Give each actor a separate session and perspective-filtered context. Do not place secrets in a shared prompt and ask the model to ignore them. Use mailboxes or game signals for statements actors are allowed to perceive. Run independent actor turns concurrently, then resolve voting, initiative, or contested actions in deterministic game code.
@@ -188,3 +222,11 @@ OpenGameAgent already supplies the composition points for this pattern: persiste
 Use stable session, actor, input, operation, and timeline IDs. After loading a save fork that can coexist with its source, assign both a new session/save namespace and a new timeline ID. Persist game state and OpenGameAgent stores in the same save transaction when possible. If that is impossible, reconcile pending action journal entries before accepting new inputs.
 
 Never use wall-clock timestamps to decide whether an in-world memory happened before the current save state.
+
+## Reopening a persisted conversation
+
+Use `GameAgentRuntime.ReadTranscriptAsync` in-process, or the authorized `POST /v1/transcript` endpoint through `ServerGameAgentClient.ReadTranscriptAsync`, to rebuild a chat window for one `(sessionId, actorId)`. Pages contain the current durable transcript in stable chronological order. The page size is limited to 256 messages and the opaque cursor is bound to the session revision; if another run or a save rollback changes that revision, the old cursor fails with `transcript_changed` instead of combining two histories.
+
+This is the active model transcript, not an append-only audit log. Compacted messages are represented by their durable summary, and a rollback exposes the restored transcript. Use `IGameSessionHistoryRepository` when the product separately needs branches or an immutable audit history.
+
+`ImageAttachmentContent` is returned as attachment metadata only. Fetch bytes separately through the authorized attachment endpoint when the UI actually needs them. Server hosts must authorize `GameAgentServerOperation.ReadTranscript` before touching the runtime or session store, and should install an audience policy whenever different viewers can see different messages. Owner/public projections remove reasoning, signatures, private messages, and tool details; provider credentials never enter the transcript response.

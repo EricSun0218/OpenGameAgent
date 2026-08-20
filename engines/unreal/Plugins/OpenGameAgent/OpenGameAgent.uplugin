@@ -1,0 +1,23 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0-alpha",
+  "FriendlyName": "OpenGameAgent",
+  "Description": "Remote OpenGameAgent runtime integration for Unreal Engine.",
+  "Category": "AI",
+  "CreatedBy": "OpenGameAgent contributors",
+  "CreatedByURL": "https://opengameagent.com",
+  "DocsURL": "https://github.com/EricSun0218/OpenGameAgent/blob/main/docs/engine-integration.md",
+  "MarketplaceURL": "",
+  "SupportURL": "https://github.com/EricSun0218/OpenGameAgent/issues",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "OpenGameAgentUnreal",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}

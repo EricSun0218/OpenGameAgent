@@ -66,6 +66,56 @@ public sealed class RemoteGameAgentResult
     }
 }
 
+public sealed class RemoteGameSessionTranscriptPage
+{
+    public RemoteGameSessionTranscriptPage(
+        long sessionRevision,
+        int startIndex,
+        int totalMessages,
+        int messageCount,
+        string? nextCursor,
+        string json)
+    {
+        if (sessionRevision < 0
+            || startIndex < 0
+            || totalMessages < 0
+            || messageCount < 0
+            || startIndex > totalMessages
+            || startIndex + messageCount > totalMessages)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startIndex));
+        }
+
+        if (nextCursor is { Length: > 256 } || nextCursor?.Any(char.IsControl) == true)
+        {
+            throw new ArgumentException("The transcript cursor is invalid.", nameof(nextCursor));
+        }
+
+        SessionRevision = sessionRevision;
+        StartIndex = startIndex;
+        TotalMessages = totalMessages;
+        MessageCount = messageCount;
+        NextCursor = nextCursor;
+        Json = RemoteJson.RequireValid(json, nameof(json));
+    }
+
+    public long SessionRevision { get; }
+
+    public int StartIndex { get; }
+
+    public int TotalMessages { get; }
+
+    public int MessageCount { get; }
+
+    public string? NextCursor { get; }
+
+    /// <summary>
+    /// The bounded wire page. Message objects use the same shape as run-result messages and image
+    /// attachments contain metadata only; retrieve bytes through ReadImageAttachmentAsync.
+    /// </summary>
+    public string Json { get; }
+}
+
 public delegate ValueTask RemoteGameAgentEventHandler(
     RemoteGameAgentEvent agentEvent,
     CancellationToken cancellationToken);
@@ -103,6 +153,8 @@ public sealed class ServerGameAgentClientOptions
 
     public string AttachmentReadPath { get; set; } = "v1/attachments/read";
 
+    public string TranscriptReadPath { get; set; } = "v1/transcript";
+
     public string? ApiKey { get; set; }
 
     public string ApiKeyHeader { get; set; } = "Authorization";
@@ -126,6 +178,7 @@ public sealed class ServerGameAgentClient
     private readonly Uri _steerEndpoint;
     private readonly Uri _abortEndpoint;
     private readonly Uri _attachmentReadEndpoint;
+    private readonly Uri _transcriptReadEndpoint;
     private readonly string? _apiKey;
     private readonly string _apiKeyHeader;
     private readonly string _apiKeyScheme;
@@ -207,6 +260,10 @@ public sealed class ServerGameAgentClient
             options.ServerBaseUri,
             options.AttachmentReadPath,
             nameof(options.AttachmentReadPath));
+        _transcriptReadEndpoint = CreateEndpoint(
+            options.ServerBaseUri,
+            options.TranscriptReadPath,
+            nameof(options.TranscriptReadPath));
         _apiKey = options.ApiKey;
         _apiKeyHeader = options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;
@@ -415,6 +472,82 @@ public sealed class ServerGameAgentClient
         return ParseAttachment(body);
     }
 
+    public async Task<RemoteGameSessionTranscriptPage?> ReadTranscriptAsync(
+        GameSessionKey key,
+        int pageSize = 50,
+        string? cursor = null,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValidForClient(nameof(key));
+        if (pageSize is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize));
+        }
+
+        if (cursor is { Length: > 256 } || cursor?.Any(char.IsControl) == true)
+        {
+            throw new ArgumentException("The transcript cursor is invalid.", nameof(cursor));
+        }
+
+        var json = JsonSerializer.Serialize(new
+        {
+            sessionId = key.SessionId,
+            actorId = key.ActorId,
+            pageSize,
+            cursor,
+        });
+        using var request = CreateJsonRequest(_transcriptReadEndpoint, json);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var body = await ReadBoundedAsync(response.Content, _maxResponseCharacters, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        EnsureSuccess(response, body);
+        return ParseTranscriptPage(body, key);
+    }
+
+    private static RemoteGameSessionTranscriptPage ParseTranscriptPage(string json, GameSessionKey expectedKey)
+    {
+        using var document = RemoteJson.Parse(json, nameof(json));
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !string.Equals(RequireString(root, "sessionId"), expectedKey.SessionId, StringComparison.Ordinal)
+            || !string.Equals(RequireString(root, "actorId"), expectedKey.ActorId, StringComparison.Ordinal)
+            || !root.TryGetProperty("messages", out var messages)
+            || messages.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("The transcript response does not match the requested session actor.");
+        }
+
+        var revision = RequireNonNegativeInt64(root, "sessionRevision");
+        var start = RequireNonNegativeInt32(root, "startIndex");
+        var total = RequireNonNegativeInt32(root, "totalMessages");
+        string? next = null;
+        if (root.TryGetProperty("nextCursor", out var nextElement)
+            && nextElement.ValueKind != JsonValueKind.Null)
+        {
+            if (nextElement.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidDataException("The transcript cursor must be a string or null.");
+            }
+
+            next = nextElement.GetString();
+        }
+
+        return new RemoteGameSessionTranscriptPage(
+            revision,
+            start,
+            total,
+            messages.GetArrayLength(),
+            next,
+            json);
+    }
+
     private static StoredGameImageAttachment ParseAttachment(string json)
     {
         using var document = RemoteJson.Parse(json, nameof(json));
@@ -484,6 +617,30 @@ public sealed class ServerGameAgentClient
             || result <= 0)
         {
             throw new InvalidDataException("The attachment response has an invalid '" + propertyName + "'.");
+        }
+
+        return result;
+    }
+
+    private static int RequireNonNegativeInt32(JsonElement value, string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property)
+            || !property.TryGetInt32(out var result)
+            || result < 0)
+        {
+            throw new InvalidDataException("The transcript response has an invalid '" + propertyName + "'.");
+        }
+
+        return result;
+    }
+
+    private static long RequireNonNegativeInt64(JsonElement value, string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property)
+            || !property.TryGetInt64(out var result)
+            || result < 0)
+        {
+            throw new InvalidDataException("The transcript response has an invalid '" + propertyName + "'.");
         }
 
         return result;

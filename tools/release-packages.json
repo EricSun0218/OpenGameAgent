@@ -86,6 +86,14 @@
       "project": "src/OpenGameAgent.Media/OpenGameAgent.Media.csproj"
     },
     {
+      "id": "OpenGameAgent.Providers.OpenAI.Images",
+      "project": "src/OpenGameAgent.Providers.OpenAI.Images/OpenGameAgent.Providers.OpenAI.Images.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Providers.Volcengine.Images",
+      "project": "src/OpenGameAgent.Providers.Volcengine.Images/OpenGameAgent.Providers.Volcengine.Images.csproj"
+    },
+    {
       "id": "OpenGameAgent.Models.BuiltIn",
       "project": "src/OpenGameAgent.Models.BuiltIn/OpenGameAgent.Models.BuiltIn.csproj"
     },
