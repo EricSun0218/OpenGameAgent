@@ -11,6 +11,8 @@
   transcription handoff, word-timed subtitles, cancellable streaming TTS sub-sessions, bounded
   backpressure, handshake-only credentials, per-session NPC voices, and durable-action-safe bridge
   integration.
+- Make realtime stop and disposal share one bounded lifecycle operation so explicit stop, remote
+  closure, asynchronous disposal, and concurrent cleanup cannot double-dispose provider resources.
 - Add the optional `OpenGameAgent.DevTools` package and CLI for bounded append-only JSONL trace
   recording, crash-tail recovery, observation-only HTML playback, run summaries, and strict offline
   evaluation suitable for local debugging and CI gates.

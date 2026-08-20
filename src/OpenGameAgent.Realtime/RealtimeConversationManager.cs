@@ -7,6 +7,7 @@ public sealed class RealtimeConversationManager : IAsyncDisposable
     private readonly IRealtimeBehaviorHandler? _behaviorHandler;
     private readonly List<RealtimeConversationEventHandler> _handlers = new();
     private ConversationState? _active;
+    private Task _stopTask = Task.CompletedTask;
     private RealtimeConversationState _state = RealtimeConversationState.Idle;
     private int _disposed;
 
@@ -168,27 +169,34 @@ public sealed class RealtimeConversationManager : IAsyncDisposable
 
     public async ValueTask StopAsync(CancellationToken cancellationToken = default)
     {
-        ConversationState? active;
+        Task stopTask;
         lock (_gate)
         {
-            active = _active;
-            _active = null;
-            _state = active is null
-                ? RealtimeConversationState.Closed
-                : RealtimeConversationState.Stopping;
-        }
-
-        if (active is not null)
-        {
-            await active.StopAsync(active.Options.ShutdownTimeoutMilliseconds, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        lock (_gate)
-        {
-            if (_active is null)
+            if (_active is { } active)
             {
-                _state = RealtimeConversationState.Closed;
+                _active = null;
+                _state = RealtimeConversationState.Stopping;
+                _stopTask = active.StopAsync(
+                        active.Options.ShutdownTimeoutMilliseconds,
+                        CancellationToken.None)
+                    .AsTask();
+            }
+
+            stopTask = _stopTask;
+        }
+
+        try
+        {
+            await WaitWithCancellationAsync(stopTask, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_stopTask, stopTask) && _active is null)
+                {
+                    _state = RealtimeConversationState.Closed;
+                }
             }
         }
     }
@@ -284,13 +292,14 @@ public sealed class RealtimeConversationManager : IAsyncDisposable
         }
     }
 
-    private void OnStateTerminated(ConversationState state, bool faulted)
+    private void OnStateTerminated(ConversationState state, bool faulted, Task sessionDisposal)
     {
         lock (_gate)
         {
             if (ReferenceEquals(_active, state))
             {
                 _active = null;
+                _stopTask = sessionDisposal;
                 _state = faulted ? RealtimeConversationState.Faulted : RealtimeConversationState.Closed;
             }
         }
@@ -402,13 +411,14 @@ public sealed class RealtimeConversationManager : IAsyncDisposable
         private readonly object _behaviorGate = new();
         private readonly object _audioOutputGate = new();
         private readonly object _transcriptGate = new();
+        private readonly object _sessionDisposeGate = new();
         private readonly Dictionary<string, BehaviorExecution> _behaviors = new(StringComparer.Ordinal);
         private readonly System.Text.StringBuilder _inputTranscriptTail = new();
         private Task[] _tasks = Array.Empty<Task>();
         private long _droppedAudioFrames;
         private int _stopped;
         private int _faulted;
-        private int _sessionDisposed;
+        private Task? _sessionDisposeTask;
         private int _tailFlushed;
         private int _closedObserved;
         private string? _outputItemId;
@@ -609,8 +619,11 @@ public sealed class RealtimeConversationManager : IAsyncDisposable
                 _commands.Complete();
                 CancelAllBehaviors();
                 _stop.Cancel();
-                _owner.OnStateTerminated(this, Volatile.Read(ref _faulted) != 0);
-                _ = Task.Run(DisposeSessionAfterTransportClosedAsync);
+                var sessionDisposal = Task.Run(DisposeSessionAfterTransportClosedAsync);
+                _owner.OnStateTerminated(
+                    this,
+                    Volatile.Read(ref _faulted) != 0,
+                    sessionDisposal);
             }
         }
 
@@ -980,10 +993,16 @@ public sealed class RealtimeConversationManager : IAsyncDisposable
             }
         }
 
-        private ValueTask DisposeSessionAsync() =>
-            Interlocked.Exchange(ref _sessionDisposed, 1) == 0
-                ? _session.DisposeAsync()
-                : default;
+        private ValueTask DisposeSessionAsync()
+        {
+            Task task;
+            lock (_sessionDisposeGate)
+            {
+                task = _sessionDisposeTask ??= _session.DisposeAsync().AsTask();
+            }
+
+            return new ValueTask(task);
+        }
 
         private static string Bound(string value, int maximum) =>
             value.Length <= maximum ? value : value.Substring(0, maximum);

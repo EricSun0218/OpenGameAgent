@@ -18,6 +18,7 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
     private readonly SemaphoreSlim _ttsSendGate = new(1, 1);
     private readonly SemaphoreSlim _ttsCommandGate = new(1, 1);
     private readonly object _stateGate = new();
+    private readonly object _lifecycleGate = new();
     private readonly StringBuilder _inputTranscript = new();
     private readonly Dictionary<string, string> _ttsHandoffs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TaskCompletionSource<bool>> _ttsStartAcks = new(StringComparer.Ordinal);
@@ -30,8 +31,11 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
     private readonly string? _dialogueSessionId;
     private string? _activeTtsSessionId;
     private string? _activeHandoffId;
+    private Task? _closeTask;
+    private Task? _disposeTask;
     private int _inputSequence;
     private int _closed;
+    private int _eventsCompleted;
 
     internal VolcengineRealtimeTransportSession(
         IVolcengineWebSocketConnection? dialogue,
@@ -263,21 +267,46 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
         return default;
     }
 
-    public async ValueTask CloseAsync(CancellationToken cancellationToken)
+    public ValueTask CloseAsync(CancellationToken cancellationToken)
     {
-        if (Interlocked.Exchange(ref _closed, 1) != 0)
+        var task = GetOrStartClose();
+        return new ValueTask(VolcengineAsync.AwaitWithCancellationAsync(task, cancellationToken));
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Task task;
+        lock (_lifecycleGate)
         {
-            return;
+            task = _disposeTask ??= DisposeCoreAsync();
         }
 
+        return new ValueTask(task);
+    }
+
+    private Task GetOrStartClose()
+    {
+        lock (_lifecycleGate)
+        {
+            if (_closeTask is null)
+            {
+                Volatile.Write(ref _closed, 1);
+                _closeTask = CloseCoreAsync();
+            }
+
+            return _closeTask;
+        }
+    }
+
+    private async Task CloseCoreAsync()
+    {
         using var timeout = new CancellationTokenSource(_options.ShutdownTimeoutMilliseconds);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         try
         {
-            await _ttsCommandGate.WaitAsync(linked.Token).ConfigureAwait(false);
+            await _ttsCommandGate.WaitAsync(timeout.Token).ConfigureAwait(false);
             try
             {
-                await CancelActiveTtsAsync(linked.Token).ConfigureAwait(false);
+                await CancelActiveTtsAsync(timeout.Token).ConfigureAwait(false);
             }
             finally
             {
@@ -293,7 +322,7 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
                         Encoding.UTF8.GetBytes("{}"),
                         VolcengineSerialization.Json,
                         VolcengineCompression.Gzip,
-                        linked.Token)
+                        timeout.Token)
                     .ConfigureAwait(false);
                 await SendDialogueAsync(
                         VolcengineMessageType.FullClientRequest,
@@ -302,7 +331,7 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
                         Encoding.UTF8.GetBytes("{}"),
                         VolcengineSerialization.Json,
                         VolcengineCompression.Gzip,
-                        linked.Token)
+                        timeout.Token)
                     .ConfigureAwait(false);
             }
 
@@ -313,7 +342,7 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
                     Encoding.UTF8.GetBytes("{}"),
                     VolcengineSerialization.Json,
                     VolcengineCompression.None,
-                    linked.Token)
+                    timeout.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
@@ -325,17 +354,16 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
         finally
         {
             _lifetime.Cancel();
-            await CloseSocketAsync(_dialogue, linked.Token).ConfigureAwait(false);
-            await CloseSocketAsync(_tts, linked.Token).ConfigureAwait(false);
+            await CloseSocketAsync(_dialogue, timeout.Token).ConfigureAwait(false);
+            await CloseSocketAsync(_tts, timeout.Token).ConfigureAwait(false);
             await AwaitPumpsAsync().ConfigureAwait(false);
-            _events.TryEnqueue(new RealtimeConversationEvent(RealtimeConversationEventKind.Closed));
-            _events.Complete();
+            CompleteEvents();
         }
     }
 
-    public async ValueTask DisposeAsync()
+    private async Task DisposeCoreAsync()
     {
-        await CloseAsync(CancellationToken.None).ConfigureAwait(false);
+        await GetOrStartClose().ConfigureAwait(false);
         _dialogue?.Dispose();
         _tts.Dispose();
         _dialogueSendGate.Dispose();
@@ -361,6 +389,13 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
         {
             await EmitErrorAsync(exception, _lifetime.Token).ConfigureAwait(false);
         }
+        finally
+        {
+            if (!_lifetime.IsCancellationRequested)
+            {
+                CompleteEvents();
+            }
+        }
     }
 
     private async Task ReadTtsAsync()
@@ -379,6 +414,13 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
         catch (Exception exception)
         {
             await EmitErrorAsync(exception, _lifetime.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (!_lifetime.IsCancellationRequested)
+            {
+                CompleteEvents();
+            }
         }
     }
 
@@ -430,6 +472,9 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
             case VolcengineEvents.SessionFailed:
             case VolcengineEvents.ConnectionFailed:
                 await EmitProviderErrorAsync(message, cancellationToken).ConfigureAwait(false);
+                break;
+            case VolcengineEvents.ConnectionFinished:
+                CompleteEvents();
                 break;
         }
     }
@@ -533,6 +578,9 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
             case VolcengineEvents.SessionFailed:
             case VolcengineEvents.ConnectionFailed:
                 await EmitProviderErrorAsync(message, cancellationToken).ConfigureAwait(false);
+                break;
+            case VolcengineEvents.ConnectionFinished:
+                CompleteEvents();
                 break;
             default:
                 if (message.MessageType == VolcengineMessageType.AudioOnlyServer
@@ -1251,6 +1299,17 @@ internal sealed class VolcengineRealtimeTransportSession : IRealtimeTransportSes
         {
             throw new ObjectDisposedException(nameof(VolcengineRealtimeTransportSession));
         }
+    }
+
+    private void CompleteEvents()
+    {
+        if (Interlocked.Exchange(ref _eventsCompleted, 1) != 0)
+        {
+            return;
+        }
+
+        _events.TryEnqueue(new RealtimeConversationEvent(RealtimeConversationEventKind.Closed));
+        _events.Complete();
     }
 }
 

@@ -386,6 +386,101 @@ public sealed class VolcengineRealtimeTransportTests
     }
 
     [Fact]
+    public async Task ManagerStopAfterCompletedTtsIsIdempotent()
+    {
+        var tts = new FakeConnection();
+        var transport = CreateTtsOnlyTransport(tts, "lifecycle-credential");
+        var audio = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var manager = new RealtimeConversationManager(transport);
+        using var handler = manager.RegisterHandler((value, _) =>
+        {
+            if (value.Kind == RealtimeConversationEventKind.AudioOutput)
+            {
+                audio.TrySetResult();
+            }
+
+            if (value.Kind == RealtimeConversationEventKind.ResponseDone)
+            {
+                done.TrySetResult();
+            }
+
+            return default;
+        });
+        await manager.StartAsync(
+            new RealtimeConversationOptions(),
+            TestContext.Current.CancellationToken);
+        await manager.SendTextAsync(
+            "lifecycle smoke",
+            RealtimeTextRole.Assistant,
+            TestContext.Current.CancellationToken);
+        await WaitUntilAsync(
+            () => tts.Sent.Select(ParseClient).Any(value =>
+                value.Event == VolcengineEvents.StartSession),
+            TestContext.Current.CancellationToken);
+        var sessionId = tts.Sent
+            .Select(ParseClient)
+            .Last(value => value.Event == VolcengineEvents.StartSession)
+            .SessionId!;
+        tts.Emit(ServerEvent(
+            VolcengineEvents.TtsResponse,
+            sessionId,
+            new byte[480],
+            VolcengineMessageType.AudioOnlyServer,
+            VolcengineSerialization.Raw));
+        tts.Emit(ServerEvent(VolcengineEvents.TtsEnded, sessionId, "{}"));
+        await Task.WhenAll(audio.Task, done.Task).WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        await manager.StopAsync(TestContext.Current.CancellationToken);
+        await manager.StopAsync(TestContext.Current.CancellationToken);
+        await manager.DisposeAsync();
+        await manager.DisposeAsync();
+
+        Assert.Equal(1, tts.DisposeCount);
+        Assert.Equal(RealtimeConversationState.Closed, manager.State);
+    }
+
+    [Fact]
+    public async Task AwaitUsingDisposesAnActiveSessionExactlyOnce()
+    {
+        var tts = new FakeConnection();
+        var transport = CreateTtsOnlyTransport(tts, "scope-credential");
+
+        await using (var manager = new RealtimeConversationManager(transport))
+        {
+            await manager.StartAsync(
+                new RealtimeConversationOptions(),
+                TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(1, tts.DisposeCount);
+    }
+
+    [Fact]
+    public async Task RemoteCloseRacesWithStopAndDisposeWithoutDoubleDisposal()
+    {
+        var tts = new FakeConnection();
+        var transport = CreateTtsOnlyTransport(tts, "remote-close-credential");
+        var manager = new RealtimeConversationManager(transport);
+        await manager.StartAsync(
+            new RealtimeConversationOptions(),
+            TestContext.Current.CancellationToken);
+
+        tts.Emit(ServerEvent(VolcengineEvents.ConnectionFinished, "connect", "{}"));
+        await WaitUntilAsync(
+            () => manager.State == RealtimeConversationState.Closed,
+            TestContext.Current.CancellationToken);
+        await Task.WhenAll(
+            manager.StopAsync(TestContext.Current.CancellationToken).AsTask(),
+            manager.DisposeAsync().AsTask());
+
+        Assert.Equal(1, tts.DisposeCount);
+        Assert.Equal(RealtimeConversationState.Closed, manager.State);
+    }
+
+    [Fact]
     public async Task ProviderErrorsCannotEchoCredentialsOrHeaderSecrets()
     {
         const string credentialValue = "super-secret-api-value";
@@ -537,6 +632,16 @@ public sealed class VolcengineRealtimeTransportTests
                     request.Endpoint.AbsolutePath.Contains("/dialogue", StringComparison.Ordinal)
                         ? dialogue
                         : tts),
+        });
+
+    private static VolcengineRealtimeTransport CreateTtsOnlyTransport(
+        FakeConnection tts,
+        string credentialValue) => new(new VolcengineRealtimeTransportOptions
+        {
+            InputMode = VolcengineRealtimeInputMode.Disabled,
+            ApiKey = credentialValue,
+            ConnectionFactory = (_, _) =>
+                new ValueTask<IVolcengineWebSocketConnection>(tts),
         });
 
     private static async Task<List<RealtimeConversationEvent>> ReadThroughAsync(
@@ -727,10 +832,13 @@ public sealed class VolcengineRealtimeTransportTests
         private readonly Channel<byte[]> _receive = Channel.CreateUnbounded<byte[]>();
         private readonly ConcurrentQueue<byte[]> _sent = new();
         private int _disposed;
+        private int _disposeCount;
 
         public bool IsOpen => Volatile.Read(ref _disposed) == 0;
 
         public IReadOnlyList<byte[]> Sent => _sent.ToArray();
+
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
 
         public ValueTask SendBinaryAsync(
             ReadOnlyMemory<byte> payload,
@@ -776,6 +884,11 @@ public sealed class VolcengineRealtimeTransportTests
 
         public void Dispose()
         {
+            if (Interlocked.Increment(ref _disposeCount) != 1)
+            {
+                return;
+            }
+
             Interlocked.Exchange(ref _disposed, 1);
             _receive.Writer.TryComplete();
         }
