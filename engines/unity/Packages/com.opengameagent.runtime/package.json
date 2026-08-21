@@ -8,6 +8,11 @@
   "documentationUrl": "https://github.com/EricSun0218/OpenGameAgent/blob/main/docs/engine-integration.md",
   "changelogUrl": "https://github.com/EricSun0218/OpenGameAgent/blob/main/engines/unity/Packages/com.opengameagent.runtime/CHANGELOG.md",
   "licensesUrl": "https://github.com/EricSun0218/OpenGameAgent/blob/main/LICENSE",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EricSun0218/OpenGameAgent.git"
+  },
   "keywords": [
     "ai",
     "agent",

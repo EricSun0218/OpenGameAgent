@@ -54,6 +54,14 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 
 可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 下载版本化包文件、Godot/Unity 压缩包或可移植服务端。若游戏需要持续跟随本地最新源码，请只引用实际使用的项目：
 
+Unity 6 项目可以直接通过不可变的 GitHub UPM tag 安装完整的 `0.3.0-alpha.3` 包：
+
+```text
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+```
+
+OpenUPM 完成索引后，也可以执行 `openupm add com.opengameagent.runtime@0.3.0-alpha.3`。自动生成的 `upm` 分支包含经过测试的完整二进制；`main` 上的 Unity 源码目录本身不是可分发包。
+
 ```xml
 <ItemGroup>
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />

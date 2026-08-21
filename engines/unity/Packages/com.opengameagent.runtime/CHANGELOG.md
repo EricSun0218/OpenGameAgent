@@ -5,6 +5,7 @@
 - Add a deterministic no-key sample and store-ready package metadata.
 - Add complete third-party notices for bundled runtime dependencies.
 - Validate the sample in a real Unity 6 editor smoke test.
+- Publish complete immutable packages through GitHub UPM tags and OpenUPM.
 
 ## 0.3.0-alpha.2
 

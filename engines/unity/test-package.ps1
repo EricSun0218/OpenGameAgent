@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string] $UnityManagedDir,
-    [string] $Version = '0.3.0-alpha.2'
+    [string] $Version = '0.3.0-alpha.3'
 )
 
 Set-StrictMode -Version Latest
@@ -56,6 +56,8 @@ if ($unexpected) {
 $manifest = Get-Content -LiteralPath (Join-Path $packagePath 'package.json') -Raw | ConvertFrom-Json
 if ($manifest.name -ne 'com.opengameagent.runtime' -or
     $manifest.version -ne $Version -or
+    $manifest.license -ne 'MIT' -or
+    $manifest.repository.url -ne 'https://github.com/EricSun0218/OpenGameAgent.git' -or
     $manifest.unity -ne '6000.0' -or
     $manifest.unityRelease -ne '0f1' -or
     $manifest.samples.Count -ne 1) {
