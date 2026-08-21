@@ -88,6 +88,13 @@
           "System.Text.Json": "[8.0.6, )"
         }
       },
+      "opengameagent.media": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Models": "[0.3.0-alpha.2, )"
+        }
+      },
       "opengameagent.models": {
         "type": "Project",
         "dependencies": {

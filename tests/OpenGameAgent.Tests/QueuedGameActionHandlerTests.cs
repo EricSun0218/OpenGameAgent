@@ -31,10 +31,10 @@ public sealed class QueuedGameActionHandlerTests
 
         Assert.False(first.IsCompleted);
         Assert.Equal(2, handler.Pump(2));
-        Assert.Equal(GameActionStatus.Committed, (await first).Status);
-        Assert.Equal(GameActionStatus.Committed, (await second)!.Status);
         Assert.False(third.IsCompleted);
         Assert.Equal(1, handler.Pump(2));
+        Assert.Equal(GameActionStatus.Committed, (await first).Status);
+        Assert.Equal(GameActionStatus.Committed, (await second)!.Status);
         Assert.Equal(GameActionStatus.Committed, (await third).Status);
         Assert.Equal(
             new[]

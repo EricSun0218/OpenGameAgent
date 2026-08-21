@@ -134,6 +134,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Ope
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Volcengine.Images.Tests", "tests\OpenGameAgent.Providers.Volcengine.Images.Tests\OpenGameAgent.Providers.Volcengine.Images.Tests.csproj", "{2B46350B-92E9-424D-A3D7-215309C8EDDE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.GeneratedAssets.Example", "examples\OpenGameAgent.GeneratedAssets.Example\OpenGameAgent.GeneratedAssets.Example.csproj", "{38992081-9ECB-45A4-B312-585569B77DE2}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -392,6 +394,10 @@ Global
 		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{2B46350B-92E9-424D-A3D7-215309C8EDDE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{38992081-9ECB-45A4-B312-585569B77DE2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{38992081-9ECB-45A4-B312-585569B77DE2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{38992081-9ECB-45A4-B312-585569B77DE2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{38992081-9ECB-45A4-B312-585569B77DE2}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}

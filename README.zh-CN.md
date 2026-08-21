@@ -85,7 +85,8 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 能力感知模型目录与开发者托管的短期凭证；
 - 外部工具按需发现与大型结果产物化；
 - 包含可移植 Skills 与 MCP Server 的 Agent Plugins 1.0.0 插件包；
-- 通过可替换 API 生成图片、语音和视频。
+- 通过可替换 API 生成图片、语音和视频；
+- 可感知崩溃的生成资产物化与引擎权威导入。
 - 追加式轨迹、仅观察回放和离线 CI 评测。
 - 支持打断的实时语音、不中断音频的后台 Agent 交接，以及可替换的表现层行为。
 
@@ -132,7 +133,8 @@ GameAgentRuntime
 | 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览，以及 OpenAI Images 与火山方舟/Seedream 官方图片生成和编辑适配器 |
-| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
+| 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
+| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、生成资产任务/资源、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端以及 C#、原生 C++ 客户端 |
 | 引擎 | Godot 4.7 .NET 与 Unity 6 进程内包；Unreal Engine 5.8 原生 C++ sidecar 插件 |
@@ -147,7 +149,7 @@ GameAgentRuntime
 
 `OpenGameAgent.Models.Auth.BuiltIn` 为支持的订阅服务提供可选浏览器或设备授权。框架不会内嵌公共客户端注册信息：需要 Client ID 的流程只有在游戏开发者显式提供后才会启用。`OpenGameAgent.ProviderTransport` 只向观察器暴露白名单内且有界的响应元数据，不会把凭证或任意响应头交给追踪代码。
 
-图片、语音和视频生成使用独立的模型注册表，因为生成任务、渐进预览、轮询和输出并不是聊天补全。框架提供中立注册表、通用 HTTP 任务适配器和专用图片 Provider；本地生成器或其他 API 可以作为可选包注册，不需要修改 Agent 内核。
+图片、语音和视频生成使用独立的模型注册表，因为生成任务、渐进预览、轮询和输出并不是聊天补全。框架提供中立注册表、通用及专用 Provider，以及先物化并验证输出、再请求游戏权威导入的生成资产流水线。本地生成器、其他 API、内容审核与引擎导入器都可以替换，不需要修改 Agent 内核。详见[生成资产](docs/generated-assets.md)。
 
 ## 最小内核
 
@@ -237,6 +239,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [引擎集成](docs/engine-integration.md)
 - [部署与安全](docs/deployment-and-security.md)
 - [生成式媒体](docs/media.md)
+- [生成资产与权威导入](docs/generated-assets.md)
 - [图片输入与游戏感知](docs/image-input.md)
 - [轨迹、回放与离线评测](docs/devtools.md)
 

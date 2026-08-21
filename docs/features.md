@@ -91,6 +91,10 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Route generation by provider/model and media capability | `GameMediaModelRegistry` |
 | Call official OpenAI image generation/edit endpoints | `OpenAIImageProvider` |
 | Call Volcengine Ark/Seedream with reference images and explicit sizes | `VolcengineImageProvider` |
+| Materialize generated media as durable game assets | `GameGeneratedAssetPipeline`, `IGameGeneratedAssetResourceStore` |
+| Expose persistent asset generation as an agent tool | `GameGeneratedAssetTool` |
+| Import generated assets through authoritative game actions | `GameGeneratedAssetActionImporter`, `DurableGameActionDispatcher` |
+| Recover an interrupted asset import without repeating the mutation | `GameGeneratedAssetPipeline.ResumeImportAsync` |
 | Spill large tool output and retrieve it later | `ArtifactExtension`, `IGameAgentArtifactStore` |
 | Recall scoped memory through an extension | `GameMemoryExtension` |
 
@@ -128,6 +132,7 @@ In-memory implementations are useful for tests and short-lived sessions. The `Op
 - directory-backed skills;
 - directory-backed prompt templates.
 - content-addressed local image attachments (`OpenGameAgent.Attachments.Local`).
+- generated-asset jobs and content-addressed generated resources (`OpenGameAgent.Persistence`).
 
 File stores coordinate writers that use the same directory through cross-process leases, but they are not a distributed database. A multiplayer or multi-host service should implement the same interfaces using transactional shared storage and explicit actor ownership. Completed action, workflow, mailbox, and deduplication records are intentionally retained to preserve replay safety; long-running products should implement retention or archival in their game-owned stores rather than deleting evidence blindly.
 

@@ -85,7 +85,8 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - capability-aware model catalogs and developer-hosted short-lived credentials;
 - lazy external-tool discovery and large-result artifact spill;
 - Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
-- image, audio, and video generation through replaceable APIs.
+- image, audio, and video generation through replaceable APIs;
+- crash-aware generated-asset materialization and authoritative engine import.
 - append-only traces, observation-only playback, and offline CI evaluation.
 - realtime speech with barge-in, background-agent handoff, and replaceable presentation behaviors.
 
@@ -134,7 +135,8 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
 | Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators |
 | Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, OpenRouter previews, official OpenAI Images, and Volcengine Ark/Seedream image generation and editing |
-| Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
+| Generated assets | Stable operations, content-addressed resources, persistent lifecycle state, explicit uncertain outcomes, resumable import, and durable authoritative engine receipts |
+| Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, generated-asset jobs/resources, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
 | Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service with C# and native C++ clients |
 | Engines | Godot 4.7 .NET and Unity 6 in-process packages; Unreal Engine 5.8 native C++ sidecar plugin |
@@ -149,7 +151,7 @@ Run inputs, model content, tool catalogs, loops, queues, progress, and concurren
 
 `OpenGameAgent.Models.Auth.BuiltIn` adds opt-in browser or device authorization flows for supported subscription providers. Public client registrations are never embedded in the framework: flows that require a client ID remain disabled until the game developer supplies one. `OpenGameAgent.ProviderTransport` exposes only allowlisted, bounded response metadata to observers and never passes credentials or arbitrary response headers to tracing code.
 
-Image, audio, and video generation use a separate model registry because generation jobs, previews, polling, and outputs are not chat completions. The framework ships the neutral registry, a generic HTTP job adapter, and a dedicated image provider; games can register local generators or additional APIs without changing the agent kernel.
+Image, audio, and video generation use a separate model registry because generation jobs, previews, polling, and outputs are not chat completions. The framework ships the neutral registry, generic and provider-specific adapters, and a generated-asset pipeline that materializes validated outputs before asking the authoritative game to import them. Games can register local generators, additional APIs, content-policy gates, and engine importers without changing the agent kernel. See [Generated assets](docs/generated-assets.md).
 
 ## Minimal kernel
 
@@ -238,6 +240,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
 - [Generated media](docs/media.md)
+- [Generated assets and authoritative import](docs/generated-assets.md)
 - [Image input and game perception](docs/image-input.md)
 - [Traces, playback, and offline evaluation](docs/devtools.md)
 

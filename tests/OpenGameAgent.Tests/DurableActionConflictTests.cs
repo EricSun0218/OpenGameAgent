@@ -9,26 +9,30 @@ public sealed class DurableActionConflictTests
     [Fact]
     public async Task SameConflictSerializesAcrossActorsWhileDifferentConflictsRemainParallel()
     {
+        var operationIds = CreateOperationIdsOnDistinctStripes(3, 64);
+        var firstId = operationIds[0];
+        var secondId = operationIds[1];
+        var independentId = operationIds[2];
         var journal = new InMemoryGameActionJournal();
         var handler = new ControlledHandler();
         var dispatcher = new DurableGameActionDispatcher(journal, handler, conflictPollIntervalMilliseconds: 5);
-        var first = dispatcher.ExecuteAsync(Intent("first", "session-a", "actor-a", "shared"), TestContext.Current.CancellationToken).AsTask();
-        await handler.WaitStartedAsync("first", TestContext.Current.CancellationToken);
+        var first = dispatcher.ExecuteAsync(Intent(firstId, "session-a", "actor-a", "shared"), TestContext.Current.CancellationToken).AsTask();
+        await handler.WaitStartedAsync(firstId, TestContext.Current.CancellationToken);
 
-        var second = dispatcher.ExecuteAsync(Intent("second", "session-b", "actor-b", "shared"), TestContext.Current.CancellationToken).AsTask();
-        await WaitUntilReservedAsync(journal, "second", TestContext.Current.CancellationToken);
+        var second = dispatcher.ExecuteAsync(Intent(secondId, "session-b", "actor-b", "shared"), TestContext.Current.CancellationToken).AsTask();
+        await WaitUntilReservedAsync(journal, secondId, TestContext.Current.CancellationToken);
         await Task.Delay(75, TestContext.Current.CancellationToken);
-        Assert.False(handler.HasStarted("second"));
+        Assert.False(handler.HasStarted(secondId));
         Assert.Equal(1, handler.MaximumConcurrentExecutions);
 
-        var independent = dispatcher.ExecuteAsync(Intent("independent", "session-c", "actor-c", "other"), TestContext.Current.CancellationToken).AsTask();
-        await handler.WaitStartedAsync("independent", TestContext.Current.CancellationToken);
+        var independent = dispatcher.ExecuteAsync(Intent(independentId, "session-c", "actor-c", "other"), TestContext.Current.CancellationToken).AsTask();
+        await handler.WaitStartedAsync(independentId, TestContext.Current.CancellationToken);
         Assert.Equal(2, handler.MaximumConcurrentExecutions);
 
-        handler.Release("first");
-        await handler.WaitStartedAsync("second", TestContext.Current.CancellationToken);
-        handler.Release("second");
-        handler.Release("independent");
+        handler.Release(firstId);
+        await handler.WaitStartedAsync(secondId, TestContext.Current.CancellationToken);
+        handler.Release(secondId);
+        handler.Release(independentId);
 
         Assert.Equal(GameActionStatus.Committed, (await first).Status);
         Assert.Equal(GameActionStatus.Committed, (await second).Status);
@@ -184,6 +188,28 @@ public sealed class DurableActionConflictTests
         }
 
         throw new TimeoutException("The action was not reserved.");
+    }
+
+    private static IReadOnlyList<string> CreateOperationIdsOnDistinctStripes(int count, int stripeCount)
+    {
+        var operationIds = new List<string>(count);
+        var usedStripes = new HashSet<int>();
+        for (var candidate = 0; candidate < 10_000 && operationIds.Count < count; candidate++)
+        {
+            var operationId = "operation-" + candidate.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var hash = StringComparer.Ordinal.GetHashCode(operationId) & int.MaxValue;
+            if (usedStripes.Add(hash % stripeCount))
+            {
+                operationIds.Add(operationId);
+            }
+        }
+
+        if (operationIds.Count != count)
+        {
+            throw new InvalidOperationException("Unable to construct operation IDs on distinct dispatcher stripes.");
+        }
+
+        return operationIds;
     }
 
     private sealed class ControlledHandler : IGameActionHandler

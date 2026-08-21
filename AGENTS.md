@@ -16,6 +16,7 @@ This repository is a framework, not a game, world editor, content marketplace, o
 - `src/OpenGameAgent.Providers.MediaHttp`: generic remote or local media-generation transport.
 - `src/OpenGameAgent.Providers.OpenAI.Images`: official OpenAI image generation/edit transport.
 - `src/OpenGameAgent.Providers.Volcengine.Images`: Volcengine Ark/Seedream image generation/edit transport.
+- `src/OpenGameAgent.Media`: media model routing plus persistent generated-asset lifecycle contracts.
 - `src/OpenGameAgent.Client`: engine-compatible JSON/SSE service client.
 - `src/OpenGameAgent.Server`: optional C# .NET 8 host.
 - `engines/godot`: Godot .NET package and tests.
@@ -66,6 +67,7 @@ Real-editor gates are in `docs/engine-integration.md`.
 - Kernel changes require success, validation, provider-failure, cancellation, limit, and event-order tests where relevant.
 - State-changing tool changes require duplicate, uncertain-outcome, and recovery tests.
 - Persistence changes require restart, corruption, atomic-write, and concurrency coverage proportional to the change.
+- Generated-asset changes require duplicate submission, uncertain generation/import, restart, resource-integrity, and authoritative receipt coverage.
 - Routing changes require explicit, typed, classifier-failure, and conservative-fallback tests.
 - Actor or tool concurrency changes require deterministic ordering and saturation tests.
 - Wire/client/server changes require JSON and SSE integration tests.
