@@ -299,6 +299,8 @@ public sealed class GameMediaModelRegistryTests
         var testCancellation = TestContext.Current.CancellationToken;
         var completion = new TaskCompletionSource<GameMediaGenerationResult>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var generationStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         using var registry = new GameMediaModelRegistry(new GameMediaModelRegistryOptions
         {
             GenerationTimeout = TimeSpan.FromMilliseconds(100),
@@ -306,14 +308,21 @@ public sealed class GameMediaModelRegistryTests
         registry.Register(Registration(
             "slow",
             new[] { Model("slow", "render", GameMediaKind.Video) },
-            factory: _ => new DelegateGenerator((_, _, _) => new ValueTask<GameMediaGenerationResult>(completion.Task))));
+            factory: _ => new DelegateGenerator((_, _, _) =>
+            {
+                generationStarted.TrySetResult(true);
+                return new ValueTask<GameMediaGenerationResult>(completion.Task);
+            })));
 
-        using var canceled = new CancellationTokenSource(25);
-        var canceledResult = await registry.GenerateAsync(
+        using var canceled = new CancellationTokenSource();
+        var canceledGeneration = registry.GenerateAsync(
             "slow",
             "render",
             Request(GameMediaKind.Video),
-            cancellationToken: canceled.Token);
+            cancellationToken: canceled.Token).AsTask();
+        await generationStarted.Task.WaitAsync(testCancellation);
+        canceled.Cancel();
+        var canceledResult = await canceledGeneration;
         Assert.Equal(GameMediaModelGenerationStatus.Canceled, canceledResult.Status);
         Assert.Equal("canceled", canceledResult.ErrorCode);
 
