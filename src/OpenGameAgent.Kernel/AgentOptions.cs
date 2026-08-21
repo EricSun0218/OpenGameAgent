@@ -240,6 +240,48 @@ public sealed class BeforeToolCallContext
     public AgentContext Context { get; }
 }
 
+/// <summary>
+/// Immutable, final authorization context for a fully prepared tool call. This hook runs after
+/// argument preparation, policy rewrites, schema validation, and conflict-key resolution, and
+/// immediately before the call becomes executable. Final authorizers cannot rewrite arguments.
+/// </summary>
+public sealed class AuthorizeToolCallContext
+{
+    public AuthorizeToolCallContext(
+        string runId,
+        int turn,
+        AgentMessage assistantMessage,
+        ToolCallContent toolCall,
+        System.Text.Json.JsonElement arguments,
+        string? conflictKey,
+        AgentContext context)
+    {
+        RunId = string.IsNullOrWhiteSpace(runId)
+            ? throw new ArgumentException("A run ID is required.", nameof(runId))
+            : runId;
+        Turn = turn > 0 ? turn : throw new ArgumentOutOfRangeException(nameof(turn));
+        AssistantMessage = assistantMessage ?? throw new ArgumentNullException(nameof(assistantMessage));
+        ToolCall = toolCall ?? throw new ArgumentNullException(nameof(toolCall));
+        Arguments = arguments.Clone();
+        ConflictKey = conflictKey;
+        Context = context ?? throw new ArgumentNullException(nameof(context));
+    }
+
+    public string RunId { get; }
+
+    public int Turn { get; }
+
+    public AgentMessage AssistantMessage { get; }
+
+    public ToolCallContent ToolCall { get; }
+
+    public System.Text.Json.JsonElement Arguments { get; }
+
+    public string? ConflictKey { get; }
+
+    public AgentContext Context { get; }
+}
+
 public sealed class AfterToolCallContext
 {
     public AfterToolCallContext(
@@ -286,6 +328,12 @@ public sealed class AgentHooks
     public Func<AfterTurnContext, CancellationToken, ValueTask<NextTurnUpdate?>>? PrepareNextTurnAsync { get; set; }
 
     public Func<BeforeToolCallContext, CancellationToken, ValueTask<ToolCallDecision?>>? BeforeToolCallAsync { get; set; }
+
+    /// <summary>
+    /// Final, non-rewriting authorization boundary for prepared tool calls. Every registered
+    /// authorizer must allow the call. A blocked call never reaches the tool executor.
+    /// </summary>
+    public Func<AuthorizeToolCallContext, CancellationToken, ValueTask<ToolCallDecision?>>? AuthorizeToolCallAsync { get; set; }
 
     public Func<AfterToolCallContext, CancellationToken, ValueTask<ToolResult?>>? AfterToolCallAsync { get; set; }
 }

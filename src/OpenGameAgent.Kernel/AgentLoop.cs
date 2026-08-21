@@ -1158,6 +1158,33 @@ public static class AgentLoop
                 }
             }
 
+            if (options.Hooks.AuthorizeToolCallAsync is not null)
+            {
+                var authorization = await options.Hooks.AuthorizeToolCallAsync(
+                    new AuthorizeToolCallContext(
+                        runId,
+                        turn,
+                        assistantMessage,
+                        call,
+                        arguments,
+                        conflictKey,
+                        current.Snapshot()),
+                    cancellationToken).ConfigureAwait(false);
+                if (authorization?.ReplacementArgumentsJson is not null)
+                {
+                    throw new InvalidOperationException("Final tool authorizers cannot rewrite arguments.");
+                }
+
+                if (authorization?.Blocked == true)
+                {
+                    return ToolPreparation.Failed(CreateToolError(
+                        authorization.Reason ?? "Tool execution was not authorized.",
+                        limits,
+                        authorization.Terminate,
+                        failureCategory: ToolFailureCategory.Authorization));
+                }
+            }
+
             return ToolPreparation.Ready(call, tool, arguments, conflictKey);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

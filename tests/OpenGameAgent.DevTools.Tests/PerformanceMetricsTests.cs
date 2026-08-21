@@ -18,14 +18,15 @@ public sealed class PerformanceMetricsTests
             Entry(6, "model.request.started", "{\"runId\":\"run\",\"turn\":1,\"model\":\"requested\"}", 5),
             Entry(7, "kernel.messagestarted", "{\"runId\":\"run\",\"turn\":1}", 15),
             Entry(8, "kernel.messageended", "{\"runId\":\"run\",\"turn\":1,\"provider\":\"tool-provider\",\"responseModel\":\"tool-model\",\"providerAttempts\":{\"retry\":{\"retries\":1},\"fallback\":{\"fallbacks\":1}}}", 18),
-            Entry(9, "kernel.toolstarted", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"build\",\"toolCallId\":\"call-1\"}", 20),
-            Entry(10, "kernel.toolended", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"build\",\"toolCallId\":\"call-1\",\"toolError\":false,\"failureCategory\":\"None\",\"outcomeUncertain\":true,\"action\":{\"operationId\":\"op-1\",\"status\":\"uncertain\",\"hostMilliseconds\":3,\"frameworkMilliseconds\":2,\"duplicateExecutionPrevented\":true,\"recovered\":false}}", 25),
-            Entry(11, "kernel.toolstarted", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"manage_task_plan\",\"toolCallId\":\"call-2\",\"operation\":\"replace_remaining\"}", 26),
-            Entry(12, "kernel.toolended", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"manage_task_plan\",\"toolCallId\":\"call-2\",\"operation\":\"replace_remaining\",\"toolError\":true,\"failureCategory\":\"Timeout\",\"outcomeUncertain\":true}", 31),
-            Entry(13, "model.request.started", "{\"runId\":\"run\",\"turn\":2,\"model\":\"requested\"}", 32),
-            Entry(14, "kernel.messagestarted", "{\"runId\":\"run\",\"turn\":2}", 35),
-            Entry(15, "kernel.messageended", "{\"runId\":\"run\",\"turn\":2,\"provider\":\"provider\",\"responseModel\":\"resolved\"}", 40),
-            Entry(16, "run.completed", "{\"status\":\"Completed\",\"usage\":{\"totalTokens\":12,\"cost\":{\"known\":true,\"total\":0.25}}}", 50),
+            Entry(9, "tool.approval.completed", "{\"runId\":\"run\",\"tool\":\"build\",\"toolCallId\":\"call-1\",\"status\":\"Consumed\",\"waitMilliseconds\":4}", 19),
+            Entry(10, "kernel.toolstarted", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"build\",\"toolCallId\":\"call-1\"}", 20),
+            Entry(11, "kernel.toolended", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"build\",\"toolCallId\":\"call-1\",\"toolError\":false,\"failureCategory\":\"None\",\"outcomeUncertain\":true,\"action\":{\"operationId\":\"op-1\",\"status\":\"uncertain\",\"hostMilliseconds\":3,\"frameworkMilliseconds\":2,\"duplicateExecutionPrevented\":true,\"recovered\":false}}", 25),
+            Entry(12, "kernel.toolstarted", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"manage_task_plan\",\"toolCallId\":\"call-2\",\"operation\":\"replace_remaining\"}", 26),
+            Entry(13, "kernel.toolended", "{\"runId\":\"run\",\"turn\":1,\"tool\":\"manage_task_plan\",\"toolCallId\":\"call-2\",\"operation\":\"replace_remaining\",\"toolError\":true,\"failureCategory\":\"Timeout\",\"outcomeUncertain\":true}", 31),
+            Entry(14, "model.request.started", "{\"runId\":\"run\",\"turn\":2,\"model\":\"requested\"}", 32),
+            Entry(15, "kernel.messagestarted", "{\"runId\":\"run\",\"turn\":2}", 35),
+            Entry(16, "kernel.messageended", "{\"runId\":\"run\",\"turn\":2,\"provider\":\"provider\",\"responseModel\":\"resolved\"}", 40),
+            Entry(17, "run.completed", "{\"status\":\"Completed\",\"usage\":{\"totalTokens\":12,\"cost\":{\"known\":true,\"total\":0.25}}}", 50),
         });
 
         var summary = GameAgentPerformanceSummary.Create(recording);
@@ -41,7 +42,8 @@ public sealed class PerformanceMetricsTests
         Assert.Equal(10, run.Latency.ToolExecutionMilliseconds);
         Assert.Equal(3, run.Latency.HostActionMilliseconds);
         Assert.Equal(2, run.Latency.DurableActionFrameworkMilliseconds);
-        Assert.Equal(19, run.Latency.FrameworkOverheadMilliseconds);
+        Assert.Equal(4, run.Latency.ApprovalWaitMilliseconds);
+        Assert.Equal(15, run.Latency.FrameworkOverheadMilliseconds);
         Assert.Equal(55, run.Latency.TotalMilliseconds);
         Assert.Equal(2, summary.ToolCalls);
         Assert.Equal(0.5, summary.ToolSuccessRate);
@@ -59,6 +61,7 @@ public sealed class PerformanceMetricsTests
             Assert.Equal("tool-provider", tool.Provider);
             Assert.Equal("tool-model", tool.Model);
         });
+        Assert.Equal(4, run.Tools.Single(tool => tool.Tool == "build").ApprovalWaitMilliseconds);
         Assert.Equal(12, summary.TotalTokens);
         Assert.Equal(0.25, summary.TotalCost);
         Assert.Contains("\"toolSuccessRate\"", summary.ToJson(), StringComparison.Ordinal);

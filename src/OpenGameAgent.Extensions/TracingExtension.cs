@@ -182,6 +182,8 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
 
     public void Configure(GameAgentExtensionApi api)
     {
+        api.Subscribe(ToolApprovalExtension.ApprovalChanged, (value, token) =>
+            WriteApprovalAsync(value, token));
         api.On(GameAgentExtensionEvents.InputReceived, (value, context, token) =>
             WriteAsync(
                 "input.received",
@@ -342,6 +344,34 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                 context.Input.ActorId,
                 context.Input.InputId,
                 context.Input.Moment,
+                _options.OperationalClock(),
+                json),
+            cancellationToken);
+    }
+
+    private ValueTask WriteApprovalAsync(
+        GameToolApprovalEvent value,
+        CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(
+            new
+            {
+                value.ApprovalId,
+                value.RunId,
+                value.ToolCallId,
+                value.ToolName,
+                status = value.Status.ToString(),
+                waitMilliseconds = value.WaitDuration.TotalMilliseconds,
+            },
+            TraceJsonOptions);
+        return _sink.WriteAsync(
+            new GameAgentTraceEntry(
+                Interlocked.Increment(ref _sequence),
+                value.Status == GameToolApprovalStatus.Pending ? "tool.approval.pending" : "tool.approval.completed",
+                value.SessionId,
+                value.ActorId,
+                value.InputId,
+                value.Moment,
                 _options.OperationalClock(),
                 json),
             cancellationToken);

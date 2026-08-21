@@ -18,6 +18,8 @@ public enum GameAgentServerOperation
     ReconcileAction = 8,
     ReadAttachment = 9,
     ReadTranscript = 10,
+    ReadToolApprovals = 11,
+    RespondToolApproval = 12,
 }
 
 /// <summary>

@@ -35,6 +35,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Inspect registrations and conflicts | `GameAgentExtensionHost.GetResources`, `GetDiagnostics` |
 | Hide collected tools per input before model dispatch | `GameAgentExtensionApi.RegisterToolVisibilityPolicy`, `GameToolVisibilityContext` |
 | Gate, deny, or rewrite a tool call | `ToolPolicyExtension`, `IGameToolPolicy` |
+| Require durable host approval before a high-risk call | `ToolApprovalExtension`, `IGameToolApprovalBroker` |
 | Search a large tool catalog on demand | `ToolCatalogExtension`, `IGameToolCatalog` |
 | Ask the player structured questions and recommend choices | `StructuredInteractionExtension`, `IGameInteractionBroker` |
 | Track goals and resume them after game-time waits | `GoalLoopExtension` |

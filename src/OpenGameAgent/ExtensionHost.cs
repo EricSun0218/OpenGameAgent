@@ -1149,6 +1149,31 @@ internal static class AgentHookComposer
                     return replaced ? ToolCallDecision.Allow(current.ArgumentsJson) : null;
                 }
             : null,
+            AuthorizeToolCallAsync = hooks.Any(hook => hook.AuthorizeToolCallAsync is not null)
+                ? async (hookContext, cancellationToken) =>
+                {
+                    foreach (var hook in hooks)
+                    {
+                        if (hook.AuthorizeToolCallAsync is null)
+                        {
+                            continue;
+                        }
+
+                        var decision = await hook.AuthorizeToolCallAsync(hookContext, cancellationToken).ConfigureAwait(false);
+                        if (decision?.ReplacementArgumentsJson is not null)
+                        {
+                            throw new InvalidOperationException("Final tool authorizers cannot rewrite arguments.");
+                        }
+
+                        if (decision?.Blocked == true)
+                        {
+                            return decision;
+                        }
+                    }
+
+                    return null;
+                }
+            : null,
             AfterToolCallAsync = hooks.Any(hook => hook.AfterToolCallAsync is not null)
                 ? async (hookContext, cancellationToken) =>
                 {

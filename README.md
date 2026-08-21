@@ -90,6 +90,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - optional local/remote embeddings, rebuildable vector indexes, and lexical/vector hybrid recall;
 - skills selected by input type and available tools;
 - input-aware tool visibility resolved before every model request;
+- host-attested tool modes and durable, one-time, world-version-bound approval for high-risk calls;
 - recurring game-time triggers and persistent actor mailboxes with payload-free backlog queries;
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
 - capability-aware model catalogs and developer-hosted short-lived credentials;
@@ -132,12 +133,12 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Area | Capability |
 | --- | --- |
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
-| Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
+| Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, host-attested explicit/task scopes, durable one-time approval, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, auto/quick/direct/plan/workflow routing, shared per-input usage budget, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, subtitle timing, barge-in cancellation/truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; per-input tool visibility; typed lifecycle events and channels; namespaced persistent state |
-| Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
+| Official extensions | Tool policy, high-risk execution approval and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
 | DevTools | Bounded JSONL recordings, provider/framework/host latency attribution, failure and durable-write metrics, concurrent benchmark harness, local observation-only HTML playback, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
@@ -249,6 +250,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Game integration patterns](docs/game-integration-patterns.md)
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
+- [High-risk tool approval](docs/tool-approvals.md)
 - [Generated media](docs/media.md)
 - [Generated assets and authoritative import](docs/generated-assets.md)
 - [Image input and game perception](docs/image-input.md)

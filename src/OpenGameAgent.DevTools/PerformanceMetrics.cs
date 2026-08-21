@@ -28,6 +28,7 @@ public sealed class GameAgentLatencyBreakdown
         double toolExecutionMilliseconds,
         double hostActionMilliseconds,
         double durableActionFrameworkMilliseconds,
+        double approvalWaitMilliseconds,
         double frameworkOverheadMilliseconds,
         double executionMilliseconds,
         double totalMilliseconds)
@@ -48,6 +49,7 @@ public sealed class GameAgentLatencyBreakdown
         ToolExecutionMilliseconds = toolExecutionMilliseconds;
         HostActionMilliseconds = hostActionMilliseconds;
         DurableActionFrameworkMilliseconds = durableActionFrameworkMilliseconds;
+        ApprovalWaitMilliseconds = approvalWaitMilliseconds;
         FrameworkOverheadMilliseconds = frameworkOverheadMilliseconds;
         ExecutionMilliseconds = executionMilliseconds;
         TotalMilliseconds = totalMilliseconds;
@@ -70,6 +72,7 @@ public sealed class GameAgentLatencyBreakdown
     public double ToolExecutionMilliseconds { get; }
     public double HostActionMilliseconds { get; }
     public double DurableActionFrameworkMilliseconds { get; }
+    public double ApprovalWaitMilliseconds { get; }
     public double FrameworkOverheadMilliseconds { get; }
     public double ExecutionMilliseconds { get; }
     public double TotalMilliseconds { get; }
@@ -90,6 +93,7 @@ public sealed class GameAgentToolMetric
         string? actionStatus,
         double hostActionMilliseconds,
         double durableActionFrameworkMilliseconds,
+        double approvalWaitMilliseconds,
         bool duplicateExecutionPrevented,
         bool recovered)
     {
@@ -105,6 +109,7 @@ public sealed class GameAgentToolMetric
         ActionStatus = actionStatus;
         HostActionMilliseconds = hostActionMilliseconds;
         DurableActionFrameworkMilliseconds = durableActionFrameworkMilliseconds;
+        ApprovalWaitMilliseconds = approvalWaitMilliseconds;
         DuplicateExecutionPrevented = duplicateExecutionPrevented;
         Recovered = recovered;
     }
@@ -121,6 +126,7 @@ public sealed class GameAgentToolMetric
     public string? ActionStatus { get; }
     public double HostActionMilliseconds { get; }
     public double DurableActionFrameworkMilliseconds { get; }
+    public double ApprovalWaitMilliseconds { get; }
     public bool DuplicateExecutionPrevented { get; }
     public bool Recovered { get; }
 }
@@ -393,6 +399,9 @@ public sealed class GameAgentPerformanceSummary
         var modelRequests = CreateModelRequestDurations(entries);
         var hostActionDuration = tools.Sum(value => value.HostActionMilliseconds);
         var durableActionFrameworkDuration = tools.Sum(value => value.DurableActionFrameworkMilliseconds);
+        var approvalWaitDuration = entries
+            .Where(value => value.Kind == "tool.approval.completed")
+            .Sum(value => ReadDouble(value, "waitMilliseconds"));
         var executionDuration = Milliseconds(executionStart, executionEnd);
         var toolExecutionDuration = tools.Sum(value => value.DurationMilliseconds);
         var routingModelDuration = ReadDouble(routeEntry, "modelDurationMilliseconds");
@@ -420,7 +429,8 @@ public sealed class GameAgentPerformanceSummary
             toolExecutionDuration,
             hostActionDuration,
             durableActionFrameworkDuration,
-            Math.Max(0, executionDuration - modelRequestDuration - toolExecutionDuration),
+            approvalWaitDuration,
+            Math.Max(0, executionDuration - modelRequestDuration - toolExecutionDuration - approvalWaitDuration),
             executionDuration,
             queue + executionDuration);
         return new GameAgentRunPerformance(
@@ -443,6 +453,12 @@ public sealed class GameAgentPerformanceSummary
     private static GameAgentToolMetric[] CreateTools(IReadOnlyList<GameAgentTraceEntry> entries)
     {
         var starts = new Dictionary<string, ToolStart>(StringComparer.Ordinal);
+        var approvalWaits = entries
+            .Where(value => value.Kind == "tool.approval.completed")
+            .Select(value => new { Id = ReadString(value, "toolCallId"), Wait = ReadDouble(value, "waitMilliseconds") })
+            .Where(value => value.Id is not null)
+            .GroupBy(value => value.Id!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Sum(value => value.Wait), StringComparer.Ordinal);
         var result = new List<GameAgentToolMetric>();
         string? provider = null;
         string? model = null;
@@ -488,6 +504,7 @@ public sealed class GameAgentPerformanceSummary
                 ReadNullableDouble(action, "hostMilliseconds")
                     ?? (action is null ? 0 : start is null ? 0 : Milliseconds(start.Entry.OperationalTimestamp, entry.OperationalTimestamp)),
                 ReadNullableDouble(action, "frameworkMilliseconds") ?? 0,
+                approvalWaits.TryGetValue(id, out var approvalWait) ? approvalWait : 0,
                 ReadBoolean(action, "duplicateExecutionPrevented", defaultValue: false),
                 ReadBoolean(action, "recovered", defaultValue: false)));
         }

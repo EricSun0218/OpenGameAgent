@@ -1,6 +1,7 @@
 using OpenGameAgent;
 using OpenGameAgent.Attachments;
 using OpenGameAgent.Attachments.Local;
+using OpenGameAgent.Extensions;
 using OpenGameAgent.Persistence;
 using OpenGameAgent.Providers.OpenAICompatible;
 using OpenGameAgent.Server;
@@ -23,6 +24,15 @@ builder.Services.AddSingleton<IGameActionJournal>(serviceProvider =>
     return new FileGameActionJournal(actionDirectory);
 });
 builder.Services.AddSingleton<GameActionExchange>();
+builder.Services.AddSingleton<IGameToolApprovalStore>(serviceProvider =>
+{
+    var configuration = serviceProvider.GetRequiredService<IConfiguration>();
+    var approvalDirectory = configuration["OpenGameAgent:ApprovalDirectory"]
+        ?? Path.Combine(AppContext.BaseDirectory, "data", "approvals");
+    return new FileGameToolApprovalStore(approvalDirectory);
+});
+builder.Services.AddSingleton<IGameToolApprovalBroker>(serviceProvider =>
+    new GameToolApprovalBroker(serviceProvider.GetRequiredService<IGameToolApprovalStore>()));
 builder.Services.AddSingleton(serviceProvider => new DurableGameActionDispatcher(
     serviceProvider.GetRequiredService<IGameActionJournal>(),
     serviceProvider.GetRequiredService<GameActionExchange>()));

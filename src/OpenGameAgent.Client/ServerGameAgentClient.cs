@@ -116,6 +116,44 @@ public sealed class RemoteGameSessionTranscriptPage
     public string Json { get; }
 }
 
+public sealed class RemoteGameToolApproval
+{
+    internal RemoteGameToolApproval(
+        string approvalId,
+        string sessionId,
+        string actorId,
+        string toolName,
+        string risk,
+        long revision,
+        string status,
+        DateTimeOffset expiresAt,
+        string argumentsJson,
+        string json)
+    {
+        ApprovalId = approvalId;
+        SessionId = sessionId;
+        ActorId = actorId;
+        ToolName = toolName;
+        Risk = risk;
+        Revision = revision;
+        Status = status;
+        ExpiresAt = expiresAt;
+        ArgumentsJson = RemoteJson.RequireValid(argumentsJson, nameof(argumentsJson));
+        Json = RemoteJson.RequireValid(json, nameof(json));
+    }
+
+    public string ApprovalId { get; }
+    public string SessionId { get; }
+    public string ActorId { get; }
+    public string ToolName { get; }
+    public string Risk { get; }
+    public long Revision { get; }
+    public string Status { get; }
+    public DateTimeOffset ExpiresAt { get; }
+    public string ArgumentsJson { get; }
+    public string Json { get; }
+}
+
 public delegate ValueTask RemoteGameAgentEventHandler(
     RemoteGameAgentEvent agentEvent,
     CancellationToken cancellationToken);
@@ -155,6 +193,10 @@ public sealed class ServerGameAgentClientOptions
 
     public string TranscriptReadPath { get; set; } = "v1/transcript";
 
+    public string ApprovalListPath { get; set; } = "v1/approvals/pending";
+
+    public string ApprovalResponsePath { get; set; } = "v1/approvals/respond";
+
     public string? ApiKey { get; set; }
 
     public string ApiKeyHeader { get; set; } = "Authorization";
@@ -179,6 +221,8 @@ public sealed class ServerGameAgentClient
     private readonly Uri _abortEndpoint;
     private readonly Uri _attachmentReadEndpoint;
     private readonly Uri _transcriptReadEndpoint;
+    private readonly Uri _approvalListEndpoint;
+    private readonly Uri _approvalResponseEndpoint;
     private readonly string? _apiKey;
     private readonly string _apiKeyHeader;
     private readonly string _apiKeyScheme;
@@ -264,6 +308,8 @@ public sealed class ServerGameAgentClient
             options.ServerBaseUri,
             options.TranscriptReadPath,
             nameof(options.TranscriptReadPath));
+        _approvalListEndpoint = CreateEndpoint(options.ServerBaseUri, options.ApprovalListPath, nameof(options.ApprovalListPath));
+        _approvalResponseEndpoint = CreateEndpoint(options.ServerBaseUri, options.ApprovalResponsePath, nameof(options.ApprovalResponsePath));
         _apiKey = options.ApiKey;
         _apiKeyHeader = options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;
@@ -509,6 +555,136 @@ public sealed class ServerGameAgentClient
 
         EnsureSuccess(response, body);
         return ParseTranscriptPage(body, key);
+    }
+
+    public async Task<IReadOnlyList<RemoteGameToolApproval>> ListPendingToolApprovalsAsync(
+        GameSessionKey key,
+        int limit = 32,
+        string? presentedCredential = null,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValidForClient(nameof(key));
+        if (limit is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        ValidatePresentedCredential(presentedCredential);
+        var json = JsonSerializer.Serialize(new
+        {
+            credential = presentedCredential,
+            sessionId = key.SessionId,
+            actorId = key.ActorId,
+            limit,
+        });
+        using var request = CreateJsonRequest(_approvalListEndpoint, json);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var body = await ReadBoundedAsync(response.Content, _maxResponseCharacters, cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(response, body);
+        return ParseApprovals(body, key);
+    }
+
+    public async Task<RemoteGameToolApproval> RespondToToolApprovalAsync(
+        GameSessionKey key,
+        string approvalId,
+        long expectedRevision,
+        bool approve,
+        string? reason = null,
+        string? presentedCredential = null,
+        CancellationToken cancellationToken = default)
+    {
+        key.EnsureValidForClient(nameof(key));
+        if (string.IsNullOrWhiteSpace(approvalId) || approvalId.Length > 256 || approvalId.Any(char.IsControl))
+        {
+            throw new ArgumentException("A bounded approval ID is required.", nameof(approvalId));
+        }
+
+        if (expectedRevision < 0 || (reason?.Length ?? 0) > 4_096)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedRevision));
+        }
+
+        ValidatePresentedCredential(presentedCredential);
+        var json = JsonSerializer.Serialize(new
+        {
+            credential = presentedCredential,
+            sessionId = key.SessionId,
+            actorId = key.ActorId,
+            approvalId,
+            expectedRevision,
+            response = approve ? "approve" : "deny",
+            reason,
+        });
+        using var request = CreateJsonRequest(_approvalResponseEndpoint, json);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var body = await ReadBoundedAsync(response.Content, _maxResponseCharacters, cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(response, body);
+        using var document = RemoteJson.Parse(body, nameof(body));
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || !document.RootElement.TryGetProperty("approval", out var approval))
+        {
+            throw new InvalidDataException("The approval response does not contain an approval record.");
+        }
+
+        return ParseApproval(approval, key);
+    }
+
+    private static IReadOnlyList<RemoteGameToolApproval> ParseApprovals(string json, GameSessionKey expectedKey)
+    {
+        using var document = RemoteJson.Parse(json, nameof(json));
+        if (document.RootElement.ValueKind != JsonValueKind.Object
+            || !document.RootElement.TryGetProperty("approvals", out var approvals)
+            || approvals.ValueKind != JsonValueKind.Array
+            || approvals.GetArrayLength() > 256)
+        {
+            throw new InvalidDataException("The pending-approval response has an invalid shape.");
+        }
+
+        return Array.AsReadOnly(approvals.EnumerateArray().Select(value => ParseApproval(value, expectedKey)).ToArray());
+    }
+
+    private static RemoteGameToolApproval ParseApproval(JsonElement value, GameSessionKey expectedKey)
+    {
+        if (value.ValueKind != JsonValueKind.Object
+            || !string.Equals(RequireString(value, "sessionId"), expectedKey.SessionId, StringComparison.Ordinal)
+            || !string.Equals(RequireString(value, "actorId"), expectedKey.ActorId, StringComparison.Ordinal)
+            || !value.TryGetProperty("arguments", out var arguments)
+            || arguments.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("revision", out var revisionElement)
+            || !revisionElement.TryGetInt64(out var revision)
+            || revision < 0
+            || !value.TryGetProperty("expiresAt", out var expiryElement)
+            || expiryElement.ValueKind != JsonValueKind.String
+            || !expiryElement.TryGetDateTimeOffset(out var expiresAt))
+        {
+            throw new InvalidDataException("The approval record does not match the requested owner or wire contract.");
+        }
+
+        return new RemoteGameToolApproval(
+            RequireString(value, "approvalId"),
+            expectedKey.SessionId,
+            expectedKey.ActorId,
+            RequireString(value, "toolName"),
+            RequireString(value, "risk"),
+            revision,
+            RequireString(value, "status"),
+            expiresAt,
+            arguments.GetRawText(),
+            value.GetRawText());
+    }
+
+    private static void ValidatePresentedCredential(string? value)
+    {
+        if ((value?.Length ?? 0) > 4_096 || value?.Any(char.IsControl) == true)
+        {
+            throw new ArgumentException("The presented credential is invalid.", nameof(value));
+        }
     }
 
     private static RemoteGameSessionTranscriptPage ParseTranscriptPage(string json, GameSessionKey expectedKey)

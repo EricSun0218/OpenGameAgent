@@ -40,7 +40,7 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 
 ### Optional packages
 
-- `OpenGameAgent.Extensions` adds policy, searchable tools, structured player interaction, goals, host-verified task plans, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
+- `OpenGameAgent.Extensions` adds policy, durable high-risk tool approval, searchable tools, structured player interaction, goals, host-verified task plans, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
 - `OpenGameAgent.Memory` adds an optional, model-agnostic embedding contract, rebuildable vector index, lexical/vector hybrid recall, structured diagnostics, and game-time reranking. It never replaces the authoritative memory save.
 - `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
 - `OpenGameAgent.Models.BuiltIn` turns the bundled directory into an executable multi-provider model runtime; `OpenGameAgent.Models.Auth.BuiltIn` adds explicitly configured browser and device authorization flows.

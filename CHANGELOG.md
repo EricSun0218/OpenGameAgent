@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add provider-neutral, host-brokered high-risk tool approval with disabled, explicit-only,
+  confirm-once, and task-scoped modes; final post-rewrite authorization; one-time credentials bound
+  to canonical arguments and authoritative save revision; crash-safe storage; owner-authorized remote
+  endpoints; and approval-wait performance attribution.
 - Add input-aware tool visibility policies that filter collected tool definitions before every model
   request, plus independent visibility predicates for the memory append and search tools.
 - Add official OpenAI Images and Volcengine Ark/Seedream image providers with bounded reference-image

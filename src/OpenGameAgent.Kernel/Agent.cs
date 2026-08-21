@@ -671,6 +671,7 @@ public sealed class Agent
             ShouldStopAfterTurnAsync = hooks.ShouldStopAfterTurnAsync,
             PrepareNextTurnAsync = hooks.PrepareNextTurnAsync,
             BeforeToolCallAsync = hooks.BeforeToolCallAsync,
+            AuthorizeToolCallAsync = hooks.AuthorizeToolCallAsync,
             AfterToolCallAsync = hooks.AfterToolCallAsync,
         };
     }

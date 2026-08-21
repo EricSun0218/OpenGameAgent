@@ -58,6 +58,7 @@ public static partial class ServerEndpoints
                 && !context.Request.Path.StartsWithSegments("/v1/actions")
                 && !context.Request.Path.StartsWithSegments("/v1/usage")
                 && !context.Request.Path.StartsWithSegments("/v1/transcript")
+                && !context.Request.Path.StartsWithSegments("/v1/approvals")
                 && !context.Request.Path.StartsWithSegments("/v1/attachments"))
             {
                 await next(context);
@@ -126,6 +127,7 @@ public static partial class ServerEndpoints
             usage = new[] { "session-ledger", "by-cause", "itemized-cost" },
             transcript = new[] { "bounded-pages", "revision-bound-cursors", "attachment-metadata" },
             attachments = new[] { "content-addressed-images", "session-authorized-read" },
+            approvals = new[] { "owner-authorized-pending", "one-time-response", "world-bound-consumption" },
         }));
         endpoints.MapPost(
             "/v1/run",
@@ -156,6 +158,7 @@ public static partial class ServerEndpoints
             (HttpRequest request, GameAgentRuntime runtime, CancellationToken cancellationToken) =>
                 ReadAttachmentAsync(request, runtime, maximumRequestBodyBytes, cancellationToken));
         MapGameActionExchangeEndpoints(endpoints, maximumRequestBodyBytes);
+        MapGameToolApprovalEndpoints(endpoints, maximumRequestBodyBytes);
         return endpoints;
     }
 

@@ -203,6 +203,15 @@ the runtime host. Multiple policies form an allow-list intersection. This is dis
 execution policy still validates any call that reaches the authority boundary. Use both for
 world-changing operations.
 
+For a high-risk call that requires player or operator consent, add `ToolApprovalExtension` after
+the ordinary policy extension. It runs at a final, non-rewriting kernel boundary after argument
+preparation, policy rewrites, schema validation, and conflict-key resolution. `disabled` and
+`explicit-only` calls fail closed; `allowed-in-task` requires a host-attested task scope;
+`confirm-once` creates a durable pending request. A grant is bound to session, actor, input, run,
+tool call, canonical argument digest, timeline, save generation, and world revision, and is consumed
+exactly once before the executor is entered. A changed argument or loaded/advanced world invalidates
+the grant. See [High-risk tool approval](tool-approvals.md).
+
 ## Learned runtime AI
 
 Reinforcement-learning controllers, motion matching, perception networks, and low-level bots are outside the language-agent loop. They can coexist with it: learned systems produce observations or execute a high-level tool, while OpenGameAgent handles language, semantic planning, memory, and tool orchestration.
