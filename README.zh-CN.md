@@ -60,7 +60,7 @@ Unity 6 项目可以直接通过不可变的 GitHub UPM tag 安装完整的 `0.3
 https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
 ```
 
-OpenUPM 完成索引后，也可以执行 `openupm add com.opengameagent.runtime@0.3.0-alpha.3`。自动生成的 `upm` 分支包含经过测试的完整二进制；`main` 上的 Unity 源码目录本身不是可分发包。
+同一版本也已发布到 OpenUPM，可执行 `openupm add com.opengameagent.runtime@0.3.0-alpha.3` 安装。自动生成的 `upm` 分支包含经过测试的完整二进制；`main` 上的 Unity 源码目录本身不是可分发包。
 
 ```xml
 <ItemGroup>

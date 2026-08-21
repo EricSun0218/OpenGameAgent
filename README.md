@@ -60,7 +60,7 @@ Unity 6 projects can install the complete `0.3.0-alpha.3` package directly from 
 https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
 ```
 
-After the package is indexed by OpenUPM, it can also be installed with `openupm add com.opengameagent.runtime@0.3.0-alpha.3`. The generated `upm` branch contains the tested binaries; the Unity source directory on `main` is not itself a distributable package.
+The same release is available through OpenUPM: `openupm add com.opengameagent.runtime@0.3.0-alpha.3`. The generated `upm` branch contains the tested binaries; the Unity source directory on `main` is not itself a distributable package.
 
 ```xml
 <ItemGroup>
