@@ -481,6 +481,12 @@ public static class AgentLoop
             throw new InvalidOperationException("BeforeModelRequestAsync cannot change the active run ID or turn number.");
         }
 
+        await emit(new AgentEvent(
+            AgentEventKind.ModelRequestStarted,
+            runId,
+            turn,
+            modelRequest: request)).ConfigureAwait(false);
+
         var started = false;
         ModelResponse? lastPartial = null;
         AssistantStreamResult? completedStream = null;
@@ -839,7 +845,10 @@ public static class AgentLoop
             if (preparationCanceled || cancellationToken.IsCancellationRequested)
             {
                 preparationCanceled = true;
-                preparation = ToolPreparation.Failed(CreateToolError("Tool execution was aborted before dispatch.", limits));
+                preparation = ToolPreparation.Failed(CreateToolError(
+                    "Tool execution was aborted before dispatch.",
+                    limits,
+                    failureCategory: ToolFailureCategory.Cancelled));
             }
             else
             {
@@ -858,7 +867,10 @@ public static class AgentLoop
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     preparationCanceled = true;
-                    preparation = ToolPreparation.Failed(CreateToolError("Tool execution was aborted before dispatch.", limits));
+                    preparation = ToolPreparation.Failed(CreateToolError(
+                        "Tool execution was aborted before dispatch.",
+                        limits,
+                        failureCategory: ToolFailureCategory.Cancelled));
                 }
             }
 
@@ -883,7 +895,10 @@ public static class AgentLoop
         {
             foreach (var item in prepared)
             {
-                var result = CreateToolError("Tool execution was aborted before dispatch.", limits);
+                var result = CreateToolError(
+                    "Tool execution was aborted before dispatch.",
+                    limits,
+                    failureCategory: ToolFailureCategory.Cancelled);
                 outcomes[item.Index] = new ToolCallOutcome(item.Index, item.Call, result);
                 await emit(new AgentEvent(
                     AgentEventKind.ToolEnded,
@@ -922,7 +937,10 @@ public static class AgentLoop
                             return new ToolCallOutcome(
                                 item.Index,
                                 item.Call,
-                                CreateToolError("The tool was not executed because an earlier write with the same conflict key has an uncertain outcome.", limits));
+                                CreateToolError(
+                                    "The tool was not executed because an earlier write with the same conflict key has an uncertain outcome.",
+                                    limits,
+                                    failureCategory: ToolFailureCategory.Conflict));
                         }
                     }
 
@@ -945,7 +963,13 @@ public static class AgentLoop
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    return new ToolCallOutcome(item.Index, item.Call, CreateToolError("Tool execution was aborted.", limits));
+                    return new ToolCallOutcome(
+                        item.Index,
+                        item.Call,
+                        CreateToolError(
+                            "Tool execution was aborted.",
+                            limits,
+                            failureCategory: ToolFailureCategory.Cancelled));
                 }
                 finally
                 {
@@ -994,7 +1018,10 @@ public static class AgentLoop
                     outcome = new ToolCallOutcome(
                         item.Index,
                         item.Call,
-                        CreateToolError("The tool was not executed because an earlier write in this sequential batch has an uncertain outcome.", limits));
+                        CreateToolError(
+                            "The tool was not executed because an earlier write in this sequential batch has an uncertain outcome.",
+                            limits,
+                            failureCategory: ToolFailureCategory.Conflict));
                 }
                 else
                 {
@@ -1048,7 +1075,10 @@ public static class AgentLoop
             string.Equals(candidate.Definition.Name, originalCall.Name, StringComparison.Ordinal));
         if (tool is null)
         {
-            return ToolPreparation.Failed(CreateToolError($"Tool '{originalCall.Name}' is not available.", limits));
+            return ToolPreparation.Failed(CreateToolError(
+                $"Tool '{originalCall.Name}' is not available.",
+                limits,
+                failureCategory: ToolFailureCategory.InvalidArguments));
         }
 
         try
@@ -1070,7 +1100,10 @@ public static class AgentLoop
             var validationError = tool.Validate(arguments);
             if (validationError is not null)
             {
-                return ToolPreparation.Failed(CreateToolError("Invalid tool arguments: " + validationError, limits));
+                return ToolPreparation.Failed(CreateToolError(
+                    "Invalid tool arguments: " + validationError,
+                    limits,
+                    failureCategory: ToolFailureCategory.InvalidArguments));
             }
 
             if (options.Hooks.BeforeToolCallAsync is not null)
@@ -1089,7 +1122,8 @@ public static class AgentLoop
                     return ToolPreparation.Failed(CreateToolError(
                         decision.Reason ?? "Tool execution was blocked.",
                         limits,
-                        decision.Terminate));
+                        decision.Terminate,
+                        failureCategory: ToolFailureCategory.Authorization));
                 }
 
                 if (decision?.ReplacementArgumentsJson is not null)
@@ -1101,7 +1135,10 @@ public static class AgentLoop
                     validationError = tool.Validate(arguments);
                     if (validationError is not null)
                     {
-                        return ToolPreparation.Failed(CreateToolError("Invalid tool arguments: " + validationError, limits));
+                        return ToolPreparation.Failed(CreateToolError(
+                            "Invalid tool arguments: " + validationError,
+                            limits,
+                            failureCategory: ToolFailureCategory.InvalidArguments));
                     }
                 }
             }
@@ -1114,7 +1151,10 @@ public static class AgentLoop
                 conflictKey = tool.ConflictKey(arguments);
                 if (conflictKey is { Length: > 1024 })
                 {
-                    return ToolPreparation.Failed(CreateToolError("The tool conflict key is too large.", limits));
+                    return ToolPreparation.Failed(CreateToolError(
+                        "The tool conflict key is too large.",
+                        limits,
+                        failureCategory: ToolFailureCategory.InvalidArguments));
                 }
             }
 
@@ -1214,7 +1254,8 @@ public static class AgentLoop
                         ? $"Tool execution exceeded {limits.ToolTimeoutMilliseconds} ms."
                         : $"Tool execution exceeded {limits.ToolTimeoutMilliseconds} ms. Its side-effect outcome is uncertain and must be reconciled.",
                     limits,
-                    uncertain: uncertainSideEffect);
+                    uncertain: uncertainSideEffect,
+                    failureCategory: ToolFailureCategory.Timeout);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1230,7 +1271,8 @@ public static class AgentLoop
                     ? "Tool execution was aborted."
                     : "Tool execution was aborted after dispatch. Its side-effect outcome is uncertain and must be reconciled.",
                 limits,
-                uncertain: uncertainSideEffect);
+                uncertain: uncertainSideEffect,
+                failureCategory: ToolFailureCategory.Cancelled);
         }
         catch (Exception exception)
         {
@@ -1327,7 +1369,8 @@ public static class AgentLoop
         string? message,
         AgentLimits limits,
         bool terminate = false,
-        bool uncertain = false)
+        bool uncertain = false,
+        ToolFailureCategory failureCategory = ToolFailureCategory.Internal)
     {
         var text = message ?? string.Empty;
         if (text.Length > limits.MaxTextCharactersPerPart)
@@ -1340,7 +1383,8 @@ public static class AgentLoop
             isError: true,
             detailsJson: uncertain ? "{\"outcome\":\"uncertain\"}" : null,
             terminate: terminate,
-            outcomeUncertain: uncertain);
+            outcomeUncertain: uncertain,
+            failureCategory: failureCategory);
     }
 
     private static string BoundError(string? message, AgentLimits limits)

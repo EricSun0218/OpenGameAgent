@@ -83,7 +83,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 命名时间线、整数 Tick 和可选日历 JSON；
 - 保留浮点数的结构化观察与上下文；
 - 经真实解码校验、内容寻址持久化、模型能力预检与会话授权读取的截图/图片输入；
-- 快速回复、完整 Agent、确定性 Workflow 三种路由；
+- 执行前 `auto`、无副作用 `quick`、短任务 `direct`/`agent`、持久 `plan` 与确定性 Workflow 路由；
 - 同一角色串行、不同角色有界并行；
 - 先记日志的动作意图与游戏权威回执；
 - 按游戏时间过滤、过期并可自定义排序的记忆；
@@ -97,7 +97,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 包含可移植 Skills 与 MCP Server 的 Agent Plugins 1.0.0 插件包；
 - 通过可替换 API 生成图片、语音和视频；
 - 可感知崩溃的生成资产物化与引擎权威导入；
-- 追加式轨迹、仅观察回放和离线 CI 评测；
+- 追加式轨迹、Provider/框架/宿主耗时归因、Benchmark 报告、仅观察回放和离线 CI 评测；
 - 支持打断的实时语音、不中断音频的后台 Agent 交接，以及可替换的表现层行为。
 
 Runtime **不会**判断攻击是否合法、物品能否使用、资源够不够或 NPC 有没有权限。游戏只暴露窄而明确的工具，校验每次变更请求，在正确线程或服务端执行，并返回权威回执。
@@ -131,12 +131,12 @@ GameAgentRuntime
 | --- | --- |
 | Agent 内核 | 流式类型化消息、工具循环、类型化工具中间结果、steering、follow-up、hooks、取消、严格会话校验、提供方错误结果化 |
 | 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、安全并行读、冲突键串行、策略拦截/终止、超时与写入结果未知语义 |
-| 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、快速/完整/Workflow 路由、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
+| 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、auto/quick/direct/plan/Workflow 路由、共享单次输入用量预算、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
 | 实时对话 | 有界 PCM16 流、实时转写/音频事件、字幕时间、插话取消/截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
 | 官方扩展 | 工具策略与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、委派、追踪和可持久并行工作流图 |
-| 开发工具 | 有界 JSONL 轨迹、本地仅观察 HTML 回放、统计摘要与离线/CI 评测规则 |
+| 开发工具 | 有界 JSONL 轨迹、Provider/框架/宿主耗时归因、工具失败与 durable write 指标、并发 Benchmark harness、本地仅观察 HTML 回放和离线/CI 评测规则 |
 | 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
@@ -251,6 +251,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [生成式媒体](docs/media.md)
 - [生成资产与权威导入](docs/generated-assets.md)
 - [图片输入与游戏感知](docs/image-input.md)
+- [执行路由与性能](docs/execution-routing-and-performance.zh-CN.md)
 - [轨迹、回放与离线评测](docs/devtools.md)
 
 ## 项目边界

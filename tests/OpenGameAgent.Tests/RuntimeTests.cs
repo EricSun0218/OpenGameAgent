@@ -578,16 +578,23 @@ public sealed class RuntimeTests
     [Fact]
     public async Task PendingWorkCanPromoteAnOtherwiseQuickInputToAgentRoute()
     {
+        var routingProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new JsonContent("{\"route\":\"quick\"}") },
+            ModelStopReason.Stop,
+            new ModelUsage(1, 1)));
         var provider = new RecordingProvider(_ => Text("ok"));
         var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
         {
             PendingWorkProvider = (_, _) => new ValueTask<bool>(true),
+            RoutePolicy = new AutomaticGameRoutePolicy(
+                classifier: new ModelGameRouteClassifier(routingProvider, "router-model").ClassifyAsync),
         });
 
         var result = await runtime.RunAsync(Input("tick", "{}"), TestContext.Current.CancellationToken);
 
         Assert.Equal(GameRouteKind.Agent, result.Route.Route);
-        Assert.Equal("tools-or-pending-work", result.Route.Reason);
+        Assert.Equal("pending-work", result.Route.Reason);
+        Assert.Equal(0, routingProvider.CallCount);
     }
 
     [Fact]
@@ -1475,6 +1482,157 @@ public sealed class RuntimeTests
             TestContext.Current.CancellationToken);
 
         Assert.Null(decision);
+    }
+
+    [Fact]
+    public async Task ExplicitAutoRouteDefersToTheConfiguredAutomaticPolicy()
+    {
+        var provider = new RecordingProvider(_ => Text("done"));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["command"] = GameRouteDecision.Agent("typed-command"),
+            }),
+        });
+        var input = new GameInput(
+            "session",
+            "actor",
+            "command",
+            "{}",
+            new GameMoment("world", 10),
+            "explicit-auto",
+            new Dictionary<string, string> { ["agent.route"] = "auto" });
+
+        var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
+        Assert.Equal("typed-command", result.Route.Reason);
+    }
+
+    [Fact]
+    public async Task AutomaticRouteCanClassifyOrdinaryConversationAsQuickWhenToolsAreAvailable()
+    {
+        var routingProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new JsonContent("{\"route\":\"quick\"}") },
+            ModelStopReason.Stop,
+            new ModelUsage(1, 1)));
+        var answerProvider = new RecordingProvider(_ => Text("done"));
+        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(answerProvider, "answer-model")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("command", "{}", "structural-route"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
+        Assert.Equal("model-classifier", result.Route.Reason);
+        Assert.Equal(1, routingProvider.CallCount);
+        Assert.Equal(1, answerProvider.CallCount);
+    }
+
+    [Fact]
+    public async Task ModelRouteUsageSharesTheInputBudgetAndPersistsByCause()
+    {
+        var routingProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new JsonContent("{\"route\":\"quick\",\"reason\":\"simple\"}") },
+            ModelStopReason.Stop,
+            new ModelUsage(3, 2),
+            provider: "router-provider",
+            responseModel: "router-model",
+            responseId: "router-response"));
+        var responseProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new TextContent("hello") },
+            ModelStopReason.Stop,
+            new ModelUsage(2, 1),
+            provider: "answer-provider",
+            responseModel: "answer-model"));
+        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "routed-usage"),
+            TestContext.Current.CancellationToken);
+        var usage = await runtime.ReadUsageAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
+        Assert.NotNull(usage);
+        Assert.Equal(5, usage!.Ledger.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
+        Assert.Equal(3, usage.Ledger.TotalsByCause[GameSessionUsageCause.Assistant].TotalTokens);
+        Assert.Equal(5, result.RunUsage.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
+        Assert.Equal(3, result.RunUsage.TotalsByCause[GameSessionUsageCause.Assistant].TotalTokens);
+        var routing = Assert.Single(usage.Ledger.Records, record => record.Cause == GameSessionUsageCause.Routing);
+        Assert.Contains("route-classification", routing.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("router-response", routing.DetailsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidRouteClassificationStillAccountsUsageBeforeConservativeFallback()
+    {
+        var routingProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new TextContent("not-json") },
+            ModelStopReason.Stop,
+            new ModelUsage(4, 1)));
+        var responseProvider = new RecordingProvider(_ => Text("fallback"));
+        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "invalid-routing"),
+            TestContext.Current.CancellationToken);
+        var usage = await runtime.ReadUsageAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
+        Assert.Equal(5, usage!.Ledger.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
+        Assert.Contains("invalid", Assert.Single(
+            usage.Ledger.Records,
+            record => record.Cause == GameSessionUsageCause.Routing).DetailsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RoutingCannotConsumeTheAnswerBudgetAndThenStartAnotherModelCall()
+    {
+        var routingProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new JsonContent("{\"route\":\"quick\"}") },
+            ModelStopReason.Stop,
+            new ModelUsage(6, 5)));
+        var responseProvider = new RecordingProvider(_ => Text("must not run"));
+        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
+        {
+            AgentLimits = new AgentLimits { MaxTotalTokens = 10 },
+            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "routing-budget"),
+            TestContext.Current.CancellationToken);
+        var usage = await runtime.ReadUsageAsync(
+            new GameSessionKey("session", "actor"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
+        Assert.Equal(0, responseProvider.CallCount);
+        Assert.Equal(11, usage!.Ledger.Stats.TotalTokens);
+        Assert.Equal(GameSessionUsageCause.Routing, Assert.Single(usage.Ledger.Records).Cause);
     }
 
     [Fact]

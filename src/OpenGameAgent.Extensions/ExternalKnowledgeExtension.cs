@@ -192,7 +192,9 @@ public sealed class ExternalKnowledgeExtension : IGameAgentExtension
                 var sourceId = arguments.GetProperty("source").GetString() ?? string.Empty;
                 if (!_sources.TryGetValue(sourceId, out var source))
                 {
-                    return ToolResult.Error($"Knowledge source '{sourceId}' is not configured.");
+                    return ToolResult.Error(
+                        $"Knowledge source '{sourceId}' is not configured.",
+                        ToolFailureCategory.InvalidArguments);
                 }
 
                 var request = new GameExternalKnowledgeRequest(
@@ -235,7 +237,8 @@ public sealed class ExternalKnowledgeExtension : IGameAgentExtension
                 if (_artifactStore is null)
                 {
                     return ToolResult.Error(
-                        "The knowledge result exceeded the inline limit and no artifact store is configured.");
+                        "The knowledge result exceeded the inline limit and no artifact store is configured.",
+                        ToolFailureCategory.RuleRejected);
                 }
 
                 var artifactId = GameExtensionOperationIds.Create(

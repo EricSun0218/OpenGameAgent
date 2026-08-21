@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -17,6 +18,69 @@ public enum GameActionStatus
     Rejected,
     Failed,
     Uncertain,
+}
+
+public enum GameActionDispatchDisposition
+{
+    Executed,
+    Replayed,
+    Recovered,
+}
+
+public sealed class GameActionDispatchTimings
+{
+    public GameActionDispatchTimings(double totalMilliseconds, double hostMilliseconds)
+    {
+        if (totalMilliseconds < 0 || double.IsNaN(totalMilliseconds) || double.IsInfinity(totalMilliseconds))
+        {
+            throw new ArgumentOutOfRangeException(nameof(totalMilliseconds));
+        }
+
+        if (hostMilliseconds < 0
+            || hostMilliseconds > totalMilliseconds
+            || double.IsNaN(hostMilliseconds)
+            || double.IsInfinity(hostMilliseconds))
+        {
+            throw new ArgumentOutOfRangeException(nameof(hostMilliseconds));
+        }
+
+        TotalMilliseconds = totalMilliseconds;
+        HostMilliseconds = hostMilliseconds;
+    }
+
+    public double TotalMilliseconds { get; }
+
+    public double HostMilliseconds { get; }
+
+    public double FrameworkMilliseconds => Math.Max(0, TotalMilliseconds - HostMilliseconds);
+}
+
+public sealed class GameActionDispatchResult
+{
+    public GameActionDispatchResult(
+        GameActionReceipt receipt,
+        GameActionDispatchDisposition disposition,
+        GameActionDispatchTimings timings)
+    {
+        Receipt = receipt ?? throw new ArgumentNullException(nameof(receipt));
+        if (!Enum.IsDefined(typeof(GameActionDispatchDisposition), disposition))
+        {
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        }
+
+        Disposition = disposition;
+        Timings = timings ?? throw new ArgumentNullException(nameof(timings));
+    }
+
+    public GameActionReceipt Receipt { get; }
+
+    public GameActionDispatchDisposition Disposition { get; }
+
+    public GameActionDispatchTimings Timings { get; }
+
+    public bool DuplicateExecutionPrevented => Disposition == GameActionDispatchDisposition.Replayed;
+
+    public bool Recovered => Disposition == GameActionDispatchDisposition.Recovered;
 }
 
 public sealed class GameActionIntent
@@ -778,12 +842,25 @@ public sealed class DurableGameActionDispatcher
 
     public async ValueTask<GameActionReceipt> ExecuteAsync(
         GameActionIntent intent,
+        CancellationToken cancellationToken) =>
+        (await ExecuteDetailedAsync(intent, cancellationToken).ConfigureAwait(false)).Receipt;
+
+    public async ValueTask<GameActionDispatchResult> ExecuteDetailedAsync(
+        GameActionIntent intent,
         CancellationToken cancellationToken)
     {
         if (intent is null)
         {
             throw new ArgumentNullException(nameof(intent));
         }
+
+        var started = Stopwatch.GetTimestamp();
+        var hostMilliseconds = 0d;
+        GameActionDispatchResult Result(GameActionReceipt receipt, GameActionDispatchDisposition disposition) =>
+            new(
+                receipt,
+                disposition,
+                new GameActionDispatchTimings(ElapsedMilliseconds(started), hostMilliseconds));
 
         var gate = SelectGate(intent.OperationId);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -794,12 +871,14 @@ public sealed class DurableGameActionDispatcher
             ValidateEntry(reservation, intent);
             if (reservation.Receipt is not null)
             {
-                return reservation.Receipt;
+                return Result(reservation.Receipt, GameActionDispatchDisposition.Replayed);
             }
 
             if (reservation.Dispatched)
             {
-                return await TryRecoverAsync(reservation.Intent, cancellationToken).ConfigureAwait(false);
+                var recovery = await TryRecoverDetailedAsync(reservation.Intent, cancellationToken).ConfigureAwait(false);
+                hostMilliseconds += recovery.HostMilliseconds;
+                return Result(recovery.Receipt, GameActionDispatchDisposition.Recovered);
             }
 
             var claim = await ClaimDispatchWhenAvailableAsync(
@@ -808,13 +887,17 @@ public sealed class DurableGameActionDispatcher
             ValidateEntry(claim.Entry, intent);
             if (claim.Status == GameActionDispatchClaimStatus.Completed)
             {
-                return claim.Entry.Receipt
-                    ?? throw new InvalidOperationException("A completed dispatch claim did not contain its receipt.");
+                return Result(
+                    claim.Entry.Receipt
+                        ?? throw new InvalidOperationException("A completed dispatch claim did not contain its receipt."),
+                    GameActionDispatchDisposition.Replayed);
             }
 
             if (claim.Status == GameActionDispatchClaimStatus.AlreadyDispatched)
             {
-                return await TryRecoverAsync(claim.Entry.Intent, cancellationToken).ConfigureAwait(false);
+                var recovery = await TryRecoverDetailedAsync(claim.Entry.Intent, cancellationToken).ConfigureAwait(false);
+                hostMilliseconds += recovery.HostMilliseconds;
+                return Result(recovery.Receipt, GameActionDispatchDisposition.Recovered);
             }
 
             if (claim.Status != GameActionDispatchClaimStatus.Claimed)
@@ -822,10 +905,11 @@ public sealed class DurableGameActionDispatcher
                 throw new InvalidOperationException("The action journal returned an invalid dispatch claim state.");
             }
 
+            GameActionReceipt receipt;
+            var hostStarted = Stopwatch.GetTimestamp();
             try
             {
-                var receipt = await _handler.ExecuteAsync(intent, cancellationToken).ConfigureAwait(false);
-                return await CloseDurablyAsync(intent, receipt).ConfigureAwait(false);
+                receipt = await _handler.ExecuteAsync(intent, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -833,10 +917,18 @@ public sealed class DurableGameActionDispatcher
             }
             catch (Exception exception)
             {
-                return GameActionReceipt.Uncertain(
-                    intent,
-                    "The game action handler failed after dispatch; the game must reconcile the operation. " + exception.Message);
+                hostMilliseconds += ElapsedMilliseconds(hostStarted);
+                return Result(
+                    GameActionReceipt.Uncertain(
+                        intent,
+                        "The game action handler failed after dispatch; the game must reconcile the operation. " + exception.Message),
+                    GameActionDispatchDisposition.Executed);
             }
+
+            hostMilliseconds += ElapsedMilliseconds(hostStarted);
+            return Result(
+                await CloseDurablyAsync(intent, receipt).ConfigureAwait(false),
+                GameActionDispatchDisposition.Executed);
         }
         finally
         {
@@ -969,25 +1061,26 @@ public sealed class DurableGameActionDispatcher
         }
     }
 
-    private async ValueTask<GameActionReceipt> RecoverAsync(
-        GameActionIntent intent,
-        CancellationToken cancellationToken)
-    {
-        var recovered = await _handler.RecoverAsync(intent, cancellationToken).ConfigureAwait(false);
-        return recovered is null
-            ? GameActionReceipt.Uncertain(
-                intent,
-                "The action was dispatched, but its outcome is not yet known.")
-            : await CloseDurablyAsync(intent, recovered).ConfigureAwait(false);
-    }
-
     private async ValueTask<GameActionReceipt> TryRecoverAsync(
         GameActionIntent intent,
+        CancellationToken cancellationToken) =>
+        (await TryRecoverDetailedAsync(intent, cancellationToken).ConfigureAwait(false)).Receipt;
+
+    private async ValueTask<TimedRecoveryResult> TryRecoverDetailedAsync(
+        GameActionIntent intent,
         CancellationToken cancellationToken)
     {
+        var started = Stopwatch.GetTimestamp();
         try
         {
-            return await RecoverAsync(intent, cancellationToken).ConfigureAwait(false);
+            var recovered = await _handler.RecoverAsync(intent, cancellationToken).ConfigureAwait(false);
+            var hostMilliseconds = ElapsedMilliseconds(started);
+            var receipt = recovered is null
+                ? GameActionReceipt.Uncertain(
+                    intent,
+                    "The action was dispatched, but its outcome is not yet known.")
+                : await CloseDurablyAsync(intent, recovered).ConfigureAwait(false);
+            return new TimedRecoveryResult(receipt, hostMilliseconds);
         }
         catch (OperationCanceledException)
         {
@@ -995,10 +1088,28 @@ public sealed class DurableGameActionDispatcher
         }
         catch (Exception exception)
         {
-            return GameActionReceipt.Uncertain(
-                intent,
-                "The game action recovery failed; the game must reconcile the operation. " + exception.Message);
+            return new TimedRecoveryResult(
+                GameActionReceipt.Uncertain(
+                    intent,
+                    "The game action recovery failed; the game must reconcile the operation. " + exception.Message),
+                ElapsedMilliseconds(started));
         }
+    }
+
+    private static double ElapsedMilliseconds(long started) =>
+        Math.Max(0, Stopwatch.GetTimestamp() - started) * 1_000d / Stopwatch.Frequency;
+
+    private sealed class TimedRecoveryResult
+    {
+        public TimedRecoveryResult(GameActionReceipt receipt, double hostMilliseconds)
+        {
+            Receipt = receipt;
+            HostMilliseconds = hostMilliseconds;
+        }
+
+        public GameActionReceipt Receipt { get; }
+
+        public double HostMilliseconds { get; }
     }
 
     private async ValueTask<GameActionDispatchClaim> ClaimDispatchWhenAvailableAsync(
@@ -1132,13 +1243,21 @@ public static class GameActionTool
                     expectedRevision: expectedRevision,
                     generationId: generationId,
                     conflictKey: execution.ConflictKey);
-                var receipt = await dispatcher.ExecuteAsync(intent, cancellationToken).ConfigureAwait(false);
-                var json = JsonSerializer.Serialize(new ReceiptPayload(receipt), ReceiptJsonOptions);
+                var dispatch = await dispatcher.ExecuteDetailedAsync(intent, cancellationToken).ConfigureAwait(false);
+                var receipt = dispatch.Receipt;
+                var json = JsonSerializer.Serialize(new ReceiptPayload(dispatch), ReceiptJsonOptions);
                 return new ToolResult(
                     new AgentContent[] { new JsonContent(json) },
                     isError: !receipt.Succeeded,
                     detailsJson: json,
-                    outcomeUncertain: receipt.Status == GameActionStatus.Uncertain);
+                    outcomeUncertain: receipt.Status == GameActionStatus.Uncertain,
+                    failureCategory: receipt.Status switch
+                    {
+                        GameActionStatus.Committed => ToolFailureCategory.None,
+                        GameActionStatus.Rejected => ToolFailureCategory.RuleRejected,
+                        GameActionStatus.Uncertain => ToolFailureCategory.Transient,
+                        _ => ToolFailureCategory.Unspecified,
+                    });
             },
             risk,
             conflictKey: conflictKey);
@@ -1151,8 +1270,9 @@ public static class GameActionTool
 
     private sealed class ReceiptPayload
     {
-        public ReceiptPayload(GameActionReceipt receipt)
+        public ReceiptPayload(GameActionDispatchResult dispatch)
         {
+            var receipt = dispatch.Receipt;
             OperationId = receipt.OperationId;
             Status = receipt.Status.ToString().ToLowerInvariant();
             Result = GameJson.ParseElement(receipt.ResultJson);
@@ -1161,6 +1281,12 @@ public static class GameActionTool
             Message = receipt.Message;
             TimelineId = receipt.Moment.TimelineId;
             Tick = receipt.Moment.Tick;
+            Dispatch = dispatch.Disposition.ToString().ToLowerInvariant();
+            DuplicateExecutionPrevented = dispatch.DuplicateExecutionPrevented;
+            Recovered = dispatch.Recovered;
+            TotalMilliseconds = dispatch.Timings.TotalMilliseconds;
+            HostMilliseconds = dispatch.Timings.HostMilliseconds;
+            FrameworkMilliseconds = dispatch.Timings.FrameworkMilliseconds;
         }
 
         public string OperationId { get; }
@@ -1178,5 +1304,17 @@ public static class GameActionTool
         public string TimelineId { get; }
 
         public long Tick { get; }
+
+        public string Dispatch { get; }
+
+        public bool DuplicateExecutionPrevented { get; }
+
+        public double TotalMilliseconds { get; }
+
+        public double HostMilliseconds { get; }
+
+        public double FrameworkMilliseconds { get; }
+
+        public bool Recovered { get; }
     }
 }

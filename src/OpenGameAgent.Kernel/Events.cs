@@ -17,6 +17,7 @@ public enum AgentEventKind
     TurnEnded,
     RunFaulted,
     RunEnded,
+    ModelRequestStarted,
 }
 
 public enum AgentRunStatus
@@ -37,6 +38,7 @@ public sealed class AgentEvent
         int turn = 0,
         AgentMessage? message = null,
         ModelStreamEvent? modelEvent = null,
+        ModelRequest? modelRequest = null,
         ToolCallContent? toolCall = null,
         ToolProgress? progress = null,
         ToolResult? toolResult = null,
@@ -49,6 +51,7 @@ public sealed class AgentEvent
         Turn = turn;
         Message = message;
         ModelEvent = modelEvent;
+        ModelRequest = modelRequest;
         ToolCall = toolCall;
         Progress = progress;
         ToolResult = toolResult;
@@ -68,6 +71,8 @@ public sealed class AgentEvent
     public AgentMessage? Message { get; }
 
     public ModelStreamEvent? ModelEvent { get; }
+
+    public ModelRequest? ModelRequest { get; }
 
     public ToolCallContent? ToolCall { get; }
 

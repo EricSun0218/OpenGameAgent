@@ -43,6 +43,9 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Query a game-owned knowledge source | `ExternalKnowledgeExtension` |
 | Capture bounded lifecycle traces | `GameAgentTracingExtension` |
 | Persist, inspect, and evaluate traces without replaying side effects | `JsonLinesGameAgentTraceSink`, `GameAgentTraceHtmlReport`, `GameAgentTraceEvaluator` |
+| Attribute queue, provider, framework, tool, and authoritative-host latency | `GameAgentPerformanceSummary`, `GameActionDispatchTimings` |
+| Benchmark fixed/fake providers, tools, faults, and concurrency | `GameAgentBenchmarkRunner` |
+| Observe STT/TTS/barge-in and media asset-ready latency | `RealtimeMetricsCollector`, `GameMediaMetricsCollector` |
 | Load a portable package of skills and MCP servers | `AgentPluginLoader`, `AgentPluginPackage` |
 
 ## Game integration
@@ -55,7 +58,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Express game time or save forks | `GameMoment` |
 | Supply current world state | `IGameContextProvider`, `GameContextSlice` |
 | Keep obvious dialogue fast | `AutomaticGameRoutePolicy`, `ModelGameRouteClassifier` |
-| Force a known path | `agent.route` input metadata |
+| Force or automatically select a known path | `agent.route=auto|quick|agent|direct|plan|workflow:<name>` |
 | Keep one NPC ordered | built into `GameAgentRuntime` |
 | Run many NPCs concurrently | `GameRuntimeLimits.MaxConcurrentActors`, `MultiActorScheduler` |
 | Correct or cancel an active NPC run | `GameAgentRuntime.TrySteer`, `GameAgentRuntime.TryAbort` |
@@ -108,6 +111,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Resolve API keys, OAuth-style tokens, or local/no-auth modes | `IGameProviderAuthentication`, `IGameCredentialStore` |
 | Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |
 | Read durable per-session usage and explicit known/unknown cost | `GameAgentRuntime.ReadUsageAsync`, `GameSessionUsageLedger` |
+| Read usage caused by one input, including routing and workflow work | `GameAgentRunResult.RunUsage` |
 | Register supported browser/device authorization flows | `BuiltInGameOAuthRegistration` |
 | Observe bounded provider response metadata | `ProviderResponseObserver` |
 | Fetch short-lived developer-hosted credentials | `DeveloperGatewayProvider`, `HttpDeveloperGatewayCredentialSource` |

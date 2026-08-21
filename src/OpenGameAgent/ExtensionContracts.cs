@@ -213,12 +213,30 @@ public static class GameAgentExtensionEvents
 
 public sealed class GameAgentInputEvent
 {
-    public GameAgentInputEvent(GameInput input)
+    public GameAgentInputEvent(
+        GameInput input,
+        TimeSpan? queueDuration = null,
+        TimeSpan? inputPreparationDuration = null,
+        TimeSpan? sessionLoadDuration = null)
     {
         Input = input ?? throw new ArgumentNullException(nameof(input));
+        QueueDuration = RequireDuration(queueDuration, nameof(queueDuration));
+        InputPreparationDuration = RequireDuration(inputPreparationDuration, nameof(inputPreparationDuration));
+        SessionLoadDuration = RequireDuration(sessionLoadDuration, nameof(sessionLoadDuration));
     }
 
     public GameInput Input { get; }
+
+    public TimeSpan? QueueDuration { get; }
+
+    public TimeSpan? InputPreparationDuration { get; }
+
+    public TimeSpan? SessionLoadDuration { get; }
+
+    private static TimeSpan? RequireDuration(TimeSpan? value, string name) =>
+        value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
+            ? throw new ArgumentOutOfRangeException(name)
+            : value;
 }
 
 public sealed class GameAgentSessionEvent
@@ -233,7 +251,7 @@ public sealed class GameAgentSessionEvent
 
 public sealed class GameAgentContextEvent
 {
-    public GameAgentContextEvent(IReadOnlyList<GameContextSlice> context)
+    public GameAgentContextEvent(IReadOnlyList<GameContextSlice> context, TimeSpan? duration = null)
     {
         var copy = (context ?? throw new ArgumentNullException(nameof(context))).ToArray();
         if (copy.Any(value => value is null))
@@ -242,14 +260,22 @@ public sealed class GameAgentContextEvent
         }
 
         Context = Array.AsReadOnly(copy);
+        Duration = RequireDuration(duration, nameof(duration));
     }
 
     public IReadOnlyList<GameContextSlice> Context { get; }
+
+    public TimeSpan? Duration { get; }
+
+    private static TimeSpan? RequireDuration(TimeSpan? value, string name) =>
+        value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
+            ? throw new ArgumentOutOfRangeException(name)
+            : value;
 }
 
 public sealed class GameAgentToolsEvent
 {
-    public GameAgentToolsEvent(IReadOnlyList<AgentTool> tools)
+    public GameAgentToolsEvent(IReadOnlyList<AgentTool> tools, TimeSpan? duration = null)
     {
         var copy = (tools ?? throw new ArgumentNullException(nameof(tools))).ToArray();
         if (copy.Any(value => value is null))
@@ -258,24 +284,52 @@ public sealed class GameAgentToolsEvent
         }
 
         Tools = Array.AsReadOnly(copy);
+        Duration = RequireDuration(duration, nameof(duration));
     }
 
     public IReadOnlyList<AgentTool> Tools { get; }
+
+    public TimeSpan? Duration { get; }
+
+    private static TimeSpan? RequireDuration(TimeSpan? value, string name) =>
+        value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
+            ? throw new ArgumentOutOfRangeException(name)
+            : value;
 }
 
 public sealed class GameAgentRouteEvent
 {
-    public GameAgentRouteEvent(GameRouteDecision decision)
+    public GameAgentRouteEvent(
+        GameRouteDecision decision,
+        TimeSpan? duration = null,
+        TimeSpan? modelDuration = null)
     {
         Decision = decision ?? throw new ArgumentNullException(nameof(decision));
+        if (duration is { } value && (value < TimeSpan.Zero || value > TimeSpan.FromDays(1)))
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration));
+        }
+
+        Duration = duration;
+        if (modelDuration is { } modelValue
+            && (modelValue < TimeSpan.Zero || modelValue > TimeSpan.FromDays(1)))
+        {
+            throw new ArgumentOutOfRangeException(nameof(modelDuration));
+        }
+
+        ModelDuration = modelDuration;
     }
 
     public GameRouteDecision Decision { get; set; }
+
+    public TimeSpan? Duration { get; }
+
+    public TimeSpan? ModelDuration { get; }
 }
 
 public sealed class GameAgentSkillsEvent
 {
-    public GameAgentSkillsEvent(IReadOnlyList<GameSkill> skills)
+    public GameAgentSkillsEvent(IReadOnlyList<GameSkill> skills, TimeSpan? duration = null)
     {
         var copy = (skills ?? throw new ArgumentNullException(nameof(skills))).ToArray();
         if (copy.Any(value => value is null))
@@ -284,9 +338,17 @@ public sealed class GameAgentSkillsEvent
         }
 
         Skills = Array.AsReadOnly(copy);
+        Duration = RequireDuration(duration, nameof(duration));
     }
 
     public IReadOnlyList<GameSkill> Skills { get; }
+
+    public TimeSpan? Duration { get; }
+
+    private static TimeSpan? RequireDuration(TimeSpan? value, string name) =>
+        value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
+            ? throw new ArgumentOutOfRangeException(name)
+            : value;
 }
 
 public sealed class GameAgentKernelEvent

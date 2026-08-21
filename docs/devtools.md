@@ -40,6 +40,14 @@ The writer serializes concurrent events, flushes complete JSONL entries, bounds 
 
 Each entry keeps game time (`timelineId`, `tick`, optional calendar JSON) separate from the operational UTC timestamp. Completed runs record provider/model/response identity and full token and known-cost fields. `session.saved` entries include the persistent cumulative usage ledger and per-cause totals.
 
+## Performance and reliability summary
+
+`GameAgentPerformanceSummary.Create(recording)` derives per-input and aggregate JSON/JSONL/text metrics without replaying work. It separates queue, framework preparation, provider request/TTFT, tool, authoritative host-action, durable-action framework, and total latency; categorizes tool failures; and counts retries, fallbacks, uncertain writes, recoveries, duplicate-write prevention, tokens, and known/unknown cost. Aggregates are keyed by tool, failure category, route, resolved provider, and model.
+
+For repeatable load and failure testing, use `GameAgentBenchmarkRunner` with a scenario that returns a bounded trace recording. The runner supports fixed or fake providers, injected faults, warmups, concurrency, iteration timeouts, and caller-owned thresholds. `RealtimeMetricsCollector` and `GameMediaMetricsCollector` add optional bounded STT/TTS/barge-in and media asset-ready timings.
+
+See [Execution routing and performance](execution-routing-and-performance.md) for the complete API, attribution rules, examples, and Chinese documentation.
+
 ## Inspect and replay observations
 
 Run the CLI from source:

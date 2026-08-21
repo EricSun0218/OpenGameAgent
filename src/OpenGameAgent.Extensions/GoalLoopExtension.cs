@@ -262,21 +262,37 @@ public sealed class GoalLoopExtension : IGameAgentExtension
 
     public void Configure(GameAgentExtensionApi api)
     {
-        api.RegisterPromptFragment(
+        api.RegisterContextProvider(
             "goal-guidance",
-            "Use manage_goal for work that must survive this turn. Waiting goals must name game-time or game-event conditions; never use real-world time for narrative progress.");
+            (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
+                IsDirect(context.Input)
+                    ? Array.Empty<GameContextSlice>()
+                    : new[]
+                    {
+                        new GameContextSlice(
+                            "goal-guidance",
+                            JsonSerializer.Serialize(
+                                "Use manage_goal for work that must survive this turn. Waiting goals must name game-time or game-event conditions; never use real-world time for narrative progress.")),
+                    }));
         api.RegisterToolProvider(
             "goal-tools",
-            (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
-            {
-                CreateManageTool(api, context),
-                CreateListTool(context),
-            }));
+            (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(
+                IsDirect(context.Input)
+                    ? Array.Empty<AgentTool>()
+                    : new[]
+                    {
+                        CreateManageTool(api, context),
+                        CreateListTool(context),
+                    }));
         api.RegisterPendingWorkProvider(
             "active-goals",
             (context, cancellationToken) => ResumeAndCheckPendingAsync(api, context, cancellationToken),
             priority: 500);
     }
+
+    private static bool IsDirect(GameInput input) =>
+        input.Metadata.TryGetValue("agent.route", out var route)
+        && string.Equals(route, "direct", StringComparison.OrdinalIgnoreCase);
 
     private async ValueTask<bool> ResumeAndCheckPendingAsync(
         GameAgentExtensionApi api,
@@ -332,19 +348,20 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                 {
                     if (Read(context.State, goalId) is not null)
                     {
-                        return ToolResult.Error($"Goal '{goalId}' already exists.");
+                        return ToolResult.Error($"Goal '{goalId}' already exists.", ToolFailureCategory.Conflict);
                     }
 
                     var activeGoalCount = ReadAll(context.State).Count(goal => !IsTerminal(goal.Status));
                     if (activeGoalCount >= _options.MaximumActiveGoals)
                     {
                         return ToolResult.Error(
-                            $"At most {_options.MaximumActiveGoals} active or waiting goals may exist in one actor session.");
+                            $"At most {_options.MaximumActiveGoals} active or waiting goals may exist in one actor session.",
+                            ToolFailureCategory.RuleRejected);
                     }
 
                     if (!arguments.TryGetProperty("objective", out var objective))
                     {
-                        return ToolResult.Error("Creating a goal requires objective JSON.");
+                        return ToolResult.Error("Creating a goal requires objective JSON.", ToolFailureCategory.InvalidArguments);
                     }
 
                     document = new GoalDocument
@@ -363,20 +380,22 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                     var existing = Read(context.State, goalId);
                     if (existing is null)
                     {
-                        return ToolResult.Error($"Goal '{goalId}' does not exist.");
+                        return ToolResult.Error($"Goal '{goalId}' does not exist.", ToolFailureCategory.InvalidArguments);
                     }
 
                     document = existing;
 
                     if (document.Status is GameGoalStatus.Completed or GameGoalStatus.Failed or GameGoalStatus.Cancelled)
                     {
-                        return ToolResult.Error($"Goal '{goalId}' is terminal and immutable.");
+                        return ToolResult.Error($"Goal '{goalId}' is terminal and immutable.", ToolFailureCategory.Conflict);
                     }
 
                     if (!arguments.TryGetProperty("expectedRevision", out var revision)
                         || revision.GetInt64() != document.Revision)
                     {
-                        return ToolResult.Error($"Goal '{goalId}' revision conflict. Current revision is {document.Revision}.");
+                        return ToolResult.Error(
+                            $"Goal '{goalId}' revision conflict. Current revision is {document.Revision}.",
+                            ToolFailureCategory.Conflict);
                     }
 
                     document.Revision = checked(document.Revision + 1);
@@ -387,7 +406,9 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                         case "progress":
                             if (!arguments.TryGetProperty("progress", out var progress))
                             {
-                                return ToolResult.Error("A progress update requires progress JSON.");
+                                return ToolResult.Error(
+                                    "A progress update requires progress JSON.",
+                                    ToolFailureCategory.InvalidArguments);
                             }
 
                             var nextProgress = progress.GetRawText();
@@ -396,7 +417,9 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                                 : 0;
                             if (document.NonProgressUpdates >= _options.MaximumNonProgressUpdates)
                             {
-                                return ToolResult.Error("The goal repeated the same progress without advancing.");
+                                return ToolResult.Error(
+                                    "The goal repeated the same progress without advancing.",
+                                    ToolFailureCategory.RuleRejected);
                             }
 
                             document.ProgressJson = nextProgress;
@@ -412,7 +435,9 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                                 : (long?)null;
                             if (notBeforeTick is null && eventTypes.Length == 0)
                             {
-                                return ToolResult.Error("A waiting goal requires a game tick or game event type.");
+                                return ToolResult.Error(
+                                    "A waiting goal requires a game tick or game event type.",
+                                    ToolFailureCategory.InvalidArguments);
                             }
 
                             document.Status = GameGoalStatus.Waiting;
@@ -441,7 +466,9 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                             document.Wait = null;
                             break;
                         default:
-                            return ToolResult.Error($"Unsupported goal action '{action}'.");
+                            return ToolResult.Error(
+                                $"Unsupported goal action '{action}'.",
+                                ToolFailureCategory.InvalidArguments);
                     }
                 }
 

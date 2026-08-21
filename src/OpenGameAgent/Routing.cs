@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -56,13 +57,35 @@ public sealed class GameRouteDecision
 
 public sealed class GameRouteContext
 {
+    private const long DefaultRemainingModelTokens = 10_000_000_000;
+    private readonly Func<long> _remainingModelTokens;
+    private readonly Action<GameRouteModelUsage>? _recordModelUsage;
+
     public GameRouteContext(GameInput input, int availableToolCount, bool hasPendingWork = false)
+        : this(
+            input,
+            availableToolCount,
+            hasPendingWork,
+            () => DefaultRemainingModelTokens,
+            recordModelUsage: null)
+    {
+    }
+
+    internal GameRouteContext(
+        GameInput input,
+        int availableToolCount,
+        bool hasPendingWork,
+        Func<long> remainingModelTokens,
+        Action<GameRouteModelUsage>? recordModelUsage)
     {
         Input = input ?? throw new ArgumentNullException(nameof(input));
         AvailableToolCount = availableToolCount >= 0
             ? availableToolCount
             : throw new ArgumentOutOfRangeException(nameof(availableToolCount));
         HasPendingWork = hasPendingWork;
+        _remainingModelTokens = remainingModelTokens
+            ?? throw new ArgumentNullException(nameof(remainingModelTokens));
+        _recordModelUsage = recordModelUsage;
     }
 
     public GameInput Input { get; }
@@ -70,6 +93,56 @@ public sealed class GameRouteContext
     public int AvailableToolCount { get; }
 
     public bool HasPendingWork { get; }
+
+    /// <summary>
+    /// Remaining model-token budget for routing work and the selected execution route.
+    /// Policies that call a model should bound that call to this value.
+    /// </summary>
+    public long RemainingModelTokens
+    {
+        get
+        {
+            var remaining = _remainingModelTokens();
+            return remaining is >= 0 and <= DefaultRemainingModelTokens
+                ? remaining
+                : throw new InvalidOperationException("The route token-budget provider returned an invalid value.");
+        }
+    }
+
+    /// <summary>
+    /// Records a model call made while selecting the route. Runtime-created contexts persist the
+    /// usage with the same input ledger; standalone contexts accept the call as a no-op.
+    /// </summary>
+    public void RecordModelUsage(GameRouteModelUsage usage) =>
+        _recordModelUsage?.Invoke(usage ?? throw new ArgumentNullException(nameof(usage)));
+}
+
+public sealed class GameRouteModelUsage
+{
+    public GameRouteModelUsage(
+        ModelUsage usage,
+        string? runId = null,
+        string? detailsJson = null,
+        TimeSpan? duration = null)
+    {
+        Usage = usage ?? throw new ArgumentNullException(nameof(usage));
+        RunId = runId is null ? null : GameJson.RequireId(runId, nameof(runId));
+        DetailsJson = detailsJson is null ? null : GameJson.RequireValid(detailsJson, nameof(detailsJson));
+        if (duration is { } value && (value < TimeSpan.Zero || value > TimeSpan.FromHours(1)))
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration));
+        }
+
+        Duration = duration;
+    }
+
+    public ModelUsage Usage { get; }
+
+    public string? RunId { get; }
+
+    public string? DetailsJson { get; }
+
+    public TimeSpan? Duration { get; }
 }
 
 public interface IGameRoutePolicy
@@ -123,6 +196,14 @@ public sealed class AutomaticGameRoutePolicy : IGameRoutePolicy
             return typedRoute;
         }
 
+        // Pending work is authoritative and free. Merely having tools available does not prove
+        // that this particular input needs them; an optional classifier must still be allowed to
+        // select the side-effect-free quick path for ordinary conversation.
+        if (context.HasPendingWork)
+        {
+            return GameRouteDecision.Agent("pending-work");
+        }
+
         if (_classifier is not null)
         {
             var classified = await _classifier(context, cancellationToken).ConfigureAwait(false);
@@ -132,9 +213,9 @@ public sealed class AutomaticGameRoutePolicy : IGameRoutePolicy
             }
         }
 
-        if (context.HasPendingWork || context.AvailableToolCount > 0)
+        if (context.AvailableToolCount > 0)
         {
-            return GameRouteDecision.Agent("tools-or-pending-work");
+            return GameRouteDecision.Agent("tools-available");
         }
 
         return GameRouteDecision.Quick("no-tools-needed");
@@ -154,10 +235,23 @@ public sealed class AutomaticGameRoutePolicy : IGameRoutePolicy
             return true;
         }
 
-        if (string.Equals(route, "agent", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(route, "agent", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(route, "direct", StringComparison.OrdinalIgnoreCase))
         {
             decision = GameRouteDecision.Agent("explicit");
             return true;
+        }
+
+        if (string.Equals(route, "plan", StringComparison.OrdinalIgnoreCase))
+        {
+            decision = GameRouteDecision.Agent("explicit-plan");
+            return true;
+        }
+
+        if (string.Equals(route, "auto", StringComparison.OrdinalIgnoreCase))
+        {
+            decision = null!;
+            return false;
         }
 
         const string workflowPrefix = "workflow:";
@@ -201,6 +295,11 @@ public sealed class ModelGameRouteClassifier
             throw new ArgumentNullException(nameof(context));
         }
 
+        if (context.RemainingModelTokens <= 0)
+        {
+            return null;
+        }
+
         var options = new AgentOptions(_provider, _model)
         {
             SystemPrompt =
@@ -216,7 +315,7 @@ public sealed class ModelGameRouteClassifier
             Limits = new AgentLimits
             {
                 MaxTurns = 1,
-                MaxTotalTokens = 16_384,
+                MaxTotalTokens = Math.Min(16_384, context.RemainingModelTokens),
                 ModelTimeoutMilliseconds = 15_000,
                 MaxTextCharactersPerPart = 16_384,
                 MaxJsonCharactersPerPart = 1_000_000,
@@ -234,9 +333,16 @@ public sealed class ModelGameRouteClassifier
             hasPendingWork = context.HasPendingWork,
         });
         var agent = new Agent(options);
+        var startedAt = Stopwatch.GetTimestamp();
         var result = await agent.RunAsync(AgentMessage.UserJson(inputJson), cancellationToken).ConfigureAwait(false);
+        var durationMilliseconds = (Stopwatch.GetTimestamp() - startedAt) * 1_000d / Stopwatch.Frequency;
         if (!result.Succeeded)
         {
+            context.RecordModelUsage(new GameRouteModelUsage(
+                result.Usage,
+                result.RunId,
+                CreateUsageDetails("failed", assistant: null, durationMilliseconds),
+                TimeSpan.FromMilliseconds(durationMilliseconds)));
             return null;
         }
 
@@ -245,9 +351,15 @@ public sealed class ModelGameRouteClassifier
             ?? assistant?.Content.OfType<TextContent>().FirstOrDefault()?.Text;
         if (string.IsNullOrWhiteSpace(content))
         {
+            context.RecordModelUsage(new GameRouteModelUsage(
+                result.Usage,
+                result.RunId,
+                CreateUsageDetails("empty", assistant, durationMilliseconds),
+                TimeSpan.FromMilliseconds(durationMilliseconds)));
             return null;
         }
 
+        GameRouteDecision? decision = null;
         try
         {
             var validContent = GameJson.RequireValid(content, nameof(content));
@@ -259,20 +371,18 @@ public sealed class ModelGameRouteClassifier
                 : "model-classifier";
             if (string.Equals(route, "quick", StringComparison.OrdinalIgnoreCase))
             {
-                return GameRouteDecision.Quick(reason);
+                decision = GameRouteDecision.Quick(reason);
             }
-
-            if (string.Equals(route, "agent", StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(route, "agent", StringComparison.OrdinalIgnoreCase))
             {
-                return GameRouteDecision.Agent(reason);
+                decision = GameRouteDecision.Agent(reason);
             }
-
-            if (string.Equals(route, "workflow", StringComparison.OrdinalIgnoreCase)
+            else if (string.Equals(route, "workflow", StringComparison.OrdinalIgnoreCase)
                 && root.TryGetProperty("workflow", out var workflowElement)
                 && workflowElement.GetString() is { } workflow
                 && _workflows.Contains(workflow, StringComparer.Ordinal))
             {
-                return GameRouteDecision.ToWorkflow(workflow, reason);
+                decision = GameRouteDecision.ToWorkflow(workflow, reason);
             }
         }
         catch (JsonException)
@@ -288,6 +398,25 @@ public sealed class ModelGameRouteClassifier
         {
         }
 
-        return null;
+        context.RecordModelUsage(new GameRouteModelUsage(
+            result.Usage,
+            result.RunId,
+            CreateUsageDetails(decision is null ? "invalid" : "selected", assistant, durationMilliseconds),
+            TimeSpan.FromMilliseconds(durationMilliseconds)));
+        return decision;
     }
+
+    private static string CreateUsageDetails(
+        string outcome,
+        AgentMessage? assistant,
+        double durationMilliseconds) =>
+        JsonSerializer.Serialize(new
+        {
+            category = "route-classification",
+            outcome,
+            provider = assistant?.Provider,
+            model = assistant?.ResponseModel ?? assistant?.Model,
+            responseId = assistant?.ResponseId,
+            durationMilliseconds,
+        });
 }

@@ -91,12 +91,35 @@ public sealed class AgentLoopTests
                 AgentEventKind.TurnStarted,
                 AgentEventKind.MessageStarted,
                 AgentEventKind.MessageEnded,
+                AgentEventKind.ModelRequestStarted,
                 AgentEventKind.MessageStarted,
                 AgentEventKind.MessageEnded,
                 AgentEventKind.TurnEnded,
                 AgentEventKind.RunEnded,
             },
             events);
+    }
+
+    [Fact]
+    public async Task ModelRequestStartedExposesTheExactValidatedProviderRequest()
+    {
+        var provider = ScriptedProvider.FromResponses(Responses.Text("hello"));
+        var agent = new Agent(new AgentOptions(provider, "test"));
+        ModelRequest? observed = null;
+        agent.Subscribe((value, _) =>
+        {
+            if (value.Kind == AgentEventKind.ModelRequestStarted)
+            {
+                observed = value.ModelRequest;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var result = await agent.RunAsync("hi", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Same(Assert.Single(provider.Requests), observed);
     }
 
     [Fact]

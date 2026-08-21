@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenGameAgent.Kernel;
@@ -49,6 +50,7 @@ public sealed class RetryingModelProvider : IModelProvider, IModelRequestPreflig
         ModelRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        var retryDelayMilliseconds = 0d;
         for (var attempt = 1; attempt <= _maximumAttempts; attempt++)
         {
             var enumerator = _inner.StreamAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
@@ -130,7 +132,18 @@ public sealed class RetryingModelProvider : IModelProvider, IModelRequestPreflig
                     if (current.IsTerminal)
                     {
                         terminalSeen = true;
-                        yield return current;
+                        yield return attempt == 1
+                            ? current
+                            : ModelProviderRetrySafety.AppendDiagnostic(
+                                current,
+                                "oga.provider.retry",
+                                "The model request completed after a transient retry.",
+                                JsonSerializer.Serialize(new
+                                {
+                                    attempts = attempt,
+                                    retries = attempt - 1,
+                                    retryDelayMilliseconds,
+                                }));
                         yield break;
                     }
 
@@ -158,6 +171,7 @@ public sealed class RetryingModelProvider : IModelProvider, IModelRequestPreflig
             }
 
             wait = wait > _maximumDelay ? _maximumDelay : wait;
+            retryDelayMilliseconds += wait.TotalMilliseconds;
             await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -284,7 +298,17 @@ public sealed class FallbackModelProvider : IModelProvider, IModelRequestPreflig
                     if (current.IsTerminal)
                     {
                         terminalSeen = true;
-                        yield return current;
+                        yield return index == 0
+                            ? current
+                            : ModelProviderRetrySafety.AppendDiagnostic(
+                                current,
+                                "oga.provider.fallback",
+                                "The model request completed through a configured fallback provider.",
+                                JsonSerializer.Serialize(new
+                                {
+                                    providerIndex = index,
+                                    fallbacks = index,
+                                }));
                         yield break;
                     }
 
@@ -311,4 +335,30 @@ internal static class ModelProviderRetrySafety
     public static bool HasMeaningfulStart(ModelStreamEvent streamEvent) =>
         streamEvent.Partial is { } partial
         && (partial.Content.Count > 0 || partial.Usage.TotalTokens > 0);
+
+    public static ModelStreamEvent AppendDiagnostic(
+        ModelStreamEvent streamEvent,
+        string code,
+        string message,
+        string dataJson)
+    {
+        var response = streamEvent.Response
+            ?? throw new InvalidOperationException("A terminal model event requires a response.");
+        var diagnostics = response.Diagnostics
+            .Concat(new[] { new ModelDiagnostic(code, message, dataJson: dataJson) })
+            .ToArray();
+        return ModelStreamEvent.Terminal(new ModelResponse(
+            response.Content,
+            response.StopReason,
+            response.Usage,
+            response.ErrorMessage,
+            response.Provider,
+            response.Api,
+            response.ResponseModel,
+            response.ResponseId,
+            response.RawStopReason,
+            response.EndTurn,
+            diagnostics,
+            response.Deferred));
+    }
 }

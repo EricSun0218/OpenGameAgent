@@ -187,8 +187,24 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                 "input.received",
                 context,
                 _options.IncludeInputPayload
-                    ? (object)new { type = value.Input.Type, payload = Parse(value.Input.PayloadJson), metadataCount = value.Input.Metadata.Count }
-                    : new { type = value.Input.Type, payloadOmitted = true, metadataCount = value.Input.Metadata.Count },
+                    ? (object)new
+                    {
+                        type = value.Input.Type,
+                        payload = Parse(value.Input.PayloadJson),
+                        metadataCount = value.Input.Metadata.Count,
+                        queueMilliseconds = value.QueueDuration?.TotalMilliseconds,
+                        inputPreparationMilliseconds = value.InputPreparationDuration?.TotalMilliseconds,
+                        sessionLoadMilliseconds = value.SessionLoadDuration?.TotalMilliseconds,
+                    }
+                    : new
+                    {
+                        type = value.Input.Type,
+                        payloadOmitted = true,
+                        metadataCount = value.Input.Metadata.Count,
+                        queueMilliseconds = value.QueueDuration?.TotalMilliseconds,
+                        inputPreparationMilliseconds = value.InputPreparationDuration?.TotalMilliseconds,
+                        sessionLoadMilliseconds = value.SessionLoadDuration?.TotalMilliseconds,
+                    },
                 token));
         api.On(GameAgentExtensionEvents.SessionLoaded, (value, context, token) =>
             WriteAsync(
@@ -200,28 +216,56 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
             WriteAsync(
                 "context.collected",
                 context,
-                new { count = value.Context.Count, sources = value.Context.Select(slice => slice.Source).ToArray() },
+                new
+                {
+                    count = value.Context.Count,
+                    sources = value.Context.Select(slice => slice.Source).ToArray(),
+                    durationMilliseconds = value.Duration?.TotalMilliseconds,
+                },
                 token));
         api.On(GameAgentExtensionEvents.ToolsCollected, (value, context, token) =>
             WriteAsync(
                 "tools.collected",
                 context,
-                new { count = value.Tools.Count, names = value.Tools.Select(tool => tool.Definition.Name).ToArray() },
+                new
+                {
+                    count = value.Tools.Count,
+                    names = value.Tools.Select(tool => tool.Definition.Name).ToArray(),
+                    durationMilliseconds = value.Duration?.TotalMilliseconds,
+                },
                 token));
         api.On(GameAgentExtensionEvents.RouteSelected, (value, context, token) =>
             WriteAsync(
                 "route.selected",
                 context,
-                new { route = value.Decision.Route.ToString(), value.Decision.Reason, value.Decision.Workflow },
+                new
+                {
+                    route = value.Decision.Route.ToString(),
+                    value.Decision.Reason,
+                    value.Decision.Workflow,
+                    durationMilliseconds = value.Duration?.TotalMilliseconds,
+                    modelDurationMilliseconds = value.ModelDuration?.TotalMilliseconds,
+                },
                 token));
         api.On(GameAgentExtensionEvents.SkillsSelected, (value, context, token) =>
             WriteAsync(
                 "skills.selected",
                 context,
-                new { count = value.Skills.Count, ids = value.Skills.Select(skill => skill.SkillId).ToArray() },
+                new
+                {
+                    count = value.Skills.Count,
+                    ids = value.Skills.Select(skill => skill.SkillId).ToArray(),
+                    durationMilliseconds = value.Duration?.TotalMilliseconds,
+                },
                 token));
         api.On(GameAgentExtensionEvents.KernelEvent, (value, context, token) =>
-            WriteAsync("kernel." + value.Value.Kind.ToString().ToLowerInvariant(), context, KernelDetails(value.Value), token));
+            WriteAsync(
+                value.Value.Kind == AgentEventKind.ModelRequestStarted
+                    ? "model.request.started"
+                    : "kernel." + value.Value.Kind.ToString().ToLowerInvariant(),
+                context,
+                KernelDetails(value.Value),
+                token));
         api.On(GameAgentExtensionEvents.RunCompleted, (value, context, token) =>
             WriteAsync(
                 "run.completed",
@@ -234,7 +278,11 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                     succeeded = value.Result.Succeeded,
                     turns = value.Result.AgentResult?.Turns,
                     toolCalls = value.Result.AgentResult?.ToolCalls,
-                    usage = ProjectUsage(value.Result.AgentResult?.Usage),
+                    usage = ProjectUsageTotals(value.Result.RunUsage.Stats.Total),
+                    usageByCause = value.Result.RunUsage.TotalsByCause
+                        .OrderBy(pair => pair.Key)
+                        .Select(pair => new { cause = pair.Key.ToString(), usage = ProjectUsageTotals(pair.Value) })
+                        .ToArray(),
                     responses = value.Result.AgentResult?.NewMessages
                         .Where(message => message.Role == AgentRole.Assistant)
                         .Select(message => new
@@ -305,15 +353,144 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
         value.Turn,
         tool = value.ToolCall?.Name,
         toolCallId = value.ToolCall?.Id,
+        operation = ProjectFrameworkToolOperation(value.ToolCall),
         arguments = _options.IncludeToolArguments && value.ToolCall is not null
             ? Parse(value.ToolCall.ArgumentsJson)
             : (JsonElement?)null,
         status = value.Status?.ToString(),
         value.Error,
         contentParts = value.Message?.Content.Count,
+        requestedModel = value.Message?.Model,
+        provider = value.Message?.Provider,
+        responseModel = value.Message?.ResponseModel,
+        responseId = value.Message?.ResponseId,
+        streamEvent = value.ModelEvent?.Kind.ToString(),
+        modelRequest = value.ModelRequest is null
+            ? null
+            : new
+            {
+                value.ModelRequest.Model,
+                messages = value.ModelRequest.Messages.Count,
+                tools = value.ModelRequest.Tools.Count,
+            },
+        providerAttempts = ProjectProviderAttempts(value.Message?.Diagnostics),
         progressMessage = value.Progress?.Message,
         toolError = value.ToolResult?.IsError,
+        failureCategory = value.ToolResult?.FailureCategory.ToString(),
+        outcomeUncertain = value.ToolResult?.OutcomeUncertain,
+        action = ProjectActionResult(value.ToolResult?.DetailsJson),
+        usage = ProjectUsage(value.Message?.Usage ?? value.ToolResult?.Usage),
     };
+
+    private static string? ProjectFrameworkToolOperation(ToolCallContent? call)
+    {
+        if (call is null
+            || call.Name is not "manage_task_plan" and not "manage_goal")
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(call.ArgumentsJson, new JsonDocumentOptions { MaxDepth = 8 });
+            return document.RootElement.TryGetProperty("action", out var action)
+                   && action.ValueKind == JsonValueKind.String
+                ? action.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static object? ProjectProviderAttempts(IReadOnlyList<ModelDiagnostic>? diagnostics)
+    {
+        if (diagnostics is null)
+        {
+            return null;
+        }
+
+        var retry = diagnostics.LastOrDefault(value => string.Equals(value.Code, "oga.provider.retry", StringComparison.Ordinal));
+        var fallback = diagnostics.LastOrDefault(value => string.Equals(value.Code, "oga.provider.fallback", StringComparison.Ordinal));
+        if (retry is null && fallback is null)
+        {
+            return null;
+        }
+
+        return new
+        {
+            retry = ParseBoundedDiagnostic(retry?.DataJson),
+            fallback = ParseBoundedDiagnostic(fallback?.DataJson),
+        };
+    }
+
+    private static JsonElement? ParseBoundedDiagnostic(string? json)
+    {
+        if (json is null || json.Length > 4_096)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 8 });
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static object? ProjectActionResult(string? detailsJson)
+    {
+        if (detailsJson is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(detailsJson, new JsonDocumentOptions { MaxDepth = 32 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("operationId", out var operationId)
+                || operationId.ValueKind != JsonValueKind.String
+                || !root.TryGetProperty("status", out var status)
+                || status.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return new
+            {
+                operationId = operationId.GetString(),
+                status = status.GetString(),
+                dispatch = root.TryGetProperty("dispatch", out var dispatch) && dispatch.ValueKind == JsonValueKind.String
+                    ? dispatch.GetString()
+                    : null,
+                duplicateExecutionPrevented = root.TryGetProperty("duplicateExecutionPrevented", out var duplicate)
+                    && duplicate.ValueKind == JsonValueKind.True,
+                recovered = root.TryGetProperty("recovered", out var recovered)
+                    && recovered.ValueKind == JsonValueKind.True,
+                totalMilliseconds = ReadOptionalDouble(root, "totalMilliseconds"),
+                hostMilliseconds = ReadOptionalDouble(root, "hostMilliseconds"),
+                frameworkMilliseconds = ReadOptionalDouble(root, "frameworkMilliseconds"),
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static double? ReadOptionalDouble(JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var property)
+        && property.ValueKind == JsonValueKind.Number
+        && property.TryGetDouble(out var value)
+            ? value
+            : null;
 
     private static object? ProjectUsage(ModelUsage? usage) => usage is null
         ? null
@@ -336,6 +513,26 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                 total = usage.Cost.TotalIfKnown,
             },
         };
+
+    private static object ProjectUsageTotals(GameSessionUsageTotals usage) => new
+    {
+        usage.InputTokens,
+        usage.OutputTokens,
+        usage.CacheReadTokens,
+        usage.CacheWriteTokens,
+        usage.ReasoningTokens,
+        usage.CacheWriteOneHourTokens,
+        usage.TotalTokens,
+        cost = new
+        {
+            known = usage.CostKnown,
+            input = usage.CostKnown ? usage.InputCost : (double?)null,
+            output = usage.CostKnown ? usage.OutputCost : (double?)null,
+            cacheRead = usage.CostKnown ? usage.CacheReadCost : (double?)null,
+            cacheWrite = usage.CostKnown ? usage.CacheWriteCost : (double?)null,
+            total = usage.CostTotalIfKnown,
+        },
+    };
 
     private static object ProjectUsage(GameSessionUsageTotals usage) => new
     {

@@ -769,7 +769,9 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 var depth = checked(parentDepth + 1);
                 if (depth > _maximumDepth)
                 {
-                    return ToolResult.Error($"Delegation depth {depth} exceeds the configured maximum {_maximumDepth}.");
+                    return ToolResult.Error(
+                        $"Delegation depth {depth} exceeds the configured maximum {_maximumDepth}.",
+                        ToolFailureCategory.RuleRejected);
                 }
 
                 var id = arguments.TryGetProperty("delegationId", out var configuredId)
@@ -798,7 +800,8 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                         || existing.Depth != depth)
                     {
                         return ToolResult.Error(
-                            $"Delegation ID '{id}' is already reserved for a different task.");
+                            $"Delegation ID '{id}' is already reserved for a different task.",
+                            ToolFailureCategory.Conflict);
                     }
 
                     return JsonResult(existing);
@@ -821,7 +824,8 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                         || saved.Current.CreatedAt != pending.CreatedAt)
                     {
                         return ToolResult.Error(
-                            $"Delegation ID '{id}' is already reserved for a different task.");
+                            $"Delegation ID '{id}' is already reserved for a different task.",
+                            ToolFailureCategory.Conflict);
                     }
 
                     return JsonResult(saved.Current);
@@ -865,7 +869,7 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                     cancellationToken).ConfigureAwait(false);
                 if (record is null)
                 {
-                    return ToolResult.Error($"Delegation '{id}' does not exist.");
+                    return ToolResult.Error($"Delegation '{id}' does not exist.", ToolFailureCategory.InvalidArguments);
                 }
 
                 return JsonResult(record);
@@ -887,12 +891,14 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                     cancellationToken).ConfigureAwait(false);
                 if (record is null)
                 {
-                    return ToolResult.Error($"Delegation '{id}' does not exist.");
+                    return ToolResult.Error($"Delegation '{id}' does not exist.", ToolFailureCategory.InvalidArguments);
                 }
 
                 if (!_active.TryGetValue(key, out var handle))
                 {
-                    return ToolResult.Error($"Delegation '{id}' is not currently running.");
+                    return ToolResult.Error(
+                        $"Delegation '{id}' is not currently running.",
+                        ToolFailureCategory.Conflict);
                 }
 
                 var accepted = handle.TrySteer(AgentMessage.UserJson(arguments.GetProperty("message").GetRawText()));
@@ -916,7 +922,7 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                     cancellationToken).ConfigureAwait(false);
                 if (record is null)
                 {
-                    return ToolResult.Error($"Delegation '{id}' does not exist.");
+                    return ToolResult.Error($"Delegation '{id}' does not exist.", ToolFailureCategory.InvalidArguments);
                 }
 
                 var accepted = _active.TryGetValue(key, out var handle) && handle.TryCancel();

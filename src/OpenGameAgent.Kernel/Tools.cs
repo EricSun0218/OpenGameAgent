@@ -34,6 +34,25 @@ public enum ToolSchemaStrictness
     Require,
 }
 
+/// <summary>
+/// Stable, provider-neutral failure taxonomy for tool telemetry and retry policy. Game tools should
+/// classify expected failures explicitly; <see cref="Unspecified"/> remains available for legacy
+/// or opaque tool implementations.
+/// </summary>
+public enum ToolFailureCategory
+{
+    None,
+    Unspecified,
+    InvalidArguments,
+    Authorization,
+    RuleRejected,
+    Transient,
+    Timeout,
+    Cancelled,
+    Conflict,
+    Internal,
+}
+
 public sealed class ToolConstrainedSampling
 {
     private ToolConstrainedSampling(
@@ -161,7 +180,8 @@ public sealed class ToolResult
         bool terminate = false,
         ModelUsage? usage = null,
         bool outcomeUncertain = false,
-        IEnumerable<string>? addedToolNames = null)
+        IEnumerable<string>? addedToolNames = null,
+        ToolFailureCategory failureCategory = ToolFailureCategory.None)
     {
         var copied = content?.ToArray() ?? throw new ArgumentNullException(nameof(content));
         if (copied.Any(part => part is null))
@@ -182,6 +202,19 @@ public sealed class ToolResult
         Terminate = terminate;
         Usage = usage;
         OutcomeUncertain = outcomeUncertain;
+        if (!Enum.IsDefined(typeof(ToolFailureCategory), failureCategory))
+        {
+            throw new ArgumentOutOfRangeException(nameof(failureCategory));
+        }
+
+        if (!isError && failureCategory != ToolFailureCategory.None)
+        {
+            throw new ArgumentException("Only an error tool result can carry a failure category.", nameof(failureCategory));
+        }
+
+        FailureCategory = isError && failureCategory == ToolFailureCategory.None
+            ? ToolFailureCategory.Unspecified
+            : failureCategory;
         var copiedAddedTools = addedToolNames?.ToArray() ?? Array.Empty<string>();
         if (copiedAddedTools.Any(string.IsNullOrWhiteSpace)
             || copiedAddedTools.Distinct(StringComparer.Ordinal).Count() != copiedAddedTools.Length)
@@ -204,10 +237,17 @@ public sealed class ToolResult
 
     public bool OutcomeUncertain { get; }
 
+    public ToolFailureCategory FailureCategory { get; }
+
     public IReadOnlyList<string> AddedToolNames { get; }
 
-    public static ToolResult Error(string message) =>
-        new(new AgentContent[] { new TextContent(message ?? string.Empty) }, isError: true);
+    public static ToolResult Error(
+        string message,
+        ToolFailureCategory failureCategory = ToolFailureCategory.Unspecified) =>
+        new(
+            new AgentContent[] { new TextContent(message ?? string.Empty) },
+            isError: true,
+            failureCategory: failureCategory);
 }
 
 public sealed class ToolExecutionContext

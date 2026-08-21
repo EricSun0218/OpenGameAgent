@@ -346,14 +346,18 @@ public sealed class ToolCatalogExtension : IGameAgentExtension
                     : ReadActiveNames(context.State).Concat(requested).Distinct(StringComparer.Ordinal).ToList();
                 if (names.Count > _maximumActiveTools)
                 {
-                    return ToolResult.Error($"At most {_maximumActiveTools} catalog tools may be active.");
+                    return ToolResult.Error(
+                        $"At most {_maximumActiveTools} catalog tools may be active.",
+                        ToolFailureCategory.RuleRejected);
                 }
 
                 foreach (var name in names)
                 {
                     if (await _catalog.FindAsync(name, context, cancellationToken).ConfigureAwait(false) is null)
                     {
-                        return ToolResult.Error($"Catalog tool '{name}' does not exist.");
+                        return ToolResult.Error(
+                            $"Catalog tool '{name}' does not exist.",
+                            ToolFailureCategory.InvalidArguments);
                     }
                 }
 

@@ -431,13 +431,15 @@ public sealed class GameAgentArtifactExtension : IGameAgentExtension
                     cancellationToken).ConfigureAwait(false);
                 if (artifact is null)
                 {
-                    return ToolResult.Error($"Artifact '{id}' does not exist.");
+                    return ToolResult.Error($"Artifact '{id}' does not exist.", ToolFailureCategory.InvalidArguments);
                 }
 
                 var offset = arguments.TryGetProperty("offset", out var offsetElement) ? offsetElement.GetInt32() : 0;
                 if (offset > artifact.Content.Length)
                 {
-                    return ToolResult.Error("The artifact offset is beyond the end of the content.");
+                    return ToolResult.Error(
+                        "The artifact offset is beyond the end of the content.",
+                        ToolFailureCategory.InvalidArguments);
                 }
 
                 var maximum = arguments.TryGetProperty("maximumCharacters", out var maximumElement)

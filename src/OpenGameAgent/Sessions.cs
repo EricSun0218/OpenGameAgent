@@ -61,6 +61,8 @@ public enum GameSessionUsageCause
     DeferredFetch = 4,
     Hook = 5,
     Adjustment = 6,
+    Routing = 7,
+    Workflow = 8,
 }
 
 public sealed class GameSessionUsageRecord

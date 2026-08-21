@@ -125,7 +125,7 @@ The route is selected before skills and the kernel run:
 - `Agent`: bounded multi-turn model/tool loop;
 - `Workflow`: a named deterministic or hybrid workflow.
 
-Explicit input metadata has highest precedence. Then typed routes, an optional classifier, and a conservative structural fallback are applied. If tools or pending work exist, the fallback chooses the full agent route. Games can replace `IGameRoutePolicy` entirely.
+Explicit input metadata has highest precedence. Then typed routes and authoritative pending work are applied. Pending work selects the full agent route without spending a classifier request. When an optional classifier is configured, it may still choose Quick for an ordinary input even though tools exist; otherwise the presence of tools conservatively selects Agent. Routing-model usage shares the input's model-token budget and is persisted as a separate cause. Games can replace `IGameRoutePolicy` entirely. See [Execution routing and performance](execution-routing-and-performance.md).
 
 ## Placement
 

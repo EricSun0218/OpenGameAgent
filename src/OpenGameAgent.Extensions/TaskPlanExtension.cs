@@ -284,16 +284,41 @@ public sealed class TaskPlanExtension : IGameAgentExtension
 
     public void Configure(GameAgentExtensionApi api)
     {
-        api.RegisterPromptFragment(
+        api.RegisterContextProvider(
             "task-plan-guidance",
-            "Use manage_task_plan for multi-step work that must survive later inputs. An active or paused plan retains exactly one in-progress step. Paused plans do not drive pending work and must be resumed before advancing. Advance only with evidence the host can verify, never by assertion. Use replace_remaining when new world state invalidates unfinished work; completed steps remain immutable.");
+            (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
+                IsDirect(context.Input)
+                    ? Array.Empty<GameContextSlice>()
+                    : new[]
+                    {
+                        new GameContextSlice(
+                            "task-plan-guidance",
+                            JsonSerializer.Serialize(
+                                "Use manage_task_plan for multi-step work that must survive later inputs. An active or paused plan retains exactly one in-progress step. Paused plans do not drive pending work and must be resumed before advancing. Advance only with evidence the host can verify, never by assertion. Use replace_remaining when new world state invalidates unfinished work; completed steps remain immutable.")),
+                    }));
+        api.RegisterContextProvider(
+            "explicit-plan-guidance",
+            (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
+                context.Input.Metadata.TryGetValue("agent.route", out var route)
+                && string.Equals(route, "plan", StringComparison.OrdinalIgnoreCase)
+                    ? new[]
+                    {
+                        new GameContextSlice(
+                            "execution-mode",
+                            JsonSerializer.Serialize(
+                                "The host explicitly requested persistent-plan execution. Create or resume a task plan before treating this input as durable multi-input work. Preserve completed steps and require host-verifiable evidence for progress.")),
+                    }
+                    : Array.Empty<GameContextSlice>()));
         api.RegisterToolProvider(
             "task-plan-tools",
-            (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
-            {
-                CreateManageTool(api, context),
-                CreateListTool(context),
-            }));
+            (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(
+                IsDirect(context.Input)
+                    ? Array.Empty<AgentTool>()
+                    : new[]
+                    {
+                        CreateManageTool(api, context),
+                        CreateListTool(context),
+                    }));
         api.RegisterPendingWorkProvider(
             "active-task-plans",
             (context, _) =>
@@ -303,6 +328,10 @@ public sealed class TaskPlanExtension : IGameAgentExtension
             },
             priority: 450);
     }
+
+    private static bool IsDirect(GameInput input) =>
+        input.Metadata.TryGetValue("agent.route", out var route)
+        && string.Equals(route, "direct", StringComparison.OrdinalIgnoreCase);
 
     private AgentTool CreateManageTool(GameAgentExtensionApi api, GameAgentExtensionRunContext context) =>
         new(
@@ -320,7 +349,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                 {
                     if (Read(context.State, planId) is not null)
                     {
-                        return ToolResult.Error($"Task plan '{planId}' already exists.");
+                        return ToolResult.Error($"Task plan '{planId}' already exists.", ToolFailureCategory.Conflict);
                     }
 
                     PruneTerminalPlans(context.State);
@@ -328,20 +357,24 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                     if (activeCount >= _options.MaximumActivePlans)
                     {
                         return ToolResult.Error(
-                            $"At most {_options.MaximumActivePlans} active or paused task plans may exist in one actor session.");
+                            $"At most {_options.MaximumActivePlans} active or paused task plans may exist in one actor session.",
+                            ToolFailureCategory.RuleRejected);
                     }
 
                     if (!arguments.TryGetProperty("objective", out var objectiveElement)
                         || !arguments.TryGetProperty("steps", out var stepsElement))
                     {
-                        return ToolResult.Error("Creating a task plan requires an objective and ordered steps.");
+                        return ToolResult.Error(
+                            "Creating a task plan requires an objective and ordered steps.",
+                            ToolFailureCategory.InvalidArguments);
                     }
 
                     var steps = ReadSteps(stepsElement);
                     if (steps.Count > _options.MaximumStepsPerPlan)
                     {
                         return ToolResult.Error(
-                            $"A task plan can contain at most {_options.MaximumStepsPerPlan} steps.");
+                            $"A task plan can contain at most {_options.MaximumStepsPerPlan} steps.",
+                            ToolFailureCategory.InvalidArguments);
                     }
 
                     document = new TaskPlanDocument
@@ -367,27 +400,29 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                     var existing = Read(context.State, planId);
                     if (existing is null)
                     {
-                        return ToolResult.Error($"Task plan '{planId}' does not exist.");
+                        return ToolResult.Error($"Task plan '{planId}' does not exist.", ToolFailureCategory.InvalidArguments);
                     }
 
                     document = existing;
                     if (IsTerminal(document.Status))
                     {
-                        return ToolResult.Error($"Task plan '{planId}' is terminal and immutable.");
+                        return ToolResult.Error($"Task plan '{planId}' is terminal and immutable.", ToolFailureCategory.Conflict);
                     }
 
                     if (!arguments.TryGetProperty("expectedRevision", out var revisionElement)
                         || revisionElement.GetInt64() != document.Revision)
                     {
                         return ToolResult.Error(
-                            $"Task plan '{planId}' revision conflict. Current revision is {document.Revision}.");
+                            $"Task plan '{planId}' revision conflict. Current revision is {document.Revision}.",
+                            ToolFailureCategory.Conflict);
                     }
 
                     if (document.Status == GameTaskPlanStatus.Paused
                         && action is not "pause" and not "resume")
                     {
                         return ToolResult.Error(
-                            $"Task plan '{planId}' is paused and must be resumed before it can change.");
+                            $"Task plan '{planId}' is paused and must be resumed before it can change.",
+                            ToolFailureCategory.Conflict);
                     }
 
                     var changed = true;
@@ -396,12 +431,16 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                         case "advance":
                             if (string.Equals(document.LastAdvancedInputId, context.Input.InputId, StringComparison.Ordinal))
                             {
-                                return ToolResult.Error("A task plan may advance at most once per agent input.");
+                                return ToolResult.Error(
+                                    "A task plan may advance at most once per agent input.",
+                                    ToolFailureCategory.Conflict);
                             }
 
                             if (!arguments.TryGetProperty("evidence", out var evidenceElement))
                             {
-                                return ToolResult.Error("Advancing a task plan requires host-verifiable evidence.");
+                                return ToolResult.Error(
+                                    "Advancing a task plan requires host-verifiable evidence.",
+                                    ToolFailureCategory.InvalidArguments);
                             }
 
                             var current = document.Steps.Single(step => step.Status == GameTaskPlanStepStatus.InProgress);
@@ -412,7 +451,9 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                                 evidenceElement,
                                 cancellationToken).ConfigureAwait(false))
                             {
-                                return ToolResult.Error("The host rejected the evidence for advancing this task plan.");
+                                return ToolResult.Error(
+                                    "The host rejected the evidence for advancing this task plan.",
+                                    ToolFailureCategory.RuleRejected);
                             }
 
                             current.Status = GameTaskPlanStepStatus.Completed;
@@ -432,7 +473,9 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                         case "replace_remaining":
                             if (!arguments.TryGetProperty("steps", out var replacementElement))
                             {
-                                return ToolResult.Error("Replacing unfinished work requires ordered replacement steps.");
+                                return ToolResult.Error(
+                                    "Replacing unfinished work requires ordered replacement steps.",
+                                    ToolFailureCategory.InvalidArguments);
                             }
 
                             var replacements = ReadSteps(replacementElement);
@@ -443,7 +486,8 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                             if (checked(completed.Count + replacements.Count) > _options.MaximumStepsPerPlan)
                             {
                                 return ToolResult.Error(
-                                    $"A task plan can contain at most {_options.MaximumStepsPerPlan} steps.");
+                                    $"A task plan can contain at most {_options.MaximumStepsPerPlan} steps.",
+                                    ToolFailureCategory.InvalidArguments);
                             }
 
                             var nextRevision = checked(document.Revision + 1);
@@ -492,7 +536,9 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                             ClearInProgress(document);
                             break;
                         default:
-                            return ToolResult.Error($"Unsupported task-plan action '{action}'.");
+                            return ToolResult.Error(
+                                $"Unsupported task-plan action '{action}'.",
+                                ToolFailureCategory.InvalidArguments);
                     }
 
                     if (!changed)

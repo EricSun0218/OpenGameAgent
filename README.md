@@ -83,7 +83,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - named timelines and integer ticks, with optional calendar JSON;
 - structured observations and context slices with floating-point values intact;
 - content-addressed screenshot/image input with decode validation, model-capability preflight, and session-authorized retrieval;
-- quick-response, full-agent, and deterministic-workflow routes;
+- preflight `auto`, side-effect-free `quick`, short-task `direct`/`agent`, persistent `plan`, and deterministic-workflow routes;
 - per-actor serialization with bounded cross-actor concurrency;
 - journaled action intents and authoritative game receipts;
 - game-time memory filtering, expiry, and optional custom ranking;
@@ -97,7 +97,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
 - image, audio, and video generation through replaceable APIs;
 - crash-aware generated-asset materialization and authoritative engine import;
-- append-only traces, observation-only playback, and offline CI evaluation;
+- append-only traces, provider/framework/host timing attribution, benchmark reports, observation-only playback, and offline CI evaluation;
 - realtime speech with barge-in, background-agent handoff, and replaceable presentation behaviors.
 
 The runtime does **not** decide combat legality, inventory rules, economy changes, NPC permissions, or other business rules. The game exposes narrow tools, validates every requested mutation, performs it on the correct thread or server, and returns the authoritative receipt.
@@ -133,12 +133,12 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | --- | --- |
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
 | Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, timeouts, uncertain write outcomes |
-| Game runtime | Arbitrary JSON input, game clocks/timelines, fast/full/workflow routing, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
+| Game runtime | Arbitrary JSON input, game clocks/timelines, auto/quick/direct/plan/workflow routing, shared per-input usage budget, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, subtitle timing, barge-in cancellation/truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; per-input tool visibility; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
-| DevTools | Bounded JSONL recordings, local observation-only HTML playback, summaries, and offline/CI evaluation rules |
+| DevTools | Bounded JSONL recordings, provider/framework/host latency attribution, failure and durable-write metrics, concurrent benchmark harness, local observation-only HTML playback, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
@@ -252,6 +252,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Generated media](docs/media.md)
 - [Generated assets and authoritative import](docs/generated-assets.md)
 - [Image input and game perception](docs/image-input.md)
+- [Execution routing and performance](docs/execution-routing-and-performance.md)
 - [Traces, playback, and offline evaluation](docs/devtools.md)
 
 ## Project boundary

@@ -153,7 +153,9 @@ public sealed class GameMemoryExtension : IGameAgentExtension
                     && requestedOwner is not null
                     && !string.Equals(requestedOwner, context.Input.ActorId, StringComparison.Ordinal))
                 {
-                    return ToolResult.Error("Cross-actor memory search is disabled.");
+                    return ToolResult.Error(
+                        "Cross-actor memory search is disabled.",
+                        ToolFailureCategory.Authorization);
                 }
 
                 var moment = new GameMoment(
@@ -163,7 +165,9 @@ public sealed class GameMemoryExtension : IGameAgentExtension
                         : context.Input.Moment.Tick);
                 if (moment.Tick > context.Input.Moment.Tick)
                 {
-                    return ToolResult.Error("Memory search cannot read from the future of the current game timeline.");
+                    return ToolResult.Error(
+                        "Memory search cannot read from the future of the current game timeline.",
+                        ToolFailureCategory.RuleRejected);
                 }
 
                 var query = new GameMemoryQuery(

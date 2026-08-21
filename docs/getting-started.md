@@ -207,11 +207,12 @@ The default route is intentionally simple:
 
 - explicit `agent.route` metadata wins;
 - a configured input-type route wins next;
-- an optional model classifier may choose;
-- available tools or pending work choose `Agent`;
+- pending work chooses `Agent` without a classifier call;
+- an optional model classifier can still select `QuickResponse` for ordinary input when tools are available;
+- without a classifier, available tools conservatively choose `Agent`;
 - otherwise choose `QuickResponse`.
 
-Quick response still calls the model but stops after one turn and exposes no tools. Use type routes for predictable latency:
+Supported explicit values are `auto`, `quick`, `agent`, `direct`, `plan`, and `workflow:<name>`. `direct` selects the short-task Agent loop while hiding official persistent-plan tools; `plan` keeps that loop and adds persistent-plan guidance. Quick response still calls the answer model but stops after one turn and exposes no tools. Use type routes for predictable latency:
 
 ```csharp
 options.RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
@@ -220,6 +221,8 @@ options.RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRo
     ["monthly_simulation"] = GameRouteDecision.ToWorkflow("monthly", "fixed-simulation")
 });
 ```
+
+If you configure `ModelGameRouteClassifier`, its provider call is recorded under `GameSessionUsageCause.Routing` and shares the same per-input model-token budget as the selected route. The runtime never runs a speculative Quick answer and then replays it as Agent work. See [Execution routing and performance](execution-routing-and-performance.md).
 
 ## Add memory and skills
 
