@@ -10,7 +10,7 @@ Install the immutable GitHub UPM release from **Window > Package Manager > + > A
 https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
 ```
 
-Or install from OpenUPM after the package is listed:
+Or install the same release from OpenUPM:
 
 ```bash
 openupm add com.opengameagent.runtime@0.3.0-alpha.3
