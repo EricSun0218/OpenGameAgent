@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">OpenGameAgent</title>
+  <desc id="desc">Provider-neutral agent runtime for AI-native games.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111A2A"/>
+      <stop offset="1" stop-color="#090D16"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="80%" cy="20%" r="75%">
+      <stop offset="0" stop-color="#DE593C" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#DE593C" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#glow)"/>
+  <g transform="translate(120 172) scale(4.8)" fill="none" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M45.5 8H20L8 20v24l12 12h24l12-12V32H39.5" stroke="#EEE9DC" stroke-width="7"/>
+    <path d="M56 32H45" stroke="#DE593C" stroke-width="7"/>
+    <path d="M23.5 44 32 20l8.5 24M27 35h10" stroke="#EEE9DC" stroke-width="5"/>
+  </g>
+  <text x="500" y="360" fill="#EEE9DC" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="104" font-weight="750">OpenGameAgent</text>
+  <text x="505" y="448" fill="#B8C1D1" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="38">Agent runtime for AI-native games</text>
+  <g transform="translate(505 520)" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="27" font-weight="650">
+    <rect width="225" height="62" rx="31" fill="#1D293C"/><text x="34" y="40" fill="#EEE9DC">Structured context</text>
+    <rect x="245" width="180" height="62" rx="31" fill="#1D293C"/><text x="280" y="40" fill="#EEE9DC">Typed tools</text>
+    <rect x="445" width="180" height="62" rx="31" fill="#1D293C"/><text x="483" y="40" fill="#EEE9DC">Streaming</text>
+    <rect x="645" width="250" height="62" rx="31" fill="#DE593C"/><text x="686" y="40" fill="#FFFFFF">Multi-NPC runtime</text>
+  </g>
+  <text x="505" y="666" fill="#718097" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="26">Unity 6  •  Godot 4.7 .NET  •  In-process or server-hosted</text>
+  <text x="128" y="806" fill="#718097" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="23">MIT licensed · opengameagent.com</text>
+</svg>

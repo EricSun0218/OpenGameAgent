@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">OpenGameAgent engine modes</title>
+  <desc id="desc">OpenGameAgent supports in-process and server-hosted game agent runtimes in Unity and Godot.</desc>
+  <rect width="1600" height="900" fill="#0C111C"/>
+  <text x="100" y="130" fill="#EEE9DC" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="64" font-weight="750">One runtime. Two deployment modes.</text>
+  <text x="100" y="190" fill="#8997AC" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="28">Start in the engine. Move authority or credentials to a service when the game needs it.</text>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <g transform="translate(100 285)"><rect width="650" height="420" rx="34" fill="#182235" stroke="#2D405F" stroke-width="3"/><text x="45" y="75" fill="#DE593C" font-size="22" font-weight="700">IN-PROCESS</text><text x="45" y="135" fill="#EEE9DC" font-size="45" font-weight="750">Runtime inside the game</text><text x="45" y="205" fill="#B8C1D1" font-size="27">Fast integration · direct host tools</text><text x="45" y="252" fill="#B8C1D1" font-size="27">Local models or player-provided keys</text><g transform="translate(45 315)"><rect width="180" height="62" rx="31" fill="#25334A"/><text x="89" y="40" fill="#EEE9DC" font-size="27">Unity</text><rect x="200" width="240" height="62" rx="31" fill="#25334A"/><text x="245" y="40" fill="#EEE9DC" font-size="27">Godot .NET</text></g></g>
+    <g transform="translate(850 285)"><rect width="650" height="420" rx="34" fill="#182235" stroke="#DE593C" stroke-width="3"/><text x="45" y="75" fill="#DE593C" font-size="22" font-weight="700">SERVER-HOSTED</text><text x="45" y="135" fill="#EEE9DC" font-size="45" font-weight="750">Runtime behind an API</text><text x="45" y="205" fill="#B8C1D1" font-size="27">Protected credentials · owner auth</text><text x="45" y="252" fill="#B8C1D1" font-size="27">Durable action exchange · scale out</text><g transform="translate(45 315)"><rect width="250" height="62" rx="31" fill="#DE593C"/><text x="85" y="40" fill="#FFFFFF" font-size="27">Same protocol</text><rect x="315" width="225" height="62" rx="31" fill="#25334A"/><text x="367" y="40" fill="#EEE9DC" font-size="27">Sidecar</text></g></g>
+  </g>
+  <text x="100" y="804" fill="#718097" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24">Provider-neutral · typed streaming · actor-scoped lifecycle · no second agent loop</text>
+</svg>

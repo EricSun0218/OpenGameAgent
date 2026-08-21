@@ -43,9 +43,12 @@ if (Test-Path -LiteralPath $packageRoot) {
 
 New-Item -ItemType Directory -Path (Join-Path $packagedAddon 'runtime'), (Join-Path $packagedAddon 'lib') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE') -Destination (Join-Path $packageRoot 'LICENSE')
+Copy-Item -LiteralPath (Join-Path $addonRoot 'LICENSE') -Destination (Join-Path $packagedAddon 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $addonRoot 'runtime\OpenGameAgentNode.cs') -Destination (Join-Path $packagedAddon 'runtime\OpenGameAgentNode.cs')
 Copy-Item -LiteralPath (Join-Path $addonRoot 'OpenGameAgent.Godot.props') -Destination (Join-Path $packagedAddon 'OpenGameAgent.Godot.props')
 Copy-Item -LiteralPath (Join-Path $addonRoot 'README.md') -Destination (Join-Path $packagedAddon 'README.md')
+Copy-Item -LiteralPath (Join-Path $addonRoot 'plugin.gd') -Destination (Join-Path $packagedAddon 'plugin.gd')
+Copy-Item -LiteralPath (Join-Path $addonRoot 'examples') -Destination (Join-Path $packagedAddon 'examples') -Recurse
 $plugin = Get-Content -LiteralPath (Join-Path $addonRoot 'plugin.cfg') -Raw
 $plugin = $plugin -replace 'version="[^"]+"', ('version="' + $Version + '"')
 $plugin | Set-Content -LiteralPath (Join-Path $packagedAddon 'plugin.cfg') -Encoding utf8NoBOM

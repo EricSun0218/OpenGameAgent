@@ -15,9 +15,12 @@ $packageRoot = [string]$buildOutput[-1]
 
 $required = @(
     'LICENSE',
+    'addons\open_game_agent\LICENSE',
     'addons\open_game_agent\plugin.cfg',
+    'addons\open_game_agent\plugin.gd',
     'addons\open_game_agent\OpenGameAgent.Godot.props',
     'addons\open_game_agent\runtime\OpenGameAgentNode.cs',
+    'addons\open_game_agent\examples\minimal_local_agent\MinimalLocalAgent.cs',
     'addons\open_game_agent\lib\OpenGameAgent.Attachments.dll',
     'addons\open_game_agent\lib\OpenGameAgent.Kernel.dll',
     'addons\open_game_agent\lib\OpenGameAgent.dll',
@@ -33,6 +36,10 @@ $sourceLicenseHash = (Get-FileHash -LiteralPath (Join-Path $engineRoot 'LICENSE'
 $packagedLicenseHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'LICENSE') -Algorithm SHA256).Hash
 if ($packagedLicenseHash -ne $sourceLicenseHash) {
     throw 'Godot package must contain the complete repository license.'
+}
+$addonLicenseHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'addons\open_game_agent\LICENSE') -Algorithm SHA256).Hash
+if ($addonLicenseHash -ne $sourceLicenseHash) {
+    throw 'Godot add-on directory must contain the complete repository license.'
 }
 
 $packageRoot
