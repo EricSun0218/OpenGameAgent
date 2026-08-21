@@ -64,6 +64,9 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
         with:
           global-json-file: global.json
+      - name: Verify store listings and media
+        shell: pwsh
+        run: ./tools/Test-StoreListings.ps1
       - name: Build Unity compile stubs
         shell: pwsh
         run: dotnet build tests/OpenGameAgent.Unity.Stubs/OpenGameAgent.Unity.Stubs.csproj -c Release -o artifacts/unity-stubs

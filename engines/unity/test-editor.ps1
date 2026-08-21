@@ -32,14 +32,18 @@ if ($creation.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $testRo
 }
 
 $assetsEditor = Join-Path $testRoot 'Assets\Editor'
+$assetsSample = Join-Path $testRoot 'Assets\OpenGameAgentSample'
 $packages = Join-Path $testRoot 'Packages'
-New-Item -ItemType Directory -Path $assetsEditor -Force | Out-Null
+New-Item -ItemType Directory -Path $assetsEditor, $assetsSample -Force | Out-Null
 try {
     $packageUri = 'file:' + ([IO.Path]::GetFullPath($packagePath).Replace('\', '/'))
     $manifestPath = Join-Path $packages 'manifest.json'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $manifest.dependencies | Add-Member -NotePropertyName 'com.opengameagent.runtime' -NotePropertyValue $packageUri -Force
     $manifest | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+    Copy-Item `
+        -LiteralPath (Join-Path $packagePath 'Samples~\Minimal Local Agent\OpenGameAgentQuickstart.cs') `
+        -Destination (Join-Path $assetsSample 'OpenGameAgentQuickstart.cs')
     @'
 using System;
 using System.Collections.Generic;

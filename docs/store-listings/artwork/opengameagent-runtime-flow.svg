@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">OpenGameAgent runtime flow</title>
+  <desc id="desc">Structured world state flows through the agent loop into typed intents that the authoritative game validates.</desc>
+  <rect width="1600" height="900" fill="#0C111C"/>
+  <text x="100" y="130" fill="#EEE9DC" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="64" font-weight="750">From world state to safe game action</text>
+  <text x="100" y="190" fill="#8997AC" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="28">The model proposes. Your game remains authoritative.</text>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <g transform="translate(90 305)"><rect width="315" height="270" rx="30" fill="#182235" stroke="#2D405F" stroke-width="3"/><text x="36" y="62" fill="#DE593C" font-size="22" font-weight="700">01 · OBSERVE</text><text x="36" y="120" fill="#EEE9DC" font-size="38" font-weight="700">Structured context</text><text x="36" y="170" fill="#AEB9C9" font-size="24">JSON state · game time</text><text x="36" y="207" fill="#AEB9C9" font-size="24">images · events · memory</text></g>
+    <path d="M425 440h95" stroke="#DE593C" stroke-width="6"/><path d="m510 424 20 16-20 16" fill="none" stroke="#DE593C" stroke-width="6"/>
+    <g transform="translate(540 305)"><rect width="315" height="270" rx="30" fill="#182235" stroke="#DE593C" stroke-width="3"/><text x="36" y="62" fill="#DE593C" font-size="22" font-weight="700">02 · THINK</text><text x="36" y="120" fill="#EEE9DC" font-size="38" font-weight="700">Agent loop</text><text x="36" y="170" fill="#AEB9C9" font-size="24">route · plan · stream</text><text x="36" y="207" fill="#AEB9C9" font-size="24">steer · tools · retry</text></g>
+    <path d="M875 440h95" stroke="#DE593C" stroke-width="6"/><path d="m960 424 20 16-20 16" fill="none" stroke="#DE593C" stroke-width="6"/>
+    <g transform="translate(990 305)"><rect width="315" height="270" rx="30" fill="#182235" stroke="#2D405F" stroke-width="3"/><text x="36" y="62" fill="#DE593C" font-size="22" font-weight="700">03 · PROPOSE</text><text x="36" y="120" fill="#EEE9DC" font-size="38" font-weight="700">Typed intent</text><text x="36" y="170" fill="#AEB9C9" font-size="24">bounded schema · operation ID</text><text x="36" y="207" fill="#AEB9C9" font-size="24">expected world revision</text></g>
+    <path d="M1325 440h95" stroke="#DE593C" stroke-width="6"/><path d="m1410 424 20 16-20 16" fill="none" stroke="#DE593C" stroke-width="6"/>
+    <g transform="translate(1260 650)"><rect width="250" height="90" rx="45" fill="#DE593C"/><text x="49" y="57" fill="#FFFFFF" font-size="26" font-weight="750">GAME COMMITS</text></g>
+  </g>
+  <text x="100" y="794" fill="#718097" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="24">Validation · permissions · resources · physics · revisions remain ordinary game code</text>
+</svg>

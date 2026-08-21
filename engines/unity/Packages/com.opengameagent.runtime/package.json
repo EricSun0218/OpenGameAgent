@@ -2,8 +2,12 @@
   "name": "com.opengameagent.runtime",
   "version": "0.3.0-alpha.2",
   "displayName": "OpenGameAgent",
-  "description": "In-process and server-hosted agent runtime for AI-native Unity games.",
+  "description": "A provider-neutral agent runtime for AI-native Unity games, with local and server-hosted execution, structured context, tools, streaming, steering, and multi-actor coordination.",
   "unity": "6000.0",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://github.com/EricSun0218/OpenGameAgent/blob/main/docs/engine-integration.md",
+  "changelogUrl": "https://github.com/EricSun0218/OpenGameAgent/blob/main/engines/unity/Packages/com.opengameagent.runtime/CHANGELOG.md",
+  "licensesUrl": "https://github.com/EricSun0218/OpenGameAgent/blob/main/LICENSE",
   "keywords": [
     "ai",
     "agent",
@@ -13,6 +17,14 @@
     "multi-agent"
   ],
   "author": {
-    "name": "Eric Sun"
-  }
+    "name": "Eric Sun",
+    "url": "https://opengameagent.com"
+  },
+  "samples": [
+    {
+      "displayName": "Minimal Local Agent",
+      "description": "Runs a deterministic, no-key agent turn and prints the result.",
+      "path": "Samples~/Minimal Local Agent"
+    }
+  ]
 }

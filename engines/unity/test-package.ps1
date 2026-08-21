@@ -14,6 +14,7 @@ $packagePath = [string]$buildOutput[-1]
 
 $required = @(
     'LICENSE.md',
+    'Third-Party Notices.txt',
     'package.json',
     'package.json.meta',
     'Runtime.meta',
@@ -31,6 +32,7 @@ $required = @(
     'Runtime\Plugins\OpenGameAgent.Client.dll',
     'Runtime\Plugins\OpenGameAgent.Client.dll.meta',
     'Runtime\Plugins\System.Text.Json.dll'
+    'Samples~\Minimal Local Agent\OpenGameAgentQuickstart.cs'
 )
 foreach ($relative in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $packagePath $relative) -PathType Leaf)) {
@@ -52,7 +54,11 @@ if ($unexpected) {
 }
 
 $manifest = Get-Content -LiteralPath (Join-Path $packagePath 'package.json') -Raw | ConvertFrom-Json
-if ($manifest.name -ne 'com.opengameagent.runtime' -or $manifest.version -ne $Version) {
+if ($manifest.name -ne 'com.opengameagent.runtime' -or
+    $manifest.version -ne $Version -or
+    $manifest.unity -ne '6000.0' -or
+    $manifest.unityRelease -ne '0f1' -or
+    $manifest.samples.Count -ne 1) {
     throw 'Unity package manifest identity is invalid.'
 }
 
