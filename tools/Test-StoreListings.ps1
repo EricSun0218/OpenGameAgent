@@ -48,7 +48,7 @@ foreach ($assembly in @(
 
 $plugin = Get-Content -LiteralPath (
     Join-Path $repositoryRoot 'engines\godot\addons\open_game_agent\plugin.cfg') -Raw
-if ($plugin -notmatch '(?m)^script="plugin\.gd"$') {
+if ($plugin -notmatch '(?m)^script="plugin\.gd"\r?$') {
     throw 'Godot add-on must declare a real editor plug-in script.'
 }
 
