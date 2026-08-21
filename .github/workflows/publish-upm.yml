@@ -1,0 +1,96 @@
+name: Publish Unity UPM
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to publish from the Unity package manifest
+        required: true
+        default: 0.3.0-alpha.3
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-upm-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_VERSION: ${{ inputs.version }}
+      PACKAGE_NAME: com.opengameagent.runtime
+      UPM_TAG_PREFIX: upm/
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+        with:
+          global-json-file: global.json
+      - name: Validate version and build package
+        shell: pwsh
+        run: |
+          if ($env:PACKAGE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw 'Version must be semantic.'
+          }
+
+          $sourceManifest = Get-Content -LiteralPath 'engines/unity/Packages/com.opengameagent.runtime/package.json' -Raw | ConvertFrom-Json
+          if ($sourceManifest.name -ne $env:PACKAGE_NAME -or $sourceManifest.version -ne $env:PACKAGE_VERSION) {
+            throw 'The requested version must match the Unity package manifest on main.'
+          }
+
+          $stubs = Join-Path $env:RUNNER_TEMP 'unity-stubs'
+          dotnet restore tests/OpenGameAgent.Unity.Stubs/OpenGameAgent.Unity.Stubs.csproj --locked-mode
+          dotnet build tests/OpenGameAgent.Unity.Stubs/OpenGameAgent.Unity.Stubs.csproj -c Release --no-restore -o $stubs
+          ./engines/unity/test-package.ps1 -UnityManagedDir $stubs -Version $env:PACKAGE_VERSION
+
+          $builtPackage = Resolve-Path 'artifacts/unity/com.opengameagent.runtime'
+          $stagedPackage = Join-Path $env:RUNNER_TEMP 'opengameagent-upm-package'
+          New-Item -ItemType Directory -Path $stagedPackage | Out-Null
+          Copy-Item -Path (Join-Path $builtPackage '*') -Destination $stagedPackage -Recurse -Force
+          "UPM_PACKAGE_PATH=$stagedPackage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Publish immutable UPM branch and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${UPM_TAG_PREFIX}${PACKAGE_VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::Immutable UPM tag ${tag} already exists."
+            exit 1
+          fi
+
+          package_copy="${RUNNER_TEMP}/opengameagent-upm-package-copy"
+          mkdir -p "${package_copy}"
+          cp -a "${UPM_PACKAGE_PATH}/." "${package_copy}/"
+
+          if git ls-remote --exit-code --heads origin refs/heads/upm >/dev/null 2>&1; then
+            git fetch origin refs/heads/upm:refs/remotes/origin/upm
+            git switch --create upm --track origin/upm
+            git rm -r --ignore-unmatch .
+          else
+            git switch --orphan upm
+            git rm -r --ignore-unmatch .
+          fi
+
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
+          cp -a "${package_copy}/." .
+
+          manifest_name="$(jq -r .name package.json)"
+          manifest_version="$(jq -r .version package.json)"
+          if [[ "${manifest_name}" != "${PACKAGE_NAME}" || "${manifest_version}" != "${PACKAGE_VERSION}" ]]; then
+            echo "::error::Generated package manifest does not match the requested package."
+            exit 1
+          fi
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- .
+          git commit -m "chore(upm): publish ${PACKAGE_NAME} ${PACKAGE_VERSION}"
+          git tag -a "${tag}" -m "${PACKAGE_NAME} ${PACKAGE_VERSION}"
+          git push origin HEAD:refs/heads/upm "refs/tags/${tag}"

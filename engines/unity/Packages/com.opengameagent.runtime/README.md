@@ -2,10 +2,25 @@
 
 Unity 6 adapter for the OpenGameAgent runtime.
 
-1. Build the local UPM package with `engines/unity/build-package.ps1`.
-2. Add the generated directory through Unity Package Manager.
-3. Add `OpenGameAgentBehaviour` to a persistent GameObject.
-4. Call `Configure(runtime)` for in-process execution or `ConfigureRemote(client)` for a .NET service.
+## Install
+
+Install the immutable GitHub UPM release from **Window > Package Manager > + > Add package from git URL**:
+
+```text
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+```
+
+Or install from OpenUPM after the package is listed:
+
+```bash
+openupm add com.opengameagent.runtime@0.3.0-alpha.3
+```
+
+The `upm/*` tags point to a generated package-only branch containing the tested adapter, runtime/client assemblies, notices, and sample. Do not install the package source subdirectory from `main`; generated DLLs intentionally do not live there.
+
+For local development, build the package with `engines/unity/build-package.ps1` and add the generated `artifacts/unity/com.opengameagent.runtime` directory through Unity Package Manager.
+
+Add `OpenGameAgentBehaviour` to a persistent GameObject and call `Configure(runtime)` for in-process execution or `ConfigureRemote(client)` for a .NET service.
 
 For a no-key first run, import **Minimal Local Agent** from Package Manager > OpenGameAgent > Samples, add `OpenGameAgentQuickstart` to a GameObject, and enter Play Mode. The sample uses a deterministic provider so it never contacts an external service.
 

@@ -54,6 +54,14 @@ The kernel boundary is intentionally small and designed to stabilize early. New 
 
 Download versioned package artifacts, Godot and Unity archives, or the portable server from the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. For active development against a source checkout, reference only the projects your game needs:
 
+Unity 6 projects can install the complete `0.3.0-alpha.3` package directly from its immutable GitHub UPM tag:
+
+```text
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+```
+
+After the package is indexed by OpenUPM, it can also be installed with `openupm add com.opengameagent.runtime@0.3.0-alpha.3`. The generated `upm` branch contains the tested binaries; the Unity source directory on `main` is not itself a distributable package.
+
 ```xml
 <ItemGroup>
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />

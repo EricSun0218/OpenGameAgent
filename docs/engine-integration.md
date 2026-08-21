@@ -43,6 +43,20 @@ Verify package structure and a real editor import/scene run:
 
 ## Unity 6
 
+Install the immutable package from **Window > Package Manager > + > Add package from git URL**:
+
+```text
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+```
+
+OpenUPM users can install the same package content with:
+
+```bash
+openupm add com.opengameagent.runtime@0.3.0-alpha.3
+```
+
+Release tags under `upm/` point at a generated package-only branch. This avoids checking generated assemblies into `main` while keeping Git installs reproducible. The `engines/unity/Packages/com.opengameagent.runtime` directory on `main` contains package source and metadata, not the complete installable package.
+
 Build the distributable UPM directory:
 
 ```powershell
