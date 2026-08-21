@@ -60,9 +60,22 @@ bool FOpenGameAgentSseParser::Feed(
 
 bool FOpenGameAgentSseParser::Finish(const FEventSink Sink, FString& Error)
 {
+    return FinishInternal(true, Sink, Error);
+}
+
+bool FOpenGameAgentSseParser::FinishOpenStream(const FEventSink Sink, FString& Error)
+{
+    return FinishInternal(false, Sink, Error);
+}
+
+bool FOpenGameAgentSseParser::FinishInternal(
+    const bool bRequireTerminalResult,
+    const FEventSink Sink,
+    FString& Error)
+{
     if (bFinished)
     {
-        return bSawTerminalResult;
+        return !bRequireTerminalResult || bSawTerminalResult;
     }
 
     if (PendingLine.Num() > 0 && !ConsumeLine(PendingLine, Sink, Error))
@@ -77,12 +90,15 @@ bool FOpenGameAgentSseParser::Finish(const FEventSink Sink, FString& Error)
     }
 
     bFinished = true;
-    if (!bSawTerminalResult)
+    if (bRequireTerminalResult && !bSawTerminalResult)
     {
         Error = TEXT("The server stream ended without a terminal result event.");
         return false;
     }
-    Sink(TEXT("result"), TerminalResultData);
+    if (bSawTerminalResult)
+    {
+        Sink(TEXT("result"), TerminalResultData);
+    }
     return true;
 }
 

@@ -14,6 +14,7 @@ public:
 
     bool Feed(const TArrayView<const uint8> Bytes, FEventSink Sink, FString& Error);
     bool Finish(FEventSink Sink, FString& Error);
+    bool FinishOpenStream(FEventSink Sink, FString& Error);
     bool HasTerminalResult() const { return bSawTerminalResult; }
 
 private:
@@ -31,5 +32,6 @@ private:
 
     bool ConsumeLine(const TArrayView<const uint8> Bytes, FEventSink Sink, FString& Error);
     bool Dispatch(FEventSink Sink, FString& Error);
+    bool FinishInternal(bool bRequireTerminalResult, FEventSink Sink, FString& Error);
     static bool DecodeUtf8(const TArrayView<const uint8> Bytes, FString& Value, FString& Error);
 };

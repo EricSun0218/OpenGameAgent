@@ -77,6 +77,19 @@ bool FOpenGameAgentSseFailureTest::RunTest(const FString& Parameters)
         [](const FString&, const FString&) {},
         Error));
 
+    FOpenGameAgentSseParser OpenEnded(1024, 4096);
+    Error.Reset();
+    TArray<FString> OpenEndedEvents;
+    TestTrue(TEXT("Open-ended data parses"), OpenEnded.Feed(
+        TArrayView<const uint8>(reinterpret_cast<const uint8*>(AgentOnly.Get()), AgentOnly.Length()),
+        [&OpenEndedEvents](const FString& Name, const FString&) { OpenEndedEvents.Add(Name); },
+        Error));
+    TestTrue(TEXT("Open-ended stream does not require a result"), OpenEnded.FinishOpenStream(
+        [&OpenEndedEvents](const FString& Name, const FString&) { OpenEndedEvents.Add(Name); },
+        Error));
+    TestEqual(TEXT("Open-ended event count"), OpenEndedEvents.Num(), 1);
+    TestEqual(TEXT("Open-ended event name"), OpenEndedEvents[0], FString(TEXT("agent")));
+
     FOpenGameAgentSseParser AfterTerminal(1024, 4096);
     const FTCHARToUTF8 InvalidOrder(
         TEXT("event: result\ndata: {}\n\nevent: agent\ndata: {}\n\n"));

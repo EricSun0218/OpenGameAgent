@@ -80,11 +80,15 @@ FString InputId;
 AgentSubsystem->RunJson(CanonicalInputJson, InputId, Error);
 ```
 
-`OnRunEvent`, `OnRunCompleted`, `OnRunFailed`, `OnControlCompleted`, and `OnActionResponse` are Blueprint-assignable and always delivered on the game thread. `SteerActor` and `AbortActor` target an active actor. `CancelRun` only stops the local HTTP caller and never asserts that a durable mutation did or did not commit. Request, response, stream-event, identifier, and active-run limits are enforced before callbacks reach gameplay.
+The native C++ subsystem is the authoritative adapter surface; Blueprint exposure is a thin projection rather than a separate implementation. `OnRunEvent`, `OnRunCompleted`, `OnRunFailed`, `OnControlCompleted`, `OnActionResponse`, `OnQueryResponse`, `OnActionStreamEvent`, and `OnActionStreamClosed` are Blueprint-assignable and always delivered on the game thread. `SteerActor` and `AbortActor` target an active actor. `CancelRun` only stops the local HTTP caller and never asserts that a durable mutation did or did not commit. Request, response, stream-event, identifier, and active-run limits are enforced before callbacks reach gameplay.
 
-For authoritative mutations, claim a bounded batch through `ClaimActions`, compare every operation with the game's save/operation ledger, execute or recover it on the game thread, and submit the canonical receipt with `SubmitActionReceiptJson`. Use `ReconcileAction` after a restart or uncertain delivery. The sidecar persists the action intent and delivery state; Unreal remains responsible for world validation, generation/revision checks, the actual mutation, and its authoritative receipt.
+For authoritative mutations, claim a bounded batch through `ClaimActions` or subscribe with `StartActionStream`, compare every operation with the game's save/operation ledger, execute or recover it on the game thread, and submit the canonical receipt with `SubmitActionReceiptJson`. Use `ReconcileAction` after a restart or uncertain delivery. `StopActionStream` only stops delivery and never changes an action outcome. The sidecar persists the action intent and delivery state; Unreal remains responsible for world validation, generation/revision checks, the actual mutation, and its authoritative receipt.
+
+The same subsystem exposes `ReadUsage`, `ReadTranscript`, and `ReadImageAttachment` through the authorized bounded server APIs. Responses arrive on `OnQueryResponse` as canonical JSON. Transcript cursors are opaque and bound to the persisted session revision, and attachment bytes are fetched explicitly rather than being inlined in transcript pages. `ReadServerCapabilities` reports the deployed server surface.
 
 The plugin rejects non-loopback plaintext HTTP unless explicitly enabled. Provider credentials stay in the sidecar; an optional sidecar access token is sent only as an Authorization header and is never copied into run JSON or event errors.
+
+Unreal Engine 6 is moving its future gameplay model toward Verse and Scene Graph, while early versions retain C++ and Blueprint compatibility. OpenGameAgent therefore keeps its native C++ client and engine-neutral wire protocol stable; Blueprint remains a convenience layer, and a future Verse adapter can project the same C++ operations without duplicating the runtime.
 
 Verify the distributable plugin structure and then compile/run its automation tests in a real editor:
 

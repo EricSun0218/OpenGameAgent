@@ -6,6 +6,7 @@
 #include "OpenGameAgentSubsystem.generated.h"
 
 struct FOpenGameAgentRunState;
+struct FOpenGameAgentActionStreamState;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
     FOpenGameAgentRunEvent,
@@ -39,6 +40,29 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
     const FString&, ResponseJson,
     const FString&, Error);
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
+    FOpenGameAgentQueryResponse,
+    const FString&, Operation,
+    const FString&, SessionId,
+    const FString&, ActorId,
+    const FString&, ResponseJson,
+    const FString&, Error);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
+    FOpenGameAgentActionStreamEvent,
+    const FString&, StreamId,
+    const FString&, SessionId,
+    const FString&, ActorId,
+    const FString&, EventName,
+    const FString&, EventJson);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+    FOpenGameAgentActionStreamClosed,
+    const FString&, StreamId,
+    const FString&, SessionId,
+    const FString&, ActorId,
+    const FString&, Error);
+
 /**
  * Blueprint and C++ bridge to a trusted OpenGameAgent HTTP/SSE sidecar or server.
  * Gameplay authority remains in Unreal; this subsystem only transports structured inputs,
@@ -64,6 +88,15 @@ public:
 
     UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
     FOpenGameAgentActionResponse OnActionResponse;
+
+    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
+    FOpenGameAgentQueryResponse OnQueryResponse;
+
+    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent|Actions")
+    FOpenGameAgentActionStreamEvent OnActionStreamEvent;
+
+    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent|Actions")
+    FOpenGameAgentActionStreamClosed OnActionStreamClosed;
 
     /** Configure a remote sidecar. Plain HTTP is accepted only for loopback unless explicitly allowed. */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
@@ -96,6 +129,31 @@ public:
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
     bool CancelRun(const FString& InputId);
 
+    /** Read the server's bounded public capability document. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
+    bool ReadServerCapabilities(FString& Error);
+
+    /** Read the authorized persisted usage ledger for a session actor. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
+    bool ReadUsage(const FString& SessionId, const FString& ActorId, FString& Error);
+
+    /** Read one authorized, revision-bound page of the active persisted transcript. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
+    bool ReadTranscript(
+        const FString& SessionId,
+        const FString& ActorId,
+        int32 PageSize,
+        const FString& Cursor,
+        FString& Error);
+
+    /** Read one authorized image attachment. The response JSON contains bounded base64 data. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
+    bool ReadImageAttachment(
+        const FString& SessionId,
+        const FString& ActorId,
+        const FString& AttachmentId,
+        FString& Error);
+
     /** Read a bounded batch of already-durable external action deliveries for this authorized actor. */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
     bool ClaimActions(
@@ -119,13 +177,30 @@ public:
         const FString& OperationId,
         FString& Error);
 
+    /** Start an authorized long-lived stream of already-durable external action deliveries. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
+    bool StartActionStream(
+        const FString& SessionId,
+        const FString& ActorId,
+        int32 Limit,
+        FString& StreamId,
+        FString& Error);
+
+    /** Stop only the selected action-delivery stream. It does not change any action outcome. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
+    bool StopActionStream(const FString& StreamId);
+
     UFUNCTION(BlueprintPure, Category = "OpenGameAgent")
     int32 GetActiveRunCount() const;
+
+    UFUNCTION(BlueprintPure, Category = "OpenGameAgent|Actions")
+    int32 GetActiveActionStreamCount() const;
 
     virtual void Deinitialize() override;
 
 private:
     static constexpr int32 MaximumActiveRuns = 64;
+    static constexpr int32 MaximumActiveActionStreams = 64;
     static constexpr int32 MaximumActiveRequests = 128;
     static constexpr int32 MaximumRequestCharacters = 8000000;
     static constexpr int32 MaximumResponseBytes = 16000000;
@@ -134,6 +209,7 @@ private:
     FString BaseUrl;
     FString AuthorizationValue;
     TMap<FString, TSharedPtr<FOpenGameAgentRunState, ESPMode::ThreadSafe>> ActiveRuns;
+    TMap<FString, TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>> ActiveActionStreams;
     TSet<FHttpRequestPtr> ActiveRequests;
     bool bConfigured = false;
     bool bShuttingDown = false;
@@ -145,6 +221,13 @@ private:
         const TSharedPtr<FOpenGameAgentRunState, ESPMode::ThreadSafe>& State,
         FString& Error);
     void FailRun(const FString& InputId, const FString& Error);
+    void HandleActionStreamProgress(const FString& StreamId);
+    void HandleActionStreamComplete(const FString& StreamId, bool bConnectedSuccessfully);
+    bool FeedAvailableActionStreamBytes(
+        const FString& StreamId,
+        const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>& State,
+        FString& Error);
+    void FailActionStream(const FString& StreamId, const FString& Error);
     bool SendControl(
         const FString& Operation,
         const FString& Path,
@@ -158,5 +241,20 @@ private:
         const FString& SessionId,
         const FString& ActorId,
         const FString& RequestJson,
+        FString& Error);
+    bool SendQueryRequest(
+        const FString& Operation,
+        const FString& Path,
+        const FString& SessionId,
+        const FString& ActorId,
+        const FString& RequestJson,
+        FString& Error);
+    bool SendJsonResponseRequest(
+        const FString& Operation,
+        const FString& Path,
+        const FString& SessionId,
+        const FString& ActorId,
+        const FString& RequestJson,
+        bool bQueryResponse,
         FString& Error);
 };

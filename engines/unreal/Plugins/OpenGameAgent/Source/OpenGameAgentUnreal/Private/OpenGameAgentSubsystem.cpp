@@ -5,24 +5,22 @@
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
+#include "Misc/Guid.h"
 #include "Misc/ScopeLock.h"
 #include "OpenGameAgentSseParser.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
-struct FOpenGameAgentRunState final
+struct FOpenGameAgentStreamState
 {
-    FOpenGameAgentRunState(
-        const FString& InInputId,
+    FOpenGameAgentStreamState(
         const int32 MaximumEventCharacters,
         const int32 MaximumResponseBytes)
-        : InputId(InInputId)
-        , Parser(MaximumEventCharacters, MaximumResponseBytes)
+        : Parser(MaximumEventCharacters, MaximumResponseBytes)
     {
     }
 
-    FString InputId;
     FHttpRequestPtr Request;
     FOpenGameAgentSseParser Parser;
     FCriticalSection StreamLock;
@@ -74,6 +72,40 @@ struct FOpenGameAgentRunState final
     }
 };
 
+struct FOpenGameAgentRunState final : FOpenGameAgentStreamState
+{
+    FOpenGameAgentRunState(
+        const FString& InInputId,
+        const int32 MaximumEventCharacters,
+        const int32 MaximumResponseBytes)
+        : FOpenGameAgentStreamState(MaximumEventCharacters, MaximumResponseBytes)
+        , InputId(InInputId)
+    {
+    }
+
+    FString InputId;
+};
+
+struct FOpenGameAgentActionStreamState final : FOpenGameAgentStreamState
+{
+    FOpenGameAgentActionStreamState(
+        const FString& InStreamId,
+        const FString& InSessionId,
+        const FString& InActorId,
+        const int32 MaximumEventCharacters,
+        const int32 MaximumResponseBytes)
+        : FOpenGameAgentStreamState(MaximumEventCharacters, MaximumResponseBytes)
+        , StreamId(InStreamId)
+        , SessionId(InSessionId)
+        , ActorId(InActorId)
+    {
+    }
+
+    FString StreamId;
+    FString SessionId;
+    FString ActorId;
+};
+
 struct FOpenGameAgentBoundedResponseState final
 {
     explicit FOpenGameAgentBoundedResponseState(const int32 InMaximumBytes)
@@ -114,6 +146,13 @@ struct FOpenGameAgentBoundedResponseState final
 
         const FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
         Text = FString(Converted.Length(), Converted.Get());
+        const FTCHARToUTF8 RoundTrip(*Text);
+        if (RoundTrip.Length() != Bytes.Num()
+            || FMemory::Memcmp(RoundTrip.Get(), Bytes.GetData(), Bytes.Num()) != 0)
+        {
+            Text.Reset();
+            return false;
+        }
         Bytes.Reset();
         return true;
     }
@@ -473,6 +512,118 @@ bool UOpenGameAgentSubsystem::CancelRun(const FString& InputId)
     return true;
 }
 
+bool UOpenGameAgentSubsystem::ReadServerCapabilities(FString& Error)
+{
+    return SendQueryRequest(
+        TEXT("capabilities"),
+        TEXT("/v1/capabilities"),
+        FString(),
+        FString(),
+        FString(),
+        Error);
+}
+
+bool UOpenGameAgentSubsystem::ReadUsage(
+    const FString& SessionId,
+    const FString& ActorId,
+    FString& Error)
+{
+    const FString Body = SerializeControl(SessionId, ActorId, nullptr, Error);
+    if (Body.IsEmpty())
+    {
+        return false;
+    }
+    return SendQueryRequest(TEXT("usage"), TEXT("/v1/usage"), SessionId, ActorId, Body, Error);
+}
+
+bool UOpenGameAgentSubsystem::ReadTranscript(
+    const FString& SessionId,
+    const FString& ActorId,
+    const int32 PageSize,
+    const FString& Cursor,
+    FString& Error)
+{
+    if (PageSize < 1 || PageSize > 256)
+    {
+        Error = TEXT("The transcript page size must be between 1 and 256.");
+        return false;
+    }
+    if (Cursor.Len() > 256)
+    {
+        Error = TEXT("The transcript cursor exceeds its size limit.");
+        return false;
+    }
+    for (const TCHAR Character : Cursor)
+    {
+        if (FChar::IsControl(Character))
+        {
+            Error = TEXT("The transcript cursor contains an invalid control character.");
+            return false;
+        }
+    }
+
+    const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+    Document->SetStringField(TEXT("sessionId"), SessionId);
+    Document->SetStringField(TEXT("actorId"), ActorId);
+    Document->SetNumberField(TEXT("pageSize"), PageSize);
+    if (Cursor.IsEmpty())
+    {
+        Document->SetField(TEXT("cursor"), MakeShared<FJsonValueNull>());
+    }
+    else
+    {
+        Document->SetStringField(TEXT("cursor"), Cursor);
+    }
+    FString Body;
+    const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Body);
+    if (!FJsonSerializer::Serialize(Document, Writer))
+    {
+        Error = TEXT("The transcript query could not be serialized.");
+        return false;
+    }
+    return SendQueryRequest(
+        TEXT("transcript"),
+        TEXT("/v1/transcript"),
+        SessionId,
+        ActorId,
+        Body,
+        Error);
+}
+
+bool UOpenGameAgentSubsystem::ReadImageAttachment(
+    const FString& SessionId,
+    const FString& ActorId,
+    const FString& AttachmentId,
+    FString& Error)
+{
+    if (!IsBoundedIdentifier(AttachmentId, 256))
+    {
+        Error = TEXT("A bounded attachment ID is required.");
+        return false;
+    }
+
+    const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+    Document->SetStringField(TEXT("sessionId"), SessionId);
+    Document->SetStringField(TEXT("actorId"), ActorId);
+    Document->SetStringField(TEXT("attachmentId"), AttachmentId);
+    FString Body;
+    const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Body);
+    if (!FJsonSerializer::Serialize(Document, Writer))
+    {
+        Error = TEXT("The attachment query could not be serialized.");
+        return false;
+    }
+    return SendQueryRequest(
+        TEXT("attachment"),
+        TEXT("/v1/attachments/read"),
+        SessionId,
+        ActorId,
+        Body,
+        Error);
+}
+
 bool UOpenGameAgentSubsystem::ClaimActions(
     const FString& SessionId,
     const FString& ActorId,
@@ -564,26 +715,184 @@ bool UOpenGameAgentSubsystem::ReconcileAction(
         Error);
 }
 
+bool UOpenGameAgentSubsystem::StartActionStream(
+    const FString& SessionId,
+    const FString& ActorId,
+    const int32 Limit,
+    FString& StreamId,
+    FString& Error)
+{
+    if (!IsInGameThread())
+    {
+        Error = TEXT("Action streams must start on the Unreal game thread.");
+        return false;
+    }
+    if (!bConfigured || bShuttingDown)
+    {
+        Error = TEXT("Configure the OpenGameAgent subsystem before starting an action stream.");
+        return false;
+    }
+    if (!IsBoundedIdentifier(SessionId) || !IsBoundedIdentifier(ActorId))
+    {
+        Error = TEXT("A bounded session and actor ID are required.");
+        return false;
+    }
+    if (Limit < 1 || Limit > 256)
+    {
+        Error = TEXT("The action stream limit must be between 1 and 256.");
+        return false;
+    }
+    if (ActiveActionStreams.Num() >= MaximumActiveActionStreams)
+    {
+        Error = TEXT("The Unreal adapter reached its active action-stream limit.");
+        return false;
+    }
+
+    const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+    Document->SetStringField(TEXT("sessionId"), SessionId);
+    Document->SetStringField(TEXT("actorId"), ActorId);
+    Document->SetNumberField(TEXT("limit"), Limit);
+    FString Body;
+    const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Body);
+    if (!FJsonSerializer::Serialize(Document, Writer))
+    {
+        Error = TEXT("The action stream request could not be serialized.");
+        return false;
+    }
+
+    StreamId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
+    const TSharedRef<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe> State =
+        MakeShared<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>(
+            StreamId,
+            SessionId,
+            ActorId,
+            MaximumEventCharacters,
+            MaximumResponseBytes);
+    State->Request = FHttpModule::Get().CreateRequest();
+    State->Request->SetURL(BaseUrl + TEXT("/v1/actions/stream"));
+    State->Request->SetVerb(TEXT("POST"));
+    State->Request->SetHeader(TEXT("Content-Type"), TEXT("application/json; charset=utf-8"));
+    State->Request->SetHeader(TEXT("Accept"), TEXT("text/event-stream"));
+    if (!AuthorizationValue.IsEmpty())
+    {
+        State->Request->SetHeader(TEXT("Authorization"), AuthorizationValue);
+    }
+    State->Request->SetContentAsString(Body);
+
+    const TWeakObjectPtr<UOpenGameAgentSubsystem> WeakThis(this);
+    const TWeakPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe> WeakState = State;
+    if (!State->Request->SetResponseBodyReceiveStreamDelegateV2(
+        FHttpRequestStreamDelegateV2::CreateLambda(
+        [WeakThis, WeakState, CapturedStreamId = StreamId](void* Data, int64& Length)
+        {
+            const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe> Stream = WeakState.Pin();
+            if (!Stream.IsValid()
+                || !Stream->EnqueueBytes(Data, Length, UOpenGameAgentSubsystem::MaximumResponseBytes))
+            {
+                return;
+            }
+            const auto Dispatch = [WeakThis, CapturedStreamId]()
+            {
+                if (WeakThis.IsValid())
+                {
+                    WeakThis->HandleActionStreamProgress(CapturedStreamId);
+                }
+            };
+            if (IsInGameThread())
+            {
+                Dispatch();
+            }
+            else
+            {
+                AsyncTask(ENamedThreads::GameThread, Dispatch);
+            }
+        })))
+    {
+        Error = TEXT("The Unreal HTTP backend cannot stream action deliveries.");
+        return false;
+    }
+    State->Request->OnProcessRequestComplete().BindLambda(
+        [WeakThis, CapturedStreamId = StreamId](FHttpRequestPtr, FHttpResponsePtr, const bool bSucceeded)
+        {
+            const auto Dispatch = [WeakThis, CapturedStreamId, bSucceeded]()
+            {
+                if (WeakThis.IsValid())
+                {
+                    WeakThis->HandleActionStreamComplete(CapturedStreamId, bSucceeded);
+                }
+            };
+            if (IsInGameThread())
+            {
+                Dispatch();
+            }
+            else
+            {
+                AsyncTask(ENamedThreads::GameThread, Dispatch);
+            }
+        });
+
+    ActiveActionStreams.Add(StreamId, State);
+    if (!State->Request->ProcessRequest())
+    {
+        ActiveActionStreams.Remove(StreamId);
+        StreamId.Reset();
+        Error = TEXT("Unreal could not dispatch the action stream request.");
+        return false;
+    }
+
+    Error.Reset();
+    return true;
+}
+
+bool UOpenGameAgentSubsystem::StopActionStream(const FString& StreamId)
+{
+    if (!IsInGameThread())
+    {
+        return false;
+    }
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>* Found =
+        ActiveActionStreams.Find(StreamId);
+    if (Found == nullptr)
+    {
+        return false;
+    }
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe> State = *Found;
+    ActiveActionStreams.Remove(StreamId);
+    State->Request->CancelRequest();
+    OnActionStreamClosed.Broadcast(StreamId, State->SessionId, State->ActorId, FString());
+    return true;
+}
+
 int32 UOpenGameAgentSubsystem::GetActiveRunCount() const
 {
     return ActiveRuns.Num();
+}
+
+int32 UOpenGameAgentSubsystem::GetActiveActionStreamCount() const
+{
+    return ActiveActionStreams.Num();
 }
 
 void UOpenGameAgentSubsystem::Deinitialize()
 {
     bShuttingDown = true;
     TArray<FHttpRequestPtr> Requests;
-    Requests.Reserve(ActiveRuns.Num());
+    Requests.Reserve(ActiveRuns.Num() + ActiveActionStreams.Num() + ActiveRequests.Num());
     for (const TPair<FString, TSharedPtr<FOpenGameAgentRunState, ESPMode::ThreadSafe>>& Pair : ActiveRuns)
     {
         Requests.Add(Pair.Value->Request);
     }
-    Requests.Reserve(Requests.Num() + ActiveRequests.Num());
+    for (const TPair<FString, TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>>& Pair : ActiveActionStreams)
+    {
+        Requests.Add(Pair.Value->Request);
+    }
     for (const FHttpRequestPtr& Request : ActiveRequests)
     {
         Requests.Add(Request);
     }
     ActiveRuns.Reset();
+    ActiveActionStreams.Reset();
     ActiveRequests.Reset();
     for (const FHttpRequestPtr& Request : Requests)
     {
@@ -707,6 +1016,114 @@ void UOpenGameAgentSubsystem::FailRun(const FString& InputId, const FString& Err
     ActiveRuns.Remove(InputId);
     Request->CancelRequest();
     OnRunFailed.Broadcast(InputId, Error.Left(4096));
+}
+
+void UOpenGameAgentSubsystem::HandleActionStreamProgress(const FString& StreamId)
+{
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>* Found =
+        ActiveActionStreams.Find(StreamId);
+    if (Found == nullptr)
+    {
+        return;
+    }
+    const FHttpResponsePtr Response = (*Found)->Request->GetResponse();
+    if (!Response.IsValid() || Response->GetResponseCode() == 0)
+    {
+        return;
+    }
+    FString Error;
+    if (!ValidateEventStreamResponse(Response, Error)
+        || !FeedAvailableActionStreamBytes(StreamId, *Found, Error))
+    {
+        FailActionStream(StreamId, Error);
+    }
+}
+
+void UOpenGameAgentSubsystem::HandleActionStreamComplete(
+    const FString& StreamId,
+    const bool bConnectedSuccessfully)
+{
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>* Found =
+        ActiveActionStreams.Find(StreamId);
+    if (Found == nullptr)
+    {
+        return;
+    }
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe> State = *Found;
+    if (!bConnectedSuccessfully || !State->Request->GetResponse().IsValid())
+    {
+        FailActionStream(StreamId, TEXT("The action stream did not complete successfully."));
+        return;
+    }
+
+    FString Error;
+    if (!ValidateEventStreamResponse(State->Request->GetResponse(), Error)
+        || !FeedAvailableActionStreamBytes(StreamId, State, Error)
+        || !State->Parser.FinishOpenStream(
+            [this, &StreamId, &State](const FString& EventName, const FString& Json)
+            {
+                OnActionStreamEvent.Broadcast(
+                    StreamId,
+                    State->SessionId,
+                    State->ActorId,
+                    EventName,
+                    Json);
+            },
+            Error))
+    {
+        FailActionStream(StreamId, Error);
+        return;
+    }
+
+    ActiveActionStreams.Remove(StreamId);
+    OnActionStreamClosed.Broadcast(StreamId, State->SessionId, State->ActorId, FString());
+}
+
+bool UOpenGameAgentSubsystem::FeedAvailableActionStreamBytes(
+    const FString& StreamId,
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>& State,
+    FString& Error)
+{
+    TArray<uint8> NewBytes;
+    if (!State->TakePendingBytes(NewBytes))
+    {
+        Error = TEXT("The action stream exceeded its response byte limit.");
+        return false;
+    }
+    if (NewBytes.IsEmpty())
+    {
+        return true;
+    }
+    return State->Parser.Feed(
+        MakeArrayView(NewBytes),
+        [this, &StreamId, &State](const FString& EventName, const FString& Json)
+        {
+            OnActionStreamEvent.Broadcast(
+                StreamId,
+                State->SessionId,
+                State->ActorId,
+                EventName,
+                Json);
+        },
+        Error);
+}
+
+void UOpenGameAgentSubsystem::FailActionStream(const FString& StreamId, const FString& Error)
+{
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>* Found =
+        ActiveActionStreams.Find(StreamId);
+    if (Found == nullptr)
+    {
+        return;
+    }
+    const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe> State = *Found;
+    ActiveActionStreams.Remove(StreamId);
+    State->Request->CancelRequest();
+    OnActionStreamClosed.Broadcast(
+        StreamId,
+        State->SessionId,
+        State->ActorId,
+        Error.Left(4096));
 }
 
 bool UOpenGameAgentSubsystem::SendControl(
@@ -838,54 +1255,112 @@ bool UOpenGameAgentSubsystem::SendActionRequest(
     const FString& RequestJson,
     FString& Error)
 {
+    return SendJsonResponseRequest(
+        Operation,
+        Path,
+        SessionId,
+        ActorId,
+        RequestJson,
+        false,
+        Error);
+}
+
+bool UOpenGameAgentSubsystem::SendQueryRequest(
+    const FString& Operation,
+    const FString& Path,
+    const FString& SessionId,
+    const FString& ActorId,
+    const FString& RequestJson,
+    FString& Error)
+{
+    return SendJsonResponseRequest(
+        Operation,
+        Path,
+        SessionId,
+        ActorId,
+        RequestJson,
+        true,
+        Error);
+}
+
+bool UOpenGameAgentSubsystem::SendJsonResponseRequest(
+    const FString& Operation,
+    const FString& Path,
+    const FString& SessionId,
+    const FString& ActorId,
+    const FString& RequestJson,
+    const bool bQueryResponse,
+    FString& Error)
+{
     if (!IsInGameThread())
     {
-        Error = TEXT("Action exchange requests must run on the Unreal game thread.");
+        Error = TEXT("Server requests must run on the Unreal game thread.");
         return false;
     }
     if (!bConfigured || bShuttingDown)
     {
-        Error = TEXT("Configure the OpenGameAgent subsystem before using the action exchange.");
+        Error = TEXT("Configure the OpenGameAgent subsystem before sending server requests.");
         return false;
     }
     if (ActiveRequests.Num() >= MaximumActiveRequests)
     {
-        Error = TEXT("The Unreal adapter reached its action-request limit.");
+        Error = TEXT("The Unreal adapter reached its server-request limit.");
         return false;
     }
-    if (!IsBoundedIdentifier(SessionId) || !IsBoundedIdentifier(ActorId))
+    if (!IsBoundedIdentifier(Operation, 256)
+        || Path.IsEmpty()
+        || Path.Len() > 1024
+        || !Path.StartsWith(TEXT("/v1/")))
     {
-        Error = TEXT("A bounded session and actor ID are required.");
-        return false;
-    }
-    if (RequestJson.Len() < 2 || RequestJson.Len() > MaximumRequestCharacters)
-    {
-        Error = TEXT("The action exchange request is empty or exceeds its size limit.");
+        Error = TEXT("The server request identity is invalid.");
         return false;
     }
 
-    TSharedPtr<FJsonObject> RequestDocument;
-    FString BoundSession;
-    FString BoundActor;
-    if (!ParseJsonObject(RequestJson, RequestDocument)
-        || !RequestDocument->TryGetStringField(TEXT("sessionId"), BoundSession)
-        || !RequestDocument->TryGetStringField(TEXT("actorId"), BoundActor)
-        || !BoundSession.Equals(SessionId, ESearchCase::CaseSensitive)
-        || !BoundActor.Equals(ActorId, ESearchCase::CaseSensitive))
+    const bool bHasActorIdentity = !SessionId.IsEmpty() || !ActorId.IsEmpty();
+    if (bHasActorIdentity)
     {
-        Error = TEXT("The action request identity does not match its authorized session and actor.");
+        if (!IsBoundedIdentifier(SessionId) || !IsBoundedIdentifier(ActorId))
+        {
+            Error = TEXT("A bounded session and actor ID are required.");
+            return false;
+        }
+        if (RequestJson.Len() < 2 || RequestJson.Len() > MaximumRequestCharacters)
+        {
+            Error = TEXT("The server request is empty or exceeds its size limit.");
+            return false;
+        }
+        TSharedPtr<FJsonObject> RequestDocument;
+        FString BoundSession;
+        FString BoundActor;
+        if (!ParseJsonObject(RequestJson, RequestDocument)
+            || !RequestDocument->TryGetStringField(TEXT("sessionId"), BoundSession)
+            || !RequestDocument->TryGetStringField(TEXT("actorId"), BoundActor)
+            || !BoundSession.Equals(SessionId, ESearchCase::CaseSensitive)
+            || !BoundActor.Equals(ActorId, ESearchCase::CaseSensitive))
+        {
+            Error = TEXT("The request identity does not match its authorized session and actor.");
+            return false;
+        }
+    }
+    else if (!RequestJson.IsEmpty())
+    {
+        Error = TEXT("An identity-free request cannot contain a request body.");
         return false;
     }
 
     const FHttpRequestRef Request = FHttpModule::Get().CreateRequest();
     Request->SetURL(BaseUrl + Path);
-    Request->SetVerb(TEXT("POST"));
-    Request->SetHeader(TEXT("Content-Type"), TEXT("application/json; charset=utf-8"));
+    Request->SetVerb(RequestJson.IsEmpty() ? TEXT("GET") : TEXT("POST"));
+    Request->SetHeader(TEXT("Accept"), TEXT("application/json"));
+    if (!RequestJson.IsEmpty())
+    {
+        Request->SetHeader(TEXT("Content-Type"), TEXT("application/json; charset=utf-8"));
+        Request->SetContentAsString(RequestJson);
+    }
     if (!AuthorizationValue.IsEmpty())
     {
         Request->SetHeader(TEXT("Authorization"), AuthorizationValue);
     }
-    Request->SetContentAsString(RequestJson);
 
     const TWeakObjectPtr<UOpenGameAgentSubsystem> WeakThis(this);
     const TSharedRef<FOpenGameAgentBoundedResponseState, ESPMode::ThreadSafe> ResponseState =
@@ -900,13 +1375,16 @@ bool UOpenGameAgentSubsystem::SendActionRequest(
             }
         })))
     {
-        Error = TEXT("The Unreal HTTP backend cannot stream the action response.");
+        Error = TEXT("The Unreal HTTP backend cannot stream the server response.");
         return false;
     }
     Request->OnProcessRequestComplete().BindLambda(
-        [WeakThis, ResponseState, Operation, SessionId, ActorId](FHttpRequestPtr Completed, FHttpResponsePtr Response, const bool bSucceeded)
+        [WeakThis, ResponseState, Operation, SessionId, ActorId, bQueryResponse](
+            FHttpRequestPtr Completed,
+            FHttpResponsePtr Response,
+            const bool bSucceeded)
         {
-            const auto Dispatch = [WeakThis, ResponseState, Operation, SessionId, ActorId, Completed, Response, bSucceeded]()
+            const auto Dispatch = [WeakThis, ResponseState, Operation, SessionId, ActorId, bQueryResponse, Completed, Response, bSucceeded]()
             {
                 if (!WeakThis.IsValid())
                 {
@@ -917,29 +1395,38 @@ bool UOpenGameAgentSubsystem::SendActionRequest(
                 FString Failure;
                 if (!ResponseState->Take(Json))
                 {
-                    Failure = TEXT("The action exchange response exceeded its size limit.");
+                    Failure = TEXT("The server response is invalid or exceeded its size limit.");
                 }
                 else if (!bSucceeded || !Response.IsValid())
                 {
-                    Failure = TEXT("The action exchange request did not complete successfully.");
+                    Failure = TEXT("The server request did not complete successfully.");
+                }
+                else if (Response->GetResponseCode() < 200 || Response->GetResponseCode() > 299)
+                {
+                    Json.Reset();
+                    Failure = FString::Printf(
+                        TEXT("The agent server returned HTTP %d."),
+                        Response->GetResponseCode());
                 }
                 else
                 {
+                    const FString ContentType = Response->GetHeader(TEXT("Content-Type"));
                     TSharedPtr<FJsonValue> Parsed;
-                    if (!ParseJsonValue(Json, Parsed))
+                    if (!ContentType.StartsWith(TEXT("application/json"), ESearchCase::IgnoreCase)
+                        || !ParseJsonValue(Json, Parsed))
                     {
                         Json.Reset();
-                        Failure = TEXT("The action exchange response contains invalid JSON.");
-                    }
-                    else if (Response->GetResponseCode() < 200 || Response->GetResponseCode() > 299)
-                    {
-                        Json.Reset();
-                        Failure = FString::Printf(
-                            TEXT("The action exchange returned HTTP %d."),
-                            Response->GetResponseCode());
+                        Failure = TEXT("The server response is not bounded JSON.");
                     }
                 }
-                WeakThis->OnActionResponse.Broadcast(Operation, SessionId, ActorId, Json, Failure);
+                if (bQueryResponse)
+                {
+                    WeakThis->OnQueryResponse.Broadcast(Operation, SessionId, ActorId, Json, Failure);
+                }
+                else
+                {
+                    WeakThis->OnActionResponse.Broadcast(Operation, SessionId, ActorId, Json, Failure);
+                }
             };
             if (IsInGameThread())
             {
@@ -955,7 +1442,7 @@ bool UOpenGameAgentSubsystem::SendActionRequest(
     if (!Request->ProcessRequest())
     {
         ActiveRequests.Remove(Request);
-        Error = TEXT("Unreal could not dispatch the action exchange request.");
+        Error = TEXT("Unreal could not dispatch the server request.");
         return false;
     }
     Error.Reset();
