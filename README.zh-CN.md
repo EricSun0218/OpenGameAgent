@@ -12,7 +12,7 @@
 
 <p align="center"><a href="README.md">English</a></p>
 
-OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够观察结构化状态、制定计划、调用工具、检查权威结果、形成记忆并持续完成目标。它可以运行在 Godot、Unity 或 .NET 服务端中，而每次状态变更仍由游戏代码裁决。
+OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够观察结构化状态、制定计划、调用工具、检查权威结果、形成记忆并持续完成目标。它可以运行在 Godot、Unity、Unreal 原生客户端背后的 sidecar 或 .NET 服务端中，而每次状态变更仍由游戏代码裁决。同一权威边界现在也覆盖实时语音、持久图片观察、生成式媒体，以及可在崩溃后恢复的生成资产存档/世界导入。
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
@@ -46,7 +46,7 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 
 也不是每次互动都必须运行完整 Agent Loop。问候等简单输入可以走快速回复路由，开放式任务使用完整循环，需要固定执行图的场景则可以使用确定性 Workflow。
 
-> 当前版本：`0.3.0-alpha.2`。在 `1.0` 前公开 API 仍可能调整。
+> 最新已发布版本：`0.3.0-alpha.2`。本 README 描述当前 `main`；其中还包含发布版之后加入的 Realtime、Unreal、图片 Provider、会话读取、工具可见性和生成资产能力。使用这些较新 API 时请直接引用源码 checkout。在 `1.0` 前公开 API 仍可能调整。
 
 内核边界刻意保持小而稳定。后续游戏特有能力通常应通过扩展、工具、策略、工作流或游戏自有服务加入，而不是继续膨胀模型/工具循环。
 
@@ -59,6 +59,8 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Media/OpenGameAgent.Media.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj" />
 </ItemGroup>
 ```
 
@@ -86,8 +88,8 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 外部工具按需发现与大型结果产物化；
 - 包含可移植 Skills 与 MCP Server 的 Agent Plugins 1.0.0 插件包；
 - 通过可替换 API 生成图片、语音和视频；
-- 可感知崩溃的生成资产物化与引擎权威导入。
-- 追加式轨迹、仅观察回放和离线 CI 评测。
+- 可感知崩溃的生成资产物化与引擎权威导入；
+- 追加式轨迹、仅观察回放和离线 CI 评测；
 - 支持打断的实时语音、不中断音频的后台 Agent 交接，以及可替换的表现层行为。
 
 Runtime **不会**判断攻击是否合法、物品能否使用、资源够不够或 NPC 有没有权限。游戏只暴露窄而明确的工具，校验每次变更请求，在正确线程或服务端执行，并返回权威回执。
@@ -95,7 +97,7 @@ Runtime **不会**判断攻击是否合法、物品能否使用、资源够不�
 ## 架构
 
 ```text
-Godot / Unity / .NET 游戏服务
+Godot / Unity / Unreal sidecar / .NET 游戏服务
         |
         | GameInput（JSON + GameMoment）
         v
@@ -198,7 +200,7 @@ var input = new GameInput(
 var run = await runtime.RunAsync(input);
 ```
 
-可继续阅读可编译的[互动世界示例](examples/OpenGameAgent.Example/Program.cs)和[入门指南](docs/getting-started.md)。
+可继续阅读可编译的[互动世界示例](examples/OpenGameAgent.Example/Program.cs)、离线[生成资产示例](examples/OpenGameAgent.GeneratedAssets.Example/Program.cs)和[入门指南](docs/getting-started.md)。
 
 ## Runtime 放在哪里
 

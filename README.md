@@ -12,7 +12,7 @@
 
 <p align="center"><a href="README.zh-CN.md">简体中文</a></p>
 
-OpenGameAgent is a compact, hackable C# runtime that lets game characters observe structured state, plan, call tools, inspect authoritative results, remember, and continue toward goals. It runs inside Godot, Unity, or .NET services while game code remains authoritative over every state change.
+OpenGameAgent is a compact, hackable C# runtime that lets game characters observe structured state, plan, call tools, inspect authoritative results, remember, and continue toward goals. It runs inside Godot or Unity, behind a native Unreal client, or in .NET services while game code remains authoritative over every state change. The same authority boundary now covers realtime speech, durable image observations, generated media, and crash-recoverable import of generated assets into a save or world.
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
@@ -46,7 +46,7 @@ OpenGameAgent is model- and provider-neutral. Characters operate through develop
 
 Not every interaction needs the full loop. A game can route greetings and other simple inputs through the quick-response path, use the complete agent loop for open-ended tasks, and use deterministic workflows where the execution graph should be fixed.
 
-> Current version: `0.3.0-alpha.2`. Public APIs can change before `1.0`.
+> Latest published release: `0.3.0-alpha.2`. This README documents the current `main` branch, which also contains post-release Realtime, Unreal, image-provider, transcript, tool-visibility, and generated-asset work. Reference the source checkout when consuming those newer APIs. Public APIs can change before `1.0`.
 
 The kernel boundary is intentionally small and designed to stabilize early. New game-specific capabilities should normally arrive as extensions, tools, policies, workflows, or game-owned services instead of expanding the model/tool loop.
 
@@ -59,6 +59,8 @@ Download versioned package artifacts, Godot and Unity archives, or the portable 
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Media/OpenGameAgent.Media.csproj" />
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj" />
 </ItemGroup>
 ```
 
@@ -86,8 +88,8 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - lazy external-tool discovery and large-result artifact spill;
 - Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
 - image, audio, and video generation through replaceable APIs;
-- crash-aware generated-asset materialization and authoritative engine import.
-- append-only traces, observation-only playback, and offline CI evaluation.
+- crash-aware generated-asset materialization and authoritative engine import;
+- append-only traces, observation-only playback, and offline CI evaluation;
 - realtime speech with barge-in, background-agent handoff, and replaceable presentation behaviors.
 
 The runtime does **not** decide combat legality, inventory rules, economy changes, NPC permissions, or other business rules. The game exposes narrow tools, validates every requested mutation, performs it on the correct thread or server, and returns the authoritative receipt.
@@ -95,7 +97,7 @@ The runtime does **not** decide combat legality, inventory rules, economy change
 ## Architecture
 
 ```text
-Godot / Unity / .NET game server
+Godot / Unity / Unreal sidecar / .NET game server
         |
         | GameInput (bounded JSON + GameMoment)
         v
@@ -201,7 +203,7 @@ var input = new GameInput(
 var run = await runtime.RunAsync(input);
 ```
 
-See the buildable [living-world example](examples/OpenGameAgent.Example/Program.cs) and [Getting started](docs/getting-started.md).
+See the buildable [living-world example](examples/OpenGameAgent.Example/Program.cs), the offline [generated-asset example](examples/OpenGameAgent.GeneratedAssets.Example/Program.cs), and [Getting started](docs/getting-started.md).
 
 ## Choose where it runs
 
