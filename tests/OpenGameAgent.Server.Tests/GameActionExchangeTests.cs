@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
 using Xunit;
 
@@ -276,6 +277,58 @@ public sealed class GameActionExchangeTests
         Assert.StartsWith("data: ", dataLine, StringComparison.Ordinal);
         Assert.Contains(intent.OperationId, dataLine, StringComparison.Ordinal);
         Assert.DoesNotContain("pair-owner-a", dataLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TypedClientClaimsReconcilesAndSettlesExternalActions()
+    {
+        var journal = new InMemoryGameActionJournal();
+        var intent = Intent("operation-typed-client");
+        await journal.ReserveAsync(intent, TestContext.Current.CancellationToken);
+        Assert.Equal(
+            GameActionDispatchClaimStatus.Claimed,
+            (await journal.ClaimDispatchAsync(intent.OperationId, TestContext.Current.CancellationToken)).Status);
+        await using var app = await CreateAppAsync(journal, new PairingAuthenticator(), new OwnerAuthorizer());
+        using var http = app.GetTestClient();
+        var client = new ServerGameAgentClient(new ServerGameAgentClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+        var key = new GameSessionKey(intent.SessionId, intent.ActorId);
+
+        var claimed = Assert.Single(await client.ClaimActionsAsync(
+            key,
+            presentedCredential: "pair-owner-a",
+            cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(intent.OperationId, claimed.Intent.OperationId);
+        Assert.Equal(intent.ConflictKey, claimed.Intent.ConflictKey);
+        Assert.True(claimed.RequiresReconciliation);
+
+        var dispatched = await client.ReconcileActionAsync(
+            key,
+            intent.OperationId,
+            "pair-owner-a",
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(dispatched);
+        Assert.Equal("dispatched", dispatched.Status);
+
+        var stored = await client.SubmitActionReceiptAsync(
+            key,
+            intent.ExpectedRevision,
+            intent.GenerationId,
+            GameActionReceipt.Committed(intent, "{\"placed\":true}", 8),
+            "pair-owner-a",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(GameActionStatus.Committed, stored.Status);
+
+        var completed = await client.ReconcileActionAsync(
+            key,
+            intent.OperationId,
+            "pair-owner-a",
+            TestContext.Current.CancellationToken);
+        Assert.NotNull(completed);
+        Assert.Equal("completed", completed.Status);
+        Assert.False(completed.RequiresReconciliation);
+        Assert.Equal(GameActionStatus.Committed, completed.Receipt!.Status);
     }
 
     private static GameActionIntent Intent(string operationId) => new(

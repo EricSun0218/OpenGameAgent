@@ -1404,6 +1404,45 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task ExactControlCoordinatesRejectDelayedRequestsAndAcceptCurrentTurn()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new ScriptedProvider(async (_, _, cancellationToken) =>
+        {
+            entered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return Responses.Text("unreachable");
+        });
+        var agent = new Agent(new AgentOptions(provider, "test")
+        {
+            RunIdFactory = () => "run-current",
+        });
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        var active = Assert.IsType<AgentActiveRun>(agent.ActiveRun);
+        Assert.Equal("run-current", active.RunId);
+        Assert.Equal(1, active.Turn);
+        Assert.Equal(
+            AgentControlStatus.RunMismatch,
+            agent.TrySteer(AgentMessage.User("late", DateTimeOffset.UnixEpoch), "run-old", 1).Status);
+        Assert.Equal(
+            AgentControlStatus.TurnMismatch,
+            agent.TryAbort("run-current", 2).Status);
+        Assert.Equal(
+            AgentControlStatus.Accepted,
+            agent.TrySteer(AgentMessage.User("current", DateTimeOffset.UnixEpoch), "run-current", 1).Status);
+        Assert.Equal(AgentControlStatus.Accepted, agent.TryAbort("run-current", 1).Status);
+
+        Assert.Equal(
+            AgentRunStatus.Aborted,
+            (await run.WaitAsync(TestContext.Current.CancellationToken)).Status);
+        Assert.Null(agent.ActiveRun);
+        Assert.Equal(AgentControlStatus.Idle, agent.TryAbort("run-current", 1).Status);
+    }
+
+    [Fact]
     public async Task AbortCannotBeBlockedByAThrowingCancellationCallback()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1566,7 +1605,10 @@ public sealed class AgentLoopTests
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var agent = new Agent(new AgentOptions(ScriptedProvider.FromResponses(Responses.Text("done")), "test"));
+        var agent = new Agent(new AgentOptions(ScriptedProvider.FromResponses(Responses.Text("done")), "test")
+        {
+            RunIdFactory = () => "run-1",
+        });
         agent.Subscribe(async (value, _) =>
         {
             if (value.Kind == AgentEventKind.RunEnded)
@@ -1581,6 +1623,9 @@ public sealed class AgentLoopTests
 
         Assert.False(agent.TrySteer("too late"));
         Assert.False(agent.TryAbort());
+        Assert.Equal(
+            AgentControlStatus.ControlClosed,
+            agent.TryAbort("run-1", 1).Status);
         release.TrySetResult();
         await run;
     }

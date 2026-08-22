@@ -7,6 +7,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Runtime.Hosting\OpenGameAgent.Runtime.Hosting.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Runtime.Protocol\OpenGameAgent.Runtime.Protocol.csproj" />
     <ProjectReference Include="..\OpenGameAgent.Attachments\OpenGameAgent.Attachments.csproj" />
     <ProjectReference Include="..\OpenGameAgent.Attachments.Local\OpenGameAgent.Attachments.Local.csproj" />
     <ProjectReference Include="..\OpenGameAgent.Persistence\OpenGameAgent.Persistence.csproj" />

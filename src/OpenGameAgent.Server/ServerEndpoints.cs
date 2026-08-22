@@ -59,7 +59,8 @@ public static partial class ServerEndpoints
                 && !context.Request.Path.StartsWithSegments("/v1/usage")
                 && !context.Request.Path.StartsWithSegments("/v1/transcript")
                 && !context.Request.Path.StartsWithSegments("/v1/approvals")
-                && !context.Request.Path.StartsWithSegments("/v1/attachments"))
+                && !context.Request.Path.StartsWithSegments("/v1/attachments")
+                && !context.Request.Path.StartsWithSegments("/runtime/v1"))
             {
                 await next(context);
                 return;
@@ -113,6 +114,8 @@ public static partial class ServerEndpoints
         }
 
         endpoints.MapGet("/healthz", () => Results.Ok(new { status = "healthy" }));
+        var runtime = new GameRuntimeServerState();
+        MapGameRuntimeEndpoints(endpoints, runtime, maximumRequestBodyBytes);
         endpoints.MapGet("/v1/capabilities", () => Results.Ok(new
         {
             name = "OpenGameAgent",

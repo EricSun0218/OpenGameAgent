@@ -743,6 +743,29 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         return agent.TrySteer(message);
     }
 
+    public AgentControlResult TrySteer(
+        GameSessionKey key,
+        AgentMessage message,
+        string expectedRunId,
+        int expectedTurn)
+    {
+        key.EnsureValid(nameof(key));
+        if (message is null)
+        {
+            throw new ArgumentNullException(nameof(message));
+        }
+
+        Agent? agent;
+        lock (_activeAgentsGate)
+        {
+            _activeAgents.TryGetValue(key, out agent);
+        }
+
+        return agent is null
+            ? new AgentControlResult(AgentControlStatus.Idle)
+            : agent.TrySteer(message, expectedRunId, expectedTurn);
+    }
+
     /// <summary>
     /// Requests cancellation for an actor that is currently running.
     /// Returns false when the actor is idle.
@@ -762,6 +785,47 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
 
         return agent.TryAbort();
+    }
+
+    public AgentControlResult TryAbort(
+        GameSessionKey key,
+        string expectedRunId,
+        int expectedTurn)
+    {
+        key.EnsureValid(nameof(key));
+        Agent? agent;
+        lock (_activeAgentsGate)
+        {
+            _activeAgents.TryGetValue(key, out agent);
+        }
+
+        return agent is null
+            ? new AgentControlResult(AgentControlStatus.Idle)
+            : agent.TryAbort(expectedRunId, expectedTurn);
+    }
+
+    public AgentActiveRun? ReadActiveRun(GameSessionKey key)
+    {
+        key.EnsureValid(nameof(key));
+        Agent? agent;
+        lock (_activeAgentsGate)
+        {
+            _activeAgents.TryGetValue(key, out agent);
+        }
+
+        return agent?.ActiveRun;
+    }
+
+    public Task WaitForIdleAsync(GameSessionKey key)
+    {
+        key.EnsureValid(nameof(key));
+        Agent? agent;
+        lock (_activeAgentsGate)
+        {
+            _activeAgents.TryGetValue(key, out agent);
+        }
+
+        return agent?.WaitForIdleAsync() ?? Task.CompletedTask;
     }
 
     private async ValueTask<GameAgentRunResult> RunCoreAsync(

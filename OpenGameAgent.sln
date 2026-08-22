@@ -1,4 +1,4 @@
-﻿Microsoft Visual Studio Solution File, Format Version 12.00
+Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
@@ -143,6 +143,14 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Memory.Onnx", "src\OpenGameAgent.Memory.Onnx\OpenGameAgent.Memory.Onnx.csproj", "{360E6B90-621A-47BF-8DD1-81CCEA5A0A5F}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Memory.Onnx.Tests", "tests\OpenGameAgent.Memory.Onnx.Tests\OpenGameAgent.Memory.Onnx.Tests.csproj", "{591B657D-3BE6-4795-97F1-2D19CD522B55}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Runtime.Protocol", "src\OpenGameAgent.Runtime.Protocol\OpenGameAgent.Runtime.Protocol.csproj", "{10E05D66-DA10-484A-BE13-E9A4AA15B594}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Runtime.Protocol.Tests", "tests\OpenGameAgent.Runtime.Protocol.Tests\OpenGameAgent.Runtime.Protocol.Tests.csproj", "{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Runtime.Hosting", "src\OpenGameAgent.Runtime.Hosting\OpenGameAgent.Runtime.Hosting.csproj", "{A7645943-B42B-4C5B-8859-079CF7296B23}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Runtime.Hosting.Tests", "tests\OpenGameAgent.Runtime.Hosting.Tests\OpenGameAgent.Runtime.Hosting.Tests.csproj", "{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -422,6 +430,22 @@ Global
 		{591B657D-3BE6-4795-97F1-2D19CD522B55}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{591B657D-3BE6-4795-97F1-2D19CD522B55}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{591B657D-3BE6-4795-97F1-2D19CD522B55}.Release|Any CPU.Build.0 = Release|Any CPU
+		{10E05D66-DA10-484A-BE13-E9A4AA15B594}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{10E05D66-DA10-484A-BE13-E9A4AA15B594}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{10E05D66-DA10-484A-BE13-E9A4AA15B594}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{10E05D66-DA10-484A-BE13-E9A4AA15B594}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A7645943-B42B-4C5B-8859-079CF7296B23}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A7645943-B42B-4C5B-8859-079CF7296B23}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A7645943-B42B-4C5B-8859-079CF7296B23}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A7645943-B42B-4C5B-8859-079CF7296B23}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
@@ -475,5 +499,9 @@ Global
 		{D15B0AF0-C213-4A29-8A9E-2606A7561306} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 		{360E6B90-621A-47BF-8DD1-81CCEA5A0A5F} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{591B657D-3BE6-4795-97F1-2D19CD522B55} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{10E05D66-DA10-484A-BE13-E9A4AA15B594} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{A7645943-B42B-4C5B-8859-079CF7296B23} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 	EndGlobalSection
 EndGlobal

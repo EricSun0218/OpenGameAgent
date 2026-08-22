@@ -49,6 +49,7 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 - `OpenGameAgent.Media` routes image, audio, and video generation by provider/model capability while keeping generation jobs outside the text/tool protocol.
 - `OpenGameAgent.Connectors.Mcp` exposes external tool servers through one lazy, searchable tool by default. Direct tool exposure is an explicit opt-in.
 - Provider, persistence, engine, client, and server packages stay replaceable and do not change kernel semantics.
+- `OpenGameAgent.Runtime.Protocol` and `OpenGameAgent.Runtime.Hosting` optionally expose the same runtime through a versioned Session/Run/Turn/Item contract, bounded replay, and exact run/turn control. They are not Kernel dependencies; see [OpenGameAgent Runtime Protocol v1](runtime-protocol.md).
 
 `GameAgentBuilder` is the composition root. Extensions register prompt fragments, context, tools, skills, route rules, workflows, hooks, model providers, services, typed lifecycle events, and typed channels. Registration names are scoped and validated, extension state is namespaced inside the session, and the builder is one-shot so a running configuration cannot be mutated accidentally.
 

@@ -142,7 +142,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; per-input tool visibility; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy, high-risk execution approval and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, delegation, tracing, and durable parallel workflow graphs |
-| DevTools | Bounded JSONL recordings, provider/framework/host latency attribution, failure and durable-write metrics, concurrent benchmark harness, local observation-only HTML playback, and offline/CI evaluation rules |
+| DevTools | Bounded JSONL recordings, provider/framework/host latency attribution, failure and durable-write metrics, concurrent benchmark runtime, local observation-only HTML playback, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
@@ -153,6 +153,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, generated-asset jobs/resources, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
 | Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service with C# and native C++ clients |
+| Runtime protocol | Optional versioned Session/Run/Turn/Item contract, capability negotiation, stable event IDs, bounded replay/gap reconciliation, exact run/turn control, C# client, Schema/fixtures, and C++ DTOs |
 | Engines | Godot 4.7 .NET and Unity 6 in-process packages; Unreal Engine 5.8 native C++ sidecar plugin |
 
 Realtime speech is an optional layer rather than a second game-authority path. The realtime transport can converse or transcribe, and can request reversible gaze, gesture, expression, or movement presentation. Planning and durable world mutations are handed to the same `GameAgentRuntime` and game-owned tools used by non-voice inputs. Optional OpenAI and Volcengine adapters share this contract; the Volcengine adapter keeps dialogue/VAD and streaming TTS separate from the authoritative agent loop. See [Realtime conversations](docs/realtime-conversations.md).

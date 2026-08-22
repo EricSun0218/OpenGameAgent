@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>In-process host, canonical event projection, and bounded replay journal for the OpenGameAgent Runtime Protocol.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Runtime.Protocol\OpenGameAgent.Runtime.Protocol.csproj" />
+  </ItemGroup>
+</Project>

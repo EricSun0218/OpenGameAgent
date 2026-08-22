@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opengameagent.com/schemas/runtime/v1/runtime.schema.json",
+  "title": "OpenGameAgent Runtime Protocol v1",
+  "description": "Transport-neutral session/run/turn/item event and exact-control contract.",
+  "oneOf": [
+    { "$ref": "#/$defs/initializeRequest" },
+    { "$ref": "#/$defs/initializeResponse" },
+    { "$ref": "#/$defs/startRequest" },
+    { "$ref": "#/$defs/controlRequest" },
+    { "$ref": "#/$defs/controlResponse" },
+    { "$ref": "#/$defs/readEventsRequest" },
+    { "$ref": "#/$defs/eventEnvelope" },
+    { "$ref": "#/$defs/eventPage" }
+  ],
+  "$defs": {
+    "boundedId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "jsonText": {
+      "type": "string",
+      "maxLength": 8000000,
+      "description": "A string containing one valid JSON value. Consumers must parse it with maximum depth 128 and reject duplicate object properties."
+    },
+    "initializeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimumVersion", "maximumVersion", "capabilities"],
+      "properties": {
+        "minimumVersion": { "type": "integer", "minimum": 1 },
+        "maximumVersion": { "type": "integer", "minimum": 1 },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      }
+    },
+    "initializeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "capabilities", "serverName", "serverVersion"],
+      "properties": {
+        "version": { "const": 1 },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "serverName": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "serverVersion": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "startRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "inputJson"],
+      "properties": {
+        "requestId": { "$ref": "#/$defs/boundedId" },
+        "inputJson": { "$ref": "#/$defs/jsonText" }
+      }
+    },
+    "controlRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "actorId", "expectedRunId", "expectedTurnId", "expectedTurn"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/boundedId" },
+        "actorId": { "$ref": "#/$defs/boundedId" },
+        "expectedRunId": { "$ref": "#/$defs/boundedId" },
+        "expectedTurnId": { "$ref": "#/$defs/boundedId" },
+        "expectedTurn": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "messageJson": {
+          "oneOf": [
+            { "$ref": "#/$defs/jsonText" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "controlResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "activeRunId", "activeTurn", "accepted"],
+      "properties": {
+        "status": {
+          "enum": ["accepted", "idle", "runNotStarted", "runMismatch", "turnMismatch", "controlClosed", "unauthorized"]
+        },
+        "activeRunId": {
+          "oneOf": [
+            { "$ref": "#/$defs/boundedId" },
+            { "type": "null" }
+          ]
+        },
+        "activeTurn": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 1000000 },
+            { "type": "null" }
+          ]
+        },
+        "accepted": { "type": "boolean", "readOnly": true }
+      }
+    },
+    "readEventsRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "actorId", "afterSequence", "maximum"],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/boundedId" },
+        "actorId": { "$ref": "#/$defs/boundedId" },
+        "afterSequence": { "type": "integer", "minimum": 0 },
+        "maximum": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
+    "eventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion", "eventId", "sequence", "occurredAt", "sessionId", "actorId", "inputId",
+        "runId", "turn", "turnId", "itemId", "eventKind", "itemKind", "lifecycle", "name", "payloadJson", "terminal"
+      ],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "eventId": { "$ref": "#/$defs/boundedId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "sessionId": { "$ref": "#/$defs/boundedId" },
+        "actorId": { "$ref": "#/$defs/boundedId" },
+        "inputId": { "$ref": "#/$defs/boundedId" },
+        "runId": { "oneOf": [{ "$ref": "#/$defs/boundedId" }, { "type": "null" }] },
+        "turn": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 1000000 }, { "type": "null" }] },
+        "turnId": { "oneOf": [{ "$ref": "#/$defs/boundedId" }, { "type": "null" }] },
+        "itemId": { "oneOf": [{ "$ref": "#/$defs/boundedId" }, { "type": "null" }] },
+        "eventKind": { "enum": ["run", "turn", "item", "result", "gap", "heartbeat"] },
+        "itemKind": {
+          "oneOf": [
+            { "enum": ["message", "tool", "action", "approval", "interaction", "artifact", "delegation", "plan", "media", "status"] },
+            { "type": "null" }
+          ]
+        },
+        "lifecycle": { "enum": ["started", "delta", "completed"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "payloadJson": { "$ref": "#/$defs/jsonText" },
+        "terminal": { "type": "boolean" }
+      }
+    },
+    "eventPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId", "actorId", "requestedAfterSequence", "firstRetainedSequence", "lastSequence",
+        "nextAfterSequence", "gap", "events"
+      ],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/boundedId" },
+        "actorId": { "$ref": "#/$defs/boundedId" },
+        "requestedAfterSequence": { "type": "integer", "minimum": 0 },
+        "firstRetainedSequence": { "type": "integer", "minimum": 0 },
+        "lastSequence": { "type": "integer", "minimum": 0 },
+        "nextAfterSequence": { "type": "integer", "minimum": 0 },
+        "gap": { "type": "boolean" },
+        "events": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/eventEnvelope" }
+        }
+      }
+    }
+  }
+}

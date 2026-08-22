@@ -14,8 +14,16 @@
       "project": "src/OpenGameAgent.ProviderTransport/OpenGameAgent.ProviderTransport.csproj"
     },
     {
+      "id": "OpenGameAgent.Runtime.Protocol",
+      "project": "src/OpenGameAgent.Runtime.Protocol/OpenGameAgent.Runtime.Protocol.csproj"
+    },
+    {
       "id": "OpenGameAgent",
       "project": "src/OpenGameAgent/OpenGameAgent.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Runtime.Hosting",
+      "project": "src/OpenGameAgent.Runtime.Hosting/OpenGameAgent.Runtime.Hosting.csproj"
     },
     {
       "id": "OpenGameAgent.Realtime",
@@ -24,6 +32,10 @@
     {
       "id": "OpenGameAgent.Memory",
       "project": "src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj"
+    },
+    {
+      "id": "OpenGameAgent.Memory.Onnx",
+      "project": "src/OpenGameAgent.Memory.Onnx/OpenGameAgent.Memory.Onnx.csproj"
     },
     {
       "id": "OpenGameAgent.Models",

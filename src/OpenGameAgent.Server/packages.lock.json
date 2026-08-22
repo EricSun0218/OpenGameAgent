@@ -95,6 +95,19 @@
       },
       "opengameagent.providertransport": {
         "type": "Project"
+      },
+      "opengameagent.runtime.hosting": {
+        "type": "Project",
+        "dependencies": {
+          "OpenGameAgent": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Runtime.Protocol": "[0.3.0-alpha.2, )"
+        }
+      },
+      "opengameagent.runtime.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "System.Text.Json": "[8.0.6, )"
+        }
       }
     }
   }

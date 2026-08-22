@@ -2,15 +2,6 @@
   "version": 1,
   "dependencies": {
     "net8.0": {
-      "Microsoft.AspNetCore.TestHost": {
-        "type": "Direct",
-        "requested": "[8.0.30, )",
-        "resolved": "8.0.30",
-        "contentHash": "Bqi+1PttTehAGGJj6+ovmm3rmRRGTjLdjBIkCudkjIwXGbhYIJzREPzMd2o/ljaIAmV92LxLyUW3jcOvGDEQbw==",
-        "dependencies": {
-          "System.IO.Pipelines": "8.0.0"
-        }
-      },
       "Microsoft.NET.Test.Sdk": {
         "type": "Direct",
         "requested": "[18.8.1, )",
@@ -121,39 +112,10 @@
           "System.Security.Principal.Windows": "5.0.0"
         }
       },
-      "SkiaSharp": {
-        "type": "Transitive",
-        "resolved": "4.150.1",
-        "contentHash": "5v3T8X1N62Dp+AkPO70GNBNS/NRBPGMOTiN+Prg33sZAcm/Ug3YOAH+3RTj/jxJV8NGTJs2idGpC2Qdae2mGLQ==",
-        "dependencies": {
-          "SkiaSharp.NativeAssets.Win32": "4.150.1",
-          "SkiaSharp.NativeAssets.macOS": "4.150.1"
-        }
-      },
-      "SkiaSharp.NativeAssets.Linux.NoDependencies": {
-        "type": "Transitive",
-        "resolved": "4.150.1",
-        "contentHash": "2KVadgDky2xQw7lEMRT/u0ftX5K1u8X7MhCN47Em22Z6VM6JJg1c9cwfGuSPAt1oY6+GjGHH18vkeev+nqT9Kw=="
-      },
-      "SkiaSharp.NativeAssets.macOS": {
-        "type": "Transitive",
-        "resolved": "4.150.1",
-        "contentHash": "r755HVwaHZhyf1clWjrM2/RoOZYCzkQEmE9pu/mVsebPejWu52niNPUwtfyf112qoF0PIk6OndqVOUoITj6TwQ=="
-      },
-      "SkiaSharp.NativeAssets.Win32": {
-        "type": "Transitive",
-        "resolved": "4.150.1",
-        "contentHash": "qrLSL8OonbkMJdSH8heK0Jl39Y2xxZGdd7Ru4cyBXk2ITdx+Fu1sCFLmvCKmnMaYs//mlN/YSpSpOurEXErcQw=="
-      },
       "System.Collections.Immutable": {
         "type": "Transitive",
         "resolved": "8.0.0",
         "contentHash": "AurL6Y5BA1WotzlEvVaIDpqzpIPvYnnldxru8oXJU2yFxFUy3+pNXjXd1ymO+RA0rq0+590Q8gaz2l3Sr7fmqg=="
-      },
-      "System.IO.Pipelines": {
-        "type": "Transitive",
-        "resolved": "8.0.0",
-        "contentHash": "FHNOatmUq0sqJOkTx+UF/9YK1f180cnW5FVqnQMvYUN0elp6wFzbtPSiqbo1/ru8ICp43JM1i7kKkk6GsNGHlA=="
       },
       "System.Reflection.Metadata": {
         "type": "Transitive",
@@ -250,69 +212,12 @@
       "opengameagent.attachments": {
         "type": "Project"
       },
-      "opengameagent.attachments.local": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
-          "SkiaSharp": "[4.150.1, )",
-          "SkiaSharp.NativeAssets.Linux.NoDependencies": "[4.150.1, )"
-        }
-      },
-      "opengameagent.client": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Runtime.Protocol": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.extensions": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Models": "[0.3.0-alpha.2, )"
-        }
-      },
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
           "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
-      },
-      "opengameagent.media": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Models": "[0.3.0-alpha.2, )"
-        }
-      },
-      "opengameagent.models": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )"
-        }
-      },
-      "opengameagent.persistence": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Extensions": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Media": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.providers.openaicompatible": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.providertransport": {
-        "type": "Project"
       },
       "opengameagent.runtime.hosting": {
         "type": "Project",
@@ -325,18 +230,6 @@
         "type": "Project",
         "dependencies": {
           "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.server": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Attachments.Local": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Persistence": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Providers.OpenAICompatible": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Runtime.Hosting": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Runtime.Protocol": "[0.3.0-alpha.2, )"
         }
       }
     }

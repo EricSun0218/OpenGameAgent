@@ -18,6 +18,8 @@ This repository is a framework, not a game, world editor, content marketplace, o
 - `src/OpenGameAgent.Providers.Volcengine.Images`: Volcengine Ark/Seedream image generation/edit transport.
 - `src/OpenGameAgent.Media`: media model routing plus persistent generated-asset lifecycle contracts.
 - `src/OpenGameAgent.Client`: engine-compatible JSON/SSE service client.
+- `src/OpenGameAgent.Runtime.Protocol`: optional versioned, transport-neutral Session/Run/Turn/Item contract.
+- `src/OpenGameAgent.Runtime.Hosting`: optional in-process Runtime projection and bounded replay journal.
 - `src/OpenGameAgent.Server`: optional C# .NET 8 host.
 - `engines/godot`: Godot .NET package and tests.
 - `engines/unity`: Unity UPM package and tests.

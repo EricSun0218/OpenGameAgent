@@ -30,6 +30,65 @@ public enum AgentRunStatus
     KernelError,
 }
 
+public enum AgentControlStatus
+{
+    Accepted,
+    Idle,
+    RunNotStarted,
+    RunMismatch,
+    TurnMismatch,
+    ControlClosed,
+}
+
+public sealed class AgentActiveRun
+{
+    public AgentActiveRun(string runId, int turn)
+    {
+        if (string.IsNullOrWhiteSpace(runId) || runId.Length > 1_024 || runId.Any(char.IsControl))
+        {
+            throw new ArgumentException("A bounded run ID is required.", nameof(runId));
+        }
+
+        if (turn < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(turn));
+        }
+
+        RunId = runId;
+        Turn = turn;
+    }
+
+    public string RunId { get; }
+
+    public int Turn { get; }
+}
+
+public sealed class AgentControlResult
+{
+    public AgentControlResult(AgentControlStatus status, AgentActiveRun? activeRun = null)
+    {
+        if (!Enum.IsDefined(typeof(AgentControlStatus), status))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status));
+        }
+
+        if (status is AgentControlStatus.Accepted or AgentControlStatus.RunMismatch or AgentControlStatus.TurnMismatch
+            && activeRun is null)
+        {
+            throw new ArgumentException("This control result requires the active run coordinates.", nameof(activeRun));
+        }
+
+        Status = status;
+        ActiveRun = activeRun;
+    }
+
+    public AgentControlStatus Status { get; }
+
+    public AgentActiveRun? ActiveRun { get; }
+
+    public bool Accepted => Status == AgentControlStatus.Accepted;
+}
+
 public sealed class AgentEvent
 {
     internal AgentEvent(

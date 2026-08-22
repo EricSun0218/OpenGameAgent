@@ -73,15 +73,6 @@
       "opengameagent.attachments": {
         "type": "Project"
       },
-      "opengameagent.client": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Runtime.Protocol": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {

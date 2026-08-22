@@ -18,6 +18,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenGameAgent.Client\OpenGameAgent.Client.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Runtime.Protocol\OpenGameAgent.Runtime.Protocol.csproj" />
     <ProjectReference Include="..\..\src\OpenGameAgent.Server\OpenGameAgent.Server.csproj" />
   </ItemGroup>
 </Project>

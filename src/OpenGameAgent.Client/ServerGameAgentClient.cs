@@ -197,6 +197,18 @@ public sealed class ServerGameAgentClientOptions
 
     public string ApprovalResponsePath { get; set; } = "v1/approvals/respond";
 
+    public string CapabilitiesPath { get; set; } = "v1/capabilities";
+
+    public string UsagePath { get; set; } = "v1/usage";
+
+    public string ActionClaimPath { get; set; } = "v1/actions/claim";
+
+    public string ActionStreamPath { get; set; } = "v1/actions/stream";
+
+    public string ActionReceiptPath { get; set; } = "v1/actions/receipt";
+
+    public string ActionReconcilePath { get; set; } = "v1/actions/reconcile";
+
     public string? ApiKey { get; set; }
 
     public string ApiKeyHeader { get; set; } = "Authorization";
@@ -212,7 +224,7 @@ public sealed class ServerGameAgentClientOptions
     public int MaxRequestCharacters { get; set; } = 8_000_000;
 }
 
-public sealed class ServerGameAgentClient
+public sealed partial class ServerGameAgentClient
 {
     private readonly HttpClient _httpClient;
     private readonly Uri _runEndpoint;
@@ -223,6 +235,12 @@ public sealed class ServerGameAgentClient
     private readonly Uri _transcriptReadEndpoint;
     private readonly Uri _approvalListEndpoint;
     private readonly Uri _approvalResponseEndpoint;
+    private readonly Uri _capabilitiesEndpoint;
+    private readonly Uri _usageEndpoint;
+    private readonly Uri _actionClaimEndpoint;
+    private readonly Uri _actionStreamEndpoint;
+    private readonly Uri _actionReceiptEndpoint;
+    private readonly Uri _actionReconcileEndpoint;
     private readonly string? _apiKey;
     private readonly string _apiKeyHeader;
     private readonly string _apiKeyScheme;
@@ -310,6 +328,12 @@ public sealed class ServerGameAgentClient
             nameof(options.TranscriptReadPath));
         _approvalListEndpoint = CreateEndpoint(options.ServerBaseUri, options.ApprovalListPath, nameof(options.ApprovalListPath));
         _approvalResponseEndpoint = CreateEndpoint(options.ServerBaseUri, options.ApprovalResponsePath, nameof(options.ApprovalResponsePath));
+        _capabilitiesEndpoint = CreateEndpoint(options.ServerBaseUri, options.CapabilitiesPath, nameof(options.CapabilitiesPath));
+        _usageEndpoint = CreateEndpoint(options.ServerBaseUri, options.UsagePath, nameof(options.UsagePath));
+        _actionClaimEndpoint = CreateEndpoint(options.ServerBaseUri, options.ActionClaimPath, nameof(options.ActionClaimPath));
+        _actionStreamEndpoint = CreateEndpoint(options.ServerBaseUri, options.ActionStreamPath, nameof(options.ActionStreamPath));
+        _actionReceiptEndpoint = CreateEndpoint(options.ServerBaseUri, options.ActionReceiptPath, nameof(options.ActionReceiptPath));
+        _actionReconcileEndpoint = CreateEndpoint(options.ServerBaseUri, options.ActionReconcilePath, nameof(options.ActionReconcilePath));
         _apiKey = options.ApiKey;
         _apiKeyHeader = options.ApiKeyHeader;
         _apiKeyScheme = options.ApiKeyScheme ?? string.Empty;

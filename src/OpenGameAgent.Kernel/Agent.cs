@@ -37,6 +37,8 @@ public sealed class Agent
     private string? _error;
     private CancellationTokenSource? _activeCancellation;
     private Task<AgentRunResult>? _activeTask;
+    private string? _activeRunId;
+    private int _activeTurn;
 
     public Agent(AgentOptions options)
     {
@@ -224,6 +226,30 @@ public sealed class Agent
 
     public bool TrySteer(string text) => TrySteer(AgentMessage.User(text, _clock()));
 
+    /// <summary>
+    /// Queues steering only when the caller's run and turn coordinates still identify the active turn.
+    /// A delayed control request can therefore never steer a newer run.
+    /// </summary>
+    public AgentControlResult TrySteer(
+        AgentMessage message,
+        string expectedRunId,
+        int expectedTurn)
+    {
+        AgentValidator.ValidateMessage(message ?? throw new ArgumentNullException(nameof(message)), _limits);
+        ValidateControlCoordinates(expectedRunId, expectedTurn);
+        lock (_gate)
+        {
+            var state = ResolveControlState(expectedRunId, expectedTurn);
+            if (state.Status != AgentControlStatus.Accepted)
+            {
+                return state;
+            }
+
+            _steering.Enqueue(message);
+            return state;
+        }
+    }
+
     public void FollowUp(AgentMessage message)
     {
         AgentValidator.ValidateMessage(message ?? throw new ArgumentNullException(nameof(message)), _limits);
@@ -292,6 +318,54 @@ public sealed class Agent
         {
             // Cancellation was requested even though a callback failed.
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Requests cancellation only when the caller's run and turn coordinates still identify the
+    /// active turn. The returned coordinates are a snapshot and contain no transcript content.
+    /// </summary>
+    public AgentControlResult TryAbort(string expectedRunId, int expectedTurn)
+    {
+        ValidateControlCoordinates(expectedRunId, expectedTurn);
+        CancellationTokenSource? cancellation;
+        AgentControlResult state;
+        lock (_gate)
+        {
+            state = ResolveControlState(expectedRunId, expectedTurn);
+            if (state.Status != AgentControlStatus.Accepted)
+            {
+                return state;
+            }
+
+            cancellation = _activeCancellation;
+        }
+
+        try
+        {
+            cancellation?.Cancel();
+            return cancellation is null
+                ? new AgentControlResult(AgentControlStatus.ControlClosed, state.ActiveRun)
+                : state;
+        }
+        catch (ObjectDisposedException)
+        {
+            return new AgentControlResult(AgentControlStatus.ControlClosed, state.ActiveRun);
+        }
+        catch (AggregateException)
+        {
+            return state;
+        }
+    }
+
+    public AgentActiveRun? ActiveRun
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _activeRunId is null ? null : new AgentActiveRun(_activeRunId, _activeTurn);
+            }
         }
     }
 
@@ -464,6 +538,8 @@ public sealed class Agent
             _error = null;
             _pendingToolCallIds.Clear();
             _runSubscriberErrors.Clear();
+            _activeRunId = null;
+            _activeTurn = 0;
             var context = new AgentContext(_systemPrompt, _messages, _tools);
             var options = CreateLoopOptions();
             _activeTask = ExecuteRunAsync(operation, context, options, _activeCancellation);
@@ -509,6 +585,8 @@ public sealed class Agent
                 _pendingToolCallIds.Clear();
                 _activeCancellation = null;
                 _activeTask = null;
+                _activeRunId = null;
+                _activeTurn = 0;
             }
 
             cancellation.Dispose();
@@ -571,6 +649,16 @@ public sealed class Agent
             {
                 switch (agentEvent.Kind)
                 {
+                    case AgentEventKind.RunStarted:
+                        _activeRunId = agentEvent.RunId;
+                        _activeTurn = 0;
+                        break;
+
+                    case AgentEventKind.TurnStarted:
+                        _activeRunId = agentEvent.RunId;
+                        _activeTurn = agentEvent.Turn;
+                        break;
+
                     case AgentEventKind.MessageStarted:
                     case AgentEventKind.MessageUpdated:
                         if (agentEvent.Message?.Role == AgentRole.Assistant)
@@ -611,6 +699,7 @@ public sealed class Agent
                         _streamingMessage = null;
                         _streamingEvent = null;
                         _pendingToolCallIds.Clear();
+                        _acceptsActiveControl = false;
                         break;
                 }
 
@@ -659,6 +748,49 @@ public sealed class Agent
         if (_isRunning)
         {
             throw new InvalidOperationException("The agent is already running. Queue steering or follow-up input, or wait for it to become idle.");
+        }
+    }
+
+    private AgentControlResult ResolveControlState(string expectedRunId, int expectedTurn)
+    {
+        if (!_isRunning)
+        {
+            return new AgentControlResult(AgentControlStatus.Idle);
+        }
+
+        if (_activeRunId is null)
+        {
+            return new AgentControlResult(AgentControlStatus.RunNotStarted);
+        }
+
+        var active = new AgentActiveRun(_activeRunId, _activeTurn);
+        if (!string.Equals(_activeRunId, expectedRunId, StringComparison.Ordinal))
+        {
+            return new AgentControlResult(AgentControlStatus.RunMismatch, active);
+        }
+
+        if (_activeTurn != expectedTurn)
+        {
+            return new AgentControlResult(AgentControlStatus.TurnMismatch, active);
+        }
+
+        return !_acceptsActiveControl
+            ? new AgentControlResult(AgentControlStatus.ControlClosed, active)
+            : new AgentControlResult(AgentControlStatus.Accepted, active);
+    }
+
+    private void ValidateControlCoordinates(string expectedRunId, int expectedTurn)
+    {
+        if (string.IsNullOrWhiteSpace(expectedRunId)
+            || expectedRunId.Length > _limits.MaxSessionIdCharacters
+            || expectedRunId.Any(char.IsControl))
+        {
+            throw new ArgumentException("A bounded expected run ID is required.", nameof(expectedRunId));
+        }
+
+        if (expectedTurn < 1 || expectedTurn > _limits.MaxTurns)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedTurn));
         }
     }
 

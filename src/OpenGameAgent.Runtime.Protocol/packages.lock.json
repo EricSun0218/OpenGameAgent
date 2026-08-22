@@ -2,6 +2,20 @@
   "version": 1,
   "dependencies": {
     ".NETStandard,Version=v2.1": {
+      "System.Text.Json": {
+        "type": "Direct",
+        "requested": "[8.0.6, )",
+        "resolved": "8.0.6",
+        "contentHash": "BvSpVBsVN9b+Y+wONbvJOHd1HjXQf33+XiC28ZMOwRsYb42mz3Q8YHnpTSwpwJLqYCMqM+0UUVC3V+pi25XfkQ==",
+        "dependencies": {
+          "Microsoft.Bcl.AsyncInterfaces": "8.0.0",
+          "System.Buffers": "4.5.1",
+          "System.Memory": "4.5.5",
+          "System.Runtime.CompilerServices.Unsafe": "6.0.0",
+          "System.Text.Encodings.Web": "8.0.0",
+          "System.Threading.Tasks.Extensions": "4.5.4"
+        }
+      },
       "Microsoft.Bcl.AsyncInterfaces": {
         "type": "Transitive",
         "resolved": "8.0.0",
@@ -42,57 +56,12 @@
           "System.Runtime.CompilerServices.Unsafe": "6.0.0"
         }
       },
-      "System.Text.Json": {
-        "type": "Transitive",
-        "resolved": "8.0.6",
-        "contentHash": "BvSpVBsVN9b+Y+wONbvJOHd1HjXQf33+XiC28ZMOwRsYb42mz3Q8YHnpTSwpwJLqYCMqM+0UUVC3V+pi25XfkQ==",
-        "dependencies": {
-          "Microsoft.Bcl.AsyncInterfaces": "8.0.0",
-          "System.Buffers": "4.5.1",
-          "System.Memory": "4.5.5",
-          "System.Runtime.CompilerServices.Unsafe": "6.0.0",
-          "System.Text.Encodings.Web": "8.0.0",
-          "System.Threading.Tasks.Extensions": "4.5.4"
-        }
-      },
       "System.Threading.Tasks.Extensions": {
         "type": "Transitive",
         "resolved": "4.5.4",
         "contentHash": "zteT+G8xuGu6mS+mzDzYXbzS7rd3K6Fjb9RiZlYlJPam2/hU7JCBZBVEcywNuR+oZ1ncTvc/cq0faRr3P01OVg==",
         "dependencies": {
           "System.Runtime.CompilerServices.Unsafe": "4.5.3"
-        }
-      },
-      "opengameagent": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.attachments": {
-        "type": "Project"
-      },
-      "opengameagent.client": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.Runtime.Protocol": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.kernel": {
-        "type": "Project",
-        "dependencies": {
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
-          "System.Text.Json": "[8.0.6, )"
-        }
-      },
-      "opengameagent.runtime.protocol": {
-        "type": "Project",
-        "dependencies": {
-          "System.Text.Json": "[8.0.6, )"
         }
       }
     }

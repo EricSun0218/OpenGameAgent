@@ -11,6 +11,7 @@ using OpenGameAgent.Attachments;
 using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
 using OpenGameAgent.Persistence;
+using OpenGameAgent.Runtime.Protocol;
 using Xunit;
 
 namespace OpenGameAgent.Server.Tests;
@@ -1430,6 +1431,323 @@ public sealed class ServerTests
         Assert.Contains("transcript_message_too_large", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RuntimeClientNegotiatesStreamsAndReplaysWithoutRerunning()
+    {
+        var provider = new StreamingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
+        await using var app = await CreateAppAsync(runtime);
+        using var http = app.GetTestClient();
+        var client = new GameRuntimeServerClient(new GameRuntimeServerClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+        var negotiated = await client.InitializeAsync(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(GameRuntimeProtocol.Version, negotiated.Version);
+        Assert.Contains("events.cursor.v1", negotiated.Capabilities);
+
+        var input = new GameInput(
+            "runtime-session",
+            "runtime-actor",
+            "chat",
+            "{\"text\":\"hello\"}",
+            new GameMoment("world", 1),
+            "runtime-input");
+        var firstEvents = new List<GameRuntimeEventEnvelope>();
+        var first = await client.StreamAsync(
+            input,
+            "request-1",
+            (value, _) =>
+            {
+                firstEvents.Add(value);
+                return default;
+            },
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(first.Terminal);
+        Assert.NotNull(first.LastEventId);
+        Assert.True(firstEvents.Count > 3);
+        Assert.True(firstEvents[^1].Terminal);
+        Assert.Equal(1, provider.Calls);
+        Assert.Equal(firstEvents.Count, firstEvents.Select(value => value.EventId).Distinct().Count());
+
+        var replayed = new List<GameRuntimeEventEnvelope>();
+        var replay = await client.StreamAsync(
+            input,
+            "request-1",
+            (value, _) =>
+            {
+                replayed.Add(value);
+                return default;
+            },
+            lastEventId: firstEvents[1].EventId,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(replay.Terminal);
+        Assert.Equal(firstEvents.Skip(2).Select(value => value.EventId), replayed.Select(value => value.EventId));
+        Assert.Equal(1, provider.Calls);
+
+        var page = await client.ReadEventsAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(page.Gap);
+        Assert.Equal(page.LastSequence, page.NextAfterSequence);
+        Assert.True(page.Events[^1].Terminal);
+    }
+
+    [Fact]
+    public async Task TypedClientReadsServerCapabilitiesAndCompleteUsage()
+    {
+        await using var app = await CreateAppAsync();
+        using var http = app.GetTestClient();
+        var client = new ServerGameAgentClient(new ServerGameAgentClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+        var capabilities = await client.ReadCapabilitiesAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("OpenGameAgent", capabilities.Name);
+        Assert.Equal("1", capabilities.ProtocolVersion);
+
+        var input = new GameInput(
+            "usage-client-session",
+            "usage-client-actor",
+            "chat",
+            "{}",
+            new GameMoment("world", 1),
+            "usage-client-input");
+        Assert.True((await client.RunAsync(input, TestContext.Current.CancellationToken)).Succeeded);
+        var usage = await client.ReadUsageAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, usage.TotalTokens);
+        Assert.Equal(1, usage.TotalRecordCount);
+        Assert.False(usage.CostKnown);
+        Assert.Null(usage.TotalCost);
+    }
+
+    [Fact]
+    public async Task RuntimeStreamForANewInputDoesNotReplayAnOlderRunTerminal()
+    {
+        var provider = new StreamingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
+        await using var app = await CreateAppAsync(runtime);
+        using var http = app.GetTestClient();
+        var client = new GameRuntimeServerClient(new GameRuntimeServerClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+        var first = new GameInput(
+            "shared-session",
+            "shared-actor",
+            "chat",
+            "{}",
+            new GameMoment("world", 1),
+            "first-input");
+        Assert.True((await client.StreamAsync(
+            first,
+            "first-request",
+            (_, _) => default,
+            cancellationToken: TestContext.Current.CancellationToken)).Terminal);
+
+        var secondEvents = new List<GameRuntimeEventEnvelope>();
+        var second = new GameInput(
+            first.SessionId,
+            first.ActorId,
+            "chat",
+            "{}",
+            new GameMoment("world", 2),
+            "second-input");
+        var result = await client.StreamAsync(
+            second,
+            "second-request",
+            (value, _) =>
+            {
+                secondEvents.Add(value);
+                return default;
+            },
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(result.Terminal);
+        Assert.NotEmpty(secondEvents);
+        Assert.All(secondEvents, value => Assert.Equal(second.InputId, value.InputId));
+        Assert.Equal(2, provider.Calls);
+    }
+
+    [Fact]
+    public async Task RuntimeExactInterruptRejectsStaleCoordinatesAndSettlesTheRun()
+    {
+        var provider = new BlockingServerProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["autonomous"] = GameRouteDecision.Agent("typed"),
+            }),
+        });
+        await using var app = await CreateAppAsync(runtime);
+        using var http = app.GetTestClient();
+        var client = new GameRuntimeServerClient(new GameRuntimeServerClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+        var coordinate = new TaskCompletionSource<(string RunId, int Turn, string TurnId)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var input = new GameInput(
+            "interrupt-session",
+            "interrupt-actor",
+            "autonomous",
+            "{}",
+            new GameMoment("world", 1),
+            "interrupt-input");
+        var stream = client.StreamAsync(
+            input,
+            "interrupt-request",
+            (value, _) =>
+            {
+                if (value.RunId is not null && value.Turn is > 0 && value.TurnId is not null)
+                {
+                    coordinate.TrySetResult((value.RunId, value.Turn.Value, value.TurnId));
+                }
+
+                return default;
+            },
+            cancellationToken: TestContext.Current.CancellationToken);
+        await provider.FirstRequestStarted.Task;
+        var active = await coordinate.Task;
+
+        var stale = await client.InterruptAsync(
+            new GameRuntimeControlRequest(
+                input.SessionId,
+                input.ActorId,
+                active.RunId + "-stale",
+                "stale-turn",
+                active.Turn),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(GameRuntimeControlStatus.RunMismatch, stale.Status);
+
+        var staleTurn = await client.InterruptAsync(
+            new GameRuntimeControlRequest(
+                input.SessionId,
+                input.ActorId,
+                active.RunId,
+                active.TurnId + "-stale",
+                active.Turn),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(GameRuntimeControlStatus.TurnMismatch, staleTurn.Status);
+
+        var accepted = await client.InterruptAsync(
+            new GameRuntimeControlRequest(
+                input.SessionId,
+                input.ActorId,
+                active.RunId,
+                active.TurnId,
+                active.Turn),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(accepted.Accepted);
+        var result = await stream;
+        Assert.True(result.Terminal);
+    }
+
+    [Fact]
+    public async Task RuntimeAuthorizationRunsBeforeRuntimeStateAndPayloadCannotSelectAnotherOwner()
+    {
+        var provider = new StreamingProvider();
+        var store = new CountingGameSessionStore();
+        var key = new GameSessionKey("owned-runtime", "actor");
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            SessionStore = store,
+        });
+        var authorizer = new TestOwnerAuthorizer((subject, resource, operation) =>
+            subject == "owner-a"
+            && resource == key
+            && operation == GameAgentServerOperation.Stream);
+        await using var app = await CreateAppAsync(runtime, authorizer: authorizer);
+        using var http = app.GetTestClient();
+        var deniedInput = new GameInput(
+            "other-session",
+            key.ActorId,
+            "chat",
+            "{}",
+            new GameMoment("world", 1),
+            "denied-input");
+        var deniedBody = JsonSerializer.Serialize(new
+        {
+            requestId = "denied-request",
+            inputJson = GameAgentWire.SerializeInput(deniedInput),
+        });
+        using var denied = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/runtime/v1/run/stream",
+            "owner-a",
+            deniedBody);
+        using var deniedResponse = await http.SendAsync(denied, TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, deniedResponse.StatusCode);
+        Assert.Equal(0, store.LoadCalls);
+        Assert.Equal(0, store.SaveCalls);
+        Assert.Equal(0, provider.Calls);
+
+        http.DefaultRequestHeaders.Add("X-Test-Subject", "owner-a");
+        var client = new GameRuntimeServerClient(new GameRuntimeServerClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+        var allowed = await client.StreamAsync(
+            new GameInput(
+                key.SessionId,
+                key.ActorId,
+                "chat",
+                "{}",
+                new GameMoment("world", 1),
+                "allowed-input"),
+            "allowed-request",
+            (_, _) => default,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(allowed.Terminal);
+        Assert.True(store.LoadCalls > 0);
+        Assert.True(store.SaveCalls > 0);
+        Assert.Equal(1, provider.Calls);
+    }
+
+    [Fact]
+    public async Task RuntimeProjectionNeverLeaksReasoningOrToolDetailsToOwner()
+    {
+        var key = new GameSessionKey("runtime-audience", "actor");
+        var authorizer = new TestOwnerAuthorizer((subject, resource, _) =>
+            subject == "owner-a" && resource == key);
+        await using var app = await CreateAppAsync(
+            CreateAudienceRuntime(),
+            authorizer: authorizer,
+            audiencePolicy: CreateAudiencePolicy(GameAgentAudience.Owner));
+        using var http = app.GetTestClient();
+        var input = new GameInput(
+            key.SessionId,
+            key.ActorId,
+            "autonomous",
+            "{}",
+            new GameMoment("world", 1),
+            "runtime-audience-input");
+        var body = JsonSerializer.Serialize(new
+        {
+            requestId = "audience-request",
+            inputJson = GameAgentWire.SerializeInput(input),
+        });
+        using var request = CreateOwnedRequest(
+            HttpMethod.Post,
+            "/runtime/v1/run/stream",
+            "owner-a",
+            body);
+        using var response = await http.SendAsync(request, TestContext.Current.CancellationToken);
+        var stream = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+
+        response.EnsureSuccessStatusCode();
+        Assert.Contains("visible-answer", stream, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-reasoning", stream, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoning-signature", stream, StringComparison.Ordinal);
+        Assert.DoesNotContain("text-signature", stream, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-tool-result", stream, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-tool-details", stream, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-argument", stream, StringComparison.Ordinal);
+    }
+
     private static async Task<WebApplication> CreateAppAsync(
         string? apiKey = null,
         int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)
@@ -1641,10 +1959,15 @@ public sealed class ServerTests
 
     private sealed class StreamingProvider : IModelProvider
     {
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
         public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
             ModelRequest request,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
+            Interlocked.Increment(ref _calls);
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Yield();
             yield return ModelStreamEvent.Update(

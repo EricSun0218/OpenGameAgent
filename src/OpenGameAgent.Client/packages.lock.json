@@ -80,6 +80,12 @@
           "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
           "System.Text.Json": "[8.0.6, )"
         }
+      },
+      "opengameagent.runtime.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "System.Text.Json": "[8.0.6, )"
+        }
       }
     }
   }
