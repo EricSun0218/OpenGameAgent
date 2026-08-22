@@ -133,6 +133,7 @@ In-memory implementations are useful for tests and short-lived sessions. The `Op
 - game sessions;
 - append-only session histories with branches, lanes, records, and usage statistics;
 - action journals;
+- ordinary-tool run-operation journals with explicit replay/recovery policy;
 - workflow checkpoints;
 - memories;
 - mailboxes;

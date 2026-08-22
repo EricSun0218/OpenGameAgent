@@ -13,7 +13,7 @@ This file is the durable, source-independent ledger for accepted OpenGameAgent f
 
 | Priority | Capability | Status | Completion evidence |
 | --- | --- | --- | --- |
-| P0 | Durable run operation reducer for model attempts, replay-declared ordinary tools, queued control input, compaction, and usage settlement | Planned | Implementation, restart/corruption/concurrency tests, docs, full release gates |
+| P0 | Crash-safe ordinary-tool dispatch with stable operation IDs and explicit `Never` / `Safe` / `Recoverable` replay policy | Implemented; gates pending | `IGameRunOperationJournal`, in-memory/file stores, runtime execution hook, restart/corruption tests, architecture docs |
 | P1 | Restart-resumable delegation with lineage, lease/reclaim, continuation, bounded descendant listing, reports, inherited authority, and duplicate prevention | Planned | Persistence and restart tests, public API, docs, full release gates |
 | P1 | Provider-neutral visual observation projection with immutable originals, derived transforms, request budgets, deterministic selection, structured scene/BEV context, caching, and provenance | Planned | Projection tests, model-request integration, diagnostics, docs, full release gates |
 | P1 | Reconstructable model-visible context provenance for context, memory, skills, tools, compaction, images, route, provider/model, and artifacts | Planned | Trace/history schema, redaction tests, replay/eval integration, docs |
@@ -42,3 +42,5 @@ This file is the durable, source-independent ledger for accepted OpenGameAgent f
 | Runtime loading of model-generated self-modifying code | Rejected | It violates the game's authority and extension safety boundary. Signed, host-installed extensions remain supported. |
 | ACP bridge without a demonstrated consumer | Rejected for current scope | It adds a second agent protocol without improving the supported game-engine paths. Re-open only with a concrete interoperability consumer and acceptance tests. |
 | NuGet.org alpha.4 and matching GitHub Release publication | Paused | The user explicitly paused this path until the NuGet trusted-publishing Create-page bug is fixed. Source references and UPM/OpenUPM remain valid delivery paths. |
+| Persist and replay steer/follow-up messages against a replacement run after process restart | Rejected | Exact control is intentionally bound to the live `runId`/turn. Replaying it against a new run would violate the coordinate contract; reconnecting clients reconcile transcript/terminal state and issue a new follow-up. |
+| Add a second generic reducer for model attempts, compaction, or usage settlement | Superseded | Model attempts are retriable before canonical commit; compaction and usage already settle through durable session CAS and idempotent usage record IDs. The missing safety boundary was ordinary tool dispatch, now covered without duplicating those stores. |

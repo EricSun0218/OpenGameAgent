@@ -154,9 +154,12 @@ Provider credentials can be supplied directly, resolved from a game-owned creden
 - Local stores write through temporary files and replace the durable target. Processes using the same directory coordinate with cross-process file leases. They are still local save-store building blocks, not a distributed database; multi-host services need transactional shared storage and actor ownership.
 - Bounded limits protect strings, JSON, messages, turns, tokens, queues, tools, callbacks, progress, and concurrency.
 - Durable workflow checkpoints bind the workflow, session, actor, and canonical input. The same interrupted input can resume; a different input is rejected until the unfinished invocation is settled.
+- Optional ordinary-tool recovery uses `IGameRunOperationJournal`. The journal claims a stable operation before dispatch, persists terminal results, and applies each tool's `Never`, `Safe`, or `Recoverable` replay policy after a crash. Non-idempotent tools default to `Never`; read-only and idempotent tools default to `Safe`. `GameActionTool` explicitly uses recovery because its authoritative dispatcher owns the stronger intent/receipt journal.
 - The optional HTTP service accepts JSON only on mutation endpoints, bounds request bodies to 8 MB by default, and parses with a fixed depth limit.
 
 The framework cannot make arbitrary game code transactional. The game must make mutation handlers idempotent or recoverable at the operation-ID boundary.
+
+Model attempts remain safe to retry until a canonical assistant message is committed. Completed tool turns, compaction usage, and usage-ledger settlement already use idempotent session CAS records. Exact steer/abort coordinates are intentionally scoped to the live run: after a process restart, clients reconcile the terminal stream/transcript and submit a new follow-up rather than silently replaying a command addressed to an old run ID.
 
 Workflow checkpoints and game-state commits are also separate transactions unless the host supplies a shared transactional implementation. Every workflow node that can cause a side effect should use a stable operation ID and the durable action dispatcher. When several save forks remain accessible in one store, assign a new session/save namespace as well as a new timeline ID; transcript identity is `(session, actor)`.
 

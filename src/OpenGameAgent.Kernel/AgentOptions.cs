@@ -317,6 +317,76 @@ public sealed class AfterToolCallContext
     public AgentContext Context { get; }
 }
 
+public enum ToolExecutionDecisionKind
+{
+    Execute,
+    ReplayResult,
+    Recover,
+}
+
+/// <summary>
+/// Final execution-lifecycle context. It runs after validation and authorization, immediately
+/// before the tool executor is dispatched.
+/// </summary>
+public sealed class BeforeToolExecutionContext
+{
+    public BeforeToolExecutionContext(
+        string runId,
+        int turn,
+        int toolCallIndex,
+        ToolCallContent toolCall,
+        System.Text.Json.JsonElement arguments,
+        string? conflictKey,
+        ToolRisk risk,
+        ToolReplayPolicy replayPolicy,
+        AgentContext context)
+    {
+        RunId = string.IsNullOrWhiteSpace(runId)
+            ? throw new ArgumentException("A run ID is required.", nameof(runId))
+            : runId;
+        Turn = turn > 0 ? turn : throw new ArgumentOutOfRangeException(nameof(turn));
+        ToolCallIndex = toolCallIndex >= 0 ? toolCallIndex : throw new ArgumentOutOfRangeException(nameof(toolCallIndex));
+        ToolCall = toolCall ?? throw new ArgumentNullException(nameof(toolCall));
+        Arguments = arguments.Clone();
+        ConflictKey = conflictKey;
+        if (!Enum.IsDefined(typeof(ToolRisk), risk) || !Enum.IsDefined(typeof(ToolReplayPolicy), replayPolicy))
+        {
+            throw new ArgumentOutOfRangeException(nameof(risk));
+        }
+
+        Risk = risk;
+        ReplayPolicy = replayPolicy;
+        Context = context ?? throw new ArgumentNullException(nameof(context));
+    }
+
+    public string RunId { get; }
+    public int Turn { get; }
+    public int ToolCallIndex { get; }
+    public ToolCallContent ToolCall { get; }
+    public System.Text.Json.JsonElement Arguments { get; }
+    public string? ConflictKey { get; }
+    public ToolRisk Risk { get; }
+    public ToolReplayPolicy ReplayPolicy { get; }
+    public AgentContext Context { get; }
+}
+
+public sealed class ToolExecutionDecision
+{
+    private ToolExecutionDecision(ToolExecutionDecisionKind kind, ToolResult? result)
+    {
+        Kind = kind;
+        Result = result;
+    }
+
+    public ToolExecutionDecisionKind Kind { get; }
+    public ToolResult? Result { get; }
+
+    public static ToolExecutionDecision Execute() => new(ToolExecutionDecisionKind.Execute, null);
+    public static ToolExecutionDecision Recover() => new(ToolExecutionDecisionKind.Recover, null);
+    public static ToolExecutionDecision Replay(ToolResult result) =>
+        new(ToolExecutionDecisionKind.ReplayResult, result ?? throw new ArgumentNullException(nameof(result)));
+}
+
 public sealed class AgentHooks
 {
     public Func<IReadOnlyList<AgentMessage>, CancellationToken, ValueTask<IReadOnlyList<AgentMessage>>>? TransformContextAsync { get; set; }
@@ -334,6 +404,12 @@ public sealed class AgentHooks
     /// authorizer must allow the call. A blocked call never reaches the tool executor.
     /// </summary>
     public Func<AuthorizeToolCallContext, CancellationToken, ValueTask<ToolCallDecision?>>? AuthorizeToolCallAsync { get; set; }
+
+    /// <summary>
+    /// Optional durable execution boundary. It may replay a previously persisted result or request
+    /// the tool's recovery callback, but cannot rewrite validated arguments.
+    /// </summary>
+    public Func<BeforeToolExecutionContext, CancellationToken, ValueTask<ToolExecutionDecision?>>? BeforeToolExecutionAsync { get; set; }
 
     public Func<AfterToolCallContext, CancellationToken, ValueTask<ToolResult?>>? AfterToolCallAsync { get; set; }
 }

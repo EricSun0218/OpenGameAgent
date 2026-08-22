@@ -151,7 +151,7 @@ GameAgentRuntime
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览、OpenAI Images、火山方舟/Seedream，以及可选的 LocalAI 与可信 ComfyUI Workflow 适配器 |
 | 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
-| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、生成资产任务/资源、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
+| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端以及 C#、原生 C++ 客户端 |
 | Runtime 协议 | 可选的版本化 Session/Run/Turn/Item 契约、能力协商、稳定事件 ID、有界重放与 gap 对账、精确 Run/Turn 控制、C# 客户端、Schema/fixture 和 C++ DTO |

@@ -20,7 +20,7 @@ public sealed class PersistenceTests
                 AgentRole.User,
                 new AgentContent[]
                 {
-                    new TextContent("hello"),
+                    new TextContent("hello", "text-signature", AgentTextPhase.Commentary),
                     new JsonContent("{\"value\":1.25}"),
                     new ResourceContent("game://asset/1", "application/game-object", "object"),
                     new ImageAttachmentContent(new GameImageAttachment(
@@ -30,6 +30,7 @@ public sealed class PersistenceTests
                         32,
                         16,
                         "frame.png")),
+                    new BinaryContent(AgentMediaKind.Audio, "AQID", "audio/pcm", "voice.pcm"),
                 },
                 DateTimeOffset.UnixEpoch,
                 metadata: new Dictionary<string, string> { ["kind"] = "input" }),
@@ -38,12 +39,29 @@ public sealed class PersistenceTests
                 new AgentContent[]
                 {
                     new ReasoningContent("plan", "signature", redacted: true),
-                    new ToolCallContent("call", "move", "{\"x\":2.5}"),
+                    new ToolCallContent("call", "move", "{\"x\":2.5}", "tool-thought", "world"),
                 },
                 DateTimeOffset.UnixEpoch.AddSeconds(1),
                 model: "model",
                 stopReason: ModelStopReason.ToolUse,
-                usage: usage),
+                usage: new ModelUsage(
+                    10,
+                    4,
+                    3,
+                    2,
+                    reasoningTokens: 2,
+                    cacheWriteOneHourTokens: 1,
+                    cost: new ModelCost(0.1, 0.2, 0.03, 0.04, isKnown: true)),
+                provider: "provider",
+                api: "responses",
+                responseModel: "resolved-model",
+                responseId: "response-1",
+                rawStopReason: "tool_calls",
+                endTurn: false,
+                diagnostics: new[]
+                {
+                    new ModelDiagnostic("compat", "provider normalized", ModelDiagnosticSeverity.Warning, "{\"field\":\"stop\"}"),
+                }),
             new(
                 AgentRole.Tool,
                 new AgentContent[] { new JsonContent("{\"committed\":true}") },
@@ -51,7 +69,24 @@ public sealed class PersistenceTests
                 toolCallId: "call",
                 toolName: "move",
                 detailsJson: "{\"revision\":7}",
-                usage: new ModelUsage(2, 1)),
+                usage: new ModelUsage(2, 1),
+                addedToolNames: new[] { "inspect" }),
+            new(
+                AgentRole.Assistant,
+                new AgentContent[] { new TextContent("queued") },
+                DateTimeOffset.UnixEpoch.AddSeconds(3),
+                model: "model",
+                stopReason: ModelStopReason.Deferred,
+                provider: "provider",
+                api: "responses",
+                deferred: new DeferredModelHandle(
+                    "provider",
+                    "model",
+                    "responses",
+                    "deferred-1",
+                    DateTimeOffset.UnixEpoch.AddHours(1),
+                    250,
+                    "{\"queue\":2}")),
         };
         var store = new FileGameSessionStore(directory.Path);
         var saved = await store.SaveAsync(
@@ -64,17 +99,39 @@ public sealed class PersistenceTests
 
         Assert.True(saved.Saved);
         Assert.NotNull(loaded);
-        Assert.Equal(3, loaded.Messages.Count);
+        Assert.Equal(4, loaded.Messages.Count);
+        var text = Assert.IsType<TextContent>(loaded.Messages[0].Content[0]);
+        Assert.Equal("text-signature", text.Signature);
+        Assert.Equal(AgentTextPhase.Commentary, text.Phase);
         Assert.Equal("{\"value\":1.25}", Assert.IsType<JsonContent>(loaded.Messages[0].Content[1]).Json);
         var image = Assert.IsType<ImageAttachmentContent>(loaded.Messages[0].Content[3]).Attachment;
         Assert.Equal("sha256:0123456789abcdef", image.AttachmentId);
         Assert.Equal(32, image.Width);
         Assert.Equal("frame.png", image.Name);
+        var binary = Assert.IsType<BinaryContent>(loaded.Messages[0].Content[4]);
+        Assert.Equal(AgentMediaKind.Audio, binary.MediaKind);
+        Assert.Equal("AQID", binary.Data);
         Assert.Equal("signature", Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Signature);
         Assert.True(Assert.IsType<ReasoningContent>(loaded.Messages[1].Content[0]).Redacted);
+        var toolCall = Assert.IsType<ToolCallContent>(loaded.Messages[1].Content[1]);
+        Assert.Equal("tool-thought", toolCall.ThoughtSignature);
+        Assert.Equal("world", toolCall.Namespace);
         Assert.Equal(10, loaded.Messages[1].Usage!.InputTokens);
+        Assert.Equal(2, loaded.Messages[1].Usage!.ReasoningTokens);
+        Assert.Equal(0.37, loaded.Messages[1].Usage!.Cost.Total, precision: 10);
+        Assert.True(loaded.Messages[1].Usage!.Cost.IsKnown);
+        Assert.Equal("provider", loaded.Messages[1].Provider);
+        Assert.Equal("responses", loaded.Messages[1].Api);
+        Assert.Equal("resolved-model", loaded.Messages[1].ResponseModel);
+        Assert.Equal("response-1", loaded.Messages[1].ResponseId);
+        Assert.Equal("tool_calls", loaded.Messages[1].RawStopReason);
+        Assert.False(loaded.Messages[1].EndTurn);
+        Assert.Equal("compat", Assert.Single(loaded.Messages[1].Diagnostics).Code);
         Assert.Equal("{\"revision\":7}", loaded.Messages[2].DetailsJson);
         Assert.Equal(3, loaded.Messages[2].Usage!.TotalTokens);
+        Assert.Equal("inspect", Assert.Single(loaded.Messages[2].AddedToolNames));
+        Assert.Equal("deferred-1", loaded.Messages[3].Deferred!.Id);
+        Assert.Equal(250, loaded.Messages[3].Deferred!.PollAfterMilliseconds);
         Assert.Equal(12, loaded.LastMoment!.Value.Tick);
     }
 

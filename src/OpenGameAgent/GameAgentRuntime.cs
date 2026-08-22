@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -261,6 +262,13 @@ public sealed class GameAgentRuntimeOptions
 
     public IGameSessionStore SessionStore { get; set; } = new InMemoryGameSessionStore();
 
+    /// <summary>
+    /// Optional durable lifecycle journal for ordinary tools. World-changing tools must continue to
+    /// use <see cref="DurableGameActionDispatcher"/>; this journal adds crash-safe replay policy for
+    /// read-only, idempotent, or explicitly recoverable non-action tools.
+    /// </summary>
+    public IGameRunOperationJournal? RunOperationJournal { get; set; }
+
     public IGameImageAttachmentStore? ImageAttachments { get; set; }
 
     public IGameContextProvider? ContextProvider { get; set; }
@@ -346,6 +354,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly string _instructions;
     private readonly IGameRoutePolicy _routePolicy;
     private readonly IGameSessionStore _sessionStore;
+    private readonly IGameRunOperationJournal? _runOperationJournal;
     private readonly IGameImageAttachmentStore? _imageAttachments;
     private readonly IGameContextProvider? _contextProvider;
     private readonly IGameSkillSource? _skillSource;
@@ -387,6 +396,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             ?? throw new ArgumentException("A route policy is required.", nameof(options));
         _sessionStore = options.SessionStore
             ?? throw new ArgumentException("A session store is required.", nameof(options));
+        _runOperationJournal = options.RunOperationJournal;
         _imageAttachments = options.ImageAttachments;
         _contextProvider = options.ContextProvider;
         _skillSource = options.SkillSource;
@@ -2131,6 +2141,54 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
         hooks = _extensions.ComposeHooks(extensionContext, hooks);
 
+        var runToolOperations = new ConcurrentDictionary<string, (string OperationId, ToolRisk Risk)>(StringComparer.Ordinal);
+        if (_runOperationJournal is not null && route == GameRouteKind.Agent)
+        {
+            var configuredBeforeToolExecution = hooks.BeforeToolExecutionAsync;
+            hooks.BeforeToolExecutionAsync = async (context, cancellationToken) =>
+            {
+                var configuredDecision = configuredBeforeToolExecution is null
+                    ? null
+                    : await configuredBeforeToolExecution(context, cancellationToken).ConfigureAwait(false);
+                if (configuredDecision is not null
+                    && configuredDecision.Kind != ToolExecutionDecisionKind.Execute)
+                {
+                    return configuredDecision;
+                }
+
+                var operationId = GameRunToolOperationIds.CreateV1(input, context);
+                var intent = new GameRunToolIntent(
+                    operationId,
+                    new GameSessionKey(input.SessionId, input.ActorId),
+                    input.InputId,
+                    context.Turn,
+                    context.ToolCallIndex,
+                    context.ToolCall.Name,
+                    context.Arguments.GetRawText(),
+                    context.Risk,
+                    context.ReplayPolicy);
+                var claim = await _runOperationJournal.ClaimToolAsync(intent, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The run-operation journal returned no tool claim.");
+                runToolOperations[RunToolKey(context.RunId, context.Turn, context.ToolCall.Id)] =
+                    (operationId, context.Risk);
+                return claim.Status switch
+                {
+                    GameRunToolClaimStatus.Execute => ToolExecutionDecision.Execute(),
+                    GameRunToolClaimStatus.Replay => ToolExecutionDecision.Replay(
+                        claim.Entry.Result ?? throw new InvalidOperationException("A replay claim did not contain a result.")),
+                    GameRunToolClaimStatus.Recover => ToolExecutionDecision.Recover(),
+                    _ => ToolExecutionDecision.Replay(new ToolResult(
+                        new AgentContent[]
+                        {
+                            new TextContent("The tool was already dispatched, and its outcome must be reconciled before it can run again."),
+                        },
+                        isError: true,
+                        outcomeUncertain: context.Risk != ToolRisk.ReadOnly,
+                        failureCategory: ToolFailureCategory.Conflict)),
+                };
+            };
+        }
+
         var configuredAfterToolCall = hooks.AfterToolCallAsync;
         hooks.AfterToolCallAsync = async (context, cancellationToken) =>
         {
@@ -2151,6 +2209,36 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
             using var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds);
             var persisted = await PersistToolImagesAsync(result, settlementCancellation.Token).ConfigureAwait(false);
+            if (_runOperationJournal is not null
+                && runToolOperations.TryGetValue(
+                    RunToolKey(context.RunId, context.Turn, context.ToolCall.Id),
+                    out var operation))
+            {
+                try
+                {
+                    var completed = await _runOperationJournal.CompleteToolAsync(
+                        operation.OperationId,
+                        persisted,
+                        settlementCancellation.Token).ConfigureAwait(false);
+                    if (completed.Completed)
+                    {
+                        runToolOperations.TryRemove(
+                            RunToolKey(context.RunId, context.Turn, context.ToolCall.Id),
+                            out _);
+                    }
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException
+                                                   || settlementCancellation.IsCancellationRequested)
+                {
+                    persisted = new ToolResult(
+                        new AgentContent[] { new TextContent("The tool result could not be committed to the run journal.") },
+                        isError: true,
+                        detailsJson: "{\"category\":\"run-journal-settlement\"}",
+                        outcomeUncertain: operation.Risk != ToolRisk.ReadOnly,
+                        failureCategory: ToolFailureCategory.Transient);
+                }
+            }
+
             if (cancellation is not null)
             {
                 throw cancellation;
@@ -2286,6 +2374,9 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
         return hooks;
     }
+
+    private static string RunToolKey(string runId, int turn, string toolCallId) =>
+        runId + "\u001f" + turn.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\u001f" + toolCallId;
 
     private async ValueTask<AgentContext> RefreshTurnContextAsync(
         GameInput input,
@@ -2879,6 +2970,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         ShouldStopAfterTurnAsync = value.ShouldStopAfterTurnAsync,
         PrepareNextTurnAsync = value.PrepareNextTurnAsync,
         BeforeToolCallAsync = value.BeforeToolCallAsync,
+        AuthorizeToolCallAsync = value.AuthorizeToolCallAsync,
+        BeforeToolExecutionAsync = value.BeforeToolExecutionAsync,
         AfterToolCallAsync = value.AfterToolCallAsync,
     };
 

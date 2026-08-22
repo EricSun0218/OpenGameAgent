@@ -1287,6 +1287,69 @@ public static class AgentLoop
         Task<ToolResult>? execution = null;
         try
         {
+            if (options.Hooks.BeforeToolExecutionAsync is not null)
+            {
+                var decision = await options.Hooks.BeforeToolExecutionAsync(
+                    new BeforeToolExecutionContext(
+                        runId,
+                        turn,
+                        prepared.Index,
+                        prepared.Call,
+                        prepared.Arguments,
+                        prepared.ConflictKey,
+                        prepared.Tool.Risk,
+                        prepared.Tool.ReplayPolicy,
+                        context),
+                    cancellationToken).ConfigureAwait(false);
+                if (decision?.Kind == ToolExecutionDecisionKind.ReplayResult)
+                {
+                    result = decision.Result
+                        ?? throw new InvalidOperationException("A replay decision requires a tool result.");
+                    uncertainSideEffect |= result.OutcomeUncertain;
+                    result = await ApplyAfterToolCallAsync(
+                        result,
+                        prepared,
+                        assistantMessage,
+                        runId,
+                        turn,
+                        context,
+                        options,
+                        limits,
+                        uncertainSideEffect,
+                        cancellationToken).ConfigureAwait(false);
+                    AgentValidator.ValidateToolResult(result, limits);
+                    return new ToolCallOutcome(prepared.Index, prepared.Call, result, result.OutcomeUncertain);
+                }
+
+                if (decision?.Kind == ToolExecutionDecisionKind.Recover)
+                {
+                    result = await prepared.Tool.RecoverAsync(
+                            prepared.Arguments,
+                            executionContext,
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                        ?? CreateToolError(
+                            "The dispatched tool outcome could not be recovered.",
+                            limits,
+                            uncertain: prepared.Tool.Risk != ToolRisk.ReadOnly,
+                            failureCategory: ToolFailureCategory.Conflict);
+                    uncertainSideEffect |= result.OutcomeUncertain;
+                    result = await ApplyAfterToolCallAsync(
+                        result,
+                        prepared,
+                        assistantMessage,
+                        runId,
+                        turn,
+                        context,
+                        options,
+                        limits,
+                        uncertainSideEffect,
+                        cancellationToken).ConfigureAwait(false);
+                    AgentValidator.ValidateToolResult(result, limits);
+                    return new ToolCallOutcome(prepared.Index, prepared.Call, result, result.OutcomeUncertain);
+                }
+            }
+
             using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             using var timeoutDelayCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             dispatched = true;
@@ -1354,32 +1417,18 @@ public static class AgentLoop
 
         await Task.WhenAll(progressToSettle).ConfigureAwait(false);
 
-        try
-        {
-            if (options.Hooks.AfterToolCallAsync is not null)
-            {
-                result = await options.Hooks.AfterToolCallAsync(
-                        new AfterToolCallContext(
-                            runId,
-                            turn,
-                            assistantMessage,
-                            prepared.Call,
-                            prepared.Arguments,
-                            result,
-                            context),
-                        cancellationToken).ConfigureAwait(false)
-                    ?? result;
-                uncertainSideEffect |= result.OutcomeUncertain;
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception exception)
-        {
-            uncertainSideEffect |= prepared.Tool.Risk != ToolRisk.ReadOnly;
-            result = CreateToolError(exception.Message, limits, uncertain: uncertainSideEffect);
-        }
+        result = await ApplyAfterToolCallAsync(
+            result,
+            prepared,
+            assistantMessage,
+            runId,
+            turn,
+            context,
+            options,
+            limits,
+            uncertainSideEffect,
+            cancellationToken).ConfigureAwait(false);
+        uncertainSideEffect |= result.OutcomeUncertain;
 
         try
         {
@@ -1395,6 +1444,48 @@ public static class AgentLoop
         }
 
         return new ToolCallOutcome(prepared.Index, prepared.Call, result, uncertainSideEffect);
+    }
+
+    private static async Task<ToolResult> ApplyAfterToolCallAsync(
+        ToolResult result,
+        PreparedToolCall prepared,
+        AgentMessage assistantMessage,
+        string runId,
+        int turn,
+        AgentContext context,
+        AgentLoopOptions options,
+        AgentLimits limits,
+        bool uncertainSideEffect,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (options.Hooks.AfterToolCallAsync is not null)
+            {
+                return await options.Hooks.AfterToolCallAsync(
+                        new AfterToolCallContext(
+                            runId,
+                            turn,
+                            assistantMessage,
+                            prepared.Call,
+                            prepared.Arguments,
+                            result,
+                            context),
+                        cancellationToken).ConfigureAwait(false)
+                    ?? result;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return result;
+        }
+        catch (Exception exception)
+        {
+            uncertainSideEffect |= prepared.Tool.Risk != ToolRisk.ReadOnly;
+            return CreateToolError(exception.Message, limits, uncertain: uncertainSideEffect);
+        }
+
+        return result;
     }
 
     private static async Task CompleteProgressAsync(

@@ -1221,46 +1221,54 @@ public static class GameActionTool
         }
 
         var definition = new ToolDefinition(action, description, inputSchemaJson);
+        async ValueTask<ToolResult> ExecuteAsync(
+            JsonElement arguments,
+            ToolExecutionContext execution,
+            CancellationToken cancellationToken)
+        {
+            var operationId = operationIdFactory is null
+                ? GameActionOperationIds.CreateV2(
+                    input,
+                    action,
+                    execution,
+                    generationId)
+                : GameJson.RequireId(operationIdFactory(input, arguments, execution), nameof(operationIdFactory));
+            var intent = new GameActionIntent(
+                operationId: operationId,
+                inputId: input.InputId,
+                sessionId: input.SessionId,
+                actorId: input.ActorId,
+                action: action,
+                argumentsJson: arguments.GetRawText(),
+                moment: input.Moment,
+                expectedRevision: expectedRevision,
+                generationId: generationId,
+                conflictKey: execution.ConflictKey);
+            var dispatch = await dispatcher.ExecuteDetailedAsync(intent, cancellationToken).ConfigureAwait(false);
+            var receipt = dispatch.Receipt;
+            var json = JsonSerializer.Serialize(new ReceiptPayload(dispatch), ReceiptJsonOptions);
+            return new ToolResult(
+                new AgentContent[] { new JsonContent(json) },
+                isError: !receipt.Succeeded,
+                detailsJson: json,
+                outcomeUncertain: receipt.Status == GameActionStatus.Uncertain,
+                failureCategory: receipt.Status switch
+                {
+                    GameActionStatus.Committed => ToolFailureCategory.None,
+                    GameActionStatus.Rejected => ToolFailureCategory.RuleRejected,
+                    GameActionStatus.Uncertain => ToolFailureCategory.Transient,
+                    _ => ToolFailureCategory.Unspecified,
+                });
+        }
+
         return new AgentTool(
             definition,
-            async (arguments, execution, cancellationToken) =>
-            {
-                var operationId = operationIdFactory is null
-                    ? GameActionOperationIds.CreateV2(
-                        input,
-                        action,
-                        execution,
-                        generationId)
-                    : GameJson.RequireId(operationIdFactory(input, arguments, execution), nameof(operationIdFactory));
-                var intent = new GameActionIntent(
-                    operationId: operationId,
-                    inputId: input.InputId,
-                    sessionId: input.SessionId,
-                    actorId: input.ActorId,
-                    action: action,
-                    argumentsJson: arguments.GetRawText(),
-                    moment: input.Moment,
-                    expectedRevision: expectedRevision,
-                    generationId: generationId,
-                    conflictKey: execution.ConflictKey);
-                var dispatch = await dispatcher.ExecuteDetailedAsync(intent, cancellationToken).ConfigureAwait(false);
-                var receipt = dispatch.Receipt;
-                var json = JsonSerializer.Serialize(new ReceiptPayload(dispatch), ReceiptJsonOptions);
-                return new ToolResult(
-                    new AgentContent[] { new JsonContent(json) },
-                    isError: !receipt.Succeeded,
-                    detailsJson: json,
-                    outcomeUncertain: receipt.Status == GameActionStatus.Uncertain,
-                    failureCategory: receipt.Status switch
-                    {
-                        GameActionStatus.Committed => ToolFailureCategory.None,
-                        GameActionStatus.Rejected => ToolFailureCategory.RuleRejected,
-                        GameActionStatus.Uncertain => ToolFailureCategory.Transient,
-                        _ => ToolFailureCategory.Unspecified,
-                    });
-            },
+            ExecuteAsync,
             risk,
-            conflictKey: conflictKey);
+            conflictKey: conflictKey,
+            replayPolicy: ToolReplayPolicy.Recoverable,
+            recover: async (arguments, execution, cancellationToken) =>
+                await ExecuteAsync(arguments, execution, cancellationToken).ConfigureAwait(false));
     }
 
     private static readonly JsonSerializerOptions ReceiptJsonOptions = new()

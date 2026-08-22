@@ -22,6 +22,18 @@ public enum ToolExecutionMode
     Parallel,
 }
 
+/// <summary>
+/// Declares how an ordinary tool call may be handled after a crash left a durable dispatch record
+/// without a terminal result. Authoritative game actions should keep using their action journal;
+/// this policy covers other tools that opt into the run-operation journal.
+/// </summary>
+public enum ToolReplayPolicy
+{
+    Never,
+    Safe,
+    Recoverable,
+}
+
 public enum ToolConstrainedSamplingKind
 {
     JsonSchema,
@@ -293,6 +305,7 @@ public sealed class ToolExecutionContext
 public sealed class AgentTool
 {
     private readonly Func<JsonElement, ToolExecutionContext, CancellationToken, ValueTask<ToolResult>> _execute;
+    private readonly Func<JsonElement, ToolExecutionContext, CancellationToken, ValueTask<ToolResult?>>? _recover;
     private readonly Func<JsonElement, string?>? _validate;
     private readonly Func<JsonElement, string?>? _prepareArguments;
 
@@ -303,7 +316,9 @@ public sealed class AgentTool
         ToolExecutionMode? executionMode = null,
         Func<JsonElement, string?>? validate = null,
         Func<JsonElement, string?>? conflictKey = null,
-        Func<JsonElement, string?>? prepareArguments = null)
+        Func<JsonElement, string?>? prepareArguments = null,
+        ToolReplayPolicy? replayPolicy = null,
+        Func<JsonElement, ToolExecutionContext, CancellationToken, ValueTask<ToolResult?>>? recover = null)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
         _execute = execute ?? throw new ArgumentNullException(nameof(execute));
@@ -320,6 +335,21 @@ public sealed class AgentTool
 
         Risk = risk;
         ExecutionMode = executionMode;
+        var effectiveReplayPolicy = replayPolicy ?? (risk == ToolRisk.NonIdempotentWrite
+            ? ToolReplayPolicy.Never
+            : ToolReplayPolicy.Safe);
+        if (!Enum.IsDefined(typeof(ToolReplayPolicy), effectiveReplayPolicy))
+        {
+            throw new ArgumentOutOfRangeException(nameof(replayPolicy));
+        }
+
+        if (effectiveReplayPolicy == ToolReplayPolicy.Recoverable && recover is null)
+        {
+            throw new ArgumentException("A recoverable tool requires a recovery callback.", nameof(recover));
+        }
+
+        ReplayPolicy = effectiveReplayPolicy;
+        _recover = recover;
         _validate = validate;
         _prepareArguments = prepareArguments;
         ConflictKey = conflictKey;
@@ -330,6 +360,8 @@ public sealed class AgentTool
     public ToolRisk Risk { get; }
 
     public ToolExecutionMode? ExecutionMode { get; }
+
+    public ToolReplayPolicy ReplayPolicy { get; }
 
     public Func<JsonElement, string?>? ConflictKey { get; }
 
@@ -353,6 +385,14 @@ public sealed class AgentTool
         ToolExecutionContext context,
         CancellationToken cancellationToken) =>
         _execute(arguments, context, cancellationToken);
+
+    internal ValueTask<ToolResult?> RecoverAsync(
+        JsonElement arguments,
+        ToolExecutionContext context,
+        CancellationToken cancellationToken) =>
+        _recover is null
+            ? new ValueTask<ToolResult?>((ToolResult?)null)
+            : _recover(arguments, context, cancellationToken);
 }
 
 public sealed class ToolCallDecision

@@ -21,7 +21,9 @@ public static class GameAgentValueComparer
         return (left, right) switch
         {
             (TextContent first, TextContent second) =>
-                string.Equals(first.Text, second.Text, StringComparison.Ordinal),
+                string.Equals(first.Text, second.Text, StringComparison.Ordinal)
+                && string.Equals(first.Signature, second.Signature, StringComparison.Ordinal)
+                && first.Phase == second.Phase,
             (JsonContent first, JsonContent second) =>
                 string.Equals(first.Json, second.Json, StringComparison.Ordinal),
             (ReasoningContent first, ReasoningContent second) =>
@@ -38,10 +40,17 @@ public static class GameAgentValueComparer
                 && first.Attachment.Width == second.Attachment.Width
                 && first.Attachment.Height == second.Attachment.Height
                 && string.Equals(first.Attachment.Name, second.Attachment.Name, StringComparison.Ordinal),
+            (BinaryContent first, BinaryContent second) =>
+                first.MediaKind == second.MediaKind
+                && string.Equals(first.Data, second.Data, StringComparison.Ordinal)
+                && string.Equals(first.MediaType, second.MediaType, StringComparison.Ordinal)
+                && string.Equals(first.Name, second.Name, StringComparison.Ordinal),
             (ToolCallContent first, ToolCallContent second) =>
                 string.Equals(first.Id, second.Id, StringComparison.Ordinal)
                 && string.Equals(first.Name, second.Name, StringComparison.Ordinal)
-                && string.Equals(first.ArgumentsJson, second.ArgumentsJson, StringComparison.Ordinal),
+                && string.Equals(first.ArgumentsJson, second.ArgumentsJson, StringComparison.Ordinal)
+                && string.Equals(first.ThoughtSignature, second.ThoughtSignature, StringComparison.Ordinal)
+                && string.Equals(first.Namespace, second.Namespace, StringComparison.Ordinal),
             _ => false,
         };
     }
@@ -65,6 +74,15 @@ public static class GameAgentValueComparer
             && string.Equals(left.Model, right.Model, StringComparison.Ordinal)
             && left.StopReason == right.StopReason
             && string.Equals(left.ErrorMessage, right.ErrorMessage, StringComparison.Ordinal)
+            && string.Equals(left.Provider, right.Provider, StringComparison.Ordinal)
+            && string.Equals(left.Api, right.Api, StringComparison.Ordinal)
+            && string.Equals(left.ResponseModel, right.ResponseModel, StringComparison.Ordinal)
+            && string.Equals(left.ResponseId, right.ResponseId, StringComparison.Ordinal)
+            && string.Equals(left.RawStopReason, right.RawStopReason, StringComparison.Ordinal)
+            && left.EndTurn == right.EndTurn
+            && DiagnosticsEqual(left.Diagnostics, right.Diagnostics)
+            && DeferredEquals(left.Deferred, right.Deferred)
+            && left.AddedToolNames.SequenceEqual(right.AddedToolNames, StringComparer.Ordinal)
             && UsageEquals(left.Usage, right.Usage)
             && DictionariesEqual(left.Metadata, right.Metadata)
             && MessagesContentEqual(left.Content, right.Content);
@@ -110,7 +128,36 @@ public static class GameAgentValueComparer
                 && left.InputTokens == right.InputTokens
                 && left.OutputTokens == right.OutputTokens
                 && left.CacheReadTokens == right.CacheReadTokens
-                && left.CacheWriteTokens == right.CacheWriteTokens;
+                && left.CacheWriteTokens == right.CacheWriteTokens
+                && left.ReasoningTokens == right.ReasoningTokens
+                && left.CacheWriteOneHourTokens == right.CacheWriteOneHourTokens
+                && left.Cost.IsKnown == right.Cost.IsKnown
+                && left.Cost.Input.Equals(right.Cost.Input)
+                && left.Cost.Output.Equals(right.Cost.Output)
+                && left.Cost.CacheRead.Equals(right.Cost.CacheRead)
+                && left.Cost.CacheWrite.Equals(right.Cost.CacheWrite);
+
+    private static bool DiagnosticsEqual(
+        IReadOnlyList<ModelDiagnostic> left,
+        IReadOnlyList<ModelDiagnostic> right) =>
+        left.Count == right.Count
+        && left.Zip(right, static (first, second) =>
+            string.Equals(first.Code, second.Code, StringComparison.Ordinal)
+            && string.Equals(first.Message, second.Message, StringComparison.Ordinal)
+            && first.Severity == second.Severity
+            && string.Equals(first.DataJson, second.DataJson, StringComparison.Ordinal)).All(equal => equal);
+
+    private static bool DeferredEquals(DeferredModelHandle? left, DeferredModelHandle? right) =>
+        left is null
+            ? right is null
+            : right is not null
+                && string.Equals(left.Provider, right.Provider, StringComparison.Ordinal)
+                && string.Equals(left.Model, right.Model, StringComparison.Ordinal)
+                && string.Equals(left.Api, right.Api, StringComparison.Ordinal)
+                && string.Equals(left.Id, right.Id, StringComparison.Ordinal)
+                && left.ExpiresAt == right.ExpiresAt
+                && left.PollAfterMilliseconds == right.PollAfterMilliseconds
+                && string.Equals(left.DataJson, right.DataJson, StringComparison.Ordinal);
 
     private static bool DictionariesEqual(
         IReadOnlyDictionary<string, string> left,

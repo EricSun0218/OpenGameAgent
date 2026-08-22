@@ -804,6 +804,7 @@ public sealed class Agent
             PrepareNextTurnAsync = hooks.PrepareNextTurnAsync,
             BeforeToolCallAsync = hooks.BeforeToolCallAsync,
             AuthorizeToolCallAsync = hooks.AuthorizeToolCallAsync,
+            BeforeToolExecutionAsync = hooks.BeforeToolExecutionAsync,
             AfterToolCallAsync = hooks.AfterToolCallAsync,
         };
     }
