@@ -255,6 +255,8 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                         .ToArray(),
                     classificationVisibleContentCharacters = value.Decision.Classification?.VisibleContentCharacters,
                     classificationReasoningCharacters = value.Decision.Classification?.ReasoningCharacters,
+                    classificationProviderStatusCode = value.Decision.Classification?.ProviderStatusCode,
+                    classificationProviderFailureCategory = value.Decision.Classification?.ProviderFailureCategory,
                     durationMilliseconds = value.Duration?.TotalMilliseconds,
                     modelDurationMilliseconds = value.ModelDuration?.TotalMilliseconds,
                 },

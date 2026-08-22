@@ -145,6 +145,8 @@ public sealed class GameAgentRunPerformance
         IReadOnlyList<string> routeClassificationContentKinds,
         long routeClassificationVisibleContentCharacters,
         long routeClassificationReasoningCharacters,
+        int? routeClassificationProviderStatusCode,
+        string? routeClassificationProviderFailureCategory,
         string? provider,
         string? model,
         string status,
@@ -167,6 +169,8 @@ public sealed class GameAgentRunPerformance
         RouteClassificationContentKinds = routeClassificationContentKinds;
         RouteClassificationVisibleContentCharacters = routeClassificationVisibleContentCharacters;
         RouteClassificationReasoningCharacters = routeClassificationReasoningCharacters;
+        RouteClassificationProviderStatusCode = routeClassificationProviderStatusCode;
+        RouteClassificationProviderFailureCategory = routeClassificationProviderFailureCategory;
         Provider = provider;
         Model = model;
         Status = status;
@@ -190,6 +194,8 @@ public sealed class GameAgentRunPerformance
     public IReadOnlyList<string> RouteClassificationContentKinds { get; }
     public long RouteClassificationVisibleContentCharacters { get; }
     public long RouteClassificationReasoningCharacters { get; }
+    public int? RouteClassificationProviderStatusCode { get; }
+    public string? RouteClassificationProviderFailureCategory { get; }
     public string? Provider { get; }
     public string? Model { get; }
     public string Status { get; }
@@ -394,7 +400,7 @@ public sealed class GameAgentPerformanceSummary
         foreach (var run in Runs)
         {
             text.AppendLine(
-                $"{run.SessionId}/{run.ActorId}/{run.InputId} route={run.Route} reason={run.RouteReason} classification={run.RouteClassificationStatus ?? "n/a"} classificationFailure={run.RouteClassificationFailure ?? "n/a"} routeFallback={run.RouteFallbackReason ?? "n/a"} classifierContent={string.Join(",", run.RouteClassificationContentKinds)} classifierVisibleChars={run.RouteClassificationVisibleContentCharacters} classifierReasoningChars={run.RouteClassificationReasoningCharacters} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
+                $"{run.SessionId}/{run.ActorId}/{run.InputId} route={run.Route} reason={run.RouteReason} classification={run.RouteClassificationStatus ?? "n/a"} classificationFailure={run.RouteClassificationFailure ?? "n/a"} routeFallback={run.RouteFallbackReason ?? "n/a"} classifierContent={string.Join(",", run.RouteClassificationContentKinds)} classifierVisibleChars={run.RouteClassificationVisibleContentCharacters} classifierReasoningChars={run.RouteClassificationReasoningCharacters} classifierProviderStatus={run.RouteClassificationProviderStatusCode?.ToString(CultureInfo.InvariantCulture) ?? "n/a"} classifierProviderFailure={run.RouteClassificationProviderFailureCategory ?? "n/a"} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
         }
 
         return text.ToString();
@@ -469,6 +475,8 @@ public sealed class GameAgentPerformanceSummary
             ReadStringArray(routeEntry, "classificationContentKinds"),
             ReadInt64(routeEntry is null ? null : ReadDetails(routeEntry), "classificationVisibleContentCharacters"),
             ReadInt64(routeEntry is null ? null : ReadDetails(routeEntry), "classificationReasoningCharacters"),
+            ReadNullableInt32(routeEntry is null ? null : ReadDetails(routeEntry), "classificationProviderStatusCode"),
+            ReadString(routeEntry, "classificationProviderFailureCategory"),
             ReadString(messageEnded, "provider"),
             ReadString(messageEnded, "responseModel") ?? ReadString(messageEnded, "requestedModel"),
             ReadString(completed, "status") ?? "Unknown",
@@ -679,6 +687,14 @@ public sealed class GameAgentPerformanceSummary
         && property.TryGetInt64(out var number)
             ? number
             : 0;
+
+    private static int? ReadNullableInt32(JsonElement? element, string name) =>
+        element is { ValueKind: JsonValueKind.Object } value
+        && value.TryGetProperty(name, out var property)
+        && property.ValueKind == JsonValueKind.Number
+        && property.TryGetInt32(out var number)
+            ? number
+            : null;
 
     private static bool ReadBoolean(GameAgentTraceEntry? entry, string name, bool defaultValue) =>
         entry is null ? defaultValue : ReadBoolean(ReadDetails(entry), name, defaultValue);

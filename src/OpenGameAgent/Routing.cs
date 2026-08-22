@@ -94,7 +94,9 @@ public sealed class GameRouteClassification
         string? fallbackReason = null,
         IReadOnlyList<AgentContentKind>? responseContentKinds = null,
         long visibleContentCharacters = 0,
-        long reasoningCharacters = 0)
+        long reasoningCharacters = 0,
+        int? providerStatusCode = null,
+        string? providerFailureCategory = null)
     {
         if (usedFallback != (fallbackReason is not null))
         {
@@ -114,6 +116,11 @@ public sealed class GameRouteClassification
             throw new ArgumentOutOfRangeException(nameof(reasoningCharacters));
         }
 
+        if (providerStatusCode is < 100 or > 599)
+        {
+            throw new ArgumentOutOfRangeException(nameof(providerStatusCode));
+        }
+
         var kinds = (responseContentKinds ?? Array.Empty<AgentContentKind>())
             .Select(kind => Enum.IsDefined(typeof(AgentContentKind), kind)
                 ? kind
@@ -124,6 +131,10 @@ public sealed class GameRouteClassification
         ResponseContentKinds = Array.AsReadOnly(kinds);
         VisibleContentCharacters = visibleContentCharacters;
         ReasoningCharacters = reasoningCharacters;
+        ProviderStatusCode = providerStatusCode;
+        ProviderFailureCategory = providerFailureCategory is null
+            ? null
+            : GameJson.RequireId(providerFailureCategory, nameof(providerFailureCategory));
     }
 
     public bool Selected => Failure is null && !UsedFallback;
@@ -145,22 +156,34 @@ public sealed class GameRouteClassification
 
     public long ReasoningCharacters { get; }
 
+    /// <summary>
+    /// Safe provider-failure metadata. Response bodies and provider reasoning are never included.
+    /// </summary>
+    public int? ProviderStatusCode { get; }
+
+    public string? ProviderFailureCategory { get; }
+
     internal static GameRouteClassification Success(ClassifierResponseShape shape = default) =>
         new(failure: null, responseContentKinds: shape.ContentKinds,
             visibleContentCharacters: shape.VisibleContentCharacters,
-            reasoningCharacters: shape.ReasoningCharacters);
+            reasoningCharacters: shape.ReasoningCharacters,
+            providerStatusCode: shape.ProviderStatusCode,
+            providerFailureCategory: shape.ProviderFailureCategory);
 
     internal static GameRouteClassification Failed(
         GameRouteClassificationFailure failure,
         ClassifierResponseShape shape = default) =>
         new(failure, responseContentKinds: shape.ContentKinds,
             visibleContentCharacters: shape.VisibleContentCharacters,
-            reasoningCharacters: shape.ReasoningCharacters);
+            reasoningCharacters: shape.ReasoningCharacters,
+            providerStatusCode: shape.ProviderStatusCode,
+            providerFailureCategory: shape.ProviderFailureCategory);
 
     internal GameRouteClassification WithFallback(string reason) =>
         new(Failure ?? GameRouteClassificationFailure.NoDecision, usedFallback: true,
             GameJson.RequireId(reason, nameof(reason)), ResponseContentKinds,
-            VisibleContentCharacters, ReasoningCharacters);
+            VisibleContentCharacters, ReasoningCharacters,
+            ProviderStatusCode, ProviderFailureCategory);
 
     internal static string FailureName(GameRouteClassificationFailure failure) => failure switch
     {
@@ -180,11 +203,15 @@ internal readonly struct ClassifierResponseShape
     public ClassifierResponseShape(
         IReadOnlyList<AgentContentKind> contentKinds,
         long visibleContentCharacters,
-        long reasoningCharacters)
+        long reasoningCharacters,
+        int? providerStatusCode = null,
+        string? providerFailureCategory = null)
     {
         ContentKinds = contentKinds ?? throw new ArgumentNullException(nameof(contentKinds));
         VisibleContentCharacters = visibleContentCharacters;
         ReasoningCharacters = reasoningCharacters;
+        ProviderStatusCode = providerStatusCode;
+        ProviderFailureCategory = providerFailureCategory;
     }
 
     public IReadOnlyList<AgentContentKind>? ContentKinds { get; }
@@ -192,6 +219,10 @@ internal readonly struct ClassifierResponseShape
     public long VisibleContentCharacters { get; }
 
     public long ReasoningCharacters { get; }
+
+    public int? ProviderStatusCode { get; }
+
+    public string? ProviderFailureCategory { get; }
 }
 
 public sealed class GameRouteContext
@@ -743,6 +774,8 @@ public sealed class ModelGameRouteClassifier
                 .ToArray(),
             visibleContentCharacters = responseShape.VisibleContentCharacters,
             reasoningCharacters = responseShape.ReasoningCharacters,
+            providerStatusCode = responseShape.ProviderStatusCode,
+            providerFailureCategory = responseShape.ProviderFailureCategory,
             durationMilliseconds,
         });
 
@@ -763,8 +796,60 @@ public sealed class ModelGameRouteClassifier
         var reasoningCharacters = assistant.Content
             .OfType<ReasoningContent>()
             .Sum(content => (long)content.Text.Length);
-        return new ClassifierResponseShape(Array.AsReadOnly(kinds), visibleCharacters, reasoningCharacters);
+        var providerFailure = InspectProviderFailure(assistant.Diagnostics);
+        return new ClassifierResponseShape(
+            Array.AsReadOnly(kinds),
+            visibleCharacters,
+            reasoningCharacters,
+            providerFailure.StatusCode,
+            providerFailure.Category);
     }
+
+    private static (int? StatusCode, string? Category) InspectProviderFailure(
+        IReadOnlyList<ModelDiagnostic> diagnostics)
+    {
+        for (var index = diagnostics.Count - 1; index >= 0; index--)
+        {
+            var dataJson = diagnostics[index].DataJson;
+            if (dataJson is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(dataJson, new JsonDocumentOptions { MaxDepth = 8 });
+                var root = document.RootElement;
+                var statusCode = root.TryGetProperty("statusCode", out var status)
+                                 && status.TryGetInt32(out var parsedStatus)
+                                 && parsedStatus is >= 100 and <= 599
+                    ? parsedStatus
+                    : (int?)null;
+                var category = root.TryGetProperty("category", out var categoryElement)
+                               && categoryElement.ValueKind == JsonValueKind.String
+                               && categoryElement.GetString() is { Length: > 0 and <= 64 } parsedCategory
+                               && IsSafeProviderCategory(parsedCategory)
+                    ? parsedCategory
+                    : null;
+                if (statusCode is not null || category is not null)
+                {
+                    return (statusCode, category);
+                }
+            }
+            catch (JsonException)
+            {
+                // Diagnostics are optional observations; malformed provider metadata is ignored.
+            }
+        }
+
+        return (null, null);
+    }
+
+    private static bool IsSafeProviderCategory(string value) =>
+        value.All(character => character is >= 'a' and <= 'z'
+            or >= 'A' and <= 'Z'
+            or >= '0' and <= '9'
+            or '-' or '_' or '.');
 
     private static string ContentKindName(AgentContentKind kind) => kind switch
     {

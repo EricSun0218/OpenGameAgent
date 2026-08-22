@@ -76,6 +76,41 @@ public sealed class RoutingProviderIntegrationTests
     }
 
     [Fact]
+    public async Task DeepSeekClassifierUsesOfficialBoundedShapeAndProjectsSafeHttpFailure()
+    {
+        var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(
+                "provider-body-secret prompt-body-secret",
+                Encoding.UTF8,
+                "text/plain"),
+        });
+        var options = Options(handler);
+        options.Protocol.ThinkingFormat = OpenAICompatibleThinkingFormat.DeepSeek;
+        options.Protocol.MaxTokensField = OpenAICompatibleMaxTokensField.MaxTokens;
+        var classifier = new ModelGameRouteClassifier(
+            new OpenAICompatibleProvider(options),
+            "deepseek-v4-pro");
+
+        var decision = await new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync)
+            .RouteAsync(Context(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameRouteKind.Agent, decision.Route);
+        Assert.Equal("classifier-provider-fallback-tools-available", decision.Reason);
+        Assert.Equal(GameRouteClassificationFailure.Provider, decision.Classification!.Failure);
+        Assert.Equal(400, decision.Classification.ProviderStatusCode);
+        Assert.Equal("invalid-request", decision.Classification.ProviderFailureCategory);
+        using var request = System.Text.Json.JsonDocument.Parse(handler.RequestBody);
+        Assert.Equal(128, request.RootElement.GetProperty("max_tokens").GetInt32());
+        Assert.False(request.RootElement.TryGetProperty("max_completion_tokens", out _));
+        Assert.Equal("disabled", request.RootElement.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.False(request.RootElement.TryGetProperty("reasoning_effort", out _));
+        Assert.False(request.RootElement.TryGetProperty("tools", out _));
+        Assert.DoesNotContain("provider-body-secret", decision.Classification.ProviderFailureCategory, StringComparison.Ordinal);
+        Assert.DoesNotContain("prompt-body-secret", decision.Classification.ProviderFailureCategory, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DeepSeekReasoningBudgetExhaustionRemainsBoundedAndDoesNotUseReasoningAsDecision()
     {
         const string stream = """

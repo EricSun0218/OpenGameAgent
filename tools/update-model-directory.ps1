@@ -178,7 +178,7 @@ function Get-ModelCompatibility([string]$providerId, [string]$apiId, [string]$en
         $isGrok = $providerId -eq "xai"
         $isDeepSeek = $providerId -eq "deepseek"
         $isNonStandard = $isNvidia -or $providerId -in @("baseten", "cerebras", "fireworks-ai", "xai") -or $isTogether -or $isDeepSeek -or $isZai -or $isMoonshot -or $isWorkers -or $isGateway
-        $useMaxTokens = $providerId -eq "baseten" -or $isMoonshot -or $isGateway -or $isTogether -or $isNvidia -or $isZai
+        $useMaxTokens = $providerId -eq "baseten" -or $isMoonshot -or $isGateway -or $isTogether -or $isNvidia -or $isZai -or $isDeepSeek
         $compatibility["supportsStore"] = -not $isNonStandard
         $compatibility["supportsDeveloperRole"] = if ($isOpenRouter) { $modelId.StartsWith("anthropic/") -or $modelId.StartsWith("openai/") } else { -not $isNonStandard }
         $compatibility["supportsReasoningEffort"] = -not ($isGrok -or $isZai -or $isMoonshot -or $isTogether -or $isGateway -or $isNvidia)

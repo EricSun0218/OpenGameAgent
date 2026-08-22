@@ -60,7 +60,8 @@ public sealed class BuiltInGameModelRuntimeTests
     public static TheoryData<string, string, string, string, string, bool, bool, bool> OpenAiCompatibleFamilies => new()
     {
         { "zai", "glm-5.2", "max_tokens", "system", "zai", false, true, false },
-        { "deepseek", "deepseek-v4-flash", "max_completion_tokens", "system", "deepseek", false, true, false },
+        { "deepseek", "deepseek-v4-flash", "max_tokens", "system", "deepseek", false, true, false },
+        { "deepseek", "deepseek-v4-pro", "max_tokens", "system", "deepseek", false, true, false },
         { "moonshotai", "kimi-k2.5", "max_tokens", "system", "deepseek-toggle", false, true, false },
         { "togetherai", "deepseek-ai/DeepSeek-V4-Pro", "max_tokens", "system", "together", false, false, false },
         { "nvidia", "minimaxai/minimax-m3", "max_tokens", "system", "none", false, false, false },

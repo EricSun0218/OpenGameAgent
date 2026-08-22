@@ -315,7 +315,10 @@ public sealed class ProviderTests
     [Fact]
     public async Task HttpFailureBecomesProviderFailureWithoutIncludingApiKey()
     {
-        var handler = new StubHandler(_ => Response(HttpStatusCode.TooManyRequests, "rate limited", "text/plain"));
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.TooManyRequests,
+            "provider-body-secret prompt-body-secret",
+            "text/plain"));
         var options = new OpenAICompatibleProviderOptions(
             new HttpClient(handler),
             new Uri("https://example.test/v1/chat/completions"))
@@ -331,6 +334,14 @@ public sealed class ProviderTests
         Assert.True(exception.IsTransient);
         Assert.Equal(429, exception.StatusCode);
         Assert.DoesNotContain("do-not-expose", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("provider-body-secret", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("prompt-body-secret", exception.ToString(), StringComparison.Ordinal);
+        var diagnostic = Assert.Single(exception.Diagnostics);
+        Assert.Equal("openai_compatible_http_error", diagnostic.Code);
+        Assert.Equal(ModelDiagnosticSeverity.Error, diagnostic.Severity);
+        using var data = JsonDocument.Parse(diagnostic.DataJson!);
+        Assert.Equal(429, data.RootElement.GetProperty("statusCode").GetInt32());
+        Assert.Equal("rate-limit", data.RootElement.GetProperty("category").GetString());
     }
 
     [Fact]

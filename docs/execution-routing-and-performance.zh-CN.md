@@ -58,7 +58,9 @@ Console.WriteLine(metrics.ToText());
 
 `GameAgentLatencyBreakdown` 会分别统计角色排队、输入准备、会话加载、上下文、工具收集、路由、Skills、端到端首响应、Provider 首响应、完整回答、首次工具、模型请求、工具执行、游戏宿主权威动作、durable action 框架处理、其他框架开销、执行总时长以及含排队总时长。
 
-`route.selected` trace 现在包含 `classificationStatus`（`selected` 或 `fallback`）、`classificationFailure`（`provider`、`timeout`、`empty`、`reasoning-only`、`invalid-json`、`invalid-route`、`budget-exhausted` 或 `no-decision`）以及 `classificationFallbackReason`。它还只记录有界的响应形态：`classificationContentKinds`、`classificationVisibleContentCharacters` 和 `classificationReasoningCharacters`，不会复制回答正文或推理文本。`GameAgentRunPerformance` 会暴露同样字段和 `RouteReason`，`GameAgentPerformanceSummary` 会统计分类失败数与路由回退数。路由模型耗时继续与路由框架开销分开，路由 token/cost 仍归入 routing cause。
+`route.selected` trace 现在包含 `classificationStatus`（`selected` 或 `fallback`）、`classificationFailure`（`provider`、`timeout`、`empty`、`reasoning-only`、`invalid-json`、`invalid-route`、`budget-exhausted` 或 `no-decision`）以及 `classificationFallbackReason`。它还只记录有界的响应形态：`classificationContentKinds`、`classificationVisibleContentCharacters` 和 `classificationReasoningCharacters`。HTTP Provider 失败时，`classificationProviderStatusCode` 与稳定的 `classificationProviderFailureCategory` 会提供 `invalid-request`、`authentication`、`rate-limit`、`server` 等安全传输诊断。Provider 响应正文、提示词、凭证和推理文本都不会被复制进路由 trace。`GameAgentRunPerformance` 会暴露同样字段和 `RouteReason`，`GameAgentPerformanceSummary` 会统计分类失败数与路由回退数。路由模型耗时继续与路由框架开销分开，路由 token/cost 仍归入 routing cause。
+
+内置 DeepSeek Chat Completions 定义会在有界分类请求中使用该 Provider 的 `max_tokens` 字段，并在关闭分类器推理时发送 `thinking.type=disabled`。这很重要，因为普通 Agent 请求可能不设置最大输出字段，而有界分类器一定会发送。
 
 工具结果可使用 `ToolFailureCategory`：`InvalidArguments`、`Authorization`、`RuleRejected`、`Transient`、`Timeout`、`Cancelled`、`Conflict`、`Internal` 或 `Unspecified`。自定义工具应返回自己能够证明的最精确类别。摘要按工具、失败类别、路线、实际 Provider 和模型聚合；durable 世界写入会单独计数，uncertain write 率只以这些写入为分母，同时统计 Provider 重试、任务清单重规划、回退、恢复和被拦截的重复写入。默认不会记录工具参数。对于官方通用 Goal/TaskPlan 工具，追踪只投影有界的 `action` 枚举，不会记录目标、步骤、证据或其他参数。
 

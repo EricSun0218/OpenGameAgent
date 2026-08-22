@@ -519,7 +519,20 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             var error = await ReadBoundedAsync(response.Content, _maxErrorCharacters, cancellationToken).ConfigureAwait(false);
             var retry = ProviderHttpRetryMetadata.FromResponse(response, errorText: error);
             throw new ModelProviderException(
-                $"The model endpoint returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {error}",
+                $"The model endpoint returned HTTP {(int)response.StatusCode}.",
+                new[]
+                {
+                    new ModelDiagnostic(
+                        "openai_compatible_http_error",
+                        "The OpenAI-compatible endpoint returned an unsuccessful HTTP response.",
+                        ModelDiagnosticSeverity.Error,
+                        JsonSerializer.Serialize(new
+                        {
+                            version = 1,
+                            statusCode = (int)response.StatusCode,
+                            category = ClassifyHttpFailure(response.StatusCode),
+                        })),
+                },
                 retry.IsTransient,
                 retry.RetryAfter,
                 (int)response.StatusCode,
@@ -919,6 +932,22 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             payload["thinking_token_budget"] = budget;
         }
     }
+
+    private static string ClassifyHttpFailure(HttpStatusCode statusCode) => statusCode switch
+    {
+        HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity => "invalid-request",
+        HttpStatusCode.Unauthorized => "authentication",
+        HttpStatusCode.Forbidden => "permission",
+        HttpStatusCode.NotFound => "not-found",
+        HttpStatusCode.RequestTimeout => "timeout",
+        HttpStatusCode.Conflict => "conflict",
+        HttpStatusCode.RequestEntityTooLarge => "request-too-large",
+        HttpStatusCode.UnsupportedMediaType => "unsupported-media",
+        HttpStatusCode.TooManyRequests => "rate-limit",
+        _ when (int)statusCode >= 500 => "server",
+        _ when (int)statusCode >= 400 => "client",
+        _ => "unknown",
+    };
 
     private static void AddTemplateValues(
         IDictionary<string, object?> payload,

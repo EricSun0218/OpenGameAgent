@@ -13,7 +13,7 @@ public sealed class PerformanceMetricsTests
             Entry(1, "input.received", "{\"queueMilliseconds\":5,\"inputPreparationMilliseconds\":2,\"sessionLoadMilliseconds\":3}", 0),
             Entry(2, "context.collected", "{\"durationMilliseconds\":4}", 1),
             Entry(3, "tools.collected", "{\"durationMilliseconds\":2}", 2),
-            Entry(4, "route.selected", "{\"route\":\"Agent\",\"reason\":\"classifier-timeout-fallback-tools-available\",\"classificationStatus\":\"fallback\",\"classificationFailure\":\"timeout\",\"classificationFallbackReason\":\"tools-available\",\"classificationContentKinds\":[\"reasoning\"],\"classificationVisibleContentCharacters\":0,\"classificationReasoningCharacters\":128,\"durationMilliseconds\":6,\"modelDurationMilliseconds\":4}", 3),
+            Entry(4, "route.selected", "{\"route\":\"Agent\",\"reason\":\"classifier-timeout-fallback-tools-available\",\"classificationStatus\":\"fallback\",\"classificationFailure\":\"timeout\",\"classificationFallbackReason\":\"tools-available\",\"classificationContentKinds\":[\"reasoning\"],\"classificationVisibleContentCharacters\":0,\"classificationReasoningCharacters\":128,\"classificationProviderStatusCode\":429,\"classificationProviderFailureCategory\":\"rate-limit\",\"durationMilliseconds\":6,\"modelDurationMilliseconds\":4}", 3),
             Entry(5, "skills.selected", "{\"durationMilliseconds\":1}", 4),
             Entry(6, "model.request.started", "{\"runId\":\"run\",\"turn\":1,\"model\":\"requested\"}", 5),
             Entry(7, "kernel.messagestarted", "{\"runId\":\"run\",\"turn\":1}", 15),
@@ -40,6 +40,8 @@ public sealed class PerformanceMetricsTests
         Assert.Equal(new[] { "reasoning" }, run.RouteClassificationContentKinds);
         Assert.Equal(0, run.RouteClassificationVisibleContentCharacters);
         Assert.Equal(128, run.RouteClassificationReasoningCharacters);
+        Assert.Equal(429, run.RouteClassificationProviderStatusCode);
+        Assert.Equal("rate-limit", run.RouteClassificationProviderFailureCategory);
         Assert.Equal("provider", run.Provider);
         Assert.Equal("resolved", run.Model);
         Assert.Equal(5, run.Latency.QueueMilliseconds);
@@ -77,6 +79,8 @@ public sealed class PerformanceMetricsTests
         Assert.Contains("route=Agent", summary.ToText(), StringComparison.Ordinal);
         Assert.Contains("classificationFailure=timeout", summary.ToText(), StringComparison.Ordinal);
         Assert.Contains("classifierReasoningChars=128", summary.ToText(), StringComparison.Ordinal);
+        Assert.Contains("classifierProviderStatus=429", summary.ToText(), StringComparison.Ordinal);
+        Assert.Contains("classifierProviderFailure=rate-limit", summary.ToText(), StringComparison.Ordinal);
         Assert.Single(summary.ToJsonLines().Split(Environment.NewLine));
     }
 
