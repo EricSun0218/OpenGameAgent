@@ -1355,6 +1355,23 @@ public sealed class PersistenceTests
     public async Task DelegationStateSurvivesRestartAndRejectsStaleRevision()
     {
         using var directory = new TemporaryDirectory();
+        var input = new GameInput(
+            "session",
+            "actor",
+            "delegate",
+            "{\"source\":\"test\"}",
+            new GameMoment("world", 4),
+            "parent-input",
+            new Dictionary<string, string> { ["trusted.scope"] = "bounded" });
+        var request = new GameAgentDelegateRequest(
+            "delegation",
+            input,
+            "{\"task\":\"inspect\"}",
+            1,
+            7,
+            inheritContext: true,
+            new[] { AgentMessage.User("context", DateTimeOffset.UnixEpoch) },
+            GameExecutionScope.Restricted(new[] { GameExecutionCapabilities.PersistentPlanning }));
         var pending = new GameAgentDelegationRecord(
             "delegation",
             "session",
@@ -1363,7 +1380,8 @@ public sealed class PersistenceTests
             GameAgentDelegationStatus.Pending,
             "{\"task\":\"inspect\"}",
             1,
-            new GameMoment("world", 4));
+            new GameMoment("world", 4),
+            request: request);
         var store = new FileGameAgentDelegationStore(directory.Path);
         Assert.True((await store.SaveAsync(pending, 0, TestContext.Current.CancellationToken)).Saved);
 
@@ -1374,6 +1392,15 @@ public sealed class PersistenceTests
         Assert.NotNull(loaded);
         Assert.Equal("{\"task\":\"inspect\"}", loaded.TaskJson);
         Assert.Equal(4, loaded.CreatedAt.Tick);
+        Assert.NotNull(loaded.Request);
+        Assert.Equal("parent-input", loaded.Request.ParentInput.InputId);
+        Assert.True(loaded.Request.InheritContext);
+        Assert.Single(loaded.Request.ParentMessages);
+        Assert.True(loaded.Request.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning));
+        Assert.Single(await restarted.ListRecoverableAsync(
+            DateTimeOffset.UtcNow,
+            10,
+            TestContext.Current.CancellationToken));
         Assert.False(stale.Saved);
         Assert.Equal(1, stale.Current.Revision);
 

@@ -648,7 +648,7 @@ public sealed class OfficialExtensionTests
     }
 
     [Fact]
-    public async Task RuntimeShutdownIsBoundedWhenADelegateIgnoresCancellation()
+    public async Task RuntimeShutdownLeavesUncooperativeDelegateRecoverable()
     {
         var provider = new ScriptedProvider(call => call == 1
             ? ToolCall(
@@ -657,21 +657,28 @@ public sealed class OfficialExtensionTests
                 "{\"delegationId\":\"stubborn\",\"task\":{},\"background\":true}")
             : TextResponse("started"));
         var executor = new UncooperativeDelegateExecutor();
+        var store = new InMemoryGameAgentDelegationStore();
         var runtime = new GameAgentBuilder(provider, "model")
             .UseExtension(new AgentDelegationExtension(
                 executor,
-                settlementTimeoutMilliseconds: 100))
+                store,
+                settlementTimeoutMilliseconds: 100,
+                leaseDurationMilliseconds: 1_000))
             .Build();
         Assert.True((await runtime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
         await WaitUntilAsync(() => executor.Handle is not null, TestContext.Current.CancellationToken);
 
-        var exception = await Assert.ThrowsAsync<TimeoutException>(
-            () => runtime.DisposeAsync().AsTask());
+        await runtime.DisposeAsync();
 
-        Assert.Contains("shutdown", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(executor.Handle!.CancelCalled);
-        executor.Handle.Release();
-        await WaitUntilAsync(() => executor.Handle.Disposed, TestContext.Current.CancellationToken);
+        Assert.True(executor.Handle.Disposed);
+        var recoverable = await store.LoadAsync(
+            "session",
+            "actor",
+            "stubborn",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(GameAgentDelegationStatus.Running, recoverable!.Status);
+        Assert.NotNull(recoverable.LeaseExpiresAt);
     }
 
     [Fact]
@@ -695,6 +702,153 @@ public sealed class OfficialExtensionTests
         Assert.NotNull(record);
         Assert.Equal(GameAgentDelegationStatus.Failed, record.Status);
         Assert.Contains("executor failed", record.Error);
+    }
+
+    [Fact]
+    public async Task ExpiredDelegationLeaseResumesOnceWithPersistedAuthorityAndContext()
+    {
+        var input = Input();
+        var request = new GameAgentDelegateRequest(
+            "recover-1",
+            input,
+            "{\"kind\":\"resume\"}",
+            1,
+            12,
+            inheritContext: true,
+            new[] { AgentMessage.User("inherited") },
+            GameExecutionScope.Restricted(new[] { GameExecutionCapabilities.PersistentPlanning }));
+        var expired = new GameAgentDelegationRecord(
+            "recover-1",
+            input.SessionId,
+            input.ActorId,
+            1,
+            GameAgentDelegationStatus.Running,
+            request.TaskJson,
+            request.Depth,
+            input.Moment,
+            request: request,
+            leaseId: "dead-worker",
+            leaseExpiresAt: DateTimeOffset.UtcNow.AddMinutes(-1),
+            attempt: 1);
+        var store = new InMemoryGameAgentDelegationStore();
+        Assert.True((await store.SaveAsync(expired, 0, TestContext.Current.CancellationToken)).Saved);
+        var executor = new ImmediateDelegateExecutor(new GameAgentDelegateOutcome(
+            true,
+            new[] { Assistant("recovered") }));
+        var extension = new AgentDelegationExtension(executor, store, leaseDurationMilliseconds: 1_000);
+        await using var runtime = new GameAgentBuilder(new ScriptedProvider(_ => TextResponse("unused")), "model")
+            .UseExtension(extension)
+            .Build();
+
+        var resumes = await Task.WhenAll(
+            extension.ResumePendingAsync(cancellationToken: TestContext.Current.CancellationToken).AsTask(),
+            extension.ResumePendingAsync(cancellationToken: TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Equal(1, resumes.Sum());
+        await WaitUntilAsync(
+            () => store.LoadAsync("session", "actor", "recover-1", CancellationToken.None)
+                      .AsTask().GetAwaiter().GetResult()?.Status == GameAgentDelegationStatus.Completed,
+            TestContext.Current.CancellationToken);
+        var completed = await store.LoadAsync("session", "actor", "recover-1", TestContext.Current.CancellationToken);
+        Assert.NotNull(completed);
+        Assert.Equal(2, completed.Attempt);
+        var replayed = Assert.Single(executor.Requests);
+        Assert.True(replayed.InheritContext);
+        Assert.True(replayed.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning));
+        Assert.Single(replayed.ParentMessages);
+    }
+
+    [Fact]
+    public async Task DelegationLineageIsOwnerScopedAndBounded()
+    {
+        var store = new InMemoryGameAgentDelegationStore();
+        var moment = new GameMoment("world", 1);
+        var root = new GameAgentDelegationRecord(
+            "root",
+            "session",
+            "actor",
+            1,
+            GameAgentDelegationStatus.Pending,
+            "{}",
+            1,
+            moment);
+        var child = new GameAgentDelegationRecord(
+            "child",
+            "session",
+            "actor",
+            1,
+            GameAgentDelegationStatus.Pending,
+            "{}",
+            2,
+            new GameMoment("world", 2),
+            parentDelegationId: "root",
+            rootDelegationId: "root");
+        var other = new GameAgentDelegationRecord(
+            "other",
+            "other-session",
+            "actor",
+            1,
+            GameAgentDelegationStatus.Pending,
+            "{}",
+            1,
+            moment);
+        Assert.True((await store.SaveAsync(root, 0, TestContext.Current.CancellationToken)).Saved);
+        Assert.True((await store.SaveAsync(child, 0, TestContext.Current.CancellationToken)).Saved);
+        Assert.True((await store.SaveAsync(other, 0, TestContext.Current.CancellationToken)).Saved);
+
+        var lineage = await store.ListAsync(
+            "session",
+            "actor",
+            "root",
+            maximum: 1,
+            TestContext.Current.CancellationToken);
+
+        var only = Assert.Single(lineage);
+        Assert.Equal("root", only.Id);
+    }
+
+    [Fact]
+    public async Task LocalDelegateChecksExecutionFenceBeforeEveryToolCall()
+    {
+        var executions = 0;
+        var provider = new ScriptedProvider(call => call == 1
+            ? ToolCall("write", "mutate_world", "{}")
+            : TextResponse("unexpected"));
+        var executor = new LocalGameAgentDelegateExecutor(
+            provider,
+            "model",
+            tools: (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
+            {
+                new AgentTool(
+                    new ToolDefinition("mutate_world", "Mutate a test world.", "{\"type\":\"object\",\"additionalProperties\":false}"),
+                    (_, _, _) =>
+                    {
+                        Interlocked.Increment(ref executions);
+                        return new ValueTask<ToolResult>(new ToolResult(new AgentContent[] { new TextContent("written") }));
+                    },
+                    ToolRisk.NonIdempotentWrite),
+            }));
+        var input = Input();
+        var request = new GameAgentDelegateRequest(
+            "fenced",
+            input,
+            "{}",
+            1,
+            4,
+            inheritContext: false,
+            Array.Empty<AgentMessage>(),
+            leaseValidator: _ => new ValueTask<bool>(false));
+
+        using var handle = executor.Start(request, TestContext.Current.CancellationToken);
+        var outcome = await handle.Completion;
+
+        Assert.Equal(0, executions);
+        Assert.Contains(
+            outcome.Messages,
+            message => message.Role == AgentRole.Tool
+                       && message.IsError
+                       && message.Content.OfType<TextContent>()
+                           .Any(content => content.Text.Contains("lease", StringComparison.OrdinalIgnoreCase)));
     }
 
     [Fact]

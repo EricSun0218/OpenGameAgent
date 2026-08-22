@@ -33,7 +33,13 @@ public sealed class GameAgentDelegationRecord
         int depth,
         GameMoment createdAt,
         string? resultJson = null,
-        string? error = null)
+        string? error = null,
+        GameAgentDelegateRequest? request = null,
+        string? parentDelegationId = null,
+        string? rootDelegationId = null,
+        string? leaseId = null,
+        DateTimeOffset? leaseExpiresAt = null,
+        int attempt = 0)
     {
         if (string.IsNullOrWhiteSpace(id)
             || string.IsNullOrWhiteSpace(sessionId)
@@ -42,7 +48,7 @@ public sealed class GameAgentDelegationRecord
             throw new ArgumentException("Delegation IDs and owners are required.");
         }
 
-        if (revision < 0 || depth < 1)
+        if (revision < 0 || depth < 1 || attempt < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(revision));
         }
@@ -67,6 +73,31 @@ public sealed class GameAgentDelegationRecord
         CreatedAt = createdAt;
         ResultJson = resultJson is null ? null : RequireJson(resultJson, nameof(resultJson));
         Error = error;
+        Request = request;
+        ParentDelegationId = OptionalId(parentDelegationId, nameof(parentDelegationId));
+        RootDelegationId = OptionalId(rootDelegationId, nameof(rootDelegationId)) ?? id;
+        if (ParentDelegationId is null && !string.Equals(RootDelegationId, id, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A root delegation must identify itself as the lineage root.", nameof(rootDelegationId));
+        }
+
+        LeaseId = OptionalId(leaseId, nameof(leaseId));
+        LeaseExpiresAt = leaseExpiresAt;
+        Attempt = attempt;
+        if ((LeaseId is null) != (LeaseExpiresAt is null))
+        {
+            throw new ArgumentException("A delegation lease ID and expiry must be supplied together.", nameof(leaseId));
+        }
+
+        if (request is not null
+            && (!string.Equals(request.Id, id, StringComparison.Ordinal)
+                || !string.Equals(request.TaskJson, TaskJson, StringComparison.Ordinal)
+                || request.Depth != depth
+                || !string.Equals(request.ParentDelegationId, ParentDelegationId, StringComparison.Ordinal)
+                || !string.Equals(request.RootDelegationId, RootDelegationId, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException("The durable delegation request does not match its record identity.", nameof(request));
+        }
     }
 
     public string Id { get; }
@@ -89,6 +120,30 @@ public sealed class GameAgentDelegationRecord
 
     public string? Error { get; }
 
+    /// <summary>
+    /// Opaque host recovery data. It is persisted by official stores but deliberately excluded from
+    /// model/tool JSON projections so inherited transcript and authority cannot leak through status reads.
+    /// </summary>
+    [JsonIgnore]
+    public GameAgentDelegateRequest? Request { get; }
+
+    public string? ParentDelegationId { get; }
+
+    public string RootDelegationId { get; }
+
+    [JsonIgnore]
+    public string? LeaseId { get; }
+
+    [JsonIgnore]
+    public DateTimeOffset? LeaseExpiresAt { get; }
+
+    public int Attempt { get; }
+
+    public bool IsRecoverable(DateTimeOffset now) =>
+        Request is not null
+        && (Status == GameAgentDelegationStatus.Pending
+            || (Status == GameAgentDelegationStatus.Running && LeaseExpiresAt <= now));
+
     private static string RequireJson(string value, string name)
     {
         try
@@ -100,6 +155,21 @@ public sealed class GameAgentDelegationRecord
         {
             throw new ArgumentException("The value must contain valid JSON.", name, exception);
         }
+    }
+
+    private static string? OptionalId(string? value, string name)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 256 || value.Any(char.IsControl))
+        {
+            throw new ArgumentException("A delegation lineage or lease ID must be bounded and printable.", name);
+        }
+
+        return value;
     }
 }
 
@@ -127,6 +197,18 @@ public interface IGameAgentDelegationStore
     ValueTask<GameAgentDelegationSaveResult> SaveAsync(
         GameAgentDelegationRecord record,
         long expectedRevision,
+        CancellationToken cancellationToken);
+
+    ValueTask<IReadOnlyList<GameAgentDelegationRecord>> ListRecoverableAsync(
+        DateTimeOffset now,
+        int maximum,
+        CancellationToken cancellationToken);
+
+    ValueTask<IReadOnlyList<GameAgentDelegationRecord>> ListAsync(
+        string sessionId,
+        string actorId,
+        string? rootDelegationId,
+        int maximum,
         CancellationToken cancellationToken);
 }
 
@@ -181,7 +263,8 @@ public sealed class InMemoryGameAgentDelegationStore : IGameAgentDelegationStore
                     || !string.Equals(current.ActorId, record.ActorId, StringComparison.Ordinal)
                     || !string.Equals(current.TaskJson, record.TaskJson, StringComparison.Ordinal)
                     || current.Depth != record.Depth
-                    || current.CreatedAt != record.CreatedAt)
+                    || current.CreatedAt != record.CreatedAt
+                    || !SameRecoveryIdentity(current, record))
                 {
                     throw new InvalidOperationException("A delegation record cannot change ownership or task identity.");
                 }
@@ -225,6 +308,52 @@ public sealed class InMemoryGameAgentDelegationStore : IGameAgentDelegationStore
         }
     }
 
+    public ValueTask<IReadOnlyList<GameAgentDelegationRecord>> ListRecoverableAsync(
+        DateTimeOffset now,
+        int maximum,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateMaximum(maximum);
+        lock (_gate)
+        {
+            IReadOnlyList<GameAgentDelegationRecord> records = _records.Values
+                .Where(record => record.IsRecoverable(now))
+                .OrderBy(record => record.CreatedAt.TimelineId, StringComparer.Ordinal)
+                .ThenBy(record => record.CreatedAt.Tick)
+                .ThenBy(record => record.Id, StringComparer.Ordinal)
+                .Take(maximum)
+                .ToArray();
+            return new ValueTask<IReadOnlyList<GameAgentDelegationRecord>>(records);
+        }
+    }
+
+    public ValueTask<IReadOnlyList<GameAgentDelegationRecord>> ListAsync(
+        string sessionId,
+        string actorId,
+        string? rootDelegationId,
+        int maximum,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        RequireKey(sessionId, actorId, "list");
+        ValidateOptionalId(rootDelegationId, nameof(rootDelegationId));
+        ValidateMaximum(maximum);
+        lock (_gate)
+        {
+            IReadOnlyList<GameAgentDelegationRecord> records = _records.Values
+                .Where(record => string.Equals(record.SessionId, sessionId, StringComparison.Ordinal)
+                                 && string.Equals(record.ActorId, actorId, StringComparison.Ordinal)
+                                 && (rootDelegationId is null
+                                     || string.Equals(record.RootDelegationId, rootDelegationId, StringComparison.Ordinal)))
+                .OrderBy(record => record.CreatedAt.Tick)
+                .ThenBy(record => record.Id, StringComparer.Ordinal)
+                .Take(maximum)
+                .ToArray();
+            return new ValueTask<IReadOnlyList<GameAgentDelegationRecord>>(records);
+        }
+    }
+
     private static (string SessionId, string ActorId, string Id) RequireKey(
         string sessionId,
         string actorId,
@@ -244,6 +373,43 @@ public sealed class InMemoryGameAgentDelegationStore : IGameAgentDelegationStore
         status is GameAgentDelegationStatus.Completed
             or GameAgentDelegationStatus.Failed
             or GameAgentDelegationStatus.Cancelled;
+
+    private static bool SameRecoveryIdentity(GameAgentDelegationRecord left, GameAgentDelegationRecord right) =>
+        string.Equals(left.ParentDelegationId, right.ParentDelegationId, StringComparison.Ordinal)
+        && string.Equals(left.RootDelegationId, right.RootDelegationId, StringComparison.Ordinal)
+        && SameRequest(left.Request, right.Request);
+
+    private static bool SameRequest(GameAgentDelegateRequest? left, GameAgentDelegateRequest? right)
+    {
+        if (left is null || right is null)
+        {
+            return left is null && right is null;
+        }
+
+        return left.MaximumTurns == right.MaximumTurns
+               && left.InheritContext == right.InheritContext
+               && GameAgentValueComparer.MessagesEqual(left.ParentMessages, right.ParentMessages)
+               && string.Equals(GameAgentWire.SerializeInput(left.ParentInput), GameAgentWire.SerializeInput(right.ParentInput), StringComparison.Ordinal)
+               && left.ExecutionScope.IsUnrestricted == right.ExecutionScope.IsUnrestricted
+               && left.ExecutionScope.GrantedCapabilities.SequenceEqual(right.ExecutionScope.GrantedCapabilities, StringComparer.Ordinal);
+    }
+
+    private static void ValidateMaximum(int maximum)
+    {
+        if (maximum < 1 || maximum > 10_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximum));
+        }
+    }
+
+    private static void ValidateOptionalId(string? value, string name)
+    {
+        if (value is not null
+            && (string.IsNullOrWhiteSpace(value) || value.Length > 256 || value.Any(char.IsControl)))
+        {
+            throw new ArgumentException("A delegation lineage ID must be bounded and printable.", name);
+        }
+    }
 }
 
 public sealed class GameAgentDelegateRequest
@@ -255,7 +421,11 @@ public sealed class GameAgentDelegateRequest
         int depth,
         int maximumTurns,
         bool inheritContext,
-        IReadOnlyList<AgentMessage> parentMessages)
+        IReadOnlyList<AgentMessage> parentMessages,
+        GameExecutionScope? executionScope = null,
+        string? parentDelegationId = null,
+        string? rootDelegationId = null,
+        GameAgentDelegationLeaseValidator? leaseValidator = null)
     {
         Id = string.IsNullOrWhiteSpace(id)
             ? throw new ArgumentException("A delegation ID is required.", nameof(id))
@@ -282,6 +452,14 @@ public sealed class GameAgentDelegateRequest
         }
 
         ParentMessages = new ReadOnlyCollection<AgentMessage>(messages);
+        ExecutionScope = executionScope ?? GameExecutionScope.Unrestricted;
+        ParentDelegationId = OptionalId(parentDelegationId, nameof(parentDelegationId));
+        RootDelegationId = OptionalId(rootDelegationId, nameof(rootDelegationId)) ?? Id;
+        LeaseValidator = leaseValidator;
+        if (ParentDelegationId is null && !string.Equals(RootDelegationId, Id, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A root delegation must identify itself as the lineage root.", nameof(rootDelegationId));
+        }
     }
 
     public string Id { get; }
@@ -298,6 +476,33 @@ public sealed class GameAgentDelegateRequest
 
     public IReadOnlyList<AgentMessage> ParentMessages { get; }
 
+    public GameExecutionScope ExecutionScope { get; }
+
+    public string? ParentDelegationId { get; }
+
+    public string RootDelegationId { get; }
+
+    /// <summary>
+    /// Process-local fencing check installed by the delegation extension for one claimed attempt.
+    /// Executors must apply it immediately before every tool call. It is never persisted.
+    /// </summary>
+    [JsonIgnore]
+    public GameAgentDelegationLeaseValidator? LeaseValidator { get; }
+
+    internal GameAgentDelegateRequest WithLeaseValidator(GameAgentDelegationLeaseValidator validator) =>
+        new(
+            Id,
+            ParentInput,
+            TaskJson,
+            Depth,
+            MaximumTurns,
+            InheritContext,
+            ParentMessages,
+            ExecutionScope,
+            ParentDelegationId,
+            RootDelegationId,
+            validator ?? throw new ArgumentNullException(nameof(validator)));
+
     private static string RequireJson(string value)
     {
         try
@@ -310,7 +515,24 @@ public sealed class GameAgentDelegateRequest
             throw new ArgumentException("The delegated task must contain valid JSON.", nameof(value), exception);
         }
     }
+
+    private static string? OptionalId(string? value, string name)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 256 || value.Any(char.IsControl))
+        {
+            throw new ArgumentException("A delegation lineage ID must be bounded and printable.", name);
+        }
+
+        return value;
+    }
 }
+
+public delegate ValueTask<bool> GameAgentDelegationLeaseValidator(CancellationToken cancellationToken);
 
 public sealed class GameAgentDelegateOutcome
 {
@@ -429,6 +651,13 @@ public sealed class LocalGameAgentDelegateExecutor : IGameAgentDelegateExecutor
                 SessionId = request.Id,
                 Limits = CopyLimits(limits, request.MaximumTurns),
             };
+            if (request.LeaseValidator is not null)
+            {
+                options.Hooks.AuthorizeToolCallAsync = async (_, token) =>
+                    await request.LeaseValidator(token).ConfigureAwait(false)
+                        ? ToolCallDecision.Allow()
+                        : ToolCallDecision.Block("The delegated execution lease is no longer authoritative.", terminate: true);
+            }
             if (request.InheritContext)
             {
                 var available = Math.Max(0, options.Limits.MaxMessages - 1);
@@ -540,7 +769,7 @@ public sealed class LocalGameAgentDelegateExecutor : IGameAgentDelegateExecutor
 public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDisposable
 {
     private const string DelegateSchema = """
-        {"type":"object","required":["task"],"properties":{"delegationId":{"type":"string","minLength":1,"maxLength":256},"task":{},"background":{"type":"boolean"},"inheritContext":{"type":"boolean"},"maxTurns":{"type":"integer","minimum":1,"maximum":128}},"additionalProperties":false}
+        {"type":"object","required":["task"],"properties":{"delegationId":{"type":"string","minLength":1,"maxLength":256},"parentDelegationId":{"type":"string","minLength":1,"maxLength":256},"task":{},"background":{"type":"boolean"},"inheritContext":{"type":"boolean"},"maxTurns":{"type":"integer","minimum":1,"maximum":128}},"additionalProperties":false}
         """;
     private const string IdSchema = """
         {"type":"object","required":["delegationId"],"properties":{"delegationId":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false}
@@ -548,16 +777,23 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
     private const string SteerSchema = """
         {"type":"object","required":["delegationId","message"],"properties":{"delegationId":{"type":"string","minLength":1,"maxLength":256},"message":{}},"additionalProperties":false}
         """;
+    private const string ListSchema = """
+        {"type":"object","properties":{"rootDelegationId":{"type":"string","minLength":1,"maxLength":256},"maximum":{"type":"integer","minimum":1,"maximum":256}},"additionalProperties":false}
+        """;
 
     private readonly IGameAgentDelegateExecutor _executor;
     private readonly IGameAgentDelegationStore _store;
     private readonly int _maximumDepth;
     private readonly int _maximumResultCharacters;
     private readonly TimeSpan _settlementTimeout;
+    private readonly TimeSpan _leaseDuration;
     private readonly SemaphoreSlim _concurrency;
+    private readonly string _workerId = Guid.NewGuid().ToString("N");
+    private readonly object _scheduleGate = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly ConcurrentDictionary<(string SessionId, string ActorId, string Id), IGameAgentDelegateHandle> _active = new();
     private readonly ConcurrentDictionary<(string SessionId, string ActorId, string Id), Task> _running = new();
+    private GameAgentExtensionApi? _api;
     private int _disposed;
     private int _resourcesDisposed;
 
@@ -567,7 +803,8 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
         int maximumConcurrent = 4,
         int maximumDepth = 3,
         int maximumResultCharacters = 262_144,
-        int settlementTimeoutMilliseconds = 10_000)
+        int settlementTimeoutMilliseconds = 10_000,
+        int leaseDurationMilliseconds = 60_000)
     {
         _executor = executor ?? throw new ArgumentNullException(nameof(executor));
         _store = store ?? new InMemoryGameAgentDelegationStore();
@@ -591,10 +828,16 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             throw new ArgumentOutOfRangeException(nameof(settlementTimeoutMilliseconds));
         }
 
+        if (leaseDurationMilliseconds < 1_000 || leaseDurationMilliseconds > 3_600_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(leaseDurationMilliseconds));
+        }
+
         _concurrency = new SemaphoreSlim(maximumConcurrent, maximumConcurrent);
         _maximumDepth = maximumDepth;
         _maximumResultCharacters = maximumResultCharacters;
         _settlementTimeout = TimeSpan.FromMilliseconds(settlementTimeoutMilliseconds);
+        _leaseDuration = TimeSpan.FromMilliseconds(leaseDurationMilliseconds);
     }
 
     public static GameAgentExtensionChannel<GameAgentDelegationRecord> DelegationChanged { get; } =
@@ -602,12 +845,13 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
         "opengameagent.delegation",
-        "1.0.0",
-        "Bounded foreground and background delegated agents with isolated context and durable status records.",
-        new[] { "delegation", "multi-agent", "background-work", "steering" });
+        "1.1.0",
+        "Bounded foreground and background delegated agents with isolated context, lineage, leases, and restart recovery.",
+        new[] { "delegation", "multi-agent", "background-work", "steering", "restart-recovery" });
 
     public void Configure(GameAgentExtensionApi api)
     {
+        _api = api ?? throw new ArgumentNullException(nameof(api));
         api.RegisterPromptFragment(
             "delegation-guidance",
             "Delegate only independent or context-heavy subtasks. Give each delegated agent a complete task payload, keep context inheritance opt-in, and retrieve background results by ID.");
@@ -617,26 +861,89 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             {
                 CreateDelegateTool(api, context),
                 CreateGetTool(context),
+                CreateListTool(context),
                 CreateSteerTool(context),
-                CreateCancelTool(context),
+                CreateCancelTool(api, context),
             }));
+    }
+
+    /// <summary>
+    /// Reclaims pending work and expired running leases after the host has rebuilt its runtime.
+    /// Repeated calls are safe because claims use revision CAS and an in-process active registry.
+    /// </summary>
+    public async ValueTask<int> ResumePendingAsync(
+        int maximum = 128,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        if (maximum < 1 || maximum > 10_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximum));
+        }
+
+        var api = _api ?? throw new InvalidOperationException("The delegation extension has not been configured by a runtime.");
+        var recoverable = await _store.ListRecoverableAsync(DateTimeOffset.UtcNow, maximum, cancellationToken).ConfigureAwait(false);
+        var scheduled = 0;
+        foreach (var record in recoverable)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (record.Request is null)
+            {
+                continue;
+            }
+
+            var key = (record.SessionId, record.ActorId, record.Id);
+            Task task;
+            lock (_scheduleGate)
+            {
+                ThrowIfDisposed();
+                if (!_running.TryAdd(key, Task.CompletedTask))
+                {
+                    continue;
+                }
+
+                task = RunAsync(api, record, record.Request, _lifetime.Token);
+                _running[key] = task;
+            }
+
+            scheduled++;
+            _ = ObserveAsync(key, task);
+        }
+
+        return scheduled;
+    }
+
+    public ValueTask<IReadOnlyList<GameAgentDelegationRecord>> ListAsync(
+        GameSessionKey key,
+        string? rootDelegationId = null,
+        int maximum = 128,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return _store.ListAsync(key.SessionId, key.ActorId, rootDelegationId, maximum, cancellationToken);
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return;
-        }
-
         var failures = new List<Exception>();
-        try
+        Task[] running;
+        lock (_scheduleGate)
         {
-            _lifetime.Cancel();
-        }
-        catch (Exception exception)
-        {
-            failures.Add(exception);
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                _lifetime.Cancel();
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+
+            running = _running.Values.ToArray();
         }
 
         foreach (var handle in _active.Values)
@@ -651,7 +958,6 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             }
         }
 
-        var running = _running.Values.ToArray();
         var deferredResourceDisposal = false;
         if (running.Length > 0)
         {
@@ -762,10 +1068,30 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 DelegateSchema),
             async (arguments, execution, cancellationToken) =>
             {
-                var parentDepth = context.Input.Metadata.TryGetValue("agent.delegate_depth", out var depthValue)
-                                  && int.TryParse(depthValue, out var parsedDepth)
-                    ? parsedDepth
-                    : 0;
+                GameAgentDelegationRecord? parent = null;
+                if (arguments.TryGetProperty("parentDelegationId", out var configuredParent))
+                {
+                    var parentId = configuredParent.GetString() ?? string.Empty;
+                    parent = await _store.LoadAsync(
+                        context.Input.SessionId,
+                        context.Input.ActorId,
+                        parentId,
+                        cancellationToken).ConfigureAwait(false);
+                    if (parent is null)
+                    {
+                        return ToolResult.Error(
+                            $"Parent delegation '{parentId}' does not exist.",
+                            ToolFailureCategory.InvalidArguments);
+                    }
+
+                    EnsureOwner(parent, context);
+                }
+
+                var parentDepth = parent?.Depth
+                                  ?? (context.Input.Metadata.TryGetValue("agent.delegate_depth", out var depthValue)
+                                      && int.TryParse(depthValue, out var parsedDepth)
+                                      ? parsedDepth
+                                      : 0);
                 var depth = checked(parentDepth + 1);
                 if (depth > _maximumDepth)
                 {
@@ -787,6 +1113,8 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 var maximumTurns = arguments.TryGetProperty("maxTurns", out var maxTurnsElement)
                     ? maxTurnsElement.GetInt32()
                     : 16;
+                var parentDelegationId = parent?.Id;
+                var rootDelegationId = parent?.RootDelegationId ?? id;
                 var key = Key(context, id);
                 var existing = await _store.LoadAsync(
                     key.SessionId,
@@ -797,7 +1125,12 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 {
                     EnsureOwner(existing, context);
                     if (!string.Equals(existing.TaskJson, taskJson, StringComparison.Ordinal)
-                        || existing.Depth != depth)
+                        || existing.Depth != depth
+                        || !string.Equals(existing.ParentDelegationId, parentDelegationId, StringComparison.Ordinal)
+                        || !string.Equals(existing.RootDelegationId, rootDelegationId, StringComparison.Ordinal)
+                        || existing.Request is null
+                        || existing.Request.MaximumTurns != maximumTurns
+                        || existing.Request.InheritContext != inheritContext)
                     {
                         return ToolResult.Error(
                             $"Delegation ID '{id}' is already reserved for a different task.",
@@ -807,6 +1140,17 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                     return JsonResult(existing);
                 }
 
+                var request = new GameAgentDelegateRequest(
+                    id,
+                    context.Input,
+                    taskJson,
+                    depth,
+                    maximumTurns,
+                    inheritContext,
+                    context.Session.Messages,
+                    context.ExecutionScope,
+                    parentDelegationId,
+                    rootDelegationId);
                 var pending = new GameAgentDelegationRecord(
                     id,
                     context.Input.SessionId,
@@ -815,13 +1159,21 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                     GameAgentDelegationStatus.Pending,
                     taskJson,
                     depth,
-                    context.Input.Moment);
+                    context.Input.Moment,
+                    request: request,
+                    parentDelegationId: parentDelegationId,
+                    rootDelegationId: rootDelegationId);
                 var saved = await _store.SaveAsync(pending, 0, cancellationToken).ConfigureAwait(false);
                 if (!saved.Saved)
                 {
                     if (!string.Equals(saved.Current.TaskJson, pending.TaskJson, StringComparison.Ordinal)
                         || saved.Current.Depth != pending.Depth
-                        || saved.Current.CreatedAt != pending.CreatedAt)
+                        || saved.Current.CreatedAt != pending.CreatedAt
+                        || !string.Equals(saved.Current.ParentDelegationId, pending.ParentDelegationId, StringComparison.Ordinal)
+                        || !string.Equals(saved.Current.RootDelegationId, pending.RootDelegationId, StringComparison.Ordinal)
+                        || saved.Current.Request is null
+                        || saved.Current.Request.MaximumTurns != pending.Request!.MaximumTurns
+                        || saved.Current.Request.InheritContext != pending.Request.InheritContext)
                     {
                         return ToolResult.Error(
                             $"Delegation ID '{id}' is already reserved for a different task.",
@@ -832,18 +1184,9 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 }
 
                 await api.PublishAsync(DelegationChanged, pending, cancellationToken).ConfigureAwait(false);
-                var request = new GameAgentDelegateRequest(
-                    id,
-                    context.Input,
-                    taskJson,
-                    depth,
-                    maximumTurns,
-                    inheritContext,
-                    context.Session.Messages);
                 if (background)
                 {
-                    var task = RunAsync(api, pending, request, _lifetime.Token);
-                    _running[key] = task;
+                    var task = ScheduleBackground(api, key, pending, request);
                     _ = ObserveAsync(key, task);
                     return JsonResult(new { delegationId = id, status = GameAgentDelegationStatus.Pending, background = true });
                 }
@@ -854,6 +1197,30 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             },
             ToolRisk.IdempotentWrite,
             ToolExecutionMode.Sequential);
+
+    private Task ScheduleBackground(
+        GameAgentExtensionApi api,
+        (string SessionId, string ActorId, string Id) key,
+        GameAgentDelegationRecord record,
+        GameAgentDelegateRequest request)
+    {
+        lock (_scheduleGate)
+        {
+            ThrowIfDisposed();
+            if (_running.ContainsKey(key))
+            {
+                throw new InvalidOperationException($"Delegation '{key.Id}' is already scheduled.");
+            }
+
+            var task = RunAsync(api, record, request, _lifetime.Token);
+            if (!_running.TryAdd(key, task))
+            {
+                throw new InvalidOperationException($"Delegation '{key.Id}' is already scheduled.");
+            }
+
+            return task;
+        }
+    }
 
     private AgentTool CreateGetTool(GameAgentExtensionRunContext context) =>
         new(
@@ -873,6 +1240,30 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 }
 
                 return JsonResult(record);
+            },
+            ToolRisk.ReadOnly);
+
+    private AgentTool CreateListTool(GameAgentExtensionRunContext context) =>
+        new(
+            new ToolDefinition(
+                "list_delegations",
+                "List a bounded delegation lineage for this actor session without exposing recovery context.",
+                ListSchema),
+            async (arguments, _, cancellationToken) =>
+            {
+                var root = arguments.TryGetProperty("rootDelegationId", out var rootElement)
+                    ? rootElement.GetString()
+                    : null;
+                var maximum = arguments.TryGetProperty("maximum", out var maximumElement)
+                    ? maximumElement.GetInt32()
+                    : 64;
+                var records = await _store.ListAsync(
+                    context.Input.SessionId,
+                    context.Input.ActorId,
+                    root,
+                    maximum,
+                    cancellationToken).ConfigureAwait(false);
+                return JsonResult(new { delegations = records });
             },
             ToolRisk.ReadOnly);
 
@@ -907,7 +1298,7 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             ToolRisk.NonIdempotentWrite,
             ToolExecutionMode.Sequential);
 
-    private AgentTool CreateCancelTool(GameAgentExtensionRunContext context) =>
+    private AgentTool CreateCancelTool(GameAgentExtensionApi api, GameAgentExtensionRunContext context) =>
         new(
             new ToolDefinition("cancel_delegate", "Cancel a running delegated agent by ID.", IdSchema),
             async (arguments, _, cancellationToken) =>
@@ -926,6 +1317,22 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 }
 
                 var accepted = _active.TryGetValue(key, out var handle) && handle.TryCancel();
+                if (!accepted && record.Status == GameAgentDelegationStatus.Pending)
+                {
+                    var cancelled = WithStatus(
+                        record,
+                        GameAgentDelegationStatus.Cancelled,
+                        record.Revision + 1,
+                        leaseId: null,
+                        leaseExpiresAt: null);
+                    var saved = await _store.SaveAsync(cancelled, record.Revision, cancellationToken).ConfigureAwait(false);
+                    accepted = saved.Saved;
+                    if (accepted)
+                    {
+                        await api.PublishAsync(DelegationChanged, cancelled, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
                 return JsonResult(new { delegationId = id, accepted });
             },
             ToolRisk.IdempotentWrite,
@@ -947,7 +1354,20 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
         {
             await _concurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
             concurrencyAcquired = true;
-            var running = WithStatus(pending, GameAgentDelegationStatus.Running, pending.Revision + 1);
+            var now = DateTimeOffset.UtcNow;
+            if (!pending.IsRecoverable(now))
+            {
+                return pending;
+            }
+
+            var leaseId = string.Concat(_workerId, ":", Guid.NewGuid().ToString("N"));
+            var running = WithStatus(
+                pending,
+                GameAgentDelegationStatus.Running,
+                pending.Revision + 1,
+                leaseId,
+                now + _leaseDuration,
+                checked(pending.Attempt + 1));
             var runningSave = await _store.SaveAsync(running, pending.Revision, cancellationToken).ConfigureAwait(false);
             if (!runningSave.Saved)
             {
@@ -956,7 +1376,9 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
 
             current = running;
             await api.PublishAsync(DelegationChanged, running, cancellationToken).ConfigureAwait(false);
-            using var handle = _executor.Start(request, cancellationToken)
+            var executionRequest = request.WithLeaseValidator(
+                token => ValidateLeaseAsync(key, leaseId, token));
+            using var handle = _executor.Start(executionRequest, cancellationToken)
                 ?? throw new InvalidOperationException("The delegate executor returned null.");
             if (!_active.TryAdd(key, handle))
             {
@@ -966,12 +1388,45 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             GameAgentDelegateOutcome outcome;
             try
             {
+                while (!handle.Completion.IsCompleted)
+                {
+                    var renewAfter = TimeSpan.FromMilliseconds(Math.Max(250, _leaseDuration.TotalMilliseconds / 2));
+                    var renewal = Task.Delay(renewAfter, cancellationToken);
+                    var winner = await Task.WhenAny(handle.Completion, renewal).ConfigureAwait(false);
+                    if (ReferenceEquals(winner, handle.Completion))
+                    {
+                        break;
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var renewed = WithStatus(
+                        current,
+                        GameAgentDelegationStatus.Running,
+                        current.Revision + 1,
+                        leaseId,
+                        DateTimeOffset.UtcNow + _leaseDuration,
+                        current.Attempt);
+                    var renewalSave = await _store.SaveAsync(renewed, current.Revision, cancellationToken).ConfigureAwait(false);
+                    if (!renewalSave.Saved)
+                    {
+                        handle.TryCancel();
+                        return renewalSave.Current;
+                    }
+
+                    current = renewed;
+                }
+
                 outcome = await handle.Completion.ConfigureAwait(false)
                     ?? throw new InvalidOperationException("The delegated agent returned null.");
             }
             finally
             {
                 _active.TryRemove(key, out _);
+            }
+
+            if (_lifetime.IsCancellationRequested)
+            {
+                return current;
             }
 
             var status = outcome.Succeeded
@@ -985,6 +1440,11 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
         }
         catch (OperationCanceledException)
         {
+            if (_lifetime.IsCancellationRequested)
+            {
+                return current;
+            }
+
             finalStatus = GameAgentDelegationStatus.Cancelled;
             resultJson = null;
             error = "The delegation was cancelled before execution completed.";
@@ -1028,7 +1488,13 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             current.Depth,
             current.CreatedAt,
             resultJson,
-            error);
+            error,
+            current.Request,
+            current.ParentDelegationId,
+            current.RootDelegationId,
+            leaseId: null,
+            leaseExpiresAt: null,
+            attempt: current.Attempt);
         using var settlement = new CancellationTokenSource(_settlementTimeout);
         GameAgentDelegationSaveResult save;
         try
@@ -1080,10 +1546,29 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
         string id) =>
         (context.Input.SessionId, context.Input.ActorId, id);
 
+    private async ValueTask<bool> ValidateLeaseAsync(
+        (string SessionId, string ActorId, string Id) key,
+        string leaseId,
+        CancellationToken cancellationToken)
+    {
+        var current = await _store.LoadAsync(
+            key.SessionId,
+            key.ActorId,
+            key.Id,
+            cancellationToken).ConfigureAwait(false);
+        return current is not null
+               && current.Status == GameAgentDelegationStatus.Running
+               && string.Equals(current.LeaseId, leaseId, StringComparison.Ordinal)
+               && current.LeaseExpiresAt > DateTimeOffset.UtcNow;
+    }
+
     private static GameAgentDelegationRecord WithStatus(
         GameAgentDelegationRecord current,
         GameAgentDelegationStatus status,
-        long revision) =>
+        long revision,
+        string? leaseId = null,
+        DateTimeOffset? leaseExpiresAt = null,
+        int? attempt = null) =>
         new(
             current.Id,
             current.SessionId,
@@ -1094,7 +1579,21 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
             current.Depth,
             current.CreatedAt,
             current.ResultJson,
-            current.Error);
+            current.Error,
+            current.Request,
+            current.ParentDelegationId,
+            current.RootDelegationId,
+            leaseId,
+            leaseExpiresAt,
+            attempt ?? current.Attempt);
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(AgentDelegationExtension));
+        }
+    }
 
     private static void EnsureOwner(GameAgentDelegationRecord record, GameAgentExtensionRunContext context)
     {

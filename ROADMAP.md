@@ -13,8 +13,8 @@ This file is the durable, source-independent ledger for accepted OpenGameAgent f
 
 | Priority | Capability | Status | Completion evidence |
 | --- | --- | --- | --- |
-| P0 | Crash-safe ordinary-tool dispatch with stable operation IDs and explicit `Never` / `Safe` / `Recoverable` replay policy | Implemented; gates pending | `IGameRunOperationJournal`, in-memory/file stores, runtime execution hook, restart/corruption tests, architecture docs |
-| P1 | Restart-resumable delegation with lineage, lease/reclaim, continuation, bounded descendant listing, reports, inherited authority, and duplicate prevention | Planned | Persistence and restart tests, public API, docs, full release gates |
+| P0 | Crash-safe ordinary-tool dispatch with stable operation IDs and explicit `Never` / `Safe` / `Recoverable` replay policy | Completed | `IGameRunOperationJournal`, in-memory/file stores, runtime execution hook, restart/corruption tests, architecture docs, full release gates |
+| P1 | Restart-resumable delegation with lineage, lease/reclaim, continuation, bounded descendant listing, reports, inherited authority, and duplicate prevention | Completed | `AgentDelegationExtension.ResumePendingAsync`, opaque persisted requests, renewable CAS leases, owner-scoped lineage, tests, docs, full release gates |
 | P1 | Provider-neutral visual observation projection with immutable originals, derived transforms, request budgets, deterministic selection, structured scene/BEV context, caching, and provenance | Planned | Projection tests, model-request integration, diagnostics, docs, full release gates |
 | P1 | Reconstructable model-visible context provenance for context, memory, skills, tools, compaction, images, route, provider/model, and artifacts | Planned | Trace/history schema, redaction tests, replay/eval integration, docs |
 | P1 | Runtime health snapshots for providers, MCP, local endpoints, realtime, and media with declared/available/ready/degraded/unavailable states | Planned | Typed API, server/client projection, bounded diagnostics, tests, docs |

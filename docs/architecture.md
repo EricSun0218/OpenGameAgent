@@ -83,6 +83,8 @@ Read-only and idempotent tools may use the kernel directly. Non-idempotent state
 
 Timeline IDs make save forks and simulations explicit. Moments from different timelines cannot be ordered. Operational leases in mailboxes use real duration because they protect concurrent workers; narrative memory and scheduling use game time.
 
+Background delegation follows the same separation. Narrative lineage and creation moments use game identity/time, while a renewable wall-clock lease protects one execution attempt. Official delegation stores persist the opaque request snapshot separately from model-visible status, including the parent input/context and host-derived execution scope. A restart explicitly calls `AgentDelegationExtension.ResumePendingAsync`; only pending records or expired running leases can be claimed, and every claim/renewal/terminal settlement advances revision CAS. The claimed request carries a non-persisted fencing validator which the official executor checks at final tool authorization, closing the lease-expiry overlap between an old worker and its replacement. Shutdown never labels unfinished external work as completed or cancelled merely because the process is exiting.
+
 ## Concurrency
 
 `GameAgentRuntime` uses one logical lane per `(session, actor)`:
