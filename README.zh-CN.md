@@ -46,23 +46,15 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 
 也不是每次互动都必须运行完整 Agent Loop。问候等简单输入可以走快速回复路由，开放式任务使用完整循环，需要固定执行图的场景则可以使用确定性 Workflow。
 
-> 当前预发布版本：`0.3.0-alpha.4`。在 `1.0` 前公开 API 仍可能调整；正式游戏应锁定精确包版本。
+> 当前源码预发布版本：`0.3.0-alpha.4`。在 `1.0` 前公开 API 仍可能调整；正式游戏应锁定不可变 tag 或精确源码提交。
 
 内核边界刻意保持小而稳定。后续游戏特有能力通常应通过扩展、工具、策略、工作流或游戏自有服务加入，而不是继续膨胀模型/工具循环。
 
 ## 安装
 
-可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 下载版本化包文件、Godot/Unity 压缩包或可移植服务端。若游戏需要持续跟随本地最新源码，请只引用实际使用的项目：
+已经公开的版本化产物仍可从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 下载。对于当前 `0.3.0-alpha.4` 源码线，C# 与 Godot 开发应锁定源码提交，并且只引用游戏实际需要的项目。
 
-跨语言 Runtime Protocol、进程内 Host 与类型化 HTTP/SSE 客户端分别发布为独立 NuGet 包：
-
-```bash
-dotnet add package OpenGameAgent.Runtime.Protocol --version 0.3.0-alpha.4
-dotnet add package OpenGameAgent.Runtime.Hosting --version 0.3.0-alpha.4
-dotnet add package OpenGameAgent.Client --version 0.3.0-alpha.4
-```
-
-同一次 Release 的全部包都绑定到同一个源码提交。每个 GitHub Release 都包含 `RELEASE_MANIFEST.json`，用于记录版本、提交和协议版本映射，并包含 `SHA256SUMS.txt` 校验冻结产物。Runtime Protocol v1 通过能力协商增加可选能力；若必需字段、枚举含义、游标语义或生命周期顺序发生变化，必须升级协议版本。
+发行流水线会把全部产物绑定到同一个源码提交，并生成 `RELEASE_MANIFEST.json` 与 `SHA256SUMS.txt` 供校验。Runtime Protocol v1 通过能力协商增加可选能力；若必需字段、枚举含义、游标语义或生命周期顺序发生变化，必须升级协议版本。
 
 Unity 6 项目可以直接通过不可变的 GitHub UPM tag 安装完整的 `0.3.0-alpha.4` 包：
 

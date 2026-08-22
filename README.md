@@ -46,23 +46,15 @@ OpenGameAgent is model- and provider-neutral. Characters operate through develop
 
 Not every interaction needs the full loop. A game can route greetings and other simple inputs through the quick-response path, use the complete agent loop for open-ended tasks, and use deterministic workflows where the execution graph should be fixed.
 
-> Current pre-release: `0.3.0-alpha.4`. Public APIs can change before `1.0`; pin the exact package version for shipped games.
+> Current source pre-release: `0.3.0-alpha.4`. Public APIs can change before `1.0`; pin an immutable tag or source commit for shipped games.
 
 The kernel boundary is intentionally small and designed to stabilize early. New game-specific capabilities should normally arrive as extensions, tools, policies, workflows, or game-owned services instead of expanding the model/tool loop.
 
 ## Install
 
-Download versioned package artifacts, Godot and Unity archives, or the portable server from the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. For active development against a source checkout, reference only the projects your game needs:
+Published versioned artifacts remain available on the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. For the current `0.3.0-alpha.4` source line, C# and Godot development should use a pinned source checkout and reference only the projects the game needs.
 
-The cross-language Runtime Protocol, its in-process host, and the typed HTTP/SSE client are published as independent NuGet packages:
-
-```bash
-dotnet add package OpenGameAgent.Runtime.Protocol --version 0.3.0-alpha.4
-dotnet add package OpenGameAgent.Runtime.Hosting --version 0.3.0-alpha.4
-dotnet add package OpenGameAgent.Client --version 0.3.0-alpha.4
-```
-
-All release packages share one source commit. Each GitHub Release includes `RELEASE_MANIFEST.json` for the version-to-commit and protocol mapping plus `SHA256SUMS.txt` for frozen asset verification. Runtime Protocol v1 uses capability negotiation for additive features; changes to required fields, enum meaning, cursor semantics, or lifecycle ordering require a new protocol version.
+The release pipeline binds every artifact to one source commit and generates `RELEASE_MANIFEST.json` plus `SHA256SUMS.txt` for verification. Runtime Protocol v1 uses capability negotiation for additive features; changes to required fields, enum meaning, cursor semantics, or lifecycle ordering require a new protocol version.
 
 Unity 6 projects can install the complete `0.3.0-alpha.4` package directly from its immutable GitHub UPM tag:
 

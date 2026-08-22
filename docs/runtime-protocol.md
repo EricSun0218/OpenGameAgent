@@ -13,9 +13,9 @@ The normative schema, fixtures, and dependency-free C++ DTOs live under `protoco
 
 ## Versioned distribution
 
-Runtime Protocol v1 first ships as the `0.3.0-alpha.4` line. Pin the same exact pre-release version for `OpenGameAgent.Runtime.Protocol`, `OpenGameAgent.Runtime.Hosting`, and `OpenGameAgent.Client`; the Hosting and Client package dependencies keep their protocol package aligned.
+Runtime Protocol v1 is part of the `0.3.0-alpha.4` source line. Pin one exact source commit and use `ProjectReference` for `OpenGameAgent.Runtime.Protocol`, `OpenGameAgent.Runtime.Hosting`, and `OpenGameAgent.Client`. Hosting and Client keep their Protocol project dependency aligned.
 
-Every GitHub Release contains `RELEASE_MANIFEST.json`, which records the package version, full source commit, supported Runtime Protocol versions, package IDs, asset sizes, and frozen SHA-256 hashes. `SHA256SUMS.txt` covers every release payload including that manifest; the checksum index itself is the detached verifier. The `.nupkg` repository metadata carries the same source commit. NuGet.org adds its repository signature after upload, so the publisher verifies the signed package's content hash against the frozen unsigned Release asset instead of comparing the outer ZIP bytes.
+The release pipeline generates `RELEASE_MANIFEST.json`, recording the package version, full source commit, supported Runtime Protocol versions, package IDs, asset sizes, and frozen SHA-256 hashes. `SHA256SUMS.txt` covers every release payload including that manifest; the checksum index itself is the detached verifier.
 
 ## Coordinates and lifecycle
 
