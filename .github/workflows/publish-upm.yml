@@ -7,9 +7,15 @@ on:
         description: Semantic version to publish from the Unity package manifest
         required: true
         default: 0.3.0-alpha.4
+      refresh_openupm_only:
+        description: Reuse an existing immutable Git tag and only refresh OpenUPM
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: publish-upm-${{ inputs.version }}
@@ -28,11 +34,13 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        if: ${{ !inputs.refresh_openupm_only }}
         env:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
         with:
           global-json-file: global.json
       - name: Validate version and build package
+        if: ${{ !inputs.refresh_openupm_only }}
         shell: pwsh
         run: |
           if ($env:PACKAGE_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
@@ -55,6 +63,7 @@ jobs:
           Copy-Item -Path (Join-Path $builtPackage '*') -Destination $stagedPackage -Recurse -Force
           "UPM_PACKAGE_PATH=$stagedPackage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Publish immutable UPM branch and tag
+        if: ${{ !inputs.refresh_openupm_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -94,3 +103,29 @@ jobs:
           git commit -m "chore(upm): publish ${PACKAGE_NAME} ${PACKAGE_VERSION}"
           git tag -a "${tag}" -m "${PACKAGE_NAME} ${PACKAGE_VERSION}"
           git push origin HEAD:refs/heads/upm "refs/tags/${tag}"
+      - name: Validate existing immutable UPM tag
+        if: ${{ inputs.refresh_openupm_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${UPM_TAG_PREFIX}${PACKAGE_VERSION}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::Immutable UPM tag ${tag} does not exist."
+            exit 1
+          fi
+
+          git fetch origin "refs/tags/${tag}:refs/tags/${tag}"
+          manifest_name="$(git show "${tag}:package.json" | jq -r .name)"
+          manifest_version="$(git show "${tag}:package.json" | jq -r .version)"
+          if [[ "${manifest_name}" != "${PACKAGE_NAME}" || "${manifest_version}" != "${PACKAGE_VERSION}" ]]; then
+            echo "::error::Existing UPM tag does not match the requested package and version."
+            exit 1
+          fi
+      - name: Publish through OpenUPM
+        uses: openupm/openupm-action@89b79dc8dd6cb319efff06727f8fa0051ce7e517 # v1.0.1
+        with:
+          package: ${{ env.PACKAGE_NAME }}
+          tag: ${{ env.UPM_TAG_PREFIX }}${{ inputs.version }}
+          timeout-minutes: '15'
+          poll-interval-seconds: '15'
