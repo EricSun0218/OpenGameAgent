@@ -159,7 +159,7 @@ GameAgentRuntime
 
 实时语音是可选层，不是第二条游戏权威通道。实时传输可以负责对话或转写，并请求视线、手势、表情或移动意图等可逆表现；规划和持久世界变更仍交给同一个 `GameAgentRuntime` 与游戏自有工具。可选的 OpenAI 与火山适配器使用同一契约；火山适配器把对话/VAD、流式 TTS 与权威 Agent 循环明确分开。详见[实时对话](docs/realtime-conversations.md)。
 
-如果希望整套能力在本机运行，可选的 `OpenGameAgent.Providers.Local` 包提供有界的服务发现和健康检查、OpenAI-compatible 本地嵌入、LocalAI/Speaches 匿名 loopback 实时语音预设、LocalAI 图片/视频/TTS，以及由宿主编写可信 Workflow 的 ComfyUI 适配器。框架不捆绑或自动下载模型，也不会猜测未知模型能力。详见[本地模型与媒体](docs/local-models.md)。
+如果希望整套能力在本机运行，可选的 `OpenGameAgent.Providers.Local` 包提供有界的服务发现和健康检查、OpenAI-compatible 本地嵌入、可组合的 VAD/STT/流式 TTS、本地图片/视频/语音生成、可信 ComfyUI Workflow，以及由宿主明确授权的模型盘点、预热、加载、卸载与获取。框架不捆绑模型，也不会隐式下载或猜测未知能力。详见[本地模型、语音与媒体](docs/local-models.zh-CN.md)。
 
 运行输入、模型内容、工具目录、循环、队列、进度事件与并发都有明确上限。每次模型调用前都会执行上下文准入，模型与工具调用都有截止时间，大型工具结果可以保存为产物而不是反复占满提示词。游戏可以替换内置的内存或本地文件实现。
 
@@ -263,7 +263,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [部署与安全](docs/deployment-and-security.md)
 - [高风险工具批准](docs/tool-approvals.zh-CN.md)
 - [生成式媒体](docs/media.md)
-- [本地模型与媒体](docs/local-models.md)
+- [本地模型、语音与媒体](docs/local-models.zh-CN.md)
 - [生成资产与权威导入](docs/generated-assets.md)
 - [图片输入与游戏感知](docs/image-input.md)
 - [执行路由与性能](docs/execution-routing-and-performance.zh-CN.md)

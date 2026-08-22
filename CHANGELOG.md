@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add provider-neutral composable local speech using bounded VAD, transcription, and streaming speech
+  synthesis through the existing realtime bridge, plus OpenAI-compatible local STT/TTS adapters.
+- Add explicit, host-authorized local model inventory, warmup, load, unload, and acquisition lifecycle
+  contracts with an Ollama backend; agent runs never trigger implicit downloads.
+- Let hosts advance durable task plans from committed authoritative evidence while optionally removing
+  model-visible advancement, preserving revision, once-per-input, evidence, retention, and CAS guards.
+- Make delegated-agent shutdown reliably signal handles even when cancellation races active-handle
+  publication, while leaving uncooperative work recoverable after restart.
+
 ## 0.3.0-alpha.4
 
 - Add OpenGameAgent Runtime Protocol v1 as optional `OpenGameAgent.Runtime.Protocol`,

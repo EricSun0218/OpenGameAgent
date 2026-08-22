@@ -76,6 +76,61 @@ var transport = new OpenAIRealtimeTransport(LocalRealtimePresets.Speaches());
 
 The same `RealtimeConversationManager` supplies PCM16 input/output, transcription events, subtitle timing, barge-in, truncation, steering, and handoff. Local speech does not create a separate authority path: durable actions remain in `GameAgentRuntime`.
 
+Services that expose separate VAD/STT/TTS APIs can use `ComposableRealtimeTransport`. It accepts a session-scoped `IGameVoiceActivityDetector`, a concurrent `IGameSpeechRecognizer`, and a streaming `IGameSpeechSynthesizer`, then projects them through the same realtime events and `GameRealtimeAgentBridge`. `EnergyGameVoiceActivityDetector` is a deterministic bounded default; an engine or ONNX VAD can replace it without changing the bridge.
+
+The local package includes OpenAI-compatible `/v1/audio/transcriptions` and `/v1/audio/speech` adapters. They support PCM16 WAV transcription input and validated raw PCM16 or WAV speech output:
+
+```csharp
+var speech = new ComposableRealtimeTransport(
+    new LocalOpenAISpeechRecognizer(new(
+        http,
+        new Uri("http://127.0.0.1:8000/v1"))
+    {
+        Model = "whisper-1",
+    }),
+    new LocalOpenAISpeechSynthesizer(new(
+        http,
+        new Uri("http://127.0.0.1:8000/v1"))
+    {
+        Model = "kokoro",
+        OutputFormat = LocalOpenAISpeechOutputFormat.Pcm16,
+        RawPcmSampleRate = 24_000,
+    }));
+
+await using var conversation = new RealtimeConversationManager(speech);
+// Attach the normal GameRealtimeAgentBridge, then start and feed PCM16 frames.
+```
+
+Utterance, queue, transcript, request, response, frame, timeout, and pre-roll limits are explicit. Speech onset cancels active and queued synthesis even before its first audio frame, while authoritative actions already dispatched through the game journal are unaffected.
+
+## Explicit local model lifecycle
+
+`LocalGameModelLifecycle` is a developer/host control surface for inventory, warmup, load, unload, and acquisition. Nothing invokes it automatically from a prompt or agent run. Operations have bounded concurrency and timeout; acquisition is rejected before the backend unless `AuthorizeAcquisitionAsync` explicitly grants that request.
+
+```csharp
+using var lifecycle = new LocalGameModelLifecycle(
+    new OllamaGameModelLifecycleBackend(
+        new OllamaGameModelLifecycleOptions(http)),
+    new LocalGameModelLifecycleOptions
+    {
+        AuthorizeAcquisitionAsync = (request, cancellationToken) =>
+            new ValueTask<bool>(developerSettings.AllowModelDownloads),
+    });
+
+var installed = await lifecycle.ReadInventoryAsync(refresh: true, cancellationToken);
+await lifecycle.WarmupAsync("qwen2.5:7b", cancellationToken);
+await lifecycle.AcquireAsync(
+    new LocalGameModelAcquisitionRequest("qwen2.5:7b"),
+    (progress, cancellationToken) =>
+    {
+        ShowProgress(progress.Stage, progress.Ratio);
+        return default;
+    },
+    cancellationToken);
+```
+
+The Ollama backend merges installed and running inventory, uses explicit keep-alive load/unload calls, and parses bounded pull progress. Other local runtimes implement `ILocalGameModelLifecycleBackend`; model files, license acceptance, disk placement, and acquisition policy remain host-owned.
+
 ## LocalAI image, video, and speech generation
 
 Register the exact local models configured by the host:

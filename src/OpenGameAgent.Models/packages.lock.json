@@ -69,7 +69,7 @@
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.4, )",
           "System.Text.Json": "[8.0.6, )"
         }
       }

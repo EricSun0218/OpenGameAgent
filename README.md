@@ -161,7 +161,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 
 Realtime speech is an optional layer rather than a second game-authority path. The realtime transport can converse or transcribe, and can request reversible gaze, gesture, expression, or movement presentation. Planning and durable world mutations are handed to the same `GameAgentRuntime` and game-owned tools used by non-voice inputs. Optional OpenAI and Volcengine adapters share this contract; the Volcengine adapter keeps dialogue/VAD and streaming TTS separate from the authoritative agent loop. See [Realtime conversations](docs/realtime-conversations.md).
 
-For an entirely local stack, the optional `OpenGameAgent.Providers.Local` package provides bounded endpoint discovery and health checks, OpenAI-compatible embeddings, anonymous-loopback realtime presets for LocalAI and Speaches, LocalAI image/video/TTS generation, and a host-authored ComfyUI workflow adapter. No model is bundled or downloaded, and unknown capabilities are not guessed. See [Local models and media](docs/local-models.md).
+For an entirely local stack, the optional `OpenGameAgent.Providers.Local` package provides bounded endpoint discovery and health checks, OpenAI-compatible embeddings, composable VAD/STT/streaming-TTS speech, LocalAI image/video/TTS generation, trusted ComfyUI workflows, and explicit host-authorized model inventory/warmup/load/unload/acquisition. No model is bundled or downloaded implicitly, and unknown capabilities are not guessed. See [Local models, speech, and media](docs/local-models.md).
 
 Run inputs, model content, tool catalogs, loops, queues, progress, and concurrency are bounded by explicit limits. Context admission runs before every model request, model and tool calls have deadlines, and large tool results can be retained as artifacts instead of repeatedly filling the prompt. Game-owned stores and rankers can replace the included in-memory or local-file implementations.
 
@@ -264,7 +264,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Deployment and security](docs/deployment-and-security.md)
 - [High-risk tool approval](docs/tool-approvals.md)
 - [Generated media](docs/media.md)
-- [Local models and media](docs/local-models.md)
+- [Local models, speech, and media](docs/local-models.md)
 - [Generated assets and authoritative import](docs/generated-assets.md)
 - [Image input and game perception](docs/image-input.md)
 - [Execution routing and performance](docs/execution-routing-and-performance.md)

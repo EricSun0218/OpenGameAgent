@@ -13,6 +13,7 @@
     <ProjectReference Include="..\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
     <ProjectReference Include="..\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
     <ProjectReference Include="..\OpenGameAgent.Providers.OpenAI.Realtime\OpenGameAgent.Providers.OpenAI.Realtime.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Realtime\OpenGameAgent.Realtime.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\OpenGameAgent.Providers.ImageCommon\ImageProviderCommon.cs" Link="Internal\ImageProviderCommon.cs" />

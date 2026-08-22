@@ -25,8 +25,11 @@ This is intentionally two loops. The realtime model owns turn-taking, transcript
 - `OpenGameAgent.Realtime`: provider-neutral contracts, bounded conversation manager, behavior channel orchestration, and `GameAgentRuntime` handoff bridge.
 - `OpenGameAgent.Providers.OpenAI.Realtime`: OpenAI Realtime WebSocket wire adapter. Credentials are used only during the WebSocket handshake.
 - `OpenGameAgent.Providers.Volcengine.Realtime`: Volcengine duplex speech adapter. Dialogue audio is used for VAD/transcription and handed to the OGA agent; agent text is streamed through a separate bidirectional TTS session. The provider's own chat output never becomes a second game-action loop.
+- `OpenGameAgent.Providers.Local`: OpenAI-compatible local STT/TTS adapters which compose through `ComposableRealtimeTransport`; models and services are supplied by the host.
 
 Both target `netstandard2.1`. They can run in a Godot/Unity process, a local sidecar, or a .NET service. A shipped client still must not contain a permanent developer API key.
+
+For separate speech components, `ComposableRealtimeTransport` turns bounded VAD decisions and complete PCM16 utterances into input transcript/handoff events, then streams Agent handoff text through TTS. It uses `GameRealtimeAgentBridge`, so tool calls, steering, receipts, conflicts, and durable actions remain on the existing runtime. Speech cancellation only discards presentation output; it does not roll back or replay a committed world action.
 
 ## Minimal setup
 
