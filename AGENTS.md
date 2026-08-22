@@ -66,15 +66,6 @@ Real-editor gates are in `docs/engine-integration.md`.
 
 ## Change guidance
 
-### Requirement intake and closure
-
-- Every user request and cross-thread delegation must be added to the active task plan before implementation starts.
-- First check whether the requested capability already exists in source, tests, documentation, or a published artifact. Do not implement a duplicate subsystem from a request alone.
-- Keep `ROADMAP.md` synchronized with every accepted framework requirement. Record its source-independent capability, priority, acceptance evidence, and one of: planned, in progress, completed, superseded, paused, or rejected.
-- A requirement is completed only when its implementation, focused tests, full applicable release gates, documentation, commit, push, and source-thread notification are all complete. Green CI alone is not proof that the requirement backlog is empty.
-- When a newer requirement supersedes an older one, retain the decision in `ROADMAP.md` instead of silently dropping the older item.
-- Do not stop with accepted planned or in-progress items. Paused items require an explicit user boundary; rejected or superseded items require a written rationale.
-
 - Kernel changes require success, validation, provider-failure, cancellation, limit, and event-order tests where relevant.
 - State-changing tool changes require duplicate, uncertain-outcome, and recovery tests.
 - Persistence changes require restart, corruption, atomic-write, and concurrency coverage proportional to the change.

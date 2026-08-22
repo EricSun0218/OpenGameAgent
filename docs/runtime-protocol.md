@@ -9,7 +9,7 @@ Use it when a client must reconnect to a running agent, consume a canonical cros
 - `OpenGameAgent.Client`: typed HTTP/SSE client;
 - `OpenGameAgent.Server`: self-hostable HTTP/SSE implementation.
 
-The normative schema, fixtures, dependency-free C++ DTOs, and generated TypeScript/Python SDKs live under `protocol/runtime/v1`. A commercial service can consume these public artifacts, but must not fork the agent loop or copy internal server DTOs.
+The normative schema, fixtures, dependency-free C++ DTOs, and generated TypeScript/Python SDKs live under `protocol/runtime/v1`. They are the supported interoperability boundary for remote and self-hosted services; consumers should depend on these public contracts instead of duplicating server-internal DTOs or agent-loop state.
 
 The TypeScript and Python SDKs contain strict DTO guards, cursor parsing, the same client reducer, and clients for initialize, cursor pages, exact steer/interrupt, and resumable SSE. TypeScript has no runtime dependency and builds to JavaScript plus declarations; Python uses only the standard library. Both are generated from the checked-in v1 schema and embed its SHA-256. Verify generation and packed clean consumers with `./tools/Test-RuntimeProtocolSdks.ps1`.
 
