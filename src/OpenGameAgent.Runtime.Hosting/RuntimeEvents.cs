@@ -290,7 +290,7 @@ public static class GameRuntimeIds
     public static string Event(GameSessionKey key, long sequence, string inputId)
     {
         key = new GameSessionKey(key.SessionId, key.ActorId);
-        if (sequence < 1)
+        if (sequence < 1 || sequence > GameRuntimeProtocol.MaximumSequence)
         {
             throw new ArgumentOutOfRangeException(nameof(sequence));
         }

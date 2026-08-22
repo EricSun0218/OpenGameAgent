@@ -27,9 +27,20 @@ jobs:
           DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
         with:
           global-json-file: global.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: protocol/runtime/v1/typescript/package-lock.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
       - name: Test release scripts
         shell: pwsh
         run: ./tools/Test-ReleaseScripts.ps1 -Version $env:CI_PACKAGE_VERSION
+      - name: Test generated Runtime Protocol SDKs
+        shell: pwsh
+        run: ./tools/Test-RuntimeProtocolSdks.ps1
       - name: Restore locked dependencies
         run: dotnet restore OpenGameAgent.sln --locked-mode
       - name: Build

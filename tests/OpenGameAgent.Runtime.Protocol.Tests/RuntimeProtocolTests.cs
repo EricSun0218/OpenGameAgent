@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using OpenGameAgent.Runtime.Protocol;
 using Xunit;
@@ -96,6 +97,20 @@ public sealed class RuntimeProtocolTests
     }
 
     [Fact]
+    public void SequenceRangeRemainsExactlyRepresentableAcrossSupportedLanguages()
+    {
+        Assert.Equal(9_007_199_254_740_991, GameRuntimeProtocol.MaximumSequence);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Event(
+            GameRuntimeProtocol.MaximumSequence + 1,
+            GameRuntimeLifecycle.Started,
+            "message_started"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GameRuntimeReadEventsRequest(
+            "session",
+            "actor",
+            GameRuntimeProtocol.MaximumSequence + 1));
+    }
+
+    [Fact]
     public void PublishedSchemaCppSdkAndFixtureStayOnProtocolVersionOne()
     {
         var root = FindRepositoryRoot();
@@ -127,6 +142,17 @@ public sealed class RuntimeProtocolTests
             "cpp",
             "OpenGameAgentRuntimeProtocol.hpp"));
         Assert.Contains("protocol_version = 1", cpp, StringComparison.Ordinal);
+        Assert.Contains("maximum_sequence = 9007199254740991LL", cpp, StringComparison.Ordinal);
+
+        var schemaHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(schemaPath))).ToLowerInvariant();
+        foreach (var sdkPath in new[]
+                 {
+                     Path.Combine(root, "protocol", "runtime", "v1", "typescript", "src", "index.ts"),
+                     Path.Combine(root, "protocol", "runtime", "v1", "python", "opengameagent_runtime_protocol", "__init__.py"),
+                 })
+        {
+            Assert.Contains(schemaHash, File.ReadAllText(sdkPath), StringComparison.Ordinal);
+        }
 
         var reducer = new GameRuntimeReducer();
         var fixturePath = Path.Combine(root, "protocol", "runtime", "v1", "fixtures", "canonical-run.jsonl");

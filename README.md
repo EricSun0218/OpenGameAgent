@@ -150,13 +150,13 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
-| Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators; optional local discovery for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM |
+| Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators; provider-neutral conformance runner and fixtures; optional local discovery for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM |
 | Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, OpenRouter previews, official OpenAI Images, Volcengine Ark/Seedream, plus optional LocalAI and trusted ComfyUI workflow adapters |
 | Generated assets | Stable operations, content-addressed resources, persistent lifecycle state, explicit uncertain outcomes, resumable import, and durable authoritative engine receipts |
 | Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, ordinary-tool replay journals, generated-asset jobs/resources, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
 | Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service with C# and native C++ clients |
-| Runtime protocol | Optional versioned Session/Run/Turn/Item contract, capability negotiation, stable event IDs, bounded replay/gap reconciliation, exact run/turn control, C# client, Schema/fixtures, and C++ DTOs |
+| Runtime protocol | Optional versioned Session/Run/Turn/Item contract, capability negotiation, stable event IDs, bounded replay/gap reconciliation, exact run/turn control, C# client, Schema/fixtures, C++ DTOs, and generated TypeScript/Python clients and reducers |
 | Engines | Godot 4.7 .NET and Unity 6 in-process packages; Unreal Engine 5.8 native C++ sidecar plugin |
 
 Realtime speech is an optional layer rather than a second game-authority path. The realtime transport can converse or transcribe, and can request reversible gaze, gesture, expression, or movement presentation. Planning and durable world mutations are handed to the same `GameAgentRuntime` and game-owned tools used by non-voice inputs. Optional OpenAI and Volcengine adapters share this contract; the Volcengine adapter keeps dialogue/VAD and streaming TTS separate from the authoritative agent loop. See [Realtime conversations](docs/realtime-conversations.md).
@@ -260,6 +260,8 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Feature and API map](docs/features.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
 - [Extension development kit](docs/extensions.md)
+- [Provider conformance](docs/provider-conformance.md)
+- [Runtime Protocol and cross-language SDKs](docs/runtime-protocol.md)
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
 - [High-risk tool approval](docs/tool-approvals.md)

@@ -7,6 +7,11 @@ TestResults/
 .idea/
 *.user
 *.suo
+node_modules/
+protocol/runtime/v1/typescript/dist/
+protocol/runtime/v1/python/build/
+protocol/runtime/v1/python/*.egg-info/
+protocol/runtime/v1/python/**/__pycache__/
 
 # Engine-generated state.
 .godot/

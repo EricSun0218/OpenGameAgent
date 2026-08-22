@@ -9,6 +9,7 @@ public static class GameRuntimeProtocol
     public const int Version = 1;
     public const int MaximumJsonCharacters = 8_000_000;
     public const int MaximumPageSize = 1_024;
+    public const long MaximumSequence = 9_007_199_254_740_991;
 
     public static IReadOnlyList<string> Capabilities { get; } = Array.AsReadOnly(new[]
     {
@@ -40,7 +41,8 @@ public static class GameRuntimeCursor
                    System.Globalization.NumberStyles.AllowHexSpecifier,
                    System.Globalization.CultureInfo.InvariantCulture,
                    out sequence)
-               && sequence > 0;
+               && sequence > 0
+               && sequence <= GameRuntimeProtocol.MaximumSequence;
     }
 }
 
@@ -231,7 +233,7 @@ public sealed class GameRuntimeReadEventsRequest
     {
         SessionId = GameRuntimeGuards.Id(sessionId, nameof(sessionId), 1_024);
         ActorId = GameRuntimeGuards.Id(actorId, nameof(actorId), 1_024);
-        if (afterSequence < 0)
+        if (afterSequence < 0 || afterSequence > GameRuntimeProtocol.MaximumSequence)
         {
             throw new ArgumentOutOfRangeException(nameof(afterSequence));
         }
@@ -317,7 +319,7 @@ public sealed class GameRuntimeEventEnvelope
             throw new ArgumentOutOfRangeException(nameof(protocolVersion));
         }
 
-        if (sequence < 0)
+        if (sequence < 0 || sequence > GameRuntimeProtocol.MaximumSequence)
         {
             throw new ArgumentOutOfRangeException(nameof(sequence));
         }
@@ -417,6 +419,10 @@ public sealed class GameRuntimeEventPage
         if (requestedAfterSequence < 0
             || firstRetainedSequence < 0
             || lastSequence < 0
+            || requestedAfterSequence > GameRuntimeProtocol.MaximumSequence
+            || firstRetainedSequence > GameRuntimeProtocol.MaximumSequence
+            || lastSequence > GameRuntimeProtocol.MaximumSequence
+            || nextAfterSequence > GameRuntimeProtocol.MaximumSequence
             || nextAfterSequence < requestedAfterSequence
             || nextAfterSequence > Math.Max(lastSequence, requestedAfterSequence)
             || firstRetainedSequence > lastSequence + 1)
@@ -474,7 +480,8 @@ public sealed class GameRuntimeItemSnapshot
     {
         if (!Enum.IsDefined(typeof(GameRuntimeItemKind), kind)
             || !Enum.IsDefined(typeof(GameRuntimeLifecycle), lifecycle)
-            || lastSequence < 1)
+            || lastSequence < 1
+            || lastSequence > GameRuntimeProtocol.MaximumSequence)
         {
             throw new ArgumentOutOfRangeException(nameof(kind));
         }
@@ -517,6 +524,7 @@ public sealed class GameRuntimeRunSnapshot
     {
         if (!Enum.IsDefined(typeof(GameRuntimeRunStatus), status)
             || lastSequence < 0
+            || lastSequence > GameRuntimeProtocol.MaximumSequence
             || turn is < 0 or > 1_000_000)
         {
             throw new ArgumentOutOfRangeException(nameof(status));

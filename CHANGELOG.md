@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a provider-neutral model-stream conformance runner with standard request fixtures, bounded
+  lifecycle/terminal checks, cancellation probes, resolved-identity checks, and sensitive-diagnostic guards.
+- Generate dependency-free TypeScript and standard-library Python Runtime Protocol v1 clients and
+  reducers from the normative schema, with locked builds, packed clean consumers, and exact safe-integer cursors.
 - Execute compatible tools in ordered parallel epochs around sequential barriers, retaining source-order
   transcripts, bounded concurrency, conflict-key serialization, uncertain-write blocking, and cancellation safety.
 - Detect deep-canonicalized exact prepared tool-call loops across turns, with host-configurable polling

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opengameagent-runtime-protocol"
+version = "0.3.0a4"
+description = "Dependency-free Python SDK for OpenGameAgent Runtime Protocol v1"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.setuptools]
+packages = ["opengameagent_runtime_protocol"]

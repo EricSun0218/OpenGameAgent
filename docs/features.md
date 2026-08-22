@@ -114,6 +114,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | --- | --- |
 | Describe capabilities, context, output limits, reasoning, and cost | `GameModelDescriptor` |
 | Register and select local or remote models | `GameModelCatalog` |
+| Validate a provider's normalized stream, cancellation, bounds, and diagnostic secrecy | `GameProviderConformance`, `GameProviderConformanceFixtures` |
 | Refresh a provider's model list safely | `GameModelProviderRegistration.RefreshModels`, `GameModelCatalog.RefreshAsync` |
 | Resolve API keys, OAuth-style tokens, or local/no-auth modes | `IGameProviderAuthentication`, `IGameCredentialStore` |
 | Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |

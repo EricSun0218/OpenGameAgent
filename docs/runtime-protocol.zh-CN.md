@@ -9,7 +9,9 @@ OpenGameAgent Runtime Protocol 是 OpenGameAgent 面向游戏引擎、原生客�
 - `OpenGameAgent.Client`：类型化 HTTP/SSE 客户端；
 - `OpenGameAgent.Server`：可自行托管的 HTTP/SSE 实现。
 
-规范 Schema、fixture 和无第三方依赖的 C++ DTO 位于 `protocol/runtime/v1`。商业服务只能消费这些公共契约，不需要复制服务器内部 DTO，更不能 fork Agent loop。
+规范 Schema、fixture、无第三方依赖的 C++ DTO，以及生成的 TypeScript/Python SDK 位于 `protocol/runtime/v1`。商业服务只能消费这些公共契约，不需要复制服务器内部 DTO，更不能 fork Agent loop。
+
+TypeScript 与 Python SDK 均包含严格 DTO 校验、游标解析、同语义客户端 reducer，以及 initialize、游标分页、精确 steer/interrupt 和可续传 SSE 客户端。TypeScript 没有运行时依赖并生成 JavaScript 与声明文件；Python 只依赖标准库。两者都由仓库内 v1 Schema 确定性生成并嵌入其 SHA-256。运行 `./tools/Test-RuntimeProtocolSdks.ps1` 可同时核验生成结果和打包后的全新消费者。
 
 ## 版本化分发
 
@@ -75,6 +77,7 @@ SSE 的 `id:` 是规范事件 ID。客户端持久记录最后一个完整应用
 - 新增可选 capability 或 payload 的附加字段，不得改变既有生命周期含义。
 - 修改必需字段、枚举语义、游标规则或生命周期顺序，必须升级协议版本。
 - JSON reader 拒绝重复属性，最大深度 128，并执行文档中的字符数与页大小边界。
+- 事件序号上限为 `9007199254740991`，确保 C#、C++、TypeScript 与 Python 都能无损表示同一个整数。
 - `payloadJson`、`inputJson`、`messageJson` 各自包含一个有界规范 JSON 值；它们复用已有 Runtime wire，不把 Provider 私有对象塞进 Runtime Schema。
 - 非 internal 投影永远不能包含隐藏 reasoning、signature、私密消息、凭证和私密工具细节。
 

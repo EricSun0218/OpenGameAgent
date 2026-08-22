@@ -88,7 +88,9 @@ public sealed class InMemoryGameRuntimeEventJournal
         int maximum)
     {
         key = new GameSessionKey(key.SessionId, key.ActorId);
-        if (afterSequence < 0 || maximum is < 1 or > GameRuntimeProtocol.MaximumPageSize)
+        if (afterSequence < 0
+            || afterSequence > GameRuntimeProtocol.MaximumSequence
+            || maximum is < 1 or > GameRuntimeProtocol.MaximumPageSize)
         {
             throw new ArgumentOutOfRangeException(nameof(afterSequence));
         }
@@ -155,7 +157,7 @@ public sealed class InMemoryGameRuntimeEventJournal
         CancellationToken cancellationToken)
     {
         key = new GameSessionKey(key.SessionId, key.ActorId);
-        if (afterSequence < 0)
+        if (afterSequence < 0 || afterSequence > GameRuntimeProtocol.MaximumSequence)
         {
             throw new ArgumentOutOfRangeException(nameof(afterSequence));
         }
@@ -201,7 +203,12 @@ public sealed class InMemoryGameRuntimeEventJournal
             UpdateItemState(state, draft);
         }
 
-        var sequence = checked(++state.LastSequence);
+        if (state.LastSequence >= GameRuntimeProtocol.MaximumSequence)
+        {
+            throw new InvalidOperationException("The Runtime event sequence exhausted its cross-language safe range.");
+        }
+
+        var sequence = ++state.LastSequence;
         var value = new GameRuntimeEventEnvelope(
             GameRuntimeProtocol.Version,
             GameRuntimeIds.Event(draft.Key, sequence, draft.InputId),

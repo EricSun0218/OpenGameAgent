@@ -9,6 +9,7 @@ namespace opengameagent::runtime::v1
 {
 inline constexpr std::int32_t protocol_version = 1;
 inline constexpr std::int32_t maximum_page_size = 1024;
+inline constexpr std::int64_t maximum_sequence = 9007199254740991LL;
 
 enum class event_kind { run, turn, item, result, gap, heartbeat };
 enum class item_kind { message, tool, action, approval, interaction, artifact, delegation, plan, media, status };

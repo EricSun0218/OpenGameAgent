@@ -148,13 +148,13 @@ GameAgentRuntime
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
 | 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
-| 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
+| 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；中立 Provider 一致性 runner 与 fixture；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览、OpenAI Images、火山方舟/Seedream，以及可选的 LocalAI 与可信 ComfyUI Workflow 适配器 |
 | 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
 | 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端以及 C#、原生 C++ 客户端 |
-| Runtime 协议 | 可选的版本化 Session/Run/Turn/Item 契约、能力协商、稳定事件 ID、有界重放与 gap 对账、精确 Run/Turn 控制、C# 客户端、Schema/fixture 和 C++ DTO |
+| Runtime 协议 | 可选的版本化 Session/Run/Turn/Item 契约、能力协商、稳定事件 ID、有界重放与 gap 对账、精确 Run/Turn 控制、C# 客户端、Schema/fixture、C++ DTO，以及生成的 TypeScript/Python 客户端和 reducer |
 | 引擎 | Godot 4.7 .NET 与 Unity 6 进程内包；Unreal Engine 5.8 原生 C++ sidecar 插件 |
 
 实时语音是可选层，不是第二条游戏权威通道。实时传输可以负责对话或转写，并请求视线、手势、表情或移动意图等可逆表现；规划和持久世界变更仍交给同一个 `GameAgentRuntime` 与游戏自有工具。可选的 OpenAI 与火山适配器使用同一契约；火山适配器把对话/VAD、流式 TTS 与权威 Agent 循环明确分开。详见[实时对话](docs/realtime-conversations.md)。
@@ -259,6 +259,8 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [功能与 API 地图](docs/features.md)
 - [游戏集成模式](docs/game-integration-patterns.md)
 - [扩展开发套件](docs/extensions.zh-CN.md)
+- [Provider 一致性测试](docs/provider-conformance.zh-CN.md)
+- [Runtime Protocol 与跨语言 SDK](docs/runtime-protocol.zh-CN.md)
 - [引擎集成](docs/engine-integration.md)
 - [部署与安全](docs/deployment-and-security.md)
 - [高风险工具批准](docs/tool-approvals.zh-CN.md)
