@@ -868,6 +868,7 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
         return new GameAgentExtensionRunContext(
             context.Input,
             context.Session,
+            context.ExecutionScope,
             context.SessionState,
             new GameAgentExtensionState(context.SessionState, extensionId, context.Lease),
             context.Lease,
@@ -878,12 +879,14 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
     internal GameAgentExtensionRunContext CreateRunContext(
         GameInput input,
         GameSessionSnapshot session,
-        GameAgentSessionState state)
+        GameAgentSessionState state,
+        GameExecutionScope executionScope)
     {
         var lease = new GameAgentExtensionRunLease();
         return new GameAgentExtensionRunContext(
             input,
             session,
+            executionScope,
             state,
             new GameAgentExtensionState(state, "runtime", lease),
             lease,

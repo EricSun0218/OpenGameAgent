@@ -440,6 +440,7 @@ public sealed class GameAgentExtensionRunContext
     internal GameAgentExtensionRunContext(
         GameInput input,
         GameSessionSnapshot session,
+        GameExecutionScope executionScope,
         GameAgentSessionState sessionState,
         GameAgentExtensionState state,
         GameAgentExtensionRunLease lease,
@@ -448,6 +449,7 @@ public sealed class GameAgentExtensionRunContext
     {
         Input = input ?? throw new ArgumentNullException(nameof(input));
         Session = session ?? throw new ArgumentNullException(nameof(session));
+        ExecutionScope = executionScope ?? throw new ArgumentNullException(nameof(executionScope));
         SessionState = sessionState ?? throw new ArgumentNullException(nameof(sessionState));
         State = state ?? throw new ArgumentNullException(nameof(state));
         Lease = lease ?? throw new ArgumentNullException(nameof(lease));
@@ -459,6 +461,12 @@ public sealed class GameAgentExtensionRunContext
     public GameInput Input { get; }
 
     public GameSessionSnapshot Session { get; }
+
+    /// <summary>
+    /// Host-derived optional capability grants for this input. Extensions must enforce this scope
+    /// before contributing any capability that requires an explicit grant.
+    /// </summary>
+    public GameExecutionScope ExecutionScope { get; }
 
     public GameAgentExtensionState State { get; }
 

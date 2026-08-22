@@ -24,6 +24,26 @@ Quick 是非试运行模式。它不能调用工具，不能通过工具写长�
 
 Agent 路线原生承担短任务：多轮工具、进度、重试/回退、steer、follow-up、取消、上下文刷新和 durable action receipt 都不要求先创建计划。当任务扩大时，同一个 loop 可以调用官方 Goal/TaskPlan 工具创建持久工作；已经完成的世界写入保留原 operation ID 和 receipt，不会因为创建计划而重复执行。`direct` 会同时隐藏这些官方持久化工具及其提示指导，`plan` 则显式提供计划指导。Workflow 仍是预先注册的业务协议，不允许模型凭空创造游戏规则。
 
+路线选择与持久计划授权是两个正交维度。如果某类角色仍应使用 `auto`，但只能进入 QuickResponse 或有界短任务 Agent，请配置由宿主推导的 `GameExecutionScopeProvider`：
+
+```csharp
+var runtime = new GameAgentBuilder(provider, model)
+    .UseExecutionScope((input, cancellationToken) =>
+        new ValueTask<GameExecutionScope>(
+            IsPersistentPlannerAuthorized(input.SessionId, input.ActorId)
+                ? GameExecutionScope.Restricted(new[]
+                {
+                    GameExecutionCapabilities.PersistentPlanning,
+                })
+                : GameExecutionScope.ShortTaskOnly))
+    .UseRouting(new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync))
+    .UseExtension(new GoalLoopExtension())
+    .UseExtension(new TaskPlanExtension(ValidateEvidenceAsync))
+    .Build();
+```
+
+Scope resolver 属于 Runtime 的可信配置，不是输入 metadata。服务端必须根据认证 principal 和宿主策略推导，不能把不可信 payload 的自报字段直接转换为授权。使用 `ShortTaskOnly` 时，自动分类仍以零工具权限运行，routing usage/token/latency/失败原因照常记录；普通短任务工具和非计划 pending work 仍可使用；GoalLoop/TaskPlan 的上下文、工具、pending-work 唤醒以及 Agent 原地升级计划都会被硬性移除。显式请求 `agent.route=plan` 会在回答 Provider 被调用前失败。已有持久计划仍保存在存储中，但要等后续获得授权的输入才能唤醒。`direct` 与已授权的 `plan` 语义保持不变。
+
 ## 能力审计
 
 | 验收项 | 框架覆盖 |
@@ -31,6 +51,7 @@ Agent 路线原生承担短任务：多轮工具、进度、重试/回退、stee
 | Quick / Agent / Workflow | 完整：`GameRouteKind`、`AutomaticGameRoutePolicy`、`IGameWorkflow`。 |
 | 显式 auto / direct / plan | 完整：使用 `agent.route`；别名复用现有三种稳定路线。 |
 | 安全升级 | `auto` 通过执行前分类完成；Agent 通过 `TaskPlanExtension` 升级为持久计划；有意禁止 Quick 试运行后重放。 |
+| 宿主限定持久计划 | 完整：`GameExecutionScopeProvider` 的 `ShortTaskOnly` 保留 auto/Quick/短 Agent，同时对 GoalLoop/TaskPlan 暴露和唤醒 fail-closed。 |
 | Quick 无副作用 | 完整：Runtime 提供空工具集合，内核一轮后停止。 |
 | 短多工具任务 | 完整：Agent 支持进度、steer、follow-up、abort、预算、刷新、重试和回退。 |
 | 持久复杂工作 | 完整：Goal、TaskPlan、等待、Workflow、checkpoint、邮箱、游戏时间调度和宿主证据校验。 |

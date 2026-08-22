@@ -265,7 +265,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         api.RegisterContextProvider(
             "goal-guidance",
             (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
-                IsDirect(context.Input)
+                !AllowsPersistentPlanning(context)
                     ? Array.Empty<GameContextSlice>()
                     : new[]
                     {
@@ -277,7 +277,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
         api.RegisterToolProvider(
             "goal-tools",
             (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(
-                IsDirect(context.Input)
+                !AllowsPersistentPlanning(context)
                     ? Array.Empty<AgentTool>()
                     : new[]
                     {
@@ -286,9 +286,15 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                     }));
         api.RegisterPendingWorkProvider(
             "active-goals",
-            (context, cancellationToken) => ResumeAndCheckPendingAsync(api, context, cancellationToken),
+            (context, cancellationToken) => AllowsPersistentPlanning(context)
+                ? ResumeAndCheckPendingAsync(api, context, cancellationToken)
+                : new ValueTask<bool>(false),
             priority: 500);
     }
+
+    private static bool AllowsPersistentPlanning(GameAgentExtensionRunContext context) =>
+        !IsDirect(context.Input)
+        && context.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning);
 
     private static bool IsDirect(GameInput input) =>
         input.Metadata.TryGetValue("agent.route", out var route)

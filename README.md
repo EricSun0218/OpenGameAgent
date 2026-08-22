@@ -86,6 +86,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - structured observations and context slices with floating-point values intact;
 - content-addressed screenshot/image input with decode validation, model-capability preflight, and session-authorized retrieval;
 - preflight `auto`, side-effect-free `quick`, short-task `direct`/`agent`, persistent `plan`, and deterministic-workflow routes;
+- host-derived execution scopes that keep auto/Quick/short Agent available while withholding persistent planning from unauthorized actors;
 - per-actor serialization with bounded cross-actor concurrency;
 - journaled action intents and authoritative game receipts;
 - game-time memory filtering, expiry, and optional custom ranking;

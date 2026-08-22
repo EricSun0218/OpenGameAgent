@@ -24,6 +24,26 @@ Quick mode is deliberately non-speculative. It cannot call a tool, write long-te
 
 The Agent route handles short tasks directly: multiple tool turns, progress, bounded retry/fallback, steering, follow-up, cancellation, refreshed context, and durable action receipts do not require a persistent plan. When a task grows, the same loop can call the official goal/task-plan tools to create durable work. Completed world writes retain their operation IDs and receipts; creating a plan does not replay them. `direct` intentionally removes those official persistence tools and their prompt guidance, while `plan` supplies explicit guidance. Registered workflows remain preselected named protocols rather than model-created business logic.
 
+Route choice and durable-planning authority are independent. Configure a host-derived `GameExecutionScopeProvider` when an actor may continue using `auto` but must remain limited to QuickResponse or a bounded short Agent task:
+
+```csharp
+var runtime = new GameAgentBuilder(provider, model)
+    .UseExecutionScope((input, cancellationToken) =>
+        new ValueTask<GameExecutionScope>(
+            IsPersistentPlannerAuthorized(input.SessionId, input.ActorId)
+                ? GameExecutionScope.Restricted(new[]
+                {
+                    GameExecutionCapabilities.PersistentPlanning,
+                })
+                : GameExecutionScope.ShortTaskOnly))
+    .UseRouting(new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync))
+    .UseExtension(new GoalLoopExtension())
+    .UseExtension(new TaskPlanExtension(ValidateEvidenceAsync))
+    .Build();
+```
+
+The scope resolver is runtime configuration rather than input metadata. A server must derive it from its authenticated principal and host policy; never copy an untrusted payload claim into a grant. Under `ShortTaskOnly`, automatic classification still runs with no tools, routing usage/latency/failure diagnostics remain unchanged, normal short-task tools and non-planning pending work remain available, and GoalLoop/TaskPlan context, tools, pending-work wakeups, and Agent-to-plan escalation are absent. An explicit `agent.route=plan` fails before any answer-provider request. Existing durable plans remain stored but dormant until a later authorized input. `direct` and authorized `plan` keep their existing semantics.
+
 ## Capability audit
 
 | Requirement | Framework coverage |
@@ -31,6 +51,7 @@ The Agent route handles short tasks directly: multiple tool turns, progress, bou
 | Quick / Agent / Workflow | Complete: `GameRouteKind`, `AutomaticGameRoutePolicy`, `IGameWorkflow`. |
 | Explicit auto / direct / plan | Complete through `agent.route`; aliases preserve the existing three route kinds. |
 | Safe escalation | Complete for `auto` through preflight classification and for Agent-to-plan through `TaskPlanExtension`; intentionally no speculative Quick replay. |
+| Host-scoped durable planning | Complete through `GameExecutionScopeProvider`; `ShortTaskOnly` preserves auto/Quick/short Agent while fail-closing GoalLoop/TaskPlan exposure and wakeups. |
 | Quick has no side effects | Complete: the runtime supplies an empty tool list and the kernel stops after one turn. |
 | Short multi-tool tasks | Complete in `Agent`, including progress, steering, follow-up, abort, limits, refresh, retry and fallback. |
 | Durable complex work | Complete through goals, task plans, waits, workflows, checkpoints, mailboxes, game-time scheduling, and host evidence validation. |

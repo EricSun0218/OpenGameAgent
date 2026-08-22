@@ -226,6 +226,21 @@ options.RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRo
 
 If you configure `ModelGameRouteClassifier`, its provider call is recorded under `GameSessionUsageCause.Routing` and shares the same per-input model-token budget as the selected route. The runtime never runs a speculative Quick answer and then replays it as Agent work. See [Execution routing and performance](execution-routing-and-performance.md).
 
+Route and durable-planning permission are separate. To let an ordinary actor keep `auto` classification and short tools without ever seeing or waking GoalLoop/TaskPlan, derive a trusted scope in runtime configuration:
+
+```csharp
+builder.UseExecutionScope((input, token) =>
+    new ValueTask<GameExecutionScope>(
+        CanUsePersistentPlans(input.SessionId, input.ActorId)
+            ? GameExecutionScope.Restricted(new[]
+            {
+                GameExecutionCapabilities.PersistentPlanning,
+            })
+            : GameExecutionScope.ShortTaskOnly));
+```
+
+Do not derive the grant directly from client-supplied metadata. A restricted explicit `agent.route=plan` request fails before the answer provider is called.
+
 ## Add memory and skills
 
 Memory is not injected automatically. Search it in your context provider, enforce game-time and visibility filters, then return selected results as a context slice. Wrap a store in `RankedGameMemoryStore` for a custom ranker. For model-agnostic local or remote embeddings, a rebuildable derived vector index, and lexical/vector hybrid recall, use the optional `OpenGameAgent.Memory` package described in [Hybrid and vector memory](memory.md).

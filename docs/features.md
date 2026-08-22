@@ -60,6 +60,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Supply current world state | `IGameContextProvider`, `GameContextSlice` |
 | Keep obvious dialogue fast | `AutomaticGameRoutePolicy`, `ModelGameRouteClassifier` |
 | Force or automatically select a known path | `agent.route=auto|quick|agent|direct|plan|workflow:<name>` |
+| Keep auto/Quick/short Agent while denying durable plans per actor | `GameExecutionScopeProvider`, `GameExecutionScope.ShortTaskOnly` |
 | Keep one NPC ordered | built into `GameAgentRuntime` |
 | Run many NPCs concurrently | `GameRuntimeLimits.MaxConcurrentActors`, `MultiActorScheduler` |
 | Correct or cancel an active NPC run | `GameAgentRuntime.TrySteer`, `GameAgentRuntime.TryAbort` |

@@ -53,6 +53,21 @@ public sealed class GameAgentBuilder
         return this;
     }
 
+    public GameAgentBuilder UseExecutionScope(GameExecutionScope scope)
+    {
+        EnsureMutable();
+        var configured = scope ?? throw new ArgumentNullException(nameof(scope));
+        _options.ExecutionScopeProvider = (_, _) => new ValueTask<GameExecutionScope>(configured);
+        return this;
+    }
+
+    public GameAgentBuilder UseExecutionScope(GameExecutionScopeProvider provider)
+    {
+        EnsureMutable();
+        _options.ExecutionScopeProvider = provider ?? throw new ArgumentNullException(nameof(provider));
+        return this;
+    }
+
     public GameAgentBuilder UseExtension(IGameAgentExtension extension)
     {
         EnsureMutable();

@@ -271,6 +271,14 @@ public sealed class GameAgentRuntimeOptions
 
     public GamePendingWorkProvider? PendingWorkProvider { get; set; }
 
+    /// <summary>
+    /// Host-authoritative per-input capability resolution. The default preserves the unrestricted
+    /// behavior. Use <see cref="GameExecutionScope.ShortTaskOnly"/> for actors that may use automatic
+    /// QuickResponse and bounded short-agent tools but may not create or resume persistent plans.
+    /// </summary>
+    public GameExecutionScopeProvider ExecutionScopeProvider { get; set; } =
+        static (_, _) => new ValueTask<GameExecutionScope>(GameExecutionScope.Unrestricted);
+
     public GameModelSelector? ModelSelector { get; set; }
 
     public IList<IGameWorkflow> Workflows { get; } = new List<IGameWorkflow>();
@@ -343,6 +351,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly IGameSkillSource? _skillSource;
     private readonly GameToolProvider? _toolProvider;
     private readonly GamePendingWorkProvider? _pendingWorkProvider;
+    private readonly GameExecutionScopeProvider _executionScopeProvider;
     private readonly GameModelSelector? _modelSelector;
     private readonly IReadOnlyDictionary<string, IGameWorkflow> _workflows;
     private readonly GameRuntimeLimits _limits;
@@ -383,6 +392,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         _skillSource = options.SkillSource;
         _toolProvider = options.ToolProvider;
         _pendingWorkProvider = options.PendingWorkProvider;
+        _executionScopeProvider = options.ExecutionScopeProvider
+            ?? throw new ArgumentException("An execution-scope provider is required.", nameof(options));
         _modelSelector = options.ModelSelector;
         _limits = options.Limits?.CopyAndValidate()
             ?? throw new ArgumentException("Runtime limits are required.", nameof(options));
@@ -840,6 +851,9 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var dequeuedAt = Stopwatch.GetTimestamp();
             var queueDuration = Elapsed(queuedAt, dequeuedAt);
             var inputPreparationStartedAt = Stopwatch.GetTimestamp();
+            var executionScope = await _executionScopeProvider(input, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The execution-scope provider returned null.");
+            EnsureExplicitRouteAllowed(input, executionScope);
             input = await PersistInputImagesAsync(input, cancellationToken).ConfigureAwait(false);
             var inputPreparationDuration = Elapsed(inputPreparationStartedAt);
             var key = new GameSessionKey(input.SessionId, input.ActorId);
@@ -867,7 +881,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
             AgentValidation.ValidateTranscript(loaded.Messages, _agentLimits);
             var extensionState = new GameAgentSessionState(loaded.ExtensionState, _limits);
-            var extensionContext = _extensions.CreateRunContext(input, loaded, extensionState);
+            var extensionContext = _extensions.CreateRunContext(input, loaded, extensionState, executionScope);
             failureContext = extensionContext;
             await _extensions.PublishAsync(
                 GameAgentExtensionEvents.InputReceived,
@@ -1381,6 +1395,16 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         finally
         {
             failureContext?.Invalidate();
+        }
+    }
+
+    private static void EnsureExplicitRouteAllowed(GameInput input, GameExecutionScope scope)
+    {
+        if (!scope.Allows(GameExecutionCapabilities.PersistentPlanning)
+            && input.Metadata.TryGetValue("agent.route", out var requestedRoute)
+            && string.Equals(requestedRoute, "plan", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new GameExecutionCapabilityDeniedException(GameExecutionCapabilities.PersistentPlanning);
         }
     }
 

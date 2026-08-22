@@ -287,7 +287,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         api.RegisterContextProvider(
             "task-plan-guidance",
             (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
-                IsDirect(context.Input)
+                !AllowsPersistentPlanning(context)
                     ? Array.Empty<GameContextSlice>()
                     : new[]
                     {
@@ -299,7 +299,8 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         api.RegisterContextProvider(
             "explicit-plan-guidance",
             (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
-                context.Input.Metadata.TryGetValue("agent.route", out var route)
+                AllowsPersistentPlanning(context)
+                && context.Input.Metadata.TryGetValue("agent.route", out var route)
                 && string.Equals(route, "plan", StringComparison.OrdinalIgnoreCase)
                     ? new[]
                     {
@@ -312,7 +313,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         api.RegisterToolProvider(
             "task-plan-tools",
             (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(
-                IsDirect(context.Input)
+                !AllowsPersistentPlanning(context)
                     ? Array.Empty<AgentTool>()
                     : new[]
                     {
@@ -323,11 +324,20 @@ public sealed class TaskPlanExtension : IGameAgentExtension
             "active-task-plans",
             (context, _) =>
             {
+                if (!AllowsPersistentPlanning(context))
+                {
+                    return new ValueTask<bool>(false);
+                }
+
                 PruneTerminalPlans(context.State);
                 return new ValueTask<bool>(ReadAll(context.State).Any(plan => plan.Status == GameTaskPlanStatus.Active));
             },
             priority: 450);
     }
+
+    private static bool AllowsPersistentPlanning(GameAgentExtensionRunContext context) =>
+        !IsDirect(context.Input)
+        && context.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning);
 
     private static bool IsDirect(GameInput input) =>
         input.Metadata.TryGetValue("agent.route", out var route)
