@@ -10,6 +10,8 @@ namespace OpenGameAgent.Kernel;
 
 public static class AgentLoop
 {
+    private const int ModelStreamCleanupTimeoutMilliseconds = 5_000;
+
     public static Task<AgentRunResult> RunAsync(
         IReadOnlyList<AgentMessage> prompts,
         AgentContext context,
@@ -665,10 +667,40 @@ public static class AgentLoop
                 }
                 else
                 {
-                    _ = IgnoreFailureAsync(cleanup);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        await AwaitCancelledStreamCleanupAsync(cleanup).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        _ = IgnoreFailureAsync(cleanup);
+                    }
                 }
             }
         }
+    }
+
+    private static async Task AwaitCancelledStreamCleanupAsync(Task cleanup)
+    {
+        using var timeout = new CancellationTokenSource();
+        var deadline = Task.Delay(ModelStreamCleanupTimeoutMilliseconds, timeout.Token);
+        var completed = await Task.WhenAny(cleanup, deadline).ConfigureAwait(false);
+        if (ReferenceEquals(completed, cleanup))
+        {
+            timeout.Cancel();
+            try
+            {
+                await cleanup.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Provider cleanup cannot replace an already cancelled request outcome.
+            }
+
+            return;
+        }
+
+        _ = IgnoreFailureAsync(cleanup);
     }
 
     private static void TryCancel(CancellationTokenSource cancellation)

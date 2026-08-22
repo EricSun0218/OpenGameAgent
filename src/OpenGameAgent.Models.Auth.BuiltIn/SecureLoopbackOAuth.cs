@@ -56,6 +56,8 @@ internal static class SecureLoopbackOAuth
     private const int MaximumRequestTargetBytes = 8192;
     private const int MaximumHeaders = 64;
     private const int MaximumAttempts = 16;
+    private const int MaximumBindAttempts = 50;
+    private const int BindRetryDelayMilliseconds = 100;
 
     public static async ValueTask<GameCredential> LoginAsync(
         SecureLoopbackOAuthOptions options,
@@ -550,7 +552,7 @@ internal static class SecureLoopbackOAuth
 
         public Uri RedirectUri { get; }
 
-        public static Task<LoopbackListener> StartAsync(
+        public static async Task<LoopbackListener> StartAsync(
             string redirectHost,
             int requestedPort,
             string path,
@@ -558,12 +560,31 @@ internal static class SecureLoopbackOAuth
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var listener = new TcpListener(IPAddress.Loopback, requestedPort);
-            listener.Start(8);
-            var endpoint = (IPEndPoint)listener.LocalEndpoint;
-            var authority = redirectHost + ":" + endpoint.Port;
-            var redirect = new Uri("http://" + authority + path, UriKind.Absolute);
-            return Task.FromResult(new LoopbackListener(listener, authority, path, expectedState, redirect));
+            for (var attempt = 1; ; attempt++)
+            {
+                var listener = new TcpListener(IPAddress.Loopback, requestedPort);
+                try
+                {
+                    listener.Start(8);
+                    var endpoint = (IPEndPoint)listener.LocalEndpoint;
+                    var authority = redirectHost + ":" + endpoint.Port;
+                    var redirect = new Uri("http://" + authority + path, UriKind.Absolute);
+                    return new LoopbackListener(listener, authority, path, expectedState, redirect);
+                }
+                catch (SocketException exception)
+                    when (requestedPort != 0
+                        && exception.SocketErrorCode == SocketError.AddressAlreadyInUse
+                        && attempt < MaximumBindAttempts)
+                {
+                    listener.Stop();
+                    await Task.Delay(BindRetryDelayMilliseconds, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    listener.Stop();
+                    throw;
+                }
+            }
         }
 
         public async Task<LoopbackAuthorizationResult> WaitForCallbackAsync(CancellationToken cancellationToken)

@@ -125,6 +125,58 @@ public sealed class BuiltInGameProviderAuthenticationTests
     }
 
     [Fact]
+    public async Task LoopbackRetriesAReservedFixedPortWithoutChangingTheRedirect()
+    {
+        var blocker = new TcpListener(IPAddress.Loopback, 0);
+        blocker.Start();
+        var port = ((IPEndPoint)blocker.LocalEndpoint).Port;
+        var release = Task.Run(async () =>
+        {
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+            blocker.Stop();
+        }, TestContext.Current.CancellationToken);
+        Task<HttpResponseMessage>? callback = null;
+        using var callbackClient = new HttpClient();
+        var options = new SecureLoopbackOAuthOptions(
+            new Uri("https://authorization.example/login"),
+            "127.0.0.1",
+            "/callback",
+            TimeSpan.FromSeconds(20),
+            (redirectUri, _, state) => BuildUri(
+                new Uri("https://authorization.example/login"),
+                new Dictionary<string, string>
+                {
+                    ["redirect_uri"] = redirectUri.AbsoluteUri,
+                    ["state"] = state,
+                }),
+            (code, _, _, _, _) => new ValueTask<GameCredential>(
+                new GameCredential(GameCredentialKind.OAuth, "access-" + code)),
+            port,
+            LoopbackStatePlacement.Query);
+
+        var credential = await SecureLoopbackOAuth.LoginAsync(
+            options,
+            new GameAuthInteraction
+            {
+                OpenBrowserAsync = (authorization, _) =>
+                {
+                    var fields = ParseQuery(authorization.Query);
+                    var redirect = new Uri(fields["redirect_uri"]);
+                    Assert.Equal(port, redirect.Port);
+                    callback = callbackClient.GetAsync(new Uri(
+                        redirect + "?code=accepted&state=" + Uri.EscapeDataString(fields["state"])));
+                    return default;
+                },
+            },
+            TestContext.Current.CancellationToken);
+
+        using var response = await callback!;
+        await release;
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("access-accepted", credential.Secret);
+    }
+
+    [Fact]
     public async Task XaiDeviceFlowHonorsPendingSlowDownAndVerificationHostBounds()
     {
         var requests = new List<string>();
