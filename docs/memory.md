@@ -2,7 +2,9 @@
 
 `OpenGameAgent.Memory` is an optional package for semantic memory. It keeps the
 game's `IGameMemoryStore` authoritative and treats vectors as a rebuildable
-derived index. The package does not ship an embedding model or model runtime.
+derived index. It does not ship model weights. Games can supply any local or
+remote `IMemoryEmbeddingProvider`, or add the optional
+`OpenGameAgent.Memory.Onnx` package for an in-process BGE-M3 INT8 runtime.
 
 ## Local source references
 
@@ -14,6 +16,8 @@ these references to the game project (adjust the relative path):
   <ProjectReference Include="..\OpenGameAgent\src\OpenGameAgent\OpenGameAgent.csproj" />
   <ProjectReference Include="..\OpenGameAgent\src\OpenGameAgent.Persistence\OpenGameAgent.Persistence.csproj" />
   <ProjectReference Include="..\OpenGameAgent\src\OpenGameAgent.Memory\OpenGameAgent.Memory.csproj" />
+  <!-- Add only when using the official in-process BGE-M3 adapter. -->
+  <ProjectReference Include="..\OpenGameAgent\src\OpenGameAgent.Memory.Onnx\OpenGameAgent.Memory.Onnx.csproj" />
 </ItemGroup>
 ```
 
@@ -58,6 +62,87 @@ public sealed class LocalBgeM3Embeddings : IMemoryEmbeddingProvider
     public ValueTask DisposeAsync() => _client.DisposeAsync();
 }
 ```
+
+## In-process BGE-M3 INT8
+
+`OpenGameAgent.Memory.Onnx` is an optional provider package. It runs embedding
+in the host process through ONNX Runtime, implements
+`IMemoryEmbeddingProvider`, and does not require Python or a localhost model
+service. It never downloads a model and performs no network fallback. The game
+installer owns the weights and passes a local, read-only directory with this
+layout:
+
+```text
+BgeM3/
+  config.json
+  tokenizer_config.json
+  sentencepiece.bpe.model
+  onnx/
+    model_int8.onnx
+```
+
+The supported contract is the Xenova-style BGE-M3 XLM-RoBERTa export with a
+1024-dimensional `last_hidden_state`. The provider applies the XLM-R fairseq ID
+mapping, BOS/EOS tokens, attention masks, CLS pooling, and L2 normalization.
+Query and document methods intentionally use the same BGE-M3 preprocessing.
+
+```csharp
+using OpenGameAgent.Memory;
+using OpenGameAgent.Memory.Onnx;
+
+var options = new BgeM3OnnxEmbeddingOptions(modelDirectory)
+{
+    MaximumTokens = 512,
+    MaximumBatchSize = 8,
+    MaximumConcurrentInferences = 1,
+    MaximumQueuedOperations = 8,
+    QueueTimeout = TimeSpan.FromSeconds(3),
+    InferenceTimeout = TimeSpan.FromSeconds(20),
+    ExpectedSha256 = new Dictionary<string, string>
+    {
+        ["onnx/model_int8.onnx"] = trustedModelSha256,
+        ["sentencepiece.bpe.model"] = trustedTokenizerSha256,
+    },
+    Metrics = embeddingMetrics,
+};
+
+await using var embeddings =
+    await BgeM3OnnxEmbeddingProvider.CreateAsync(options, cancellationToken);
+
+await using var memory = new VectorMemoryStore(
+    authoritativeMemoryStore,
+    rebuildableVectorIndex,
+    embeddings,
+    reranker: new GameAwareMemoryReranker(),
+    diagnostics: memoryDiagnostics);
+```
+
+At load time the provider requires the four files, checks bounded sizes,
+computes SHA-256 for the model manifest, validates the model/tokenizer config,
+and optionally compares host-supplied sizes and hashes. The resulting
+`MemoryEmbeddingIdentity` includes the weights, tokenizer, preprocessing, and
+maximum-token identity, so a change produces `RebuildRequired` instead of
+silently mixing vectors.
+
+Inference is dispatched away from the caller thread. Concurrency, queue depth,
+queue wait, batch size, batch token count, tensor allocation estimate, model
+size, load time, inference time, and cancellation are bounded. Structured
+metrics report operation type, cold load, queue/tokenization/inference timing,
+batch counts, token counts, truncation, and failure category without recording
+input text.
+
+For a Windows x64 self-contained host, publish the consuming application in the
+normal way; the package carries the ONNX Runtime native asset transitively:
+
+```powershell
+dotnet publish path/to/Host.csproj -c Release -r win-x64 --self-contained true
+```
+
+Keep the model directory outside the authoritative save. It is an application
+asset, not a memory index, and can be shared by many saves. When model loading
+or inference is unavailable, `VectorMemoryStore` retains its existing lexical
+fallback behavior unless the host explicitly configured semantic recall as
+mandatory.
 
 Compose the authoritative save store, derived vector directory, lexical/vector
 fusion, game-time reranker, and diagnostics:
@@ -125,5 +210,10 @@ inspection, explicit rebuild, and provider disposal.
 
 ```powershell
 dotnet test tests/OpenGameAgent.Memory.Tests/OpenGameAgent.Memory.Tests.csproj -c Release
+dotnet test tests/OpenGameAgent.Memory.Onnx.Tests/OpenGameAgent.Memory.Onnx.Tests.csproj -c Release
 dotnet test OpenGameAgent.sln -c Release
 ```
+
+Set `OGA_BGE_M3_MODEL_DIR` to a compatible local model directory to include the
+real-weight smoke test. Model files are never copied into the repository or
+test output.

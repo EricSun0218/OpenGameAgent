@@ -66,6 +66,8 @@ https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
 <ItemGroup>
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
+  <!-- 可选：进程内 BGE-M3 INT8 嵌入；模型权重仍由游戏自行分发。 -->
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory.Onnx/OpenGameAgent.Memory.Onnx.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Media/OpenGameAgent.Media.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj" />

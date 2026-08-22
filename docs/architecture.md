@@ -41,7 +41,7 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 ### Optional packages
 
 - `OpenGameAgent.Extensions` adds policy, durable high-risk tool approval, searchable tools, structured player interaction, goals, host-verified task plans, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
-- `OpenGameAgent.Memory` adds an optional, model-agnostic embedding contract, rebuildable vector index, lexical/vector hybrid recall, structured diagnostics, and game-time reranking. It never replaces the authoritative memory save.
+- `OpenGameAgent.Memory` adds an optional, model-agnostic embedding contract, rebuildable vector index, lexical/vector hybrid recall, structured diagnostics, and game-time reranking. `OpenGameAgent.Memory.Onnx` optionally implements that contract for an in-process BGE-M3 INT8 model directory. Neither package replaces the authoritative memory save or bundles model weights.
 - `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
 - `OpenGameAgent.Models.BuiltIn` turns the bundled directory into an executable multi-provider model runtime; `OpenGameAgent.Models.Auth.BuiltIn` adds explicitly configured browser and device authorization flows.
 - `OpenGameAgent.ProviderTransport` centralizes bounded response observations, header guards, and retry metadata without adding HTTP concepts to the kernel.
@@ -103,7 +103,7 @@ Large worlds should not invoke every NPC on every frame. Let deterministic game 
 
 `IGameContextProvider` supplies current authoritative context slices. Memory is intentionally separate: `IGameMemoryStore` stores and filters records, while game code decides which retrieved memories become a context slice. This avoids silently inserting stale or private memory.
 
-The included memory stores support scopes, kinds, tags, importance, owner, game-time cutoffs, and expiry. `RankedGameMemoryStore` applies a game-selected ranker. The optional `OpenGameAgent.Memory` package adds model-agnostic vector indexing and hybrid recall while keeping the original store authoritative; a game supplies its local or remote embedding implementation and explicitly rebuilds after changing its model identity.
+The included memory stores support scopes, kinds, tags, importance, owner, game-time cutoffs, and expiry. `RankedGameMemoryStore` applies a game-selected ranker. The optional `OpenGameAgent.Memory` package adds model-agnostic vector indexing and hybrid recall while keeping the original store authoritative; a game supplies a local or remote embedding implementation, or opts into the separate in-process BGE-M3 ONNX provider, and explicitly rebuilds after changing its model identity.
 
 Skills are bounded instruction packages selected by input type and required tools. Skills do not install or execute code. Directory-backed skills accept either a zero-configuration `SKILL.md` with scalar `name` and `description` front matter, or `skill.json` plus a separate Markdown instruction file for game-specific filtering. Manifests are rescanned for each selection and only selected instruction files are loaded, allowing safe edits without rebuilding the runtime.
 

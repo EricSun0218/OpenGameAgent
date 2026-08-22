@@ -66,6 +66,8 @@ The same release is available through OpenUPM: `openupm add com.opengameagent.ru
 <ItemGroup>
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory/OpenGameAgent.Memory.csproj" />
+  <!-- Optional: in-process BGE-M3 INT8 embeddings; model weights stay game-owned. -->
+  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Memory.Onnx/OpenGameAgent.Memory.Onnx.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Attachments.Local/OpenGameAgent.Attachments.Local.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Media/OpenGameAgent.Media.csproj" />
   <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj" />

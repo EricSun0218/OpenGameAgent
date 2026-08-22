@@ -79,6 +79,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Store long-term NPC facts/events | `IGameMemoryStore`, `GameMemory` |
 | Apply custom semantic ranking | `IGameMemoryRanker`, `RankedGameMemoryStore` |
 | Add local or remote vector embeddings and hybrid recall | `IMemoryEmbeddingProvider`, `VectorMemoryStore` |
+| Run BGE-M3 INT8 embeddings in-process without Python or a model service | `BgeM3OnnxEmbeddingProvider` (`OpenGameAgent.Memory.Onnx`) |
 | Inspect or explicitly rebuild vectors after a model change | `RuntimeMemoryLifecycle`, `VectorMemoryStatus` |
 | Add reusable behavior instructions | `IGameSkillSource`, `GameSkill` |
 | Load portable or game-filtered skills | `DirectoryGameSkillSource` (`SKILL.md` or `skill.json`) |
@@ -149,7 +150,7 @@ OpenGameAgent does not prescribe:
 - pathfinding, animation, physics, combat, inventory, quests, or construction code;
 - who can observe which data;
 - NPC activation and level-of-detail policy;
-- embedding model runtime or service (the optional memory package provides the contract and derived index);
+- embedding weights and installation (the optional ONNX package provides an in-process runtime but never downloads or bundles a model);
 - model vendor, prompt catalog, or monetization;
 - visual UI, world editor, or downloadable world-package format.
 
