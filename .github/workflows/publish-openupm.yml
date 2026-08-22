@@ -1,0 +1,49 @@
+name: Publish Unity package to OpenUPM
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - upm/*
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-openupm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_NAME: com.opengameagent.runtime
+      UPM_TAG_PREFIX: upm/
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate tag and package manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != refs/tags/${UPM_TAG_PREFIX}* ]]; then
+            echo "::error::OpenUPM publication must run from an immutable UPM tag."
+            exit 1
+          fi
+
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#${UPM_TAG_PREFIX}}"
+          manifest_name="$(jq -r .name package.json)"
+          manifest_version="$(jq -r .version package.json)"
+          if [[ "${manifest_name}" != "${PACKAGE_NAME}" || "${manifest_version}" != "${version}" ]]; then
+            echo "::error::UPM tag and package manifest do not match."
+            exit 1
+          fi
+      - name: Publish through OpenUPM
+        uses: openupm/openupm-action@89b79dc8dd6cb319efff06727f8fa0051ce7e517 # v1.0.1
+        with:
+          package: ${{ env.PACKAGE_NAME }}
+          tag: ${{ github.ref_name }}
+          timeout-minutes: '15'
+          poll-interval-seconds: '15'

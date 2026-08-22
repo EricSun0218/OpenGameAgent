@@ -77,6 +77,18 @@ foreach ($workflowPath in @('.github\workflows\ci.yml', '.github\workflows\relea
         throw "Godot download in '$workflowPath' must use bounded transient retries before checksum verification."
     }
 }
+$upmWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\publish-upm.yml') -Raw
+$openUpmWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\publish-openupm.yml') -Raw
+if ($upmWorkflow -notmatch "Copy-Item\s+-LiteralPath\s+'\.github/workflows/publish-openupm\.yml'" -or
+    $upmWorkflow -notmatch 'gh workflow run publish-openupm\.yml --ref' -or
+    $upmWorkflow -match 'openupm/openupm-action' -or
+    $openUpmWorkflow -notmatch '(?m)^\s*workflow_dispatch:\s*$' -or
+    $openUpmWorkflow -notmatch '(?ms)tags:\s*\r?\n\s*- upm/\*' -or
+    $openUpmWorkflow -notmatch 'id-token:\s*write' -or
+    $openUpmWorkflow -notmatch 'openupm/openupm-action@89b79dc8dd6cb319efff06727f8fa0051ce7e517' -or
+    $openUpmWorkflow -notmatch 'tag:\s*\$\{\{ github\.ref_name \}\}') {
+    throw 'OpenUPM publication must run from the immutable UPM tag with a pinned OIDC action.'
+}
 $packScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tools\Pack-NuGet.ps1') -Raw
 $removesExactVersionedPackage =
     $packScript -match '\$\(\$package\.id\)\.\$PackageVersion\.nupkg' -and
