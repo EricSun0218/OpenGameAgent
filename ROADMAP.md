@@ -6,8 +6,19 @@ This file is the durable, source-independent ledger for accepted OpenGameAgent f
 
 1. Add every user request or cross-thread delegation to the active plan.
 2. Audit existing source, tests, documentation, and artifacts before accepting a gap.
-3. Record the accepted generic capability below before implementation.
-4. Close an item only after focused tests, all applicable release gates, documentation, commit, push, and source-thread notification.
+3. Before design or implementation, classify a confirmed gap as open-source, closed-source, or mixed and record the decision and rationale.
+4. Record an accepted open-source capability below before implementation. Forward a closed-source capability to the user-designated closed-framework task instead of implementing it here. Split a mixed capability into a minimal public, self-hostable contract and a separately handed-off managed implementation.
+5. Close an item only after focused tests, all applicable release gates, documentation, commit, push, and source-thread notification. A handoff is closed here only after the target task has received the context, ownership boundary, and acceptance criteria.
+
+## Ownership classification
+
+| Classification | Belongs here | Routing rule |
+|---|---|---|
+| Open-source | Reusable and replaceable runtime behavior, SDKs, versioned wire contracts, provider-neutral extension points, security primitives, and conformance fixtures that any game host can self-host | Implement and verify in this repository |
+| Closed-source | Hosted control planes, organization or tenant administration, managed identity and secrets, quotas, billing, private registries, managed observability or storage, commercial scheduling or high availability, SLAs, and proprietary hosted optimization | Forward to the separate closed-framework task; do not implement here |
+| Mixed | A public interoperability boundary plus a managed commercial implementation | Keep only the smallest independently self-hostable contract and conformance surface here; forward the managed portion |
+
+Classification is mandatory for every new requirement, including cross-thread delegations. If later evidence changes the boundary, update the active plan and this ledger rather than silently moving work between repositories.
 
 ## Active requirements
 
