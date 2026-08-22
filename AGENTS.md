@@ -70,11 +70,6 @@ Real-editor gates are in `docs/engine-integration.md`.
 
 - Every user request and cross-thread delegation must be added to the active task plan before implementation starts.
 - First check whether the requested capability already exists in source, tests, documentation, or a published artifact. Do not implement a duplicate subsystem from a request alone.
-- Before designing or implementing a confirmed gap, classify it as `open-source`, `closed-source`, or `mixed` and record the rationale in the active plan.
-  - `open-source`: reusable, replaceable, self-hostable runtime contracts, SDKs, protocol schemas, security primitives, extension points, and conformance tests needed by arbitrary game hosts.
-  - `closed-source`: hosted control planes, organization or tenant administration, managed identity and secrets, quotas, billing, private registries, managed observability or storage, commercial scheduling or high availability, SLAs, and proprietary hosted optimization.
-  - `mixed`: split the requirement. Keep only the smallest provider-neutral, independently self-hostable contract and conformance surface in this repository; route the managed implementation to the separate closed-source product.
-- A closed-source requirement, or the closed-source portion of a mixed requirement, must not be implemented in this repository. Forward the exact context, ownership boundary, and acceptance criteria to the user-designated closed-framework task, track the handoff in the active plan, and notify the user. Re-evaluate the classification if later evidence changes the boundary.
 - Keep `ROADMAP.md` synchronized with every accepted framework requirement. Record its source-independent capability, priority, acceptance evidence, and one of: planned, in progress, completed, superseded, paused, or rejected.
 - A requirement is completed only when its implementation, focused tests, full applicable release gates, documentation, commit, push, and source-thread notification are all complete. Green CI alone is not proof that the requirement backlog is empty.
 - When a newer requirement supersedes an older one, retain the decision in `ROADMAP.md` instead of silently dropping the older item.
