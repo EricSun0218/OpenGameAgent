@@ -11,8 +11,8 @@ using OpenGameAgent.Attachments;
 using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
 using OpenGameAgent.Persistence;
-using OpenGameAgent.Runtime.Protocol;
 using OpenGameAgent.Runtime.Hosting;
+using OpenGameAgent.Runtime.Protocol;
 using Xunit;
 
 namespace OpenGameAgent.Server.Tests;

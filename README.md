@@ -259,6 +259,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Architecture and authority boundaries](docs/architecture.md)
 - [Feature and API map](docs/features.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
+- [Extension development kit](docs/extensions.md)
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
 - [High-risk tool approval](docs/tool-approvals.md)

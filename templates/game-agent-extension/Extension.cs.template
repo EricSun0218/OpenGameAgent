@@ -1,0 +1,22 @@
+using OpenGameAgent;
+
+namespace __NAMESPACE__;
+
+public sealed class __TYPE_NAME__ : IGameAgentExtension
+{
+    public GameAgentExtensionDescriptor Descriptor { get; } = new(
+        "__EXTENSION_ID__",
+        "1.0.0",
+        "Describe the reusable game-agent capability provided by this extension.");
+
+    public void Configure(GameAgentExtensionApi api)
+    {
+        if (api is null)
+        {
+            throw new ArgumentNullException(nameof(api));
+        }
+
+        // Register only engine-neutral context, tools, skills, policies, hooks, services, or events.
+        // Game rules and authoritative state changes remain in the host's adapters.
+    }
+}

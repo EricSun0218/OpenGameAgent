@@ -1385,6 +1385,14 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 throw new InvalidOperationException($"Delegation '{request.Id}' is already active.");
             }
 
+            // Shutdown can race the small interval between Start and publishing the
+            // handle in _active. Re-check the lifetime after publication so a handle
+            // that missed the DisposeAsync snapshot is still asked to stop.
+            if (_lifetime.IsCancellationRequested)
+            {
+                handle.TryCancel();
+            }
+
             GameAgentDelegateOutcome outcome;
             try
             {

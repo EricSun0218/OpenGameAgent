@@ -258,6 +258,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [架构与权威边界](docs/architecture.md)
 - [功能与 API 地图](docs/features.md)
 - [游戏集成模式](docs/game-integration-patterns.md)
+- [扩展开发套件](docs/extensions.zh-CN.md)
 - [引擎集成](docs/engine-integration.md)
 - [部署与安全](docs/deployment-and-security.md)
 - [高风险工具批准](docs/tool-approvals.zh-CN.md)
