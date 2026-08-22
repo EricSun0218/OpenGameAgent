@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string] $UnityManagedDir,
-    [string] $Version = '0.3.0-alpha.3'
+    [string] $Version = '0.3.0-alpha.4'
 )
 
 Set-StrictMode -Version Latest

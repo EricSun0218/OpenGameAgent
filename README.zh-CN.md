@@ -46,7 +46,7 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 
 也不是每次互动都必须运行完整 Agent Loop。问候等简单输入可以走快速回复路由，开放式任务使用完整循环，需要固定执行图的场景则可以使用确定性 Workflow。
 
-> 最新已发布版本：`0.3.0-alpha.2`。本 README 描述当前 `main`；其中还包含发布版之后加入的 Realtime、Unreal、图片 Provider、会话读取、工具可见性和生成资产能力。使用这些较新 API 时请直接引用源码 checkout。在 `1.0` 前公开 API 仍可能调整。
+> 当前预发布版本：`0.3.0-alpha.4`。在 `1.0` 前公开 API 仍可能调整；正式游戏应锁定精确包版本。
 
 内核边界刻意保持小而稳定。后续游戏特有能力通常应通过扩展、工具、策略、工作流或游戏自有服务加入，而不是继续膨胀模型/工具循环。
 
@@ -54,13 +54,23 @@ OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的
 
 可以从 [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) 下载版本化包文件、Godot/Unity 压缩包或可移植服务端。若游戏需要持续跟随本地最新源码，请只引用实际使用的项目：
 
-Unity 6 项目可以直接通过不可变的 GitHub UPM tag 安装完整的 `0.3.0-alpha.3` 包：
+跨语言 Runtime Protocol、进程内 Host 与类型化 HTTP/SSE 客户端分别发布为独立 NuGet 包：
 
-```text
-https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+```bash
+dotnet add package OpenGameAgent.Runtime.Protocol --version 0.3.0-alpha.4
+dotnet add package OpenGameAgent.Runtime.Hosting --version 0.3.0-alpha.4
+dotnet add package OpenGameAgent.Client --version 0.3.0-alpha.4
 ```
 
-同一版本也已发布到 OpenUPM，可执行 `openupm add com.opengameagent.runtime@0.3.0-alpha.3` 安装。自动生成的 `upm` 分支包含经过测试的完整二进制；`main` 上的 Unity 源码目录本身不是可分发包。
+同一次 Release 的全部包都绑定到同一个源码提交。每个 GitHub Release 都包含 `RELEASE_MANIFEST.json`，用于记录版本、提交和协议版本映射，并包含 `SHA256SUMS.txt` 校验冻结产物。Runtime Protocol v1 通过能力协商增加可选能力；若必需字段、枚举含义、游标语义或生命周期顺序发生变化，必须升级协议版本。
+
+Unity 6 项目可以直接通过不可变的 GitHub UPM tag 安装完整的 `0.3.0-alpha.4` 包：
+
+```text
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.4
+```
+
+同一版本也已发布到 OpenUPM，可执行 `openupm add com.opengameagent.runtime@0.3.0-alpha.4` 安装。自动生成的 `upm` 分支包含经过测试的完整二进制；`main` 上的 Unity 源码目录本身不是可分发包。
 
 ```xml
 <ItemGroup>

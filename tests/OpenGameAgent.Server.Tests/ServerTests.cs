@@ -1708,6 +1708,38 @@ public sealed class ServerTests
     }
 
     [Fact]
+    public async Task RuntimeStreamsNeverObservePublishedTerminalEventsBeforeTheirProjectionSources()
+    {
+        const int runCount = 128;
+        var provider = new StreamingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
+        await using var app = await CreateAppAsync(runtime);
+        using var http = app.GetTestClient();
+        var client = new GameRuntimeServerClient(new GameRuntimeServerClientOptions(
+            http,
+            http.BaseAddress ?? new Uri("http://localhost/")));
+
+        var runs = Enumerable.Range(0, runCount)
+            .Select(index => client.StreamAsync(
+                new GameInput(
+                    $"projection-race-{index}",
+                    "actor",
+                    "chat",
+                    "{}",
+                    new GameMoment("world", 1),
+                    $"input-{index}"),
+                $"request-{index}",
+                (_, _) => default,
+                cancellationToken: TestContext.Current.CancellationToken))
+            .ToArray();
+
+        var results = await Task.WhenAll(runs);
+
+        Assert.All(results, result => Assert.True(result.Terminal));
+        Assert.Equal(runCount, provider.Calls);
+    }
+
+    [Fact]
     public async Task RuntimeProjectionNeverLeaksReasoningOrToolDetailsToOwner()
     {
         var key = new GameSessionKey("runtime-audience", "actor");

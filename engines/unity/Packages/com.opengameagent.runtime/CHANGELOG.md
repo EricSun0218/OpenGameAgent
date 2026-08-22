@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0-alpha.4
+
+- Align the Unity package with Runtime Protocol v1, exact run control, local providers, realtime,
+  generated assets, and host-scoped persistent planning from the same public source release.
+
 ## 0.3.0-alpha.3
 
 - Add a deterministic no-key sample and store-ready package metadata.

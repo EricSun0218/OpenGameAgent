@@ -11,6 +11,12 @@ Use it when a client must reconnect to a running agent, consume a canonical cros
 
 The normative schema, fixtures, and dependency-free C++ DTOs live under `protocol/runtime/v1`. A commercial service can consume these public artifacts, but must not fork the agent loop or copy internal server DTOs.
 
+## Versioned distribution
+
+Runtime Protocol v1 first ships as the `0.3.0-alpha.4` line. Pin the same exact pre-release version for `OpenGameAgent.Runtime.Protocol`, `OpenGameAgent.Runtime.Hosting`, and `OpenGameAgent.Client`; the Hosting and Client package dependencies keep their protocol package aligned.
+
+Every GitHub Release contains `RELEASE_MANIFEST.json`, which records the package version, full source commit, supported Runtime Protocol versions, package IDs, asset sizes, and frozen SHA-256 hashes. `SHA256SUMS.txt` covers every release payload including that manifest; the checksum index itself is the detached verifier. The `.nupkg` repository metadata carries the same source commit. NuGet.org adds its repository signature after upload, so the publisher verifies the signed package's content hash against the frozen unsigned Release asset instead of comparing the outer ZIP bytes.
+
 ## Coordinates and lifecycle
 
 Every event has a monotonically increasing `sequence`, stable `eventId`, `(sessionId, actorId, inputId)`, and optional `runId`, `turn`/`turnId`, and `itemId`/`itemKind`. Runs, turns, and items publish `started`, `delta`, and `completed` lifecycles. Message, tool, durable action, approval, interaction, artifact, delegation, plan, media, and status items share this envelope.

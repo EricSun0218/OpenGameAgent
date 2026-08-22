@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string] $Version,
+    [string] $SourceCommit,
     [string] $ArtifactsDirectory,
     [string] $OutputDirectory
 )
@@ -12,6 +13,17 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Release.Common.ps1')
 
 $versionInfo = Get-ReleaseVersionInfo -Version $Version
+
+if ([string]::IsNullOrWhiteSpace($SourceCommit)) {
+    $SourceCommit = (& git -C (Split-Path -Parent $PSScriptRoot) rev-parse --verify HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to resolve the release source commit.'
+    }
+}
+$SourceCommit = $SourceCommit.Trim().ToLowerInvariant()
+if ($SourceCommit -notmatch '^[0-9a-f]{40,64}$') {
+    throw "Release source commit '$SourceCommit' is not a full Git object ID."
+}
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $packages = @(Get-ReleasePackageManifest -RepositoryRoot $repositoryRoot)
@@ -136,13 +148,43 @@ $releaseNotes = @(
     '',
     'Use the versioned Godot, Unity, or Unreal archive below for engine integration. The Unreal archive is a native C++ source plugin for remote placement. The portable server archive runs with `dotnet OpenGameAgent.Server.dll` on a Windows or Linux .NET 8 host.',
     '',
+    '## Provenance and compatibility',
+    '',
+    "- Source commit: ``$SourceCommit``",
+    '- `RELEASE_MANIFEST.json` maps this version to the source commit, Runtime Protocol major version, package set, asset sizes, and frozen SHA-256 hashes.',
+    '- `SHA256SUMS.txt` verifies every release payload, including the release manifest; the checksum index itself is the detached verifier. NuGet.org may add its repository signature; the publisher verifies that the signed package content still matches the frozen unsigned asset.',
+    '- Runtime Protocol v1 permits additive optional fields and capabilities. Changes to required fields, enum meaning, cursor semantics, or lifecycle ordering require a new protocol version.',
+    '- This is a pre-1.0 package release. Pin the exact package version and negotiate Runtime capabilities instead of inferring them from the package version.',
+    '',
     (Get-ReleaseStabilityNotice -VersionInfo $versionInfo)
 ) -join [Environment]::NewLine
 $releaseNotes | Set-Content -LiteralPath (Join-Path $outputRoot 'RELEASE_NOTES.md') -Encoding utf8NoBOM
 
-$downloadAssets = Get-ChildItem -LiteralPath $outputRoot -File |
+$frozenAssets = @(Get-ChildItem -LiteralPath $outputRoot -File |
     Where-Object Name -ne 'RELEASE_NOTES.md' |
-    Sort-Object Name
+    Sort-Object Name)
+$manifestAssets = @($frozenAssets | ForEach-Object {
+    [ordered]@{
+        name = $_.Name
+        length = $_.Length
+        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+})
+$releaseManifest = [ordered]@{
+    schemaVersion = 1
+    version = $Version
+    sourceCommit = $SourceCommit
+    runtimeProtocolVersions = @(1)
+    packageIds = @($packages | ForEach-Object { [string]$_.id })
+    assets = $manifestAssets
+}
+$releaseManifest |
+    ConvertTo-Json -Depth 6 |
+    Set-Content -LiteralPath (Join-Path $outputRoot 'RELEASE_MANIFEST.json') -Encoding utf8NoBOM
+
+$downloadAssets = @(Get-ChildItem -LiteralPath $outputRoot -File |
+    Where-Object Name -ne 'RELEASE_NOTES.md' |
+    Sort-Object Name)
 $checksumLines = foreach ($asset in $downloadAssets) {
     $hash = (Get-FileHash -LiteralPath $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $($asset.Name)"

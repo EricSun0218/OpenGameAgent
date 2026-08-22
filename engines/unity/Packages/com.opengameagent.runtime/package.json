@@ -1,6 +1,6 @@
 {
   "name": "com.opengameagent.runtime",
-  "version": "0.3.0-alpha.3",
+  "version": "0.3.0-alpha.4",
   "displayName": "OpenGameAgent",
   "description": "A provider-neutral agent runtime for AI-native Unity games, with local and server-hosted execution, structured context, tools, streaming, steering, and multi-actor coordination.",
   "unity": "6000.0",

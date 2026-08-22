@@ -590,27 +590,30 @@ internal sealed class GameRuntimeServerState
                 input,
                 (_, agentEvent, _) =>
                 {
-                    var published = Events.Publish(projector.Project(agentEvent, "{}"));
-                    StoreSources(key, published, EventSource.Agent(agentEvent));
+                    PublishAndStore(key, projector.Project(agentEvent, "{}"), EventSource.Agent(agentEvent));
                     return ValueTask.CompletedTask;
                 },
                 CancellationToken.None).ConfigureAwait(false);
-            var terminal = Events.Publish(GameRuntimeEventProjection.ProjectResult(input, result, "{}"));
-            StoreSources(key, terminal, EventSource.ForResult(result));
+            PublishAndStore(
+                key,
+                GameRuntimeEventProjection.ProjectResult(input, result, "{}"),
+                EventSource.ForResult(result));
             return result;
         }
         catch
         {
-            var terminal = Events.Publish(new GameRuntimeEventDraft(
+            PublishAndStore(
                 key,
-                input.InputId,
-                GameRuntimeEventKind.Result,
-                GameRuntimeLifecycle.Completed,
-                "result_failed",
-                "{\"error\":\"run_failed\"}",
-                runtime.ReadActiveRun(key)?.RunId,
-                terminal: true));
-            StoreSources(key, terminal, EventSource.Safe("{\"error\":\"run_failed\"}"));
+                new GameRuntimeEventDraft(
+                    key,
+                    input.InputId,
+                    GameRuntimeEventKind.Result,
+                    GameRuntimeLifecycle.Completed,
+                    "result_failed",
+                    "{\"error\":\"run_failed\"}",
+                    runtime.ReadActiveRun(key)?.RunId,
+                    terminal: true),
+                EventSource.Safe("{\"error\":\"run_failed\"}"));
             throw;
         }
         finally
@@ -622,34 +625,50 @@ internal sealed class GameRuntimeServerState
         }
     }
 
+    private void PublishAndStore(
+        GameSessionKey key,
+        GameRuntimeEventDraft draft,
+        EventSource source)
+    {
+        // Event publication wakes stream readers. Hold the projection gate until the matching
+        // source is installed so a reader can never observe an event that it cannot project.
+        lock (_gate)
+        {
+            var published = Events.Publish(draft);
+            StoreSources(key, published, source);
+        }
+    }
+
     private void StoreSources(
         GameSessionKey key,
         IReadOnlyList<GameRuntimeEventEnvelope> published,
         EventSource source)
     {
-        lock (_gate)
+        if (!Monitor.IsEntered(_gate))
         {
-            if (!_sources.TryGetValue(key, out var values))
-            {
-                values = new Dictionary<string, EventSource>(StringComparer.Ordinal);
-                _sources.Add(key, values);
-                _sourceOrder.Add(key, new Queue<string>());
-            }
+            throw new InvalidOperationException("Runtime projection sources must be stored under the event gate.");
+        }
 
-            var order = _sourceOrder[key];
-            foreach (var value in published)
-            {
-                var effective = value.Name == "item_interrupted"
-                    ? EventSource.Safe(value.PayloadJson)
-                    : source;
-                values[value.EventId] = effective;
-                order.Enqueue(value.EventId);
-            }
+        if (!_sources.TryGetValue(key, out var values))
+        {
+            values = new Dictionary<string, EventSource>(StringComparer.Ordinal);
+            _sources.Add(key, values);
+            _sourceOrder.Add(key, new Queue<string>());
+        }
 
-            while (order.Count > MaximumSourcesPerSession)
-            {
-                values.Remove(order.Dequeue());
-            }
+        var order = _sourceOrder[key];
+        foreach (var value in published)
+        {
+            var effective = value.Name == "item_interrupted"
+                ? EventSource.Safe(value.PayloadJson)
+                : source;
+            values[value.EventId] = effective;
+            order.Enqueue(value.EventId);
+        }
+
+        while (order.Count > MaximumSourcesPerSession)
+        {
+            values.Remove(order.Dequeue());
         }
     }
 

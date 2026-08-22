@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.3.0-alpha.4
+
+- Add OpenGameAgent Runtime Protocol v1 as optional `OpenGameAgent.Runtime.Protocol`,
+  `OpenGameAgent.Runtime.Hosting`, and `OpenGameAgent.Client` packages, with capability negotiation,
+  canonical run/turn/item events, bounded cursor replay, gap reconciliation, exact run/turn control,
+  conformance fixtures, JSON Schema, and dependency-free C++ DTOs.
+- Let hosts keep automatic Quick/short-Agent routing while withholding persistent planning through a
+  host-derived execution scope; unauthorized actors cannot collect planning tools or upgrade into a
+  durable plan.
+- Add the optional `OpenGameAgent.Memory.Onnx` package for bounded, offline BGE-M3 INT8 inference from
+  a host-supplied local model directory, including SentencePiece tokenization, normalized pooling,
+  query/document modes, manifest verification, batching, cancellation, and memory diagnostics.
+- Make automatic route classification parse bounded structured replies across OpenAI-compatible
+  providers, distinguish empty, reasoning-only, invalid, timeout, and provider failures, and apply
+  DeepSeek-compatible token/thinking request shapes without exposing hidden reasoning.
+- Add a durable generated-asset lifecycle that stages generated media, validates host import receipts,
+  binds assets to authoritative save coordinates, and recovers safely after cancellation or restart.
+- Publish tested Unity packages through immutable GitHub UPM tags and OpenUPM, and prepare Unity and
+  Godot store listings from the same public source tree.
+- Add a machine-readable release manifest that binds every release to its source commit, Runtime
+  Protocol version, package set, asset sizes, and frozen SHA-256 hashes.
+- Make Runtime SSE publication and audience-projection source registration atomic so a concurrent
+  reader cannot miss a terminal event under load.
+
 - Add the optional `OpenGameAgent.Providers.Local` package with bounded discovery and health checks
   for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM; keyless loopback realtime presets for LocalAI
   and Speaches; OpenAI-compatible local embeddings; LocalAI image/video/TTS generation; and

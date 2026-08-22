@@ -11,6 +11,12 @@ OpenGameAgent Runtime Protocol 是 OpenGameAgent 面向游戏引擎、原生客�
 
 规范 Schema、fixture 和无第三方依赖的 C++ DTO 位于 `protocol/runtime/v1`。商业服务只能消费这些公共契约，不需要复制服务器内部 DTO，更不能 fork Agent loop。
 
+## 版本化分发
+
+Runtime Protocol v1 首次通过 `0.3.0-alpha.4` 版本线正式发布。`OpenGameAgent.Runtime.Protocol`、`OpenGameAgent.Runtime.Hosting` 与 `OpenGameAgent.Client` 应锁定同一个精确预发布版本；Hosting 和 Client 的包依赖会保持 Protocol 包版本对齐。
+
+每个 GitHub Release 都包含 `RELEASE_MANIFEST.json`，记录包版本、完整源码提交、支持的 Runtime Protocol 版本、包 ID、资产大小和冻结 SHA-256。`SHA256SUMS.txt` 覆盖包括该 Manifest 在内的每个发行载荷，校验索引本身作为独立验证器；`.nupkg` 的仓库元数据也携带同一个源码提交。NuGet.org 上传后会加入仓库签名，因此发布器会将签名包的内容哈希与冻结的未签名 Release 资产核对，而不是比较外层 ZIP 字节。
+
 ## 坐标与生命周期
 
 每个事件都包含单调递增的 `sequence`、稳定 `eventId`、`(sessionId, actorId, inputId)`，以及可选的 `runId`、`turn/turnId` 和 `itemId/itemKind`。Run、Turn 和 Item 使用 `started`、`delta`、`completed` 生命周期。消息、工具、持久动作、批准、交互、产物、委派、计划、媒体和状态共用同一个 envelope。

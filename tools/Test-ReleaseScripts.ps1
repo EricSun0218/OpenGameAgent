@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $Version = '0.3.0-alpha.2'
+    [string] $Version = '0.3.0-alpha.4'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,6 +98,12 @@ $unrealPackageScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engi
 $unrealSmokeScript = Get-Content -LiteralPath (Join-Path $repositoryRoot 'engines\unreal\test-plugin.ps1') -Raw
 $releaseWorkflow = Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw
 $releaseBundle = Get-Content -LiteralPath (Join-Path $repositoryRoot 'tools\New-ReleaseBundle.ps1') -Raw
+if ($releaseBundle -notmatch 'RELEASE_MANIFEST\.json' -or
+    $releaseBundle -notmatch 'sourceCommit\s*=\s*\$SourceCommit' -or
+    $releaseBundle -notmatch 'runtimeProtocolVersions\s*=\s*@\(1\)' -or
+    $releaseBundle -notmatch 'SHA256SUMS\.txt') {
+    throw 'Release bundles must record source provenance, Runtime Protocol compatibility, and SHA-256 verification.'
+}
 if ($unrealPackageScript -notmatch 'OpenGameAgent\.uplugin' -or
     $unrealSmokeScript -notmatch 'OpenGameAgent\.Unreal\.Tests' -or
     $unrealSmokeScript -notmatch 'OPENGAMEAGENT_UNREAL_SMOKE_OK' -or

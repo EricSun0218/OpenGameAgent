@@ -7,13 +7,13 @@ Unity 6 adapter for the OpenGameAgent runtime.
 Install the immutable GitHub UPM release from **Window > Package Manager > + > Add package from git URL**:
 
 ```text
-https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.4
 ```
 
 Or install the same release from OpenUPM:
 
 ```bash
-openupm add com.opengameagent.runtime@0.3.0-alpha.3
+openupm add com.opengameagent.runtime@0.3.0-alpha.4
 ```
 
 The `upm/*` tags point to a generated package-only branch containing the tested adapter, runtime/client assemblies, notices, and sample. Do not install the package source subdirectory from `main`; generated DLLs intentionally do not live there.

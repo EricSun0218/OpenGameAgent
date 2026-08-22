@@ -8,7 +8,7 @@ authors:
 repository-code: "https://github.com/EricSun0218/OpenGameAgent"
 url: "https://github.com/EricSun0218/OpenGameAgent"
 license: "MIT"
-version: "0.3.0-alpha.2"
+version: "0.3.0-alpha.4"
 keywords:
   - game AI
   - AI agents

@@ -6,7 +6,7 @@ on:
       version:
         description: Semantic version to publish from the Unity package manifest
         required: true
-        default: 0.3.0-alpha.3
+        default: 0.3.0-alpha.4
 
 permissions:
   contents: write

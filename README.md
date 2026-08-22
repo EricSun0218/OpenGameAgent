@@ -46,7 +46,7 @@ OpenGameAgent is model- and provider-neutral. Characters operate through develop
 
 Not every interaction needs the full loop. A game can route greetings and other simple inputs through the quick-response path, use the complete agent loop for open-ended tasks, and use deterministic workflows where the execution graph should be fixed.
 
-> Latest published release: `0.3.0-alpha.2`. This README documents the current `main` branch, which also contains post-release Realtime, Unreal, image-provider, transcript, tool-visibility, and generated-asset work. Reference the source checkout when consuming those newer APIs. Public APIs can change before `1.0`.
+> Current pre-release: `0.3.0-alpha.4`. Public APIs can change before `1.0`; pin the exact package version for shipped games.
 
 The kernel boundary is intentionally small and designed to stabilize early. New game-specific capabilities should normally arrive as extensions, tools, policies, workflows, or game-owned services instead of expanding the model/tool loop.
 
@@ -54,13 +54,23 @@ The kernel boundary is intentionally small and designed to stabilize early. New 
 
 Download versioned package artifacts, Godot and Unity archives, or the portable server from the [Releases](https://github.com/EricSun0218/OpenGameAgent/releases) page. For active development against a source checkout, reference only the projects your game needs:
 
-Unity 6 projects can install the complete `0.3.0-alpha.3` package directly from its immutable GitHub UPM tag:
+The cross-language Runtime Protocol, its in-process host, and the typed HTTP/SSE client are published as independent NuGet packages:
 
-```text
-https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.3
+```bash
+dotnet add package OpenGameAgent.Runtime.Protocol --version 0.3.0-alpha.4
+dotnet add package OpenGameAgent.Runtime.Hosting --version 0.3.0-alpha.4
+dotnet add package OpenGameAgent.Client --version 0.3.0-alpha.4
 ```
 
-The same release is available through OpenUPM: `openupm add com.opengameagent.runtime@0.3.0-alpha.3`. The generated `upm` branch contains the tested binaries; the Unity source directory on `main` is not itself a distributable package.
+All release packages share one source commit. Each GitHub Release includes `RELEASE_MANIFEST.json` for the version-to-commit and protocol mapping plus `SHA256SUMS.txt` for frozen asset verification. Runtime Protocol v1 uses capability negotiation for additive features; changes to required fields, enum meaning, cursor semantics, or lifecycle ordering require a new protocol version.
+
+Unity 6 projects can install the complete `0.3.0-alpha.4` package directly from its immutable GitHub UPM tag:
+
+```text
+https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.4
+```
+
+The same release is available through OpenUPM: `openupm add com.opengameagent.runtime@0.3.0-alpha.4`. The generated `upm` branch contains the tested binaries; the Unity source directory on `main` is not itself a distributable package.
 
 ```xml
 <ItemGroup>
