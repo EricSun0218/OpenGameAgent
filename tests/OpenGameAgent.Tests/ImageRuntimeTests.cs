@@ -185,6 +185,47 @@ public sealed class ImageRuntimeTests
             new ImageAttachmentContent(attachment)));
     }
 
+    [Fact]
+    public async Task RequestProjectorChangesOnlyProviderViewAndPublishesProvenance()
+    {
+        var attachments = new RecordingAttachmentStore();
+        var sessions = new InMemoryGameSessionStore();
+        var observer = new ProjectionObserverExtension();
+        var provider = new RecordingProvider(request =>
+        {
+            var user = Assert.Single(request.Messages, message => message.Role == AgentRole.User);
+            Assert.Contains(user.Content, content => content is TextContent { Text: "[bounded visual omitted]" });
+            var image = Assert.Single(user.Content.OfType<BinaryContent>());
+            Assert.Equal("CQgH", image.Data);
+            return Text("seen");
+        });
+        var options = new GameAgentRuntimeOptions(provider, "vision-model")
+        {
+            ImageAttachments = attachments,
+            ImageRequestProjector = new FakeProjector(),
+            SessionStore = sessions,
+        };
+        options.Extensions.Add(observer);
+        await using var runtime = new GameAgentRuntime(options);
+        var input = Input(
+            "projected",
+            new BinaryContent(AgentMediaKind.Image, "AQ==", GameImageMediaTypes.Png, "old.png"),
+            new BinaryContent(AgentMediaKind.Image, "Ag==", GameImageMediaTypes.Png, "new.png"));
+
+        var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded, result.Error);
+        var snapshot = Assert.IsType<GameSessionSnapshot>(await sessions.LoadAsync(
+            new GameSessionKey(input.SessionId, input.ActorId),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(2, snapshot.Messages.SelectMany(message => message.Content).OfType<ImageAttachmentContent>().Count());
+        Assert.Empty(snapshot.Messages.SelectMany(message => message.Content).OfType<BinaryContent>());
+        var projected = Assert.Single(observer.Events);
+        Assert.Equal(GameImageProjectionDisposition.Replaced, projected.Images[0].Disposition);
+        Assert.Equal(GameImageProjectionDisposition.Derived, projected.Images[1].Disposition);
+        Assert.NotEqual(projected.Images[1].SourceAttachmentId, projected.Images[1].RequestAttachmentId);
+    }
+
     private static GameInput Input(string inputId, params AgentContent[] content) => new(
         "image-session",
         "image-actor",
@@ -303,6 +344,50 @@ public sealed class ImageRuntimeTests
             }
 
             return new ValueTask<StoredGameImageAttachment>(stored);
+        }
+    }
+
+    private sealed class FakeProjector : IGameImageRequestProjector
+    {
+        public ValueTask<GameImageProjectionResult> ProjectAsync(
+            GameImageProjectionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<GameImageProjectionResult>(new GameImageProjectionResult(new[]
+            {
+                new GameImageProjectionDecision(
+                    request.Images[0].Ordinal,
+                    request.Images[0].Image.Attachment.AttachmentId,
+                    GameImageProjectionDisposition.Replaced,
+                    replacementText: "[bounded visual omitted]",
+                    transformId: "test-replaced"),
+                new GameImageProjectionDecision(
+                    request.Images[1].Ordinal,
+                    request.Images[1].Image.Attachment.AttachmentId,
+                    GameImageProjectionDisposition.Derived,
+                    new byte[] { 9, 8, 7 },
+                    GameImageMediaTypes.Png,
+                    1,
+                    1,
+                    transformId: "test-derived"),
+            }));
+        }
+    }
+
+    private sealed class ProjectionObserverExtension : IGameAgentExtension
+    {
+        public List<GameAgentImagesProjectedEvent> Events { get; } = new();
+
+        public GameAgentExtensionDescriptor Descriptor { get; } = new("test.image-projection", "1.0.0");
+
+        public void Configure(GameAgentExtensionApi api)
+        {
+            api.On(GameAgentExtensionEvents.ImagesProjected, (value, _, _) =>
+            {
+                Events.Add(value);
+                return default;
+            });
         }
     }
 }

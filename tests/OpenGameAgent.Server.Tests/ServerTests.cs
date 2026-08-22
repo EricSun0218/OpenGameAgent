@@ -12,6 +12,7 @@ using OpenGameAgent.Client;
 using OpenGameAgent.Kernel;
 using OpenGameAgent.Persistence;
 using OpenGameAgent.Runtime.Protocol;
+using OpenGameAgent.Runtime.Hosting;
 using Xunit;
 
 namespace OpenGameAgent.Server.Tests;
@@ -314,6 +315,44 @@ public sealed class ServerTests
         Assert.Contains("in-process", capabilities, StringComparison.Ordinal);
         Assert.Contains("server", capabilities, StringComparison.Ordinal);
         Assert.Contains("session-ledger", capabilities, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DetailedHealthIsAuthenticatedAndProjectedThroughTheTypedClient()
+    {
+        var monitor = new GameRuntimeHealthMonitor(new IGameRuntimeHealthProbe[]
+        {
+            new StaticGameRuntimeHealthProbe(
+                GameRuntimeComponentKind.Provider,
+                "primary-model",
+                required: true,
+                GameRuntimeComponentState.Ready),
+            new StaticGameRuntimeHealthProbe(
+                GameRuntimeComponentKind.Media,
+                "images",
+                required: false,
+                GameRuntimeComponentState.Degraded,
+                "rate-limited",
+                "retry later"),
+        });
+        await using var app = await CreateAppAsync(apiKey: "secret", healthMonitor: monitor);
+        using var anonymous = app.GetTestClient();
+
+        using var denied = await anonymous.GetAsync("/v1/health", TestContext.Current.CancellationToken);
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, denied.StatusCode);
+
+        using var http = app.GetTestClient();
+        var remote = new ServerGameAgentClient(new ServerGameAgentClientOptions(http, new Uri("http://localhost"))
+        {
+            ApiKey = "secret",
+        });
+        var health = await remote.ReadHealthAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal("Degraded", health.State);
+        Assert.Equal(2, health.Components.Count);
+        Assert.Equal("Provider", health.Components[0].Kind);
+        Assert.Equal("rate-limited", health.Components[1].DiagnosticCode);
+        Assert.Equal("retry later", health.Components[1].Detail);
     }
 
     [Fact]
@@ -1782,12 +1821,14 @@ public sealed class ServerTests
 
     private static async Task<WebApplication> CreateAppAsync(
         string? apiKey = null,
-        int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes)
+        int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes,
+        IGameRuntimeHealthMonitor? healthMonitor = null)
     {
         return await CreateAppAsync(
             new GameAgentRuntime(new GameAgentRuntimeOptions(new StreamingProvider(), "test")),
             apiKey,
-            maximumRequestBodyBytes);
+            maximumRequestBodyBytes,
+            healthMonitor: healthMonitor);
     }
 
     private static async Task<WebApplication> CreateAppAsync(
@@ -1795,7 +1836,8 @@ public sealed class ServerTests
         string? apiKey = null,
         int maximumRequestBodyBytes = ServerEndpoints.DefaultMaximumRequestBodyBytes,
         IGameAgentOwnerAuthorizer? authorizer = null,
-        IGameAgentAudiencePolicy? audiencePolicy = null)
+        IGameAgentAudiencePolicy? audiencePolicy = null,
+        IGameRuntimeHealthMonitor? healthMonitor = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -1808,6 +1850,11 @@ public sealed class ServerTests
         if (audiencePolicy is not null)
         {
             builder.Services.AddSingleton(audiencePolicy);
+        }
+
+        if (healthMonitor is not null)
+        {
+            builder.Services.AddSingleton(healthMonitor);
         }
 
         var app = builder.Build();

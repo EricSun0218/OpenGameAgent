@@ -36,6 +36,7 @@ OpenGameAgent__AttachmentDirectory=/var/lib/opengameagent/attachments
 The included service exposes:
 
 - `GET /healthz`
+- `GET /v1/health` (detailed component health; protected when a server API key is configured)
 - `GET /v1/capabilities`
 - `POST /v1/run`
 - `POST /v1/run/stream` (Server-Sent Events)

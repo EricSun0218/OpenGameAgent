@@ -142,6 +142,113 @@ public sealed class RuntimeTests
         Assert.Equal(2, reducer.Snapshot.Items.Count(value => value.Kind == GameRuntimeItemKind.Message));
     }
 
+    [Fact]
+    public async Task HealthMonitorAggregatesRequiredAndOptionalComponentsDeterministically()
+    {
+        var monitor = new GameRuntimeHealthMonitor(
+            new IGameRuntimeHealthProbe[]
+            {
+                new StaticGameRuntimeHealthProbe(
+                    GameRuntimeComponentKind.Realtime,
+                    "voice",
+                    required: false,
+                    GameRuntimeComponentState.Unavailable,
+                    "not-configured"),
+                new StaticGameRuntimeHealthProbe(
+                    GameRuntimeComponentKind.Provider,
+                    "primary-model",
+                    required: true,
+                    GameRuntimeComponentState.Ready),
+            },
+            clock: () => DateTimeOffset.UnixEpoch);
+
+        var snapshot = await monitor.ReadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameRuntimeComponentState.Degraded, snapshot.State);
+        Assert.Equal(DateTimeOffset.UnixEpoch, snapshot.CheckedAt);
+        Assert.Equal(GameRuntimeComponentKind.Provider, snapshot.Components[0].Kind);
+        Assert.Equal("not-configured", snapshot.Components[1].DiagnosticCode);
+    }
+
+    [Fact]
+    public async Task HealthMonitorBoundsConcurrencyAndClassifiesTimeoutsWithoutExceptionText()
+    {
+        var active = 0;
+        var maximumActive = 0;
+        var probes = Enumerable.Range(0, 4).Select(index =>
+            (IGameRuntimeHealthProbe)new DelegateGameRuntimeHealthProbe(
+                GameRuntimeComponentKind.LocalEndpoint,
+                "local-" + index,
+                required: index == 0,
+                async token =>
+                {
+                    var current = Interlocked.Increment(ref active);
+                    InterlockedExtensions.Max(ref maximumActive, current);
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(1), token);
+                        return new GameRuntimeHealthProbeResult(GameRuntimeComponentState.Ready);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref active);
+                    }
+                })).ToArray();
+        var monitor = new GameRuntimeHealthMonitor(probes, new GameRuntimeHealthMonitorOptions
+        {
+            MaximumConcurrency = 2,
+            ProbeTimeout = TimeSpan.FromMilliseconds(30),
+        });
+
+        var snapshot = await monitor.ReadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameRuntimeComponentState.Unavailable, snapshot.State);
+        Assert.True(maximumActive <= 2);
+        Assert.All(snapshot.Components, component => Assert.Equal("probe-timeout", component.DiagnosticCode));
+        Assert.All(snapshot.Components, component => Assert.Null(component.Detail));
+    }
+
+    [Fact]
+    public async Task HealthMonitorPropagatesCallerCancellation()
+    {
+        var monitor = new GameRuntimeHealthMonitor(new[]
+        {
+            new DelegateGameRuntimeHealthProbe(
+                GameRuntimeComponentKind.Media,
+                "image",
+                required: false,
+                async token =>
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), token);
+                    return new GameRuntimeHealthProbeResult(GameRuntimeComponentState.Ready);
+                }),
+        });
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await monitor.ReadAsync(cancellation.Token));
+    }
+
+    [Fact]
+    public async Task InProcessHostExposesConfiguredHealthMonitor()
+    {
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new SingleResponseProvider(), "test"));
+        var monitor = new GameRuntimeHealthMonitor(new[]
+        {
+            new StaticGameRuntimeHealthProbe(
+                GameRuntimeComponentKind.Mcp,
+                "world-tools",
+                required: true,
+                GameRuntimeComponentState.Available),
+        });
+        var host = new InProcessGameAgentRuntimeHost(runtime, health: monitor);
+
+        var snapshot = await host.ReadHealthAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameRuntimeComponentState.Degraded, snapshot.State);
+        Assert.Equal(GameRuntimeComponentKind.Mcp, Assert.Single(snapshot.Components).Kind);
+    }
+
     private static GameRuntimeEventDraft Project(
         GameRuntimeAgentEventProjector projector,
         AgentEventKind kind)
@@ -195,6 +302,24 @@ public sealed class RuntimeTests
                 null,
                 null,
             });
+        }
+    }
+
+    private static class InterlockedExtensions
+    {
+        internal static void Max(ref int target, int value)
+        {
+            var current = Volatile.Read(ref target);
+            while (current < value)
+            {
+                var prior = Interlocked.CompareExchange(ref target, value, current);
+                if (prior == current)
+                {
+                    return;
+                }
+
+                current = prior;
+            }
         }
     }
 }

@@ -79,6 +79,28 @@ var result = await runtime.RunAsync(input);
 
 After admission, the runtime replaces the inline bytes with a `GameImageAttachment`. Replaying the session resolves the immutable object again; the transcript never stores base64 data.
 
+### Request-time projection
+
+Admission limits protect storage; model-request limits protect latency and provider context. Configure the optional projector when a provider should receive resized or selectively omitted images while the authoritative transcript continues to reference the originals:
+
+```csharp
+var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, model)
+{
+    ImageAttachments = attachments,
+    ImageRequestProjector = new SkiaGameImageRequestProjector(maximumCacheEntries: 128),
+    ImageProjectionBudgetSelector = (_, _) => new ValueTask<GameImageProjectionBudget>(
+        new GameImageProjectionBudget(
+            maximumImages: 4,
+            maximumTotalPixels: 8_000_000,
+            maximumEncodedBytes: 8_000_000,
+            maximumEdgePixels: 2048)),
+});
+```
+
+`SkiaGameImageRequestProjector` preserves aspect ratio, derives WebP request objects, admits the newest images first under the configured count/pixel/byte budget, and replaces omitted images with stable text. Derived data is immutable and content addressed; the original object and transcript reference are never overwritten. Repeated projections reuse a bounded cache.
+
+Subscribe to `GameAgentExtensionEvents.ImagesProjected` for source-to-request attachment IDs, disposition, transform ID, dimensions, and encoded size. `GameModelContextProvenanceExtension` persists the same relationship next to the exact model-request identity for replay and evaluation.
+
 ## Server placement
 
 The stock JSON/SSE server accepts inline image content in `GameInput.content` and uses the configured attachment directory. The client can call `ServerGameAgentClient.ReadImageAttachmentAsync` when an authorized UI needs to display an attachment referenced by that session. Multi-user hosts must install an identity-derived owner authorizer; an attachment ID alone grants no access.
@@ -87,4 +109,4 @@ Back up and restore session state and its attachment directory together. Immutab
 
 ## Multi-NPC performance
 
-Image admission does not change actor scheduling. Runs for the same `(sessionId, actorId)` remain serialized; different actors run concurrently up to `GameRuntimeLimits.MaxConcurrentActors`. Keep capture and preprocessing outside the engine's render-critical path, deduplicate identical frames, and apply actor importance/distance budgets before enqueuing runs. Shared-world writes still require game-owned revisions or transactions: per-actor ordering is not a global world lock.
+Image admission does not change actor scheduling. Runs for the same `(sessionId, actorId)` remain serialized; different actors run concurrently up to `GameRuntimeLimits.MaxConcurrentActors`. Request projection runs off the engine's render-critical path. Deduplicate identical frames and apply actor importance/distance budgets before enqueuing runs. Shared-world writes still require game-owned revisions or transactions: per-actor ordering is not a global world lock.

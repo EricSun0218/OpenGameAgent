@@ -11,13 +11,23 @@ public sealed class InProcessGameAgentRuntimeHost
 {
     private readonly GameAgentRuntime _runtime;
     private readonly InMemoryGameRuntimeEventJournal _events;
+    private readonly IGameRuntimeHealthMonitor _health;
 
     public InProcessGameAgentRuntimeHost(
         GameAgentRuntime runtime,
-        InMemoryGameRuntimeEventJournal? events = null)
+        InMemoryGameRuntimeEventJournal? events = null,
+        IGameRuntimeHealthMonitor? health = null)
     {
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _events = events ?? new InMemoryGameRuntimeEventJournal();
+        _health = health ?? new GameRuntimeHealthMonitor(new[]
+        {
+            new StaticGameRuntimeHealthProbe(
+                GameRuntimeComponentKind.Runtime,
+                "agent-runtime",
+                required: true,
+                GameRuntimeComponentState.Ready),
+        });
     }
 
     public GameRuntimeInitializeResponse Initialize(GameRuntimeInitializeRequest request)
@@ -97,6 +107,10 @@ public sealed class InProcessGameAgentRuntimeHost
             new GameSessionKey(sessionId, actorId),
             afterSequence,
             cancellationToken);
+
+    public ValueTask<GameRuntimeHealthSnapshot> ReadHealthAsync(
+        CancellationToken cancellationToken = default) =>
+        _health.ReadAsync(cancellationToken);
 
     public GameRuntimeControlResponse Steer(GameRuntimeControlRequest request)
     {

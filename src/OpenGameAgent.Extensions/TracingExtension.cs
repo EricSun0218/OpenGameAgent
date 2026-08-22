@@ -274,6 +274,28 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                     durationMilliseconds = value.Duration?.TotalMilliseconds,
                 },
                 token));
+        api.On(GameAgentExtensionEvents.ImagesProjected, (value, context, token) =>
+            WriteAsync(
+                "images.projected",
+                context,
+                new
+                {
+                    value.Model,
+                    value.RunId,
+                    value.Turn,
+                    images = value.Images.Select(image => new
+                    {
+                        image.Ordinal,
+                        image.SourceAttachmentId,
+                        image.RequestAttachmentId,
+                        disposition = image.Disposition.ToString(),
+                        image.TransformId,
+                        image.Width,
+                        image.Height,
+                        image.Bytes,
+                    }).ToArray(),
+                },
+                token));
         api.On(GameAgentExtensionEvents.KernelEvent, (value, context, token) =>
             WriteAsync(
                 value.Value.Kind == AgentEventKind.ModelRequestStarted

@@ -199,6 +199,8 @@ public sealed class ServerGameAgentClientOptions
 
     public string CapabilitiesPath { get; set; } = "v1/capabilities";
 
+    public string HealthPath { get; set; } = "v1/health";
+
     public string UsagePath { get; set; } = "v1/usage";
 
     public string ActionClaimPath { get; set; } = "v1/actions/claim";
@@ -236,6 +238,7 @@ public sealed partial class ServerGameAgentClient
     private readonly Uri _approvalListEndpoint;
     private readonly Uri _approvalResponseEndpoint;
     private readonly Uri _capabilitiesEndpoint;
+    private readonly Uri _healthEndpoint;
     private readonly Uri _usageEndpoint;
     private readonly Uri _actionClaimEndpoint;
     private readonly Uri _actionStreamEndpoint;
@@ -329,6 +332,7 @@ public sealed partial class ServerGameAgentClient
         _approvalListEndpoint = CreateEndpoint(options.ServerBaseUri, options.ApprovalListPath, nameof(options.ApprovalListPath));
         _approvalResponseEndpoint = CreateEndpoint(options.ServerBaseUri, options.ApprovalResponsePath, nameof(options.ApprovalResponsePath));
         _capabilitiesEndpoint = CreateEndpoint(options.ServerBaseUri, options.CapabilitiesPath, nameof(options.CapabilitiesPath));
+        _healthEndpoint = CreateEndpoint(options.ServerBaseUri, options.HealthPath, nameof(options.HealthPath));
         _usageEndpoint = CreateEndpoint(options.ServerBaseUri, options.UsagePath, nameof(options.UsagePath));
         _actionClaimEndpoint = CreateEndpoint(options.ServerBaseUri, options.ActionClaimPath, nameof(options.ActionClaimPath));
         _actionStreamEndpoint = CreateEndpoint(options.ServerBaseUri, options.ActionStreamPath, nameof(options.ActionStreamPath));

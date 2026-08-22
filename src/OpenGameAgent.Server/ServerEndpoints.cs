@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using OpenGameAgent.Kernel;
+using OpenGameAgent.Runtime.Hosting;
 
 namespace OpenGameAgent.Server;
 
@@ -60,6 +61,7 @@ public static partial class ServerEndpoints
                 && !context.Request.Path.StartsWithSegments("/v1/transcript")
                 && !context.Request.Path.StartsWithSegments("/v1/approvals")
                 && !context.Request.Path.StartsWithSegments("/v1/attachments")
+                && !context.Request.Path.StartsWithSegments("/v1/health")
                 && !context.Request.Path.StartsWithSegments("/runtime/v1"))
             {
                 await next(context);
@@ -114,6 +116,43 @@ public static partial class ServerEndpoints
         }
 
         endpoints.MapGet("/healthz", () => Results.Ok(new { status = "healthy" }));
+        endpoints.MapGet(
+            "/v1/health",
+            async (HttpContext context, CancellationToken cancellationToken) =>
+            {
+                var monitor = context.RequestServices.GetService<IGameRuntimeHealthMonitor>();
+                var snapshot = monitor is null
+                    ? new GameRuntimeHealthSnapshot(
+                        GameRuntimeComponentState.Ready,
+                        DateTimeOffset.UtcNow,
+                        new[]
+                        {
+                            new GameRuntimeComponentHealth(
+                                GameRuntimeComponentKind.Runtime,
+                                "agent-runtime",
+                                required: true,
+                                GameRuntimeComponentState.Ready,
+                                DateTimeOffset.UtcNow,
+                                elapsedMilliseconds: 0),
+                        })
+                    : await monitor.ReadAsync(cancellationToken);
+                return Results.Ok(new
+                {
+                    state = snapshot.State.ToString(),
+                    snapshot.CheckedAt,
+                    components = snapshot.Components.Select(component => new
+                    {
+                        kind = component.Kind.ToString(),
+                        component.Name,
+                        component.Required,
+                        state = component.State.ToString(),
+                        component.CheckedAt,
+                        component.ElapsedMilliseconds,
+                        component.DiagnosticCode,
+                        component.Detail,
+                    }),
+                });
+            });
         var runtime = new GameRuntimeServerState();
         MapGameRuntimeEndpoints(endpoints, runtime, maximumRequestBodyBytes);
         endpoints.MapGet("/v1/capabilities", () => Results.Ok(new
@@ -131,6 +170,7 @@ public static partial class ServerEndpoints
             transcript = new[] { "bounded-pages", "revision-bound-cursors", "attachment-metadata" },
             attachments = new[] { "content-addressed-images", "session-authorized-read" },
             approvals = new[] { "owner-authorized-pending", "one-time-response", "world-bound-consumption" },
+            health = new[] { "component-snapshot", "bounded-probes", "server-client" },
         }));
         endpoints.MapPost(
             "/v1/run",

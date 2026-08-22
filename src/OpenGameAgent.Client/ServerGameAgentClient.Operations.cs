@@ -25,6 +25,58 @@ public sealed class RemoteGameServerCapabilities
     public string Json { get; }
 }
 
+public sealed class RemoteGameRuntimeComponentHealth
+{
+    internal RemoteGameRuntimeComponentHealth(
+        string kind,
+        string name,
+        bool required,
+        string state,
+        DateTimeOffset checkedAt,
+        double elapsedMilliseconds,
+        string? diagnosticCode,
+        string? detail)
+    {
+        Kind = kind;
+        Name = name;
+        Required = required;
+        State = state;
+        CheckedAt = checkedAt;
+        ElapsedMilliseconds = elapsedMilliseconds;
+        DiagnosticCode = diagnosticCode;
+        Detail = detail;
+    }
+
+    public string Kind { get; }
+    public string Name { get; }
+    public bool Required { get; }
+    public string State { get; }
+    public DateTimeOffset CheckedAt { get; }
+    public double ElapsedMilliseconds { get; }
+    public string? DiagnosticCode { get; }
+    public string? Detail { get; }
+}
+
+public sealed class RemoteGameRuntimeHealth
+{
+    internal RemoteGameRuntimeHealth(
+        string state,
+        DateTimeOffset checkedAt,
+        IReadOnlyList<RemoteGameRuntimeComponentHealth> components,
+        string json)
+    {
+        State = state;
+        CheckedAt = checkedAt;
+        Components = components;
+        Json = json;
+    }
+
+    public string State { get; }
+    public DateTimeOffset CheckedAt { get; }
+    public IReadOnlyList<RemoteGameRuntimeComponentHealth> Components { get; }
+    public string Json { get; }
+}
+
 public sealed class RemoteGameSessionUsage
 {
     internal RemoteGameSessionUsage(
@@ -107,6 +159,39 @@ public sealed partial class ServerGameAgentClient
         return new RemoteGameServerCapabilities(
             RequireString(root, "name"),
             RequireString(root, "protocolVersion"),
+            body);
+    }
+
+    public async Task<RemoteGameRuntimeHealth> ReadHealthAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var request = CreateAuthenticatedRequest(HttpMethod.Get, _healthEndpoint, content: null);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        var body = await ReadBoundedAsync(response.Content, _maxResponseCharacters, cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(response, body);
+        using var document = RemoteJson.Parse(body, nameof(body));
+        var root = document.RootElement;
+        var components = new List<RemoteGameRuntimeComponentHealth>();
+        foreach (var component in root.GetProperty("components").EnumerateArray())
+        {
+            components.Add(new RemoteGameRuntimeComponentHealth(
+                RequireString(component, "kind"),
+                RequireString(component, "name"),
+                component.GetProperty("required").GetBoolean(),
+                RequireString(component, "state"),
+                component.GetProperty("checkedAt").GetDateTimeOffset(),
+                component.GetProperty("elapsedMilliseconds").GetDouble(),
+                ReadNullableString(component, "diagnosticCode"),
+                ReadNullableString(component, "detail")));
+        }
+
+        return new RemoteGameRuntimeHealth(
+            RequireString(root, "state"),
+            root.GetProperty("checkedAt").GetDateTimeOffset(),
+            components,
             body);
     }
 

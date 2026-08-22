@@ -4,6 +4,7 @@ using OpenGameAgent.Attachments.Local;
 using OpenGameAgent.Extensions;
 using OpenGameAgent.Persistence;
 using OpenGameAgent.Providers.OpenAICompatible;
+using OpenGameAgent.Runtime.Hosting;
 using OpenGameAgent.Server;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -33,6 +34,14 @@ builder.Services.AddSingleton<IGameToolApprovalStore>(serviceProvider =>
 });
 builder.Services.AddSingleton<IGameToolApprovalBroker>(serviceProvider =>
     new GameToolApprovalBroker(serviceProvider.GetRequiredService<IGameToolApprovalStore>()));
+builder.Services.AddSingleton<IGameRuntimeHealthMonitor>(_ => new GameRuntimeHealthMonitor(new[]
+{
+    new StaticGameRuntimeHealthProbe(
+        GameRuntimeComponentKind.Runtime,
+        "agent-runtime",
+        required: true,
+        GameRuntimeComponentState.Ready),
+}));
 builder.Services.AddSingleton(serviceProvider => new DurableGameActionDispatcher(
     serviceProvider.GetRequiredService<IGameActionJournal>(),
     serviceProvider.GetRequiredService<GameActionExchange>()));

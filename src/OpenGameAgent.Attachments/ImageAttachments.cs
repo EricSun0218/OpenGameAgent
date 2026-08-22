@@ -227,6 +227,218 @@ public sealed class StoredGameImageAttachment
     public ReadOnlyMemory<byte> Data => _data;
 }
 
+public enum GameImageProjectionDisposition
+{
+    Retained,
+    Derived,
+    Replaced,
+}
+
+/// <summary>
+/// Bounded request-time image budget. The canonical attachment is never changed; a projector may
+/// produce a derived request image or a stable text replacement for this one model request.
+/// </summary>
+public sealed class GameImageProjectionBudget
+{
+    public GameImageProjectionBudget(
+        int maximumImages = 8,
+        long maximumTotalPixels = 8_000_000,
+        int maximumEncodedBytes = 12 * 1024 * 1024,
+        int maximumEdgePixels = 2_048)
+    {
+        if (maximumImages < 0 || maximumImages > 1_024)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumImages));
+        }
+
+        if (maximumTotalPixels < 0 || maximumTotalPixels > 10_000_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumTotalPixels));
+        }
+
+        if (maximumEncodedBytes < 0 || maximumEncodedBytes > 1024 * 1024 * 1024)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEncodedBytes));
+        }
+
+        if (maximumEdgePixels < 1 || maximumEdgePixels > 65_536)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEdgePixels));
+        }
+
+        MaximumImages = maximumImages;
+        MaximumTotalPixels = maximumTotalPixels;
+        MaximumEncodedBytes = maximumEncodedBytes;
+        MaximumEdgePixels = maximumEdgePixels;
+    }
+
+    public int MaximumImages { get; }
+
+    public long MaximumTotalPixels { get; }
+
+    public int MaximumEncodedBytes { get; }
+
+    public int MaximumEdgePixels { get; }
+}
+
+public sealed class GameImageProjectionSource
+{
+    public GameImageProjectionSource(int ordinal, StoredGameImageAttachment image)
+    {
+        Ordinal = ordinal >= 0 ? ordinal : throw new ArgumentOutOfRangeException(nameof(ordinal));
+        Image = image ?? throw new ArgumentNullException(nameof(image));
+    }
+
+    public int Ordinal { get; }
+
+    public StoredGameImageAttachment Image { get; }
+}
+
+public sealed class GameImageProjectionRequest
+{
+    public GameImageProjectionRequest(
+        string model,
+        string? sessionId,
+        string runId,
+        int turn,
+        IReadOnlyList<GameImageProjectionSource> images,
+        GameImageProjectionBudget budget)
+    {
+        Model = Require(model, nameof(model));
+        SessionId = sessionId is null ? null : Require(sessionId, nameof(sessionId));
+        RunId = Require(runId, nameof(runId));
+        Turn = turn > 0 ? turn : throw new ArgumentOutOfRangeException(nameof(turn));
+        var copy = (images ?? throw new ArgumentNullException(nameof(images))).ToArray();
+        if (copy.Any(value => value is null)
+            || copy.Select(value => value.Ordinal).Distinct().Count() != copy.Length)
+        {
+            throw new ArgumentException("Projection sources must be non-null with unique ordinals.", nameof(images));
+        }
+
+        Images = Array.AsReadOnly(copy);
+        Budget = budget ?? throw new ArgumentNullException(nameof(budget));
+    }
+
+    public string Model { get; }
+
+    public string? SessionId { get; }
+
+    public string RunId { get; }
+
+    public int Turn { get; }
+
+    public IReadOnlyList<GameImageProjectionSource> Images { get; }
+
+    public GameImageProjectionBudget Budget { get; }
+
+    private static string Require(string value, string name) =>
+        string.IsNullOrWhiteSpace(value) || value.Length > 1_024 || value.Any(char.IsControl)
+            ? throw new ArgumentException("A bounded identifier is required.", name)
+            : value;
+}
+
+public sealed class GameImageProjectionDecision
+{
+    private readonly byte[]? _data;
+
+    public GameImageProjectionDecision(
+        int ordinal,
+        string sourceAttachmentId,
+        GameImageProjectionDisposition disposition,
+        byte[]? data = null,
+        string? mediaType = null,
+        int width = 0,
+        int height = 0,
+        string? replacementText = null,
+        string? transformId = null)
+    {
+        Ordinal = ordinal >= 0 ? ordinal : throw new ArgumentOutOfRangeException(nameof(ordinal));
+        SourceAttachmentId = Require(sourceAttachmentId, nameof(sourceAttachmentId));
+        if (!Enum.IsDefined(typeof(GameImageProjectionDisposition), disposition))
+        {
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        }
+
+        if (disposition == GameImageProjectionDisposition.Derived)
+        {
+            if (data is null || data.Length == 0 || !GameImageMediaTypes.IsRaster(mediaType ?? string.Empty)
+                || width <= 0 || height <= 0 || string.IsNullOrWhiteSpace(transformId))
+            {
+                throw new ArgumentException("A derived projection requires bytes, media type, dimensions, and a transform ID.");
+            }
+        }
+        else if (data is not null || mediaType is not null || width != 0 || height != 0)
+        {
+            throw new ArgumentException("Only a derived projection may carry image bytes and dimensions.");
+        }
+
+        if (disposition == GameImageProjectionDisposition.Replaced && string.IsNullOrWhiteSpace(replacementText))
+        {
+            throw new ArgumentException("A replaced projection requires bounded replacement text.", nameof(replacementText));
+        }
+
+        if (replacementText is { Length: > 4_096 } || transformId is { Length: > 256 })
+        {
+            throw new ArgumentException("Projection metadata exceeds its configured contract bound.");
+        }
+
+        Disposition = disposition;
+        _data = data is null ? null : (byte[])data.Clone();
+        MediaType = mediaType;
+        Width = width;
+        Height = height;
+        ReplacementText = replacementText;
+        TransformId = transformId;
+    }
+
+    public int Ordinal { get; }
+
+    public string SourceAttachmentId { get; }
+
+    public GameImageProjectionDisposition Disposition { get; }
+
+    public ReadOnlyMemory<byte> Data => _data ?? ReadOnlyMemory<byte>.Empty;
+
+    public string? MediaType { get; }
+
+    public int Width { get; }
+
+    public int Height { get; }
+
+    public string? ReplacementText { get; }
+
+    public string? TransformId { get; }
+
+    private static string Require(string value, string name) =>
+        string.IsNullOrWhiteSpace(value) || value.Length > 256 || value.Any(char.IsControl)
+            ? throw new ArgumentException("A bounded attachment ID is required.", name)
+            : value;
+}
+
+public sealed class GameImageProjectionResult
+{
+    public GameImageProjectionResult(IReadOnlyList<GameImageProjectionDecision> decisions)
+    {
+        var copy = (decisions ?? throw new ArgumentNullException(nameof(decisions))).ToArray();
+        if (copy.Any(value => value is null)
+            || copy.Select(value => value.Ordinal).Distinct().Count() != copy.Length)
+        {
+            throw new ArgumentException("Projection decisions must be non-null with unique ordinals.", nameof(decisions));
+        }
+
+        Decisions = Array.AsReadOnly(copy);
+    }
+
+    public IReadOnlyList<GameImageProjectionDecision> Decisions { get; }
+}
+
+public interface IGameImageRequestProjector
+{
+    ValueTask<GameImageProjectionResult> ProjectAsync(
+        GameImageProjectionRequest request,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IGameImageAttachmentStore
 {
     GameImageAttachmentLimits ImageLimits { get; }

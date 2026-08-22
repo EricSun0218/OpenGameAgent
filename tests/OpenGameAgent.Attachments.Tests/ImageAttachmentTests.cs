@@ -166,6 +166,66 @@ public sealed class ImageAttachmentTests : IDisposable
     }
 
     [Fact]
+    public async Task RequestProjectionResizesWithoutChangingSourceAndKeepsNewestWithinBudget()
+    {
+        var store = new FileGameImageAttachmentStore(_root);
+        var first = await store.SaveImageAsync(
+            new SaveGameImageAttachment(
+                CreateImage(SKEncodedImageFormat.Png, 100, 50),
+                GameImageMediaTypes.Png,
+                "first.png"),
+            TestContext.Current.CancellationToken);
+        var second = await store.SaveImageAsync(
+            new SaveGameImageAttachment(
+                CreateImage(SKEncodedImageFormat.Png, 80, 40),
+                GameImageMediaTypes.Png,
+                "second.png"),
+            TestContext.Current.CancellationToken);
+        var firstStored = await store.ReadImageAsync(first, TestContext.Current.CancellationToken);
+        var secondStored = await store.ReadImageAsync(second, TestContext.Current.CancellationToken);
+        using var projector = new SkiaGameImageRequestProjector();
+
+        var result = await projector.ProjectAsync(
+            new GameImageProjectionRequest(
+                "vision",
+                "session",
+                "run",
+                1,
+                new[]
+                {
+                    new GameImageProjectionSource(0, firstStored),
+                    new GameImageProjectionSource(1, secondStored),
+                },
+                new GameImageProjectionBudget(
+                    maximumImages: 1,
+                    maximumTotalPixels: 10_000,
+                    maximumEncodedBytes: 1_000_000,
+                    maximumEdgePixels: 20)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(GameImageProjectionDisposition.Replaced, result.Decisions[0].Disposition);
+        var derived = result.Decisions[1];
+        Assert.Equal(GameImageProjectionDisposition.Derived, derived.Disposition);
+        Assert.Equal(20, derived.Width);
+        Assert.Equal(10, derived.Height);
+        Assert.Equal(GameImageMediaTypes.WebP, derived.MediaType);
+        Assert.NotEmpty(derived.Data.ToArray());
+        Assert.Equal(100, (await store.ReadImageAsync(first, TestContext.Current.CancellationToken)).Attachment.Width);
+        Assert.Equal(firstStored.Data.ToArray(), (await store.ReadImageAsync(first, TestContext.Current.CancellationToken)).Data.ToArray());
+
+        var repeated = await projector.ProjectAsync(
+            new GameImageProjectionRequest(
+                "vision",
+                "session",
+                "run-2",
+                1,
+                new[] { new GameImageProjectionSource(0, secondStored) },
+                new GameImageProjectionBudget(maximumEdgePixels: 20)),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(derived.Data.ToArray(), repeated.Decisions[0].Data.ToArray());
+    }
+
+    [Fact]
     public void PublicContractsRejectUnsupportedFormatsAndUnsafeSourceNames()
     {
         Assert.Throws<ArgumentException>(() => new GameImageAttachmentLimits(

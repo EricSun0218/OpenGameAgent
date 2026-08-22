@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using OpenGameAgent.Attachments;
 using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent;
@@ -200,6 +201,8 @@ public static class GameAgentExtensionEvents
 
     public static GameAgentExtensionEvent<GameAgentSkillsEvent> SkillsSelected { get; } = new("skills.selected");
 
+    public static GameAgentExtensionEvent<GameAgentImagesProjectedEvent> ImagesProjected { get; } = new("images.projected");
+
     public static GameAgentExtensionEvent<GameAgentKernelEvent> KernelEvent { get; } = new("kernel.event");
 
     public static GameAgentExtensionEvent<GameAgentRunEvent> RunCompleted { get; } = new("run.completed");
@@ -349,6 +352,99 @@ public sealed class GameAgentSkillsEvent
         value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
             ? throw new ArgumentOutOfRangeException(name)
             : value;
+}
+
+public sealed class GameAgentImageProjectionRecord
+{
+    public GameAgentImageProjectionRecord(
+        int ordinal,
+        string sourceAttachmentId,
+        string? requestAttachmentId,
+        GameImageProjectionDisposition disposition,
+        string? transformId,
+        int width,
+        int height,
+        int bytes)
+    {
+        Ordinal = ordinal >= 0 ? ordinal : throw new ArgumentOutOfRangeException(nameof(ordinal));
+        SourceAttachmentId = GameJson.RequireId(sourceAttachmentId, nameof(sourceAttachmentId));
+        RequestAttachmentId = requestAttachmentId is null
+            ? null
+            : GameJson.RequireId(requestAttachmentId, nameof(requestAttachmentId));
+        if (!Enum.IsDefined(typeof(GameImageProjectionDisposition), disposition))
+        {
+            throw new ArgumentOutOfRangeException(nameof(disposition));
+        }
+
+        if (disposition == GameImageProjectionDisposition.Replaced)
+        {
+            if (requestAttachmentId is not null || width != 0 || height != 0 || bytes != 0)
+            {
+                throw new ArgumentException("A replaced image cannot carry projected attachment metadata.");
+            }
+        }
+        else if (requestAttachmentId is null || width <= 0 || height <= 0 || bytes <= 0)
+        {
+            throw new ArgumentException("A retained or derived image requires projected attachment metadata.");
+        }
+
+        if (transformId is { Length: > 256 })
+        {
+            throw new ArgumentException("The transform ID exceeds its contract bound.", nameof(transformId));
+        }
+
+        Disposition = disposition;
+        TransformId = transformId;
+        Width = width;
+        Height = height;
+        Bytes = bytes;
+    }
+
+    public int Ordinal { get; }
+
+    public string SourceAttachmentId { get; }
+
+    public string? RequestAttachmentId { get; }
+
+    public GameImageProjectionDisposition Disposition { get; }
+
+    public string? TransformId { get; }
+
+    public int Width { get; }
+
+    public int Height { get; }
+
+    public int Bytes { get; }
+}
+
+public sealed class GameAgentImagesProjectedEvent
+{
+    public GameAgentImagesProjectedEvent(
+        string model,
+        string runId,
+        int turn,
+        IReadOnlyList<GameAgentImageProjectionRecord> images)
+    {
+        Model = GameJson.RequireId(model, nameof(model));
+        RunId = GameJson.RequireId(runId, nameof(runId));
+        Turn = turn > 0 ? turn : throw new ArgumentOutOfRangeException(nameof(turn));
+        var copy = (images ?? throw new ArgumentNullException(nameof(images))).ToArray();
+        if (copy.Any(value => value is null)
+            || copy.Select(value => value.Ordinal).Distinct().Count() != copy.Length)
+        {
+            throw new ArgumentException("Projected image records must have unique ordinals.", nameof(images));
+        }
+
+        Images = Array.AsReadOnly(copy);
+    }
+
+    public string Model { get; }
+
+    public string RunId { get; }
+
+    public int Turn { get; }
+
+    public IReadOnlyList<GameAgentImageProjectionRecord> Images { get; }
 }
 
 public sealed class GameAgentKernelEvent

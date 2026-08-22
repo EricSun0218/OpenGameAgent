@@ -26,6 +26,8 @@ public delegate ValueTask<bool> GamePendingWorkProvider(
     GameInput input,
     CancellationToken cancellationToken);
 
+public delegate GameImageProjectionBudget GameImageProjectionBudgetSelector(string model);
+
 public sealed class GameModelSelection
 {
     private readonly ModelParameters? _parameters;
@@ -271,6 +273,15 @@ public sealed class GameAgentRuntimeOptions
 
     public IGameImageAttachmentStore? ImageAttachments { get; set; }
 
+    /// <summary>
+    /// Optional request-time image projection. Canonical attachments remain immutable; only the
+    /// bytes sent for one model request may be resized or replaced by a bounded text marker.
+    /// </summary>
+    public IGameImageRequestProjector? ImageRequestProjector { get; set; }
+
+    public GameImageProjectionBudgetSelector ImageProjectionBudgetSelector { get; set; } =
+        static _ => new GameImageProjectionBudget();
+
     public IGameContextProvider? ContextProvider { get; set; }
 
     public IGameSkillSource? SkillSource { get; set; }
@@ -356,6 +367,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly IGameSessionStore _sessionStore;
     private readonly IGameRunOperationJournal? _runOperationJournal;
     private readonly IGameImageAttachmentStore? _imageAttachments;
+    private readonly IGameImageRequestProjector? _imageRequestProjector;
+    private readonly GameImageProjectionBudgetSelector _imageProjectionBudgetSelector;
     private readonly IGameContextProvider? _contextProvider;
     private readonly IGameSkillSource? _skillSource;
     private readonly GameToolProvider? _toolProvider;
@@ -398,6 +411,13 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             ?? throw new ArgumentException("A session store is required.", nameof(options));
         _runOperationJournal = options.RunOperationJournal;
         _imageAttachments = options.ImageAttachments;
+        _imageRequestProjector = options.ImageRequestProjector;
+        _imageProjectionBudgetSelector = options.ImageProjectionBudgetSelector
+            ?? throw new ArgumentException("An image projection budget selector is required.", nameof(options));
+        if (_imageRequestProjector is not null && _imageAttachments is null)
+        {
+            throw new ArgumentException("An image request projector requires an image attachment store.", nameof(options));
+        }
         _contextProvider = options.ContextProvider;
         _skillSource = options.SkillSource;
         _toolProvider = options.ToolProvider;
@@ -1160,7 +1180,9 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             Func<IModelProvider, IModelProvider> wrapProvider = candidate =>
                 candidate is ImageResolvingModelProvider
                     ? candidate
-                    : new ImageResolvingModelProvider(candidate, ResolveModelImagesAsync);
+                    : new ImageResolvingModelProvider(
+                        candidate,
+                        (request, token) => ResolveModelImagesAsync(request, extensionContext, token));
             Func<IModelProvider, IModelProvider>? wrapRecoveryProvider = null;
             if (_transcriptCompactor is not null && contextWindowTokens > 0)
             {
@@ -1903,6 +1925,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
     private async ValueTask<ModelRequest> ResolveModelImagesAsync(
         ModelRequest request,
+        GameAgentExtensionRunContext extensionContext,
         CancellationToken cancellationToken)
     {
         if (!request.Messages.Any(message => message.Content.Any(part => part is ImageAttachmentContent)))
@@ -1915,7 +1938,92 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 "ATTACHMENT_STORE_REQUIRED",
                 "Image history requires a durable image attachment store.");
         var resolved = new Dictionary<string, StoredGameImageAttachment>(StringComparer.Ordinal);
+        var sources = new List<GameImageProjectionSource>();
+        foreach (var image in request.Messages
+                     .SelectMany(message => message.Content)
+                     .OfType<ImageAttachmentContent>())
+        {
+            if (!resolved.TryGetValue(image.Attachment.AttachmentId, out var stored))
+            {
+                stored = await store.ReadImageAsync(image.Attachment, cancellationToken).ConfigureAwait(false);
+                resolved.Add(image.Attachment.AttachmentId, stored);
+            }
+
+            sources.Add(new GameImageProjectionSource(sources.Count, stored));
+        }
+
+        var projection = _imageRequestProjector is null
+            ? new GameImageProjectionResult(sources.Select(source =>
+                    new GameImageProjectionDecision(
+                        source.Ordinal,
+                        source.Image.Attachment.AttachmentId,
+                        GameImageProjectionDisposition.Retained,
+                        transformId: "identity-v1"))
+                .ToArray())
+            : await _imageRequestProjector.ProjectAsync(
+                new GameImageProjectionRequest(
+                    request.Model,
+                    request.SessionId,
+                    request.RunId,
+                    request.Turn,
+                    sources,
+                    _imageProjectionBudgetSelector(request.Model)
+                    ?? throw new InvalidOperationException("The image projection budget selector returned null.")),
+                cancellationToken).ConfigureAwait(false);
+        ValidateProjection(sources, projection);
+
+        var projected = new Dictionary<int, ProjectedImage>();
+        var records = new List<GameAgentImageProjectionRecord>(projection.Decisions.Count);
+        foreach (var decision in projection.Decisions.OrderBy(value => value.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var source = sources[decision.Ordinal];
+            switch (decision.Disposition)
+            {
+                case GameImageProjectionDisposition.Retained:
+                    projected.Add(decision.Ordinal, ProjectedImage.FromStored(source.Image));
+                    records.Add(CreateProjectionRecord(decision, source.Image.Attachment));
+                    break;
+                case GameImageProjectionDisposition.Derived:
+                    var upload = new SaveGameImageAttachment(
+                        decision.Data.ToArray(),
+                        decision.MediaType!,
+                        source.Image.Attachment.Name);
+                    await store.ValidateImageAsync(upload, cancellationToken).ConfigureAwait(false);
+                    var attachment = await store.SaveImageAsync(upload, cancellationToken).ConfigureAwait(false);
+                    if (attachment.Width != decision.Width || attachment.Height != decision.Height)
+                    {
+                        throw new GameAttachmentException(
+                            "INVALID_IMAGE_PROJECTION",
+                            "The projected image dimensions did not match the persisted derived object.");
+                    }
+
+                    projected.Add(decision.Ordinal, new ProjectedImage(
+                        attachment,
+                        decision.Data.ToArray(),
+                        replacementText: null));
+                    records.Add(CreateProjectionRecord(decision, attachment));
+                    break;
+                case GameImageProjectionDisposition.Replaced:
+                    projected.Add(decision.Ordinal, new ProjectedImage(
+                        attachment: null,
+                        data: null,
+                        decision.ReplacementText!));
+                    records.Add(CreateProjectionRecord(decision, attachment: null));
+                    break;
+                default:
+                    throw new InvalidOperationException("The image projector returned an unsupported disposition.");
+            }
+        }
+
+        await _extensions.PublishAsync(
+            GameAgentExtensionEvents.ImagesProjected,
+            new GameAgentImagesProjectedEvent(request.Model, request.RunId, request.Turn, records),
+            extensionContext,
+            cancellationToken).ConfigureAwait(false);
+
         var messages = new List<AgentMessage>(request.Messages.Count);
+        var ordinal = 0;
         foreach (var message in request.Messages)
         {
             if (!message.Content.Any(part => part is ImageAttachmentContent))
@@ -1933,16 +2041,18 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                     continue;
                 }
 
-                if (!resolved.TryGetValue(image.Attachment.AttachmentId, out var stored))
+                var value = projected[ordinal++];
+                if (value.ReplacementText is not null)
                 {
-                    stored = await store.ReadImageAsync(image.Attachment, cancellationToken).ConfigureAwait(false);
-                    resolved.Add(image.Attachment.AttachmentId, stored);
+                    content.Add(new TextContent(value.ReplacementText));
+                    continue;
                 }
+
                 content.Add(new BinaryContent(
                     AgentMediaKind.Image,
-                    Convert.ToBase64String(stored.Data.ToArray()),
-                    stored.Attachment.MediaType,
-                    stored.Attachment.Name));
+                    Convert.ToBase64String(value.Data!),
+                    value.Attachment!.MediaType,
+                    value.Attachment.Name));
             }
 
             messages.Add(CloneMessageWithContent(message, content));
@@ -1958,6 +2068,44 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             request.RunId,
             request.Turn);
     }
+
+    private static void ValidateProjection(
+        IReadOnlyList<GameImageProjectionSource> sources,
+        GameImageProjectionResult projection)
+    {
+        if (projection is null || projection.Decisions.Count != sources.Count)
+        {
+            throw new GameAttachmentException(
+                "INVALID_IMAGE_PROJECTION",
+                "The image projector did not return exactly one decision per source image.");
+        }
+
+        foreach (var decision in projection.Decisions)
+        {
+            if (decision.Ordinal < 0 || decision.Ordinal >= sources.Count
+                || !string.Equals(
+                    decision.SourceAttachmentId,
+                    sources[decision.Ordinal].Image.Attachment.AttachmentId,
+                    StringComparison.Ordinal))
+            {
+                throw new GameAttachmentException(
+                    "INVALID_IMAGE_PROJECTION",
+                    "The image projector returned a decision for the wrong source image.");
+            }
+        }
+    }
+
+    private static GameAgentImageProjectionRecord CreateProjectionRecord(
+        GameImageProjectionDecision decision,
+        GameImageAttachment? attachment) => new(
+        decision.Ordinal,
+        decision.SourceAttachmentId,
+        attachment?.AttachmentId,
+        decision.Disposition,
+        decision.TransformId,
+        attachment?.Width ?? 0,
+        attachment?.Height ?? 0,
+        attachment?.Bytes ?? 0);
 
     private static PreparedImageBatch PrepareImageBatch(
         IReadOnlyList<AgentContent> content,
@@ -2046,6 +2194,25 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
 
         public IReadOnlyList<SaveGameImageAttachment> Uploads { get; }
+    }
+
+    private sealed class ProjectedImage
+    {
+        public ProjectedImage(GameImageAttachment? attachment, byte[]? data, string? replacementText)
+        {
+            Attachment = attachment;
+            Data = data;
+            ReplacementText = replacementText;
+        }
+
+        public GameImageAttachment? Attachment { get; }
+
+        public byte[]? Data { get; }
+
+        public string? ReplacementText { get; }
+
+        public static ProjectedImage FromStored(StoredGameImageAttachment stored) =>
+            new(stored.Attachment, stored.Data.ToArray(), replacementText: null);
     }
 
     private sealed class ImageResolvingModelProvider : IModelProvider
