@@ -91,6 +91,8 @@ public sealed class PerformanceMetricsTests
     {
         var active = 0;
         var maximumActive = 0;
+        var firstPairArrivals = 0;
+        var firstPairReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var scenario = new GameAgentBenchmarkScenario(
             "fixed-fake-provider-and-tool",
             async (iteration, cancellationToken) =>
@@ -99,7 +101,17 @@ public sealed class PerformanceMetricsTests
                 UpdateMaximum(ref maximumActive, current);
                 try
                 {
-                    await Task.Delay(5, cancellationToken);
+                    var arrival = Interlocked.Increment(ref firstPairArrivals);
+                    if (arrival <= 2)
+                    {
+                        if (arrival == 2)
+                        {
+                            firstPairReady.TrySetResult(true);
+                        }
+
+                        await firstPairReady.Task.WaitAsync(cancellationToken);
+                    }
+
                     if (iteration == 1)
                     {
                         throw new InvalidOperationException("injected fault");
