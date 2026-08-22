@@ -13,7 +13,7 @@ public sealed class PerformanceMetricsTests
             Entry(1, "input.received", "{\"queueMilliseconds\":5,\"inputPreparationMilliseconds\":2,\"sessionLoadMilliseconds\":3}", 0),
             Entry(2, "context.collected", "{\"durationMilliseconds\":4}", 1),
             Entry(3, "tools.collected", "{\"durationMilliseconds\":2}", 2),
-            Entry(4, "route.selected", "{\"route\":\"Agent\",\"durationMilliseconds\":6}", 3),
+            Entry(4, "route.selected", "{\"route\":\"Agent\",\"reason\":\"classifier-timeout-fallback-tools-available\",\"classificationStatus\":\"fallback\",\"classificationFailure\":\"timeout\",\"classificationFallbackReason\":\"tools-available\",\"durationMilliseconds\":6,\"modelDurationMilliseconds\":4}", 3),
             Entry(5, "skills.selected", "{\"durationMilliseconds\":1}", 4),
             Entry(6, "model.request.started", "{\"runId\":\"run\",\"turn\":1,\"model\":\"requested\"}", 5),
             Entry(7, "kernel.messagestarted", "{\"runId\":\"run\",\"turn\":1}", 15),
@@ -33,17 +33,21 @@ public sealed class PerformanceMetricsTests
 
         var run = Assert.Single(summary.Runs);
         Assert.Equal("Agent", run.Route);
+        Assert.Equal("classifier-timeout-fallback-tools-available", run.RouteReason);
+        Assert.Equal("fallback", run.RouteClassificationStatus);
+        Assert.Equal("timeout", run.RouteClassificationFailure);
+        Assert.Equal("tools-available", run.RouteFallbackReason);
         Assert.Equal("provider", run.Provider);
         Assert.Equal("resolved", run.Model);
         Assert.Equal(5, run.Latency.QueueMilliseconds);
         Assert.Equal(15, run.Latency.TimeToFirstResponseMilliseconds);
         Assert.Equal(10, run.Latency.ProviderTimeToFirstResponseMilliseconds);
-        Assert.Equal(21, run.Latency.ModelRequestMilliseconds);
+        Assert.Equal(25, run.Latency.ModelRequestMilliseconds);
         Assert.Equal(10, run.Latency.ToolExecutionMilliseconds);
         Assert.Equal(3, run.Latency.HostActionMilliseconds);
         Assert.Equal(2, run.Latency.DurableActionFrameworkMilliseconds);
         Assert.Equal(4, run.Latency.ApprovalWaitMilliseconds);
-        Assert.Equal(15, run.Latency.FrameworkOverheadMilliseconds);
+        Assert.Equal(11, run.Latency.FrameworkOverheadMilliseconds);
         Assert.Equal(55, run.Latency.TotalMilliseconds);
         Assert.Equal(2, summary.ToolCalls);
         Assert.Equal(0.5, summary.ToolSuccessRate);
@@ -55,6 +59,8 @@ public sealed class PerformanceMetricsTests
         Assert.Equal(1, summary.DuplicateWritesPrevented);
         Assert.Equal(1, summary.ProviderRetries);
         Assert.Equal(1, summary.ProviderFallbacks);
+        Assert.Equal(1, summary.RouteClassificationFailures);
+        Assert.Equal(1, summary.RouteFallbacks);
         Assert.Equal(1, summary.Replans);
         Assert.All(run.Tools, tool =>
         {
@@ -66,6 +72,7 @@ public sealed class PerformanceMetricsTests
         Assert.Equal(0.25, summary.TotalCost);
         Assert.Contains("\"toolSuccessRate\"", summary.ToJson(), StringComparison.Ordinal);
         Assert.Contains("route=Agent", summary.ToText(), StringComparison.Ordinal);
+        Assert.Contains("classificationFailure=timeout", summary.ToText(), StringComparison.Ordinal);
         Assert.Single(summary.ToJsonLines().Split(Environment.NewLine));
     }
 

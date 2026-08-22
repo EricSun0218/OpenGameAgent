@@ -245,6 +245,11 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                     route = value.Decision.Route.ToString(),
                     value.Decision.Reason,
                     value.Decision.Workflow,
+                    classificationStatus = value.Decision.Classification is null
+                        ? null
+                        : value.Decision.Classification.UsedFallback ? "fallback" : "selected",
+                    classificationFailure = value.Decision.Classification?.FailureCode,
+                    classificationFallbackReason = value.Decision.Classification?.FallbackReason,
                     durationMilliseconds = value.Duration?.TotalMilliseconds,
                     modelDurationMilliseconds = value.ModelDuration?.TotalMilliseconds,
                 },

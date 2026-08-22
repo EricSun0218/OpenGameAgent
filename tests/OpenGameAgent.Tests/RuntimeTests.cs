@@ -1484,6 +1484,40 @@ public sealed class RuntimeTests
         Assert.Null(decision);
     }
 
+    [Theory]
+    [InlineData("Route: {\"route\":\"quick\"}")]
+    [InlineData("```json\n{\"route\":\"quick\"}\n```\n```json\n{\"route\":\"agent\"}\n```")]
+    [InlineData("```yaml\nroute: quick\n```")]
+    [InlineData("{\"route\":\"quick\",\"confidence\":1}")]
+    public async Task ModelRouteClassifierRejectsProseMultipleFencesAndUnknownFields(string output)
+    {
+        var classifier = new ModelGameRouteClassifier(
+            new RecordingProvider(_ => Text(output)),
+            "model");
+
+        var decision = await classifier.ClassifyAsync(
+            new GameRouteContext(Input("chat", "{}"), 1),
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(decision);
+    }
+
+    [Fact]
+    public async Task ModelRouteClassifierAcceptsASingleJsonFenceFromOpenAiCompatibleProviders()
+    {
+        var classifier = new ModelGameRouteClassifier(
+            new RecordingProvider(_ => Text("```json\n{\"route\":\"quick\",\"reason\":\"read-only-question\"}\n```")),
+            "model");
+
+        var decision = await classifier.ClassifyAsync(
+            new GameRouteContext(Input("chat", "{}"), availableToolCount: 3),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(decision);
+        Assert.Equal(GameRouteKind.QuickResponse, decision.Route);
+        Assert.Equal("read-only-question", decision.Reason);
+    }
+
     [Fact]
     public async Task ExplicitAutoRouteDefersToTheConfiguredAutomaticPolicy()
     {
@@ -1514,10 +1548,7 @@ public sealed class RuntimeTests
     [Fact]
     public async Task AutomaticRouteCanClassifyOrdinaryConversationAsQuickWhenToolsAreAvailable()
     {
-        var routingProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new JsonContent("{\"route\":\"quick\"}") },
-            ModelStopReason.Stop,
-            new ModelUsage(1, 1)));
+        var routingProvider = new RecordingProvider(_ => Text("```json\n{\"route\":\"quick\"}\n```"));
         var answerProvider = new RecordingProvider(_ => Text("done"));
         var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
         var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(answerProvider, "answer-model")
@@ -1535,6 +1566,8 @@ public sealed class RuntimeTests
         Assert.Equal("model-classifier", result.Route.Reason);
         Assert.Equal(1, routingProvider.CallCount);
         Assert.Equal(1, answerProvider.CallCount);
+        Assert.Empty(Assert.Single(routingProvider.Requests).Tools);
+        Assert.Empty(Assert.Single(answerProvider.Requests).Tools);
     }
 
     [Fact]
@@ -1601,10 +1634,106 @@ public sealed class RuntimeTests
 
         Assert.True(result.Succeeded);
         Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
+        Assert.Equal("classifier-invalid-json-fallback-no-tools-needed", result.Route.Reason);
+        Assert.Equal(GameRouteClassificationFailure.InvalidJson, result.Route.Classification!.Failure);
+        Assert.True(result.Route.Classification.UsedFallback);
+        Assert.Equal("no-tools-needed", result.Route.Classification.FallbackReason);
         Assert.Equal(5, usage!.Ledger.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
-        Assert.Contains("invalid", Assert.Single(
+        Assert.Contains("invalid-json", Assert.Single(
             usage.Ledger.Records,
             record => record.Cause == GameSessionUsageCause.Routing).DetailsJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidRouteClassificationFallsBackToAgentWithToolsWithoutGivingTheRouterToolAuthority()
+    {
+        var routingProvider = new RecordingProvider(_ => Text("```json\n{\"route\":\"unknown\"}\n```"));
+        var responseProvider = new RecordingProvider(_ => Text("safe fallback"));
+        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "invalid-route-with-tools"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
+        Assert.Equal("classifier-invalid-route-fallback-tools-available", result.Route.Reason);
+        Assert.Equal(GameRouteClassificationFailure.InvalidRoute, result.Route.Classification!.Failure);
+        Assert.True(result.Route.Classification.UsedFallback);
+        Assert.Equal("tools-available", result.Route.Classification.FallbackReason);
+        Assert.Empty(Assert.Single(routingProvider.Requests).Tools);
+        Assert.Single(Assert.Single(responseProvider.Requests).Tools);
+    }
+
+    [Fact]
+    public async Task ProviderFailureAndTimeoutHaveDistinctSafeRouteFallbacks()
+    {
+        var providerFailure = new RecordingProvider(_ => new ModelResponse(
+            Array.Empty<AgentContent>(),
+            ModelStopReason.Error,
+            new ModelUsage(2, 0),
+            errorMessage: "provider unavailable"));
+        var failedRuntime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(
+                classifier: new ModelGameRouteClassifier(providerFailure, "router").ClassifyAsync),
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
+        });
+
+        var failed = await failedRuntime.RunAsync(
+            Input("chat", "{}", "provider-route-failure"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(failed.Succeeded);
+        Assert.Equal(GameRouteClassificationFailure.Provider, failed.Route.Classification!.Failure);
+        Assert.Equal("classifier-provider-fallback-tools-available", failed.Route.Reason);
+
+        var timeoutProvider = new NeverCompletingProvider();
+        var timeoutRuntime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(
+                classifier: new ModelGameRouteClassifier(
+                    timeoutProvider,
+                    "router",
+                    options: new ModelGameRouteClassifierOptions { TimeoutMilliseconds = 25 }).ClassifyAsync),
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
+        });
+
+        var timedOut = await timeoutRuntime.RunAsync(
+            Input("chat", "{}", "provider-route-timeout"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(timedOut.Succeeded);
+        Assert.Equal(GameRouteClassificationFailure.Timeout, timedOut.Route.Classification!.Failure);
+        Assert.Equal("classifier-timeout-fallback-tools-available", timedOut.Route.Reason);
+    }
+
+    [Fact]
+    public async Task EmptyRouteClassificationHasAnExplicitFallbackCategory()
+    {
+        var emptyProvider = new RecordingProvider(_ => new ModelResponse(
+            Array.Empty<AgentContent>(),
+            ModelStopReason.Stop,
+            new ModelUsage(2, 0)));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(
+                classifier: new ModelGameRouteClassifier(emptyProvider, "router").ClassifyAsync),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "empty-route-classification"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
+        Assert.Equal(GameRouteClassificationFailure.Empty, result.Route.Classification!.Failure);
+        Assert.Equal("classifier-empty-fallback-no-tools-needed", result.Route.Reason);
     }
 
     [Fact]
@@ -1644,6 +1773,10 @@ public sealed class RuntimeTests
             new RecordingProvider(_ => Text("{}")),
             "model",
             new[] { " " }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ModelGameRouteClassifier(
+            new RecordingProvider(_ => Text("{}")),
+            "model",
+            options: new ModelGameRouteClassifierOptions { TimeoutMilliseconds = 0 }));
     }
 
     [Fact]
@@ -3653,6 +3786,18 @@ public sealed class RuntimeTests
             var call = Interlocked.Increment(ref _calls);
             await Task.Yield();
             yield return ModelStreamEvent.Terminal(_handler(call));
+        }
+    }
+
+    private sealed class NeverCompletingProvider : IModelProvider
+    {
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            yield break;
         }
     }
 

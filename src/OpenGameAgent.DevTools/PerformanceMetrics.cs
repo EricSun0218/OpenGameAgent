@@ -138,6 +138,10 @@ public sealed class GameAgentRunPerformance
         string actorId,
         string inputId,
         string route,
+        string routeReason,
+        string? routeClassificationStatus,
+        string? routeClassificationFailure,
+        string? routeFallbackReason,
         string? provider,
         string? model,
         string status,
@@ -153,6 +157,10 @@ public sealed class GameAgentRunPerformance
         ActorId = actorId;
         InputId = inputId;
         Route = route;
+        RouteReason = routeReason;
+        RouteClassificationStatus = routeClassificationStatus;
+        RouteClassificationFailure = routeClassificationFailure;
+        RouteFallbackReason = routeFallbackReason;
         Provider = provider;
         Model = model;
         Status = status;
@@ -169,6 +177,10 @@ public sealed class GameAgentRunPerformance
     public string ActorId { get; }
     public string InputId { get; }
     public string Route { get; }
+    public string RouteReason { get; }
+    public string? RouteClassificationStatus { get; }
+    public string? RouteClassificationFailure { get; }
+    public string? RouteFallbackReason { get; }
     public string? Provider { get; }
     public string? Model { get; }
     public string Status { get; }
@@ -278,6 +290,8 @@ public sealed class GameAgentPerformanceSummary
     public int Replans => Runs.Sum(value => value.Replans);
     public int ProviderRetries => Runs.Sum(value => value.Retries);
     public int ProviderFallbacks => Runs.Sum(value => value.Fallbacks);
+    public int RouteClassificationFailures => Runs.Count(value => value.RouteClassificationFailure is not null);
+    public int RouteFallbacks => Runs.Count(value => value.RouteClassificationStatus == "fallback");
     public long TotalTokens => Runs.Sum(value => value.TotalTokens);
     public bool CostKnown => Runs.All(value => value.CostKnown);
     public double? TotalCost => CostKnown ? Runs.Sum(value => value.TotalCost ?? 0) : null;
@@ -366,11 +380,12 @@ public sealed class GameAgentPerformanceSummary
         var text = new StringBuilder();
         text.AppendLine($"Runs: {Runs.Count}; tools: {ToolCalls}; tool success: {ToolSuccessRate:P2}");
         text.AppendLine($"Retries: {ProviderRetries}; fallbacks: {ProviderFallbacks}; uncertain writes: {UncertainWrites}; duplicates blocked: {DuplicateWritesPrevented}");
+        text.AppendLine($"Route classifier failures: {RouteClassificationFailures}; route fallbacks: {RouteFallbacks}");
         text.AppendLine($"Tokens: {TotalTokens}; cost: {(CostKnown ? (TotalCost ?? 0).ToString("0.######", CultureInfo.InvariantCulture) : "unknown")}");
         foreach (var run in Runs)
         {
             text.AppendLine(
-                $"{run.SessionId}/{run.ActorId}/{run.InputId} route={run.Route} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
+                $"{run.SessionId}/{run.ActorId}/{run.InputId} route={run.Route} reason={run.RouteReason} classification={run.RouteClassificationStatus ?? "n/a"} classificationFailure={run.RouteClassificationFailure ?? "n/a"} routeFallback={run.RouteFallbackReason ?? "n/a"} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
         }
 
         return text.ToString();
@@ -438,6 +453,10 @@ public sealed class GameAgentPerformanceSummary
             actorId,
             inputId,
             ReadString(routeEntry, "route") ?? "Unknown",
+            ReadString(routeEntry, "reason") ?? "Unknown",
+            ReadString(routeEntry, "classificationStatus"),
+            ReadString(routeEntry, "classificationFailure"),
+            ReadString(routeEntry, "classificationFallbackReason"),
             ReadString(messageEnded, "provider"),
             ReadString(messageEnded, "responseModel") ?? ReadString(messageEnded, "requestedModel"),
             ReadString(completed, "status") ?? "Unknown",

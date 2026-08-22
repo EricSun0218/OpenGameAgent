@@ -20,6 +20,15 @@ public enum GameRouteKind
 public sealed class GameRouteDecision
 {
     public GameRouteDecision(GameRouteKind route, string reason, string? workflow = null)
+        : this(route, reason, workflow, classification: null)
+    {
+    }
+
+    private GameRouteDecision(
+        GameRouteKind route,
+        string reason,
+        string? workflow,
+        GameRouteClassification? classification)
     {
         if (!Enum.IsDefined(typeof(GameRouteKind), route))
         {
@@ -39,6 +48,7 @@ public sealed class GameRouteDecision
         Route = route;
         Reason = string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason;
         Workflow = workflow;
+        Classification = classification;
     }
 
     public GameRouteKind Route { get; }
@@ -47,12 +57,78 @@ public sealed class GameRouteDecision
 
     public string? Workflow { get; }
 
+    /// <summary>
+    /// Model-classifier outcome and any conservative fallback used by the automatic route policy.
+    /// Null when no classifier participated in route selection.
+    /// </summary>
+    public GameRouteClassification? Classification { get; }
+
     public static GameRouteDecision Quick(string reason) => new(GameRouteKind.QuickResponse, reason);
 
     public static GameRouteDecision Agent(string reason) => new(GameRouteKind.Agent, reason);
 
     public static GameRouteDecision ToWorkflow(string workflow, string reason) =>
         new(GameRouteKind.Workflow, reason, workflow);
+
+    internal GameRouteDecision WithClassification(GameRouteClassification classification) =>
+        new(Route, Reason, Workflow, classification ?? throw new ArgumentNullException(nameof(classification)));
+}
+
+public enum GameRouteClassificationFailure
+{
+    Provider,
+    Timeout,
+    Empty,
+    InvalidJson,
+    InvalidRoute,
+    BudgetExhausted,
+    NoDecision,
+}
+
+public sealed class GameRouteClassification
+{
+    internal GameRouteClassification(
+        GameRouteClassificationFailure? failure,
+        bool usedFallback = false,
+        string? fallbackReason = null)
+    {
+        if (usedFallback != (fallbackReason is not null))
+        {
+            throw new ArgumentException("A route-classification fallback requires exactly one fallback reason.", nameof(fallbackReason));
+        }
+
+        Failure = failure;
+        UsedFallback = usedFallback;
+        FallbackReason = fallbackReason;
+    }
+
+    public bool Selected => Failure is null && !UsedFallback;
+
+    public GameRouteClassificationFailure? Failure { get; }
+
+    public string? FailureCode => Failure is null ? null : FailureName(Failure.Value);
+
+    public bool UsedFallback { get; }
+
+    public string? FallbackReason { get; }
+
+    internal static GameRouteClassification Success() => new(failure: null);
+
+    internal static GameRouteClassification Failed(GameRouteClassificationFailure failure) => new(failure);
+
+    internal GameRouteClassification WithFallback(string reason) =>
+        new(Failure ?? GameRouteClassificationFailure.NoDecision, usedFallback: true, GameJson.RequireId(reason, nameof(reason)));
+
+    internal static string FailureName(GameRouteClassificationFailure failure) => failure switch
+    {
+        GameRouteClassificationFailure.Provider => "provider",
+        GameRouteClassificationFailure.Timeout => "timeout",
+        GameRouteClassificationFailure.Empty => "empty",
+        GameRouteClassificationFailure.InvalidJson => "invalid-json",
+        GameRouteClassificationFailure.InvalidRoute => "invalid-route",
+        GameRouteClassificationFailure.BudgetExhausted => "budget-exhausted",
+        _ => "no-decision",
+    };
 }
 
 public sealed class GameRouteContext
@@ -60,6 +136,7 @@ public sealed class GameRouteContext
     private const long DefaultRemainingModelTokens = 10_000_000_000;
     private readonly Func<long> _remainingModelTokens;
     private readonly Action<GameRouteModelUsage>? _recordModelUsage;
+    private GameRouteClassification? _classification;
 
     public GameRouteContext(GameInput input, int availableToolCount, bool hasPendingWork = false)
         : this(
@@ -115,6 +192,11 @@ public sealed class GameRouteContext
     /// </summary>
     public void RecordModelUsage(GameRouteModelUsage usage) =>
         _recordModelUsage?.Invoke(usage ?? throw new ArgumentNullException(nameof(usage)));
+
+    internal GameRouteClassification? Classification => _classification;
+
+    internal void RecordClassification(GameRouteClassification classification) =>
+        _classification = classification ?? throw new ArgumentNullException(nameof(classification));
 }
 
 public sealed class GameRouteModelUsage
@@ -209,8 +291,26 @@ public sealed class AutomaticGameRoutePolicy : IGameRoutePolicy
             var classified = await _classifier(context, cancellationToken).ConfigureAwait(false);
             if (classified is not null)
             {
-                return classified;
+                return classified.Classification is null
+                    ? classified.WithClassification(context.Classification ?? GameRouteClassification.Success())
+                    : classified;
             }
+
+            context.RecordClassification(
+                context.Classification ?? GameRouteClassification.Failed(GameRouteClassificationFailure.NoDecision));
+        }
+
+        var fallbackReason = context.AvailableToolCount > 0 ? "tools-available" : "no-tools-needed";
+        if (_classifier is not null)
+        {
+            var classification = (context.Classification
+                    ?? GameRouteClassification.Failed(GameRouteClassificationFailure.NoDecision))
+                .WithFallback(fallbackReason);
+            var failure = classification.FailureCode ?? "no-decision";
+            return (context.AvailableToolCount > 0
+                    ? GameRouteDecision.Agent($"classifier-{failure}-fallback-{fallbackReason}")
+                    : GameRouteDecision.Quick($"classifier-{failure}-fallback-{fallbackReason}"))
+                .WithClassification(classification);
         }
 
         if (context.AvailableToolCount > 0)
@@ -266,16 +366,52 @@ public sealed class AutomaticGameRoutePolicy : IGameRoutePolicy
     }
 }
 
+public sealed class ModelGameRouteClassifierOptions
+{
+    public int MaxOutputTokens { get; set; } = 128;
+
+    public long MaxTotalTokens { get; set; } = 2_048;
+
+    public int TimeoutMilliseconds { get; set; } = 5_000;
+
+    internal ModelGameRouteClassifierOptions CopyAndValidate()
+    {
+        if (MaxOutputTokens is < 1 or > 4_096)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxOutputTokens));
+        }
+
+        if (MaxTotalTokens is < 1 or > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaxTotalTokens));
+        }
+
+        if (TimeoutMilliseconds is < 1 or > 300_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(TimeoutMilliseconds));
+        }
+
+        return new ModelGameRouteClassifierOptions
+        {
+            MaxOutputTokens = MaxOutputTokens,
+            MaxTotalTokens = MaxTotalTokens,
+            TimeoutMilliseconds = TimeoutMilliseconds,
+        };
+    }
+}
+
 public sealed class ModelGameRouteClassifier
 {
     private readonly IModelProvider _provider;
     private readonly string _model;
     private readonly IReadOnlyCollection<string> _workflows;
+    private readonly ModelGameRouteClassifierOptions _options;
 
     public ModelGameRouteClassifier(
         IModelProvider provider,
         string model,
-        IReadOnlyCollection<string>? workflows = null)
+        IReadOnlyCollection<string>? workflows = null,
+        ModelGameRouteClassifierOptions? options = null)
     {
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
         _model = GameJson.RequireId(model, nameof(model));
@@ -284,6 +420,7 @@ public sealed class ModelGameRouteClassifier
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         _workflows = Array.AsReadOnly(copiedWorkflows);
+        _options = (options ?? new ModelGameRouteClassifierOptions()).CopyAndValidate();
     }
 
     public async ValueTask<GameRouteDecision?> ClassifyAsync(
@@ -297,6 +434,8 @@ public sealed class ModelGameRouteClassifier
 
         if (context.RemainingModelTokens <= 0)
         {
+            context.RecordClassification(GameRouteClassification.Failed(
+                GameRouteClassificationFailure.BudgetExhausted));
             return null;
         }
 
@@ -310,13 +449,13 @@ public sealed class ModelGameRouteClassifier
             Parameters = new ModelParameters
             {
                 Temperature = 0,
-                MaxOutputTokens = 128,
+                MaxOutputTokens = _options.MaxOutputTokens,
             },
             Limits = new AgentLimits
             {
                 MaxTurns = 1,
-                MaxTotalTokens = Math.Min(16_384, context.RemainingModelTokens),
-                ModelTimeoutMilliseconds = 15_000,
+                MaxTotalTokens = Math.Min(_options.MaxTotalTokens, context.RemainingModelTokens),
+                ModelTimeoutMilliseconds = _options.TimeoutMilliseconds + 1_000,
                 MaxTextCharactersPerPart = 16_384,
                 MaxJsonCharactersPerPart = 1_000_000,
             },
@@ -334,14 +473,25 @@ public sealed class ModelGameRouteClassifier
         });
         var agent = new Agent(options);
         var startedAt = Stopwatch.GetTimestamp();
-        var result = await agent.RunAsync(AgentMessage.UserJson(inputJson), cancellationToken).ConfigureAwait(false);
+        using var classifierCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        classifierCancellation.CancelAfter(_options.TimeoutMilliseconds);
+        var result = await agent.RunAsync(
+            AgentMessage.UserJson(inputJson),
+            classifierCancellation.Token).ConfigureAwait(false);
         var durationMilliseconds = (Stopwatch.GetTimestamp() - startedAt) * 1_000d / Stopwatch.Frequency;
+        cancellationToken.ThrowIfCancellationRequested();
         if (!result.Succeeded)
         {
+            var failure = classifierCancellation.IsCancellationRequested
+                ? GameRouteClassificationFailure.Timeout
+                : result.Status == AgentRunStatus.LimitExceeded
+                    ? GameRouteClassificationFailure.BudgetExhausted
+                    : GameRouteClassificationFailure.Provider;
+            context.RecordClassification(GameRouteClassification.Failed(failure));
             context.RecordModelUsage(new GameRouteModelUsage(
                 result.Usage,
                 result.RunId,
-                CreateUsageDetails("failed", assistant: null, durationMilliseconds),
+                CreateUsageDetails("fallback", failure, assistant: null, durationMilliseconds),
                 TimeSpan.FromMilliseconds(durationMilliseconds)));
             return null;
         }
@@ -351,70 +501,155 @@ public sealed class ModelGameRouteClassifier
             ?? assistant?.Content.OfType<TextContent>().FirstOrDefault()?.Text;
         if (string.IsNullOrWhiteSpace(content))
         {
+            context.RecordClassification(GameRouteClassification.Failed(GameRouteClassificationFailure.Empty));
             context.RecordModelUsage(new GameRouteModelUsage(
                 result.Usage,
                 result.RunId,
-                CreateUsageDetails("empty", assistant, durationMilliseconds),
+                CreateUsageDetails("fallback", GameRouteClassificationFailure.Empty, assistant, durationMilliseconds),
                 TimeSpan.FromMilliseconds(durationMilliseconds)));
             return null;
         }
 
-        GameRouteDecision? decision = null;
-        try
+        var parse = ParseDecision(content);
+        if (parse.Decision is not null)
         {
-            var validContent = GameJson.RequireValid(content, nameof(content));
-            using var document = JsonDocument.Parse(validContent);
-            var root = document.RootElement;
-            var route = root.GetProperty("route").GetString();
-            var reason = root.TryGetProperty("reason", out var reasonElement)
-                ? reasonElement.GetString() ?? "model-classifier"
-                : "model-classifier";
-            if (string.Equals(route, "quick", StringComparison.OrdinalIgnoreCase))
-            {
-                decision = GameRouteDecision.Quick(reason);
-            }
-            else if (string.Equals(route, "agent", StringComparison.OrdinalIgnoreCase))
-            {
-                decision = GameRouteDecision.Agent(reason);
-            }
-            else if (string.Equals(route, "workflow", StringComparison.OrdinalIgnoreCase)
-                && root.TryGetProperty("workflow", out var workflowElement)
-                && workflowElement.GetString() is { } workflow
-                && _workflows.Contains(workflow, StringComparer.Ordinal))
-            {
-                decision = GameRouteDecision.ToWorkflow(workflow, reason);
-            }
-        }
-        catch (JsonException)
-        {
-        }
-        catch (KeyNotFoundException)
-        {
-        }
-        catch (InvalidOperationException)
-        {
-        }
-        catch (ArgumentException)
-        {
+            var classification = GameRouteClassification.Success();
+            context.RecordClassification(classification);
+            context.RecordModelUsage(new GameRouteModelUsage(
+                result.Usage,
+                result.RunId,
+                CreateUsageDetails("selected", failure: null, assistant, durationMilliseconds),
+                TimeSpan.FromMilliseconds(durationMilliseconds)));
+            return parse.Decision.WithClassification(classification);
         }
 
+        context.RecordClassification(GameRouteClassification.Failed(parse.Failure));
         context.RecordModelUsage(new GameRouteModelUsage(
             result.Usage,
             result.RunId,
-            CreateUsageDetails(decision is null ? "invalid" : "selected", assistant, durationMilliseconds),
+            CreateUsageDetails("fallback", parse.Failure, assistant, durationMilliseconds),
             TimeSpan.FromMilliseconds(durationMilliseconds)));
-        return decision;
+        return null;
     }
 
-    private static string CreateUsageDetails(
+    private (GameRouteDecision? Decision, GameRouteClassificationFailure Failure) ParseDecision(string content)
+    {
+        if (!TryExtractJson(content, out var json))
+        {
+            return (null, GameRouteClassificationFailure.InvalidJson);
+        }
+
+        JsonElement root;
+        try
+        {
+            var validContent = GameJson.RequireValid(json, nameof(content));
+            using var document = JsonDocument.Parse(validContent);
+            root = document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return (null, GameRouteClassificationFailure.InvalidJson);
+        }
+        catch (ArgumentException)
+        {
+            return (null, GameRouteClassificationFailure.InvalidJson);
+        }
+
+        if (root.ValueKind != JsonValueKind.Object
+            || root.EnumerateObject().Any(property => property.Name is not "route" and not "reason" and not "workflow")
+            || !root.TryGetProperty("route", out var routeElement)
+            || routeElement.ValueKind != JsonValueKind.String)
+        {
+            return (null, GameRouteClassificationFailure.InvalidRoute);
+        }
+
+        var route = routeElement.GetString();
+        var reason = "model-classifier";
+        if (root.TryGetProperty("reason", out var reasonElement))
+        {
+            if (reasonElement.ValueKind != JsonValueKind.String
+                || reasonElement.GetString() is not { Length: > 0 and <= 512 } parsedReason
+                || string.IsNullOrWhiteSpace(parsedReason))
+            {
+                return (null, GameRouteClassificationFailure.InvalidRoute);
+            }
+
+            reason = parsedReason;
+        }
+
+        if (string.Equals(route, "quick", StringComparison.OrdinalIgnoreCase)
+            && !root.TryGetProperty("workflow", out _))
+        {
+            return (GameRouteDecision.Quick(reason), default);
+        }
+
+        if (string.Equals(route, "agent", StringComparison.OrdinalIgnoreCase)
+            && !root.TryGetProperty("workflow", out _))
+        {
+            return (GameRouteDecision.Agent(reason), default);
+        }
+
+        if (string.Equals(route, "workflow", StringComparison.OrdinalIgnoreCase)
+            && root.TryGetProperty("workflow", out var workflowElement)
+            && workflowElement.ValueKind == JsonValueKind.String
+            && workflowElement.GetString() is { } workflow
+            && _workflows.Contains(workflow, StringComparer.Ordinal))
+        {
+            return (GameRouteDecision.ToWorkflow(workflow, reason), default);
+        }
+
+        return (null, GameRouteClassificationFailure.InvalidRoute);
+    }
+
+    private static bool TryExtractJson(string content, out string json)
+    {
+        var trimmed = content.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            json = trimmed;
+            return true;
+        }
+
+        var firstLineEnd = trimmed.IndexOf('\n');
+        if (firstLineEnd < 0)
+        {
+            json = string.Empty;
+            return false;
+        }
+
+        var opening = trimmed.Substring(0, firstLineEnd).TrimEnd('\r');
+        if (!string.Equals(opening, "```json", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(opening, "```", StringComparison.Ordinal))
+        {
+            json = string.Empty;
+            return false;
+        }
+
+        var closing = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+        if (closing <= firstLineEnd
+            || trimmed.Substring(closing + 3).Trim().Length != 0
+            || trimmed.Substring(firstLineEnd + 1, closing - firstLineEnd - 1).Contains("```", StringComparison.Ordinal))
+        {
+            json = string.Empty;
+            return false;
+        }
+
+        json = trimmed.Substring(firstLineEnd + 1, closing - firstLineEnd - 1).Trim();
+        return json.Length > 0;
+    }
+
+    private string CreateUsageDetails(
         string outcome,
+        GameRouteClassificationFailure? failure,
         AgentMessage? assistant,
         double durationMilliseconds) =>
         JsonSerializer.Serialize(new
         {
             category = "route-classification",
             outcome,
+            failure = failure is null ? null : GameRouteClassification.FailureName(failure.Value),
             provider = assistant?.Provider,
+            requestedModel = _model,
             model = assistant?.ResponseModel ?? assistant?.Model,
             responseId = assistant?.ResponseId,
             durationMilliseconds,

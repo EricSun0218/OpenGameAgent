@@ -16,6 +16,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\PublicApiSurface.cs" Link="PublicApiSurface.cs" />
