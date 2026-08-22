@@ -6,7 +6,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 
 | Need | API |
 | --- | --- |
-| Stream dialogue or reasoning | `Agent.Subscribe`, `AgentEvent`, `ModelStreamEvent` |
+| Stream interleaved commentary, reasoning, tool calls, and final answers | `Agent.Subscribe`, `AgentEvent`, `ModelStreamEvent`, `AgentTextPhase` |
 | Multi-step plan and action loop | `Agent`, `AgentTool` |
 | Stream typed partial tool output or generated previews | `ToolExecutionContext.ReportProgressAsync`, `ToolProgress.Content` |
 | Interrupt or amend current work | `Agent.Steer`, `Agent.Abort` |

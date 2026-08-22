@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add the optional `OpenGameAgent.Providers.Local` package with bounded discovery and health checks
+  for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM; keyless loopback realtime presets for LocalAI
+  and Speaches; OpenAI-compatible local embeddings; LocalAI image/video/TTS generation; and
+  host-authored, source-aware ComfyUI workflows with targeted job cancellation.
+- Preserve interleaved commentary, reasoning, tool, and final-answer stream blocks and their text
+  phases through the OpenAI Responses adapter, while public audience projection continues to hide
+  private reasoning.
 - Add provider-neutral, host-brokered high-risk tool approval with disabled, explicit-only,
   confirm-once, and task-scoped modes; final post-rewrite authorization; one-time credentials bound
   to canonical arguments and authoritative save revision; crash-safe storage; owner-authorized remote

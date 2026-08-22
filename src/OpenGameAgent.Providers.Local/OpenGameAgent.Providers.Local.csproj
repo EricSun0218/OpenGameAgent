@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Description>Local model discovery, health, realtime, and media adapters for OpenGameAgent.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OpenGameAgent\OpenGameAgent.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Media\OpenGameAgent.Media.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Memory\OpenGameAgent.Memory.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Models\OpenGameAgent.Models.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
+    <ProjectReference Include="..\OpenGameAgent.Providers.OpenAI.Realtime\OpenGameAgent.Providers.OpenAI.Realtime.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\OpenGameAgent.Providers.ImageCommon\ImageProviderCommon.cs" Link="Internal\ImageProviderCommon.cs" />
+  </ItemGroup>
+</Project>

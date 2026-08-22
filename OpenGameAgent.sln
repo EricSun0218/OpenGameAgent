@@ -136,6 +136,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Vol
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.GeneratedAssets.Example", "examples\OpenGameAgent.GeneratedAssets.Example\OpenGameAgent.GeneratedAssets.Example.csproj", "{38992081-9ECB-45A4-B312-585569B77DE2}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Local", "src\OpenGameAgent.Providers.Local\OpenGameAgent.Providers.Local.csproj", "{7C1BAD12-386F-4842-B89D-2D527604A1B8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.Local.Tests", "tests\OpenGameAgent.Providers.Local.Tests\OpenGameAgent.Providers.Local.Tests.csproj", "{D15B0AF0-C213-4A29-8A9E-2606A7561306}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -398,6 +402,14 @@ Global
 		{38992081-9ECB-45A4-B312-585569B77DE2}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{38992081-9ECB-45A4-B312-585569B77DE2}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{38992081-9ECB-45A4-B312-585569B77DE2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7C1BAD12-386F-4842-B89D-2D527604A1B8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7C1BAD12-386F-4842-B89D-2D527604A1B8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7C1BAD12-386F-4842-B89D-2D527604A1B8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7C1BAD12-386F-4842-B89D-2D527604A1B8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D15B0AF0-C213-4A29-8A9E-2606A7561306}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D15B0AF0-C213-4A29-8A9E-2606A7561306}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D15B0AF0-C213-4A29-8A9E-2606A7561306}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D15B0AF0-C213-4A29-8A9E-2606A7561306}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
@@ -447,5 +459,7 @@ Global
 		{EF10DBED-EB88-4E5E-B0A2-41CFC38A2A39} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{37D1CEEC-F5B8-48C5-9325-C571E45B66FE} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 		{2B46350B-92E9-424D-A3D7-215309C8EDDE} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{7C1BAD12-386F-4842-B89D-2D527604A1B8} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{D15B0AF0-C213-4A29-8A9E-2606A7561306} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 	EndGlobalSection
 EndGlobal

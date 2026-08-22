@@ -17,7 +17,7 @@ The kernel owns one stateful model/tool loop:
 7. apply steering or follow-up messages;
 8. continue until the model stops, a hook stops the run, cancellation occurs, or a limit is reached.
 
-It knows nothing about NPCs, worlds, inventories, or engines. Its canonical values are typed content parts (`text`, `json`, `resource`, durable `image_attachment`, `reasoning`, and `tool_call`), messages, model requests, tools, and events. Inline image bytes are request-boundary input; canonical history stores only immutable attachment references.
+It knows nothing about NPCs, worlds, inventories, or engines. Its canonical values are typed content parts (`text`, `json`, `resource`, durable `image_attachment`, `reasoning`, and `tool_call`), messages, model requests, tools, and events. Text blocks can be marked as commentary or final answers, so providers may stream commentary, reasoning, tools, and answers in their original order instead of flattening them into one string. Inline image bytes are request-boundary input; canonical history stores only immutable attachment references. Host audience projection still controls whether private reasoning is visible outside internal tooling.
 
 `Agent` owns mutable transcript and queue state. `AgentLoop` is the lower-level execution function. A host that already owns state can call the loop directly; most integrations should keep an `Agent` or use `GameAgentRuntime`.
 

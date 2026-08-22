@@ -14,6 +14,12 @@ public sealed class OpenAIRealtimeTransportOptions
 
     public Func<CancellationToken, ValueTask<string?>>? GetApiKeyAsync { get; set; }
 
+    /// <summary>
+    /// Allows a keyless connection only when <see cref="Endpoint"/> is loopback.
+    /// This is intended for explicitly configured local realtime servers.
+    /// </summary>
+    public bool AllowAnonymousLoopback { get; set; }
+
     public IReadOnlyDictionary<string, string> Headers { get; set; } =
         new ReadOnlyDictionary<string, string>(new Dictionary<string, string>());
 
@@ -41,6 +47,13 @@ public sealed class OpenAIRealtimeTransportOptions
         if (Endpoint.Scheme == "ws" && !Endpoint.IsLoopback)
         {
             throw new ArgumentException("Plaintext WebSockets are allowed only for loopback endpoints.", nameof(Endpoint));
+        }
+
+        if (AllowAnonymousLoopback && !Endpoint.IsLoopback)
+        {
+            throw new ArgumentException(
+                "Anonymous realtime connections are limited to loopback endpoints.",
+                nameof(AllowAnonymousLoopback));
         }
 
         if (ConnectTimeoutMilliseconds is < 100 or > 120_000)
@@ -85,6 +98,7 @@ public sealed class OpenAIRealtimeTransportOptions
             Endpoint = Endpoint,
             ApiKey = ApiKey,
             GetApiKeyAsync = GetApiKeyAsync,
+            AllowAnonymousLoopback = AllowAnonymousLoopback,
             Headers = new ReadOnlyDictionary<string, string>(headers),
             ConnectionFactory = ConnectionFactory,
             ConnectTimeoutMilliseconds = ConnectTimeoutMilliseconds,
@@ -163,18 +177,25 @@ public sealed class OpenAIRealtimeTransport : IRealtimeTransport, IRealtimeTrans
         {
             throw new TimeoutException("Realtime authentication exceeded the configured connect timeout.", exception);
         }
-        if (string.IsNullOrWhiteSpace(apiKey)
-            || apiKey.Length > 16_384
-            || apiKey.Any(character => character is '\r' or '\n' or '\0'))
+        if (apiKey is { Length: > 0 }
+            && (string.IsNullOrWhiteSpace(apiKey)
+                || apiKey.Length > 16_384
+                || apiKey.Any(character => character is '\r' or '\n' or '\0')))
         {
-            throw new InvalidOperationException("A bounded OpenAI API key is required.");
+            throw new InvalidOperationException("A configured realtime API key is invalid.");
+        }
+
+        if (string.IsNullOrWhiteSpace(apiKey) && !_options.AllowAnonymousLoopback)
+        {
+            throw new InvalidOperationException("A bounded realtime API key is required.");
         }
 
         var endpoint = AddModel(_options.Endpoint, options.Model);
-        var headers = new Dictionary<string, string>(_options.Headers, StringComparer.OrdinalIgnoreCase)
+        var headers = new Dictionary<string, string>(_options.Headers, StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(apiKey))
         {
-            ["Authorization"] = "Bearer " + apiKey,
-        };
+            headers["Authorization"] = "Bearer " + apiKey;
+        }
         IOpenAIWebSocketConnection connection;
         try
         {

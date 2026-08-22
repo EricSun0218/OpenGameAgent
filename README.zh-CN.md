@@ -94,6 +94,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 游戏时间触发器，以及支持无 payload 积压查询的持久邮箱；
 - 可扩展工具、Skills、路由、Workflow、Hooks、事件与服务的类型化接口；
 - 能力感知模型目录与开发者托管的短期凭证；
+- 面向 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 的可选本地发现和健康检查；
 - 外部工具按需发现与大型结果产物化；
 - 包含可移植 Skills 与 MCP Server 的 Agent Plugins 1.0.0 插件包；
 - 通过可替换 API 生成图片、语音和视频；
@@ -142,8 +143,8 @@ GameAgentRuntime
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
 | 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
-| 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器 |
-| 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览，以及 OpenAI Images 与火山方舟/Seedream 官方图片生成和编辑适配器 |
+| 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
+| 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览、OpenAI Images、火山方舟/Seedream，以及可选的 LocalAI 与可信 ComfyUI Workflow 适配器 |
 | 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
 | 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、动作日志、生成资产任务/资源、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
@@ -151,6 +152,8 @@ GameAgentRuntime
 | 引擎 | Godot 4.7 .NET 与 Unity 6 进程内包；Unreal Engine 5.8 原生 C++ sidecar 插件 |
 
 实时语音是可选层，不是第二条游戏权威通道。实时传输可以负责对话或转写，并请求视线、手势、表情或移动意图等可逆表现；规划和持久世界变更仍交给同一个 `GameAgentRuntime` 与游戏自有工具。可选的 OpenAI 与火山适配器使用同一契约；火山适配器把对话/VAD、流式 TTS 与权威 Agent 循环明确分开。详见[实时对话](docs/realtime-conversations.md)。
+
+如果希望整套能力在本机运行，可选的 `OpenGameAgent.Providers.Local` 包提供有界的服务发现和健康检查、OpenAI-compatible 本地嵌入、LocalAI/Speaches 匿名 loopback 实时语音预设、LocalAI 图片/视频/TTS，以及由宿主编写可信 Workflow 的 ComfyUI 适配器。框架不捆绑或自动下载模型，也不会猜测未知模型能力。详见[本地模型与媒体](docs/local-models.md)。
 
 运行输入、模型内容、工具目录、循环、队列、进度事件与并发都有明确上限。每次模型调用前都会执行上下文准入，模型与工具调用都有截止时间，大型工具结果可以保存为产物而不是反复占满提示词。游戏可以替换内置的内存或本地文件实现。
 
@@ -253,6 +256,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [部署与安全](docs/deployment-and-security.md)
 - [高风险工具批准](docs/tool-approvals.zh-CN.md)
 - [生成式媒体](docs/media.md)
+- [本地模型与媒体](docs/local-models.md)
 - [生成资产与权威导入](docs/generated-assets.md)
 - [图片输入与游戏感知](docs/image-input.md)
 - [执行路由与性能](docs/execution-routing-and-performance.zh-CN.md)

@@ -332,6 +332,51 @@ public sealed class RealtimeConversationTests
             {
                 Headers = new Dictionary<string, string> { ["Authorization"] = "bad" },
             }));
+        Assert.Throws<ArgumentException>(() => new OpenAIRealtimeTransport(
+            new OpenAIRealtimeTransportOptions
+            {
+                Endpoint = new Uri("wss://example.com/v1/realtime"),
+                AllowAnonymousLoopback = true,
+            }));
+    }
+
+    [Fact]
+    public async Task ExplicitAnonymousLoopbackRealtimeOmitsAuthorization()
+    {
+        var connection = new FakeWebSocketConnection();
+        OpenAIWebSocketConnectRequest? connect = null;
+        var transport = new OpenAIRealtimeTransport(new OpenAIRealtimeTransportOptions
+        {
+            Endpoint = new Uri("ws://127.0.0.1:8000/v1/realtime"),
+            AllowAnonymousLoopback = true,
+            ConnectionFactory = (request, _) =>
+            {
+                connect = request;
+                return new ValueTask<IOpenAIWebSocketConnection>(connection);
+            },
+        });
+
+        await using var session = await transport.ConnectAsync(
+            new RealtimeConversationOptions { Model = "local-voice" },
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(connect);
+        Assert.DoesNotContain("Authorization", connect!.Headers.Keys, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("model=local-voice", connect.Endpoint.Query, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MissingRealtimeCredentialFailsUnlessLoopbackWasExplicitlyAllowed()
+    {
+        var transport = new OpenAIRealtimeTransport(new OpenAIRealtimeTransportOptions
+        {
+            ConnectionFactory = (_, _) => throw new InvalidOperationException("must not connect"),
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await transport.ConnectAsync(
+                new RealtimeConversationOptions(),
+                TestContext.Current.CancellationToken));
     }
 
     [Fact]

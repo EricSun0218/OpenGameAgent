@@ -10,6 +10,56 @@ namespace OpenGameAgent.Providers.OpenAI.Tests;
 public sealed class OpenAIResponsesProviderTests
 {
     [Fact]
+    public async Task PreservesInterleavedCommentaryReasoningAndFinalAnswerBlocks()
+    {
+        const string stream = """
+            data: {"type":"response.created","response":{"id":"resp_interleaved","model":"served-model"}}
+
+            data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_commentary","role":"assistant","status":"in_progress","content":[]}}
+
+            data: {"type":"response.output_text.delta","output_index":0,"delta":"I will inspect that."}
+
+            data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_commentary","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"I will inspect that.","annotations":[]}]}}
+
+            data: {"type":"response.output_item.added","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+            data: {"type":"response.reasoning_summary_text.delta","output_index":1,"delta":"private step"}
+
+            data: {"type":"response.output_item.done","output_index":1,"item":{"type":"reasoning","id":"rs_1","summary":[{"text":"private step"}],"encrypted_content":"opaque"}}
+
+            data: {"type":"response.output_item.added","output_index":2,"item":{"type":"message","id":"msg_final","role":"assistant","status":"in_progress","content":[]}}
+
+            data: {"type":"response.output_text.delta","output_index":2,"delta":"Done."}
+
+            data: {"type":"response.output_item.done","output_index":2,"item":{"type":"message","id":"msg_final","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Done.","annotations":[]}]}}
+
+            data: {"type":"response.completed","response":{"id":"resp_interleaved","model":"served-model","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":3,"total_tokens":4}}}
+
+            data: [DONE]
+
+            """;
+        var provider = Create(new StubHandler(_ => Response(stream)));
+
+        var events = await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken));
+
+        var response = events.Last().Response!;
+        Assert.Collection(
+            response.Content,
+            content => Assert.Equal(AgentTextPhase.Commentary, Assert.IsType<TextContent>(content).Phase),
+            content => Assert.Equal("private step", Assert.IsType<ReasoningContent>(content).Text),
+            content => Assert.Equal(AgentTextPhase.FinalAnswer, Assert.IsType<TextContent>(content).Phase));
+        Assert.Equal(
+            new[]
+            {
+                ModelStreamEventKind.TextDelta,
+                ModelStreamEventKind.ReasoningDelta,
+                ModelStreamEventKind.TextDelta,
+            },
+            events.Where(item => item.Kind is ModelStreamEventKind.TextDelta or ModelStreamEventKind.ReasoningDelta)
+                .Select(item => item.Kind));
+    }
+
+    [Fact]
     public async Task StreamsReasoningTextToolCallsIdentityAndDetailedUsage()
     {
         const string stream = """

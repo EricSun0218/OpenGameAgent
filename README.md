@@ -94,6 +94,7 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - recurring game-time triggers and persistent actor mailboxes with payload-free backlog queries;
 - a typed extension API for tools, skills, routes, workflows, hooks, events, and services;
 - capability-aware model catalogs and developer-hosted short-lived credentials;
+- opt-in local discovery and health profiles for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM;
 - lazy external-tool discovery and large-result artifact spill;
 - Agent Plugins 1.0.0 packages containing portable skills and MCP servers;
 - image, audio, and video generation through replaceable APIs;
@@ -144,8 +145,8 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
 | Portable plugins | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`, immediate-child `SKILL.md` discovery, MCP stdio/Streamable HTTP, client namespaces, containment, and component-level failure isolation |
-| Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators |
-| Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, OpenRouter previews, official OpenAI Images, and Volcengine Ark/Seedream image generation and editing |
+| Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators; optional local discovery for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM |
+| Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, OpenRouter previews, official OpenAI Images, Volcengine Ark/Seedream, plus optional LocalAI and trusted ComfyUI workflow adapters |
 | Generated assets | Stable operations, content-addressed resources, persistent lifecycle state, explicit uncertain outcomes, resumable import, and durable authoritative engine receipts |
 | Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, generated-asset jobs/resources, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
 | Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
@@ -153,6 +154,8 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Engines | Godot 4.7 .NET and Unity 6 in-process packages; Unreal Engine 5.8 native C++ sidecar plugin |
 
 Realtime speech is an optional layer rather than a second game-authority path. The realtime transport can converse or transcribe, and can request reversible gaze, gesture, expression, or movement presentation. Planning and durable world mutations are handed to the same `GameAgentRuntime` and game-owned tools used by non-voice inputs. Optional OpenAI and Volcengine adapters share this contract; the Volcengine adapter keeps dialogue/VAD and streaming TTS separate from the authoritative agent loop. See [Realtime conversations](docs/realtime-conversations.md).
+
+For an entirely local stack, the optional `OpenGameAgent.Providers.Local` package provides bounded endpoint discovery and health checks, OpenAI-compatible embeddings, anonymous-loopback realtime presets for LocalAI and Speaches, LocalAI image/video/TTS generation, and a host-authored ComfyUI workflow adapter. No model is bundled or downloaded, and unknown capabilities are not guessed. See [Local models and media](docs/local-models.md).
 
 Run inputs, model content, tool catalogs, loops, queues, progress, and concurrency are bounded by explicit limits. Context admission runs before every model request, model and tool calls have deadlines, and large tool results can be retained as artifacts instead of repeatedly filling the prompt. Game-owned stores and rankers can replace the included in-memory or local-file implementations.
 
@@ -254,6 +257,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Deployment and security](docs/deployment-and-security.md)
 - [High-risk tool approval](docs/tool-approvals.md)
 - [Generated media](docs/media.md)
+- [Local models and media](docs/local-models.md)
 - [Generated assets and authoritative import](docs/generated-assets.md)
 - [Image input and game perception](docs/image-input.md)
 - [Execution routing and performance](docs/execution-routing-and-performance.md)
