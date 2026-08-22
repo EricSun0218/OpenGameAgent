@@ -1737,6 +1737,33 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task ModelRouteClassifierDisablesReasoningAndDoesNotMisreportReasoningOnlyAsEmpty()
+    {
+        var routingProvider = new RecordingProvider(_ => new ModelResponse(
+            new AgentContent[] { new ReasoningContent("private classification reasoning") },
+            ModelStopReason.Stop,
+            new ModelUsage(4, 8, reasoningTokens: 8)));
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(
+                classifier: new ModelGameRouteClassifier(routingProvider, "router").ClassifyAsync),
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
+        });
+
+        var result = await runtime.RunAsync(
+            Input("chat", "{}", "reasoning-only-route"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("off", Assert.Single(routingProvider.Requests).Parameters.ReasoningLevel);
+        Assert.Equal("reasoning-only", result.Route.Classification!.FailureCode);
+        Assert.Equal(new[] { AgentContentKind.Reasoning }, result.Route.Classification.ResponseContentKinds);
+        Assert.Equal(0, result.Route.Classification.VisibleContentCharacters);
+        Assert.Equal(32, result.Route.Classification.ReasoningCharacters);
+        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
+    }
+
+    [Fact]
     public async Task RoutingCannotConsumeTheAnswerBudgetAndThenStartAnotherModelCall()
     {
         var routingProvider = new RecordingProvider(_ => new ModelResponse(
@@ -1777,6 +1804,10 @@ public sealed class RuntimeTests
             new RecordingProvider(_ => Text("{}")),
             "model",
             options: new ModelGameRouteClassifierOptions { TimeoutMilliseconds = 0 }));
+        Assert.Throws<ArgumentException>(() => new ModelGameRouteClassifier(
+            new RecordingProvider(_ => Text("{}")),
+            "model",
+            options: new ModelGameRouteClassifierOptions { ReasoningLevel = " " }));
     }
 
     [Fact]

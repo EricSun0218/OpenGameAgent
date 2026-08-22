@@ -250,6 +250,11 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                         : value.Decision.Classification.UsedFallback ? "fallback" : "selected",
                     classificationFailure = value.Decision.Classification?.FailureCode,
                     classificationFallbackReason = value.Decision.Classification?.FallbackReason,
+                    classificationContentKinds = value.Decision.Classification?.ResponseContentKinds
+                        .Select(RouteContentKindName)
+                        .ToArray(),
+                    classificationVisibleContentCharacters = value.Decision.Classification?.VisibleContentCharacters,
+                    classificationReasoningCharacters = value.Decision.Classification?.ReasoningCharacters,
                     durationMilliseconds = value.Duration?.TotalMilliseconds,
                     modelDurationMilliseconds = value.ModelDuration?.TotalMilliseconds,
                 },
@@ -594,4 +599,16 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
         using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 128 });
         return document.RootElement.Clone();
     }
+
+    private static string RouteContentKindName(AgentContentKind kind) => kind switch
+    {
+        AgentContentKind.Text => "text",
+        AgentContentKind.Json => "json",
+        AgentContentKind.Resource => "resource",
+        AgentContentKind.ImageAttachment => "image-attachment",
+        AgentContentKind.Binary => "binary",
+        AgentContentKind.Reasoning => "reasoning",
+        AgentContentKind.ToolCall => "tool-call",
+        _ => "unknown",
+    };
 }

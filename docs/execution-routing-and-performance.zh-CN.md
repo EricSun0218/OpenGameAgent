@@ -18,7 +18,7 @@ OpenGameAgent 将低延迟回答、有界工具循环与持久编排分开，但
 
 解析顺序为：显式 metadata、输入类型规则、权威待处理工作、可选分类器、已有工具、最后才是 `QuickResponse`。待处理工作已经确定需要完整循环，因此不会额外调用路由模型；但“存在可用工具”并不等于当前输入需要工具，配置分类器后，普通对话即使处于完整工具环境中也可选择无副作用的 Quick 路线。未配置分类器时，只要存在工具就保守选择 Agent。`ModelGameRouteClassifier` 的耗时和 usage 会记为 routing，并与压缩、Workflow 输出和最终回答共享同一输入的模型 token 预算。
 
-`ModelGameRouteClassifier` 接受 `JsonContent`、纯文本 JSON，或外部没有其他内容的单个 `json`/无语言 Markdown 围栏。它会拒绝外围说明文字、多个围栏、重复键、未知字段、错误字段类型、未知路线以及未注册 Workflow。`ModelGameRouteClassifierOptions` 会独立限制路由的输出 token、总 token 和 Provider 超时，默认分别为 128、2,048 和 5 秒。即使存在工具，有效的 `quick` 决策仍会生效。Provider 失败、超时、空输出、无效 JSON、无效路线、预算耗尽或自定义分类器未返回决策时，分类阶段都不会获得工具权限；自动策略在有工具时保守回退 Agent、无工具时回退 Quick，并保留原始失败类别与回退原因，不再用笼统的 `tools-available` 掩盖。
+`ModelGameRouteClassifier` 接受 `JsonContent`、纯文本 JSON，或外部没有其他内容的单个 `json`/无语言 Markdown 围栏。它会拒绝外围说明文字、多个围栏、重复键、未知字段、错误字段类型、未知路线以及未注册 Workflow。`ModelGameRouteClassifierOptions` 会独立限制路由的输出 token、总 token 和 Provider 超时，默认分别为 128、2,048 和 5 秒。分类请求还会默认使用 `ReasoningLevel="off"`，避免推理模型在产生可见 JSON 前耗尽很小的路由预算。只有模型无法关闭推理时，才应把 `ReasoningLevel` 配成该 Provider 支持的级别；分类器仍只解析可见的 `JsonContent`/`TextContent`，绝不把 `ReasoningContent` 当路线决策。即使存在工具，有效的 `quick` 决策仍会生效。Provider 失败、超时、空输出、仅推理输出、无效 JSON、无效路线、预算耗尽或自定义分类器未返回决策时，分类阶段都不会获得工具权限；自动策略在有工具时保守回退 Agent、无工具时回退 Quick，并保留原始失败类别与回退原因，不再用笼统的 `tools-available` 掩盖。
 
 Quick 是非试运行模式。它不能调用工具，不能通过工具写长期记忆、创建目标/计划或修改世界。`auto` 应在 Quick 输出最终回答之前完成分类，而不是先运行 Quick、再在可能出现副作用后重放输入。结构规则不足时，应配置类型路由或 `ModelGameRouteClassifier`。调用方显式强制 `quick` 等于做出“本次不需要能力升级”的承诺，框架不会偷偷改路。
 
@@ -58,7 +58,7 @@ Console.WriteLine(metrics.ToText());
 
 `GameAgentLatencyBreakdown` 会分别统计角色排队、输入准备、会话加载、上下文、工具收集、路由、Skills、端到端首响应、Provider 首响应、完整回答、首次工具、模型请求、工具执行、游戏宿主权威动作、durable action 框架处理、其他框架开销、执行总时长以及含排队总时长。
 
-`route.selected` trace 现在包含 `classificationStatus`（`selected` 或 `fallback`）、`classificationFailure`（`provider`、`timeout`、`empty`、`invalid-json`、`invalid-route`、`budget-exhausted` 或 `no-decision`）以及 `classificationFallbackReason`。`GameAgentRunPerformance` 会暴露同样字段和 `RouteReason`，`GameAgentPerformanceSummary` 会统计分类失败数与路由回退数。路由模型耗时继续与路由框架开销分开，路由 token/cost 仍归入 routing cause。
+`route.selected` trace 现在包含 `classificationStatus`（`selected` 或 `fallback`）、`classificationFailure`（`provider`、`timeout`、`empty`、`reasoning-only`、`invalid-json`、`invalid-route`、`budget-exhausted` 或 `no-decision`）以及 `classificationFallbackReason`。它还只记录有界的响应形态：`classificationContentKinds`、`classificationVisibleContentCharacters` 和 `classificationReasoningCharacters`，不会复制回答正文或推理文本。`GameAgentRunPerformance` 会暴露同样字段和 `RouteReason`，`GameAgentPerformanceSummary` 会统计分类失败数与路由回退数。路由模型耗时继续与路由框架开销分开，路由 token/cost 仍归入 routing cause。
 
 工具结果可使用 `ToolFailureCategory`：`InvalidArguments`、`Authorization`、`RuleRejected`、`Transient`、`Timeout`、`Cancelled`、`Conflict`、`Internal` 或 `Unspecified`。自定义工具应返回自己能够证明的最精确类别。摘要按工具、失败类别、路线、实际 Provider 和模型聚合；durable 世界写入会单独计数，uncertain write 率只以这些写入为分母，同时统计 Provider 重试、任务清单重规划、回退、恢复和被拦截的重复写入。默认不会记录工具参数。对于官方通用 Goal/TaskPlan 工具，追踪只投影有界的 `action` 枚举，不会记录目标、步骤、证据或其他参数。
 

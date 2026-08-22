@@ -83,6 +83,7 @@ public enum GameRouteClassificationFailure
     InvalidRoute,
     BudgetExhausted,
     NoDecision,
+    ReasoningOnly,
 }
 
 public sealed class GameRouteClassification
@@ -90,7 +91,10 @@ public sealed class GameRouteClassification
     internal GameRouteClassification(
         GameRouteClassificationFailure? failure,
         bool usedFallback = false,
-        string? fallbackReason = null)
+        string? fallbackReason = null,
+        IReadOnlyList<AgentContentKind>? responseContentKinds = null,
+        long visibleContentCharacters = 0,
+        long reasoningCharacters = 0)
     {
         if (usedFallback != (fallbackReason is not null))
         {
@@ -100,6 +104,26 @@ public sealed class GameRouteClassification
         Failure = failure;
         UsedFallback = usedFallback;
         FallbackReason = fallbackReason;
+        if (visibleContentCharacters < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(visibleContentCharacters));
+        }
+
+        if (reasoningCharacters < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(reasoningCharacters));
+        }
+
+        var kinds = (responseContentKinds ?? Array.Empty<AgentContentKind>())
+            .Select(kind => Enum.IsDefined(typeof(AgentContentKind), kind)
+                ? kind
+                : throw new ArgumentOutOfRangeException(nameof(responseContentKinds)))
+            .Distinct()
+            .OrderBy(kind => kind)
+            .ToArray();
+        ResponseContentKinds = Array.AsReadOnly(kinds);
+        VisibleContentCharacters = visibleContentCharacters;
+        ReasoningCharacters = reasoningCharacters;
     }
 
     public bool Selected => Failure is null && !UsedFallback;
@@ -112,23 +136,62 @@ public sealed class GameRouteClassification
 
     public string? FallbackReason { get; }
 
-    internal static GameRouteClassification Success() => new(failure: null);
+    /// <summary>
+    /// Bounded response-shape diagnostics. These values never contain model text or reasoning.
+    /// </summary>
+    public IReadOnlyList<AgentContentKind> ResponseContentKinds { get; }
 
-    internal static GameRouteClassification Failed(GameRouteClassificationFailure failure) => new(failure);
+    public long VisibleContentCharacters { get; }
+
+    public long ReasoningCharacters { get; }
+
+    internal static GameRouteClassification Success(ClassifierResponseShape shape = default) =>
+        new(failure: null, responseContentKinds: shape.ContentKinds,
+            visibleContentCharacters: shape.VisibleContentCharacters,
+            reasoningCharacters: shape.ReasoningCharacters);
+
+    internal static GameRouteClassification Failed(
+        GameRouteClassificationFailure failure,
+        ClassifierResponseShape shape = default) =>
+        new(failure, responseContentKinds: shape.ContentKinds,
+            visibleContentCharacters: shape.VisibleContentCharacters,
+            reasoningCharacters: shape.ReasoningCharacters);
 
     internal GameRouteClassification WithFallback(string reason) =>
-        new(Failure ?? GameRouteClassificationFailure.NoDecision, usedFallback: true, GameJson.RequireId(reason, nameof(reason)));
+        new(Failure ?? GameRouteClassificationFailure.NoDecision, usedFallback: true,
+            GameJson.RequireId(reason, nameof(reason)), ResponseContentKinds,
+            VisibleContentCharacters, ReasoningCharacters);
 
     internal static string FailureName(GameRouteClassificationFailure failure) => failure switch
     {
         GameRouteClassificationFailure.Provider => "provider",
         GameRouteClassificationFailure.Timeout => "timeout",
         GameRouteClassificationFailure.Empty => "empty",
+        GameRouteClassificationFailure.ReasoningOnly => "reasoning-only",
         GameRouteClassificationFailure.InvalidJson => "invalid-json",
         GameRouteClassificationFailure.InvalidRoute => "invalid-route",
         GameRouteClassificationFailure.BudgetExhausted => "budget-exhausted",
         _ => "no-decision",
     };
+}
+
+internal readonly struct ClassifierResponseShape
+{
+    public ClassifierResponseShape(
+        IReadOnlyList<AgentContentKind> contentKinds,
+        long visibleContentCharacters,
+        long reasoningCharacters)
+    {
+        ContentKinds = contentKinds ?? throw new ArgumentNullException(nameof(contentKinds));
+        VisibleContentCharacters = visibleContentCharacters;
+        ReasoningCharacters = reasoningCharacters;
+    }
+
+    public IReadOnlyList<AgentContentKind>? ContentKinds { get; }
+
+    public long VisibleContentCharacters { get; }
+
+    public long ReasoningCharacters { get; }
 }
 
 public sealed class GameRouteContext
@@ -374,6 +437,14 @@ public sealed class ModelGameRouteClassifierOptions
 
     public int TimeoutMilliseconds { get; set; } = 5_000;
 
+    /// <summary>
+    /// Provider-facing reasoning level for the classification request. The safe default asks
+    /// providers to disable reasoning. For a model that cannot disable reasoning, set a bounded
+    /// provider-supported level; any reasoning remains private and is never parsed as a route decision.
+    /// Null delegates reasoning control to the provider adapter.
+    /// </summary>
+    public string? ReasoningLevel { get; set; } = "off";
+
     internal ModelGameRouteClassifierOptions CopyAndValidate()
     {
         if (MaxOutputTokens is < 1 or > 4_096)
@@ -391,11 +462,18 @@ public sealed class ModelGameRouteClassifierOptions
             throw new ArgumentOutOfRangeException(nameof(TimeoutMilliseconds));
         }
 
+        if (ReasoningLevel is { } reasoningLevel
+            && (string.IsNullOrWhiteSpace(reasoningLevel) || reasoningLevel.Length > 64))
+        {
+            throw new ArgumentException("The classifier reasoning level must contain 1 to 64 characters.", nameof(ReasoningLevel));
+        }
+
         return new ModelGameRouteClassifierOptions
         {
             MaxOutputTokens = MaxOutputTokens,
             MaxTotalTokens = MaxTotalTokens,
             TimeoutMilliseconds = TimeoutMilliseconds,
+            ReasoningLevel = ReasoningLevel,
         };
     }
 }
@@ -450,6 +528,7 @@ public sealed class ModelGameRouteClassifier
             {
                 Temperature = 0,
                 MaxOutputTokens = _options.MaxOutputTokens,
+                ReasoningLevel = _options.ReasoningLevel,
             },
             Limits = new AgentLimits
             {
@@ -480,6 +559,8 @@ public sealed class ModelGameRouteClassifier
             classifierCancellation.Token).ConfigureAwait(false);
         var durationMilliseconds = (Stopwatch.GetTimestamp() - startedAt) * 1_000d / Stopwatch.Frequency;
         cancellationToken.ThrowIfCancellationRequested();
+        var assistant = result.NewMessages.LastOrDefault(message => message.Role == AgentRole.Assistant);
+        var responseShape = InspectResponseShape(assistant);
         if (!result.Succeeded)
         {
             var failure = classifierCancellation.IsCancellationRequested
@@ -487,25 +568,29 @@ public sealed class ModelGameRouteClassifier
                 : result.Status == AgentRunStatus.LimitExceeded
                     ? GameRouteClassificationFailure.BudgetExhausted
                     : GameRouteClassificationFailure.Provider;
-            context.RecordClassification(GameRouteClassification.Failed(failure));
+            context.RecordClassification(GameRouteClassification.Failed(failure, responseShape));
             context.RecordModelUsage(new GameRouteModelUsage(
                 result.Usage,
                 result.RunId,
-                CreateUsageDetails("fallback", failure, assistant: null, durationMilliseconds),
+                CreateUsageDetails("fallback", failure, assistant, responseShape, durationMilliseconds),
                 TimeSpan.FromMilliseconds(durationMilliseconds)));
             return null;
         }
 
-        var assistant = result.NewMessages.LastOrDefault(message => message.Role == AgentRole.Assistant);
         var content = assistant?.Content.OfType<JsonContent>().FirstOrDefault()?.Json
             ?? assistant?.Content.OfType<TextContent>().FirstOrDefault()?.Text;
         if (string.IsNullOrWhiteSpace(content))
         {
-            context.RecordClassification(GameRouteClassification.Failed(GameRouteClassificationFailure.Empty));
+            var failure = assistant?.StopReason == ModelStopReason.Length
+                ? GameRouteClassificationFailure.BudgetExhausted
+                : responseShape.ReasoningCharacters > 0
+                    ? GameRouteClassificationFailure.ReasoningOnly
+                    : GameRouteClassificationFailure.Empty;
+            context.RecordClassification(GameRouteClassification.Failed(failure, responseShape));
             context.RecordModelUsage(new GameRouteModelUsage(
                 result.Usage,
                 result.RunId,
-                CreateUsageDetails("fallback", GameRouteClassificationFailure.Empty, assistant, durationMilliseconds),
+                CreateUsageDetails("fallback", failure, assistant, responseShape, durationMilliseconds),
                 TimeSpan.FromMilliseconds(durationMilliseconds)));
             return null;
         }
@@ -513,21 +598,21 @@ public sealed class ModelGameRouteClassifier
         var parse = ParseDecision(content);
         if (parse.Decision is not null)
         {
-            var classification = GameRouteClassification.Success();
+            var classification = GameRouteClassification.Success(responseShape);
             context.RecordClassification(classification);
             context.RecordModelUsage(new GameRouteModelUsage(
                 result.Usage,
                 result.RunId,
-                CreateUsageDetails("selected", failure: null, assistant, durationMilliseconds),
+                CreateUsageDetails("selected", failure: null, assistant, responseShape, durationMilliseconds),
                 TimeSpan.FromMilliseconds(durationMilliseconds)));
             return parse.Decision.WithClassification(classification);
         }
 
-        context.RecordClassification(GameRouteClassification.Failed(parse.Failure));
+        context.RecordClassification(GameRouteClassification.Failed(parse.Failure, responseShape));
         context.RecordModelUsage(new GameRouteModelUsage(
             result.Usage,
             result.RunId,
-            CreateUsageDetails("fallback", parse.Failure, assistant, durationMilliseconds),
+            CreateUsageDetails("fallback", parse.Failure, assistant, responseShape, durationMilliseconds),
             TimeSpan.FromMilliseconds(durationMilliseconds)));
         return null;
     }
@@ -642,6 +727,7 @@ public sealed class ModelGameRouteClassifier
         string outcome,
         GameRouteClassificationFailure? failure,
         AgentMessage? assistant,
+        ClassifierResponseShape responseShape,
         double durationMilliseconds) =>
         JsonSerializer.Serialize(new
         {
@@ -652,6 +738,43 @@ public sealed class ModelGameRouteClassifier
             requestedModel = _model,
             model = assistant?.ResponseModel ?? assistant?.Model,
             responseId = assistant?.ResponseId,
+            contentKinds = (responseShape.ContentKinds ?? Array.Empty<AgentContentKind>())
+                .Select(ContentKindName)
+                .ToArray(),
+            visibleContentCharacters = responseShape.VisibleContentCharacters,
+            reasoningCharacters = responseShape.ReasoningCharacters,
             durationMilliseconds,
         });
+
+    private static ClassifierResponseShape InspectResponseShape(AgentMessage? assistant)
+    {
+        if (assistant is null)
+        {
+            return new ClassifierResponseShape(Array.Empty<AgentContentKind>(), 0, 0);
+        }
+
+        var kinds = assistant.Content.Select(content => content.Kind).Distinct().ToArray();
+        var visibleCharacters = assistant.Content.Sum(content => content switch
+        {
+            TextContent text => (long)text.Text.Length,
+            JsonContent json => json.Json.Length,
+            _ => 0,
+        });
+        var reasoningCharacters = assistant.Content
+            .OfType<ReasoningContent>()
+            .Sum(content => (long)content.Text.Length);
+        return new ClassifierResponseShape(Array.AsReadOnly(kinds), visibleCharacters, reasoningCharacters);
+    }
+
+    private static string ContentKindName(AgentContentKind kind) => kind switch
+    {
+        AgentContentKind.Text => "text",
+        AgentContentKind.Json => "json",
+        AgentContentKind.Resource => "resource",
+        AgentContentKind.ImageAttachment => "image-attachment",
+        AgentContentKind.Binary => "binary",
+        AgentContentKind.Reasoning => "reasoning",
+        AgentContentKind.ToolCall => "tool-call",
+        _ => "unknown",
+    };
 }
