@@ -441,6 +441,8 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
             },
         providerAttempts = ProjectProviderAttempts(value.Message?.Diagnostics),
         progressMessage = value.Progress?.Message,
+        toolRepeatCount = value.ToolRepeat?.ConsecutiveCount,
+        toolRepeatAction = value.ToolRepeat?.Action.ToString(),
         toolError = value.ToolResult?.IsError,
         failureCategory = value.ToolResult?.FailureCategory.ToString(),
         outcomeUncertain = value.ToolResult?.OutcomeUncertain,

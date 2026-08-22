@@ -318,7 +318,8 @@ public sealed class AgentTool
         Func<JsonElement, string?>? conflictKey = null,
         Func<JsonElement, string?>? prepareArguments = null,
         ToolReplayPolicy? replayPolicy = null,
-        Func<JsonElement, ToolExecutionContext, CancellationToken, ValueTask<ToolResult?>>? recover = null)
+        Func<JsonElement, ToolExecutionContext, CancellationToken, ValueTask<ToolResult?>>? recover = null,
+        bool trackExactRepeats = true)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
         _execute = execute ?? throw new ArgumentNullException(nameof(execute));
@@ -353,6 +354,7 @@ public sealed class AgentTool
         _validate = validate;
         _prepareArguments = prepareArguments;
         ConflictKey = conflictKey;
+        TrackExactRepeats = trackExactRepeats;
     }
 
     public ToolDefinition Definition { get; }
@@ -364,6 +366,13 @@ public sealed class AgentTool
     public ToolReplayPolicy ReplayPolicy { get; }
 
     public Func<JsonElement, string?>? ConflictKey { get; }
+
+    /// <summary>
+    /// Whether consecutive calls with the same prepared arguments participate in the kernel's
+    /// exact-repeat loop protection. Disable only for tools whose contract intentionally polls the
+    /// same observation; untracked calls neither advance nor reset another tracked sequence.
+    /// </summary>
+    public bool TrackExactRepeats { get; }
 
     public string? ValidateArguments(string argumentsJson)
     {

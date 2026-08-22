@@ -117,8 +117,14 @@ internal static class Responses
         Func<System.Text.Json.JsonElement, ToolExecutionContext, CancellationToken, ValueTask<ToolResult>> execute,
         ToolRisk risk = ToolRisk.ReadOnly,
         ToolExecutionMode? mode = null,
-        string schema = "{\"type\":\"object\",\"additionalProperties\":false}") =>
-        new(new ToolDefinition(name, "Test tool " + name, schema), execute, risk, mode);
+        string schema = "{\"type\":\"object\",\"additionalProperties\":false}",
+        bool trackExactRepeats = true) =>
+        new(
+            new ToolDefinition(name, "Test tool " + name, schema),
+            execute,
+            risk,
+            mode,
+            trackExactRepeats: trackExactRepeats);
 
     public static ToolResult Result(string text, bool terminate = false) =>
         new(new AgentContent[] { new TextContent(text) }, terminate: terminate);

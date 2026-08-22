@@ -2275,6 +2275,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         MaxMetadataValueCharacters = value.MaxMetadataValueCharacters,
         MaxQueuedMessages = value.MaxQueuedMessages,
         MaxConcurrentTools = value.MaxConcurrentTools,
+        ExactToolRepeatAdvisoryThreshold = value.ExactToolRepeatAdvisoryThreshold,
+        ExactToolRepeatTerminationThreshold = value.ExactToolRepeatTerminationThreshold,
         ToolTimeoutMilliseconds = value.ToolTimeoutMilliseconds,
         ModelTimeoutMilliseconds = value.ModelTimeoutMilliseconds,
         MaxProgressEventsPerTool = value.MaxProgressEventsPerTool,

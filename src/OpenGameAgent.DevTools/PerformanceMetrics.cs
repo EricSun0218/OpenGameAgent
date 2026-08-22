@@ -154,6 +154,8 @@ public sealed class GameAgentRunPerformance
         string status,
         GameAgentLatencyBreakdown latency,
         IReadOnlyList<GameAgentToolMetric> tools,
+        int exactToolRepeatAdvisories,
+        int exactToolRepeatTerminations,
         int retries,
         int fallbacks,
         long totalTokens,
@@ -180,6 +182,8 @@ public sealed class GameAgentRunPerformance
         Status = status;
         Latency = latency;
         Tools = tools;
+        ExactToolRepeatAdvisories = exactToolRepeatAdvisories;
+        ExactToolRepeatTerminations = exactToolRepeatTerminations;
         Retries = retries;
         Fallbacks = fallbacks;
         TotalTokens = totalTokens;
@@ -207,6 +211,8 @@ public sealed class GameAgentRunPerformance
     public string Status { get; }
     public GameAgentLatencyBreakdown Latency { get; }
     public IReadOnlyList<GameAgentToolMetric> Tools { get; }
+    public int ExactToolRepeatAdvisories { get; }
+    public int ExactToolRepeatTerminations { get; }
     public int Retries { get; }
     public int Fallbacks { get; }
     public long TotalTokens { get; }
@@ -313,6 +319,8 @@ public sealed class GameAgentPerformanceSummary
     public int ProviderFallbacks => Runs.Sum(value => value.Fallbacks);
     public int RouteClassificationFailures => Runs.Count(value => value.RouteClassificationFailure is not null);
     public int RouteFallbacks => Runs.Count(value => value.RouteClassificationStatus == "fallback");
+    public int ExactToolRepeatAdvisories => Runs.Sum(value => value.ExactToolRepeatAdvisories);
+    public int ExactToolRepeatTerminations => Runs.Sum(value => value.ExactToolRepeatTerminations);
     public long TotalTokens => Runs.Sum(value => value.TotalTokens);
     public bool CostKnown => Runs.All(value => value.CostKnown);
     public double? TotalCost => CostKnown ? Runs.Sum(value => value.TotalCost ?? 0) : null;
@@ -402,6 +410,7 @@ public sealed class GameAgentPerformanceSummary
         text.AppendLine($"Runs: {Runs.Count}; tools: {ToolCalls}; tool success: {ToolSuccessRate:P2}");
         text.AppendLine($"Retries: {ProviderRetries}; fallbacks: {ProviderFallbacks}; uncertain writes: {UncertainWrites}; duplicates blocked: {DuplicateWritesPrevented}");
         text.AppendLine($"Route classifier failures: {RouteClassificationFailures}; route fallbacks: {RouteFallbacks}");
+        text.AppendLine($"Exact tool-repeat advisories: {ExactToolRepeatAdvisories}; terminated loops: {ExactToolRepeatTerminations}");
         text.AppendLine($"Tokens: {TotalTokens}; cost: {(CostKnown ? (TotalCost ?? 0).ToString("0.######", CultureInfo.InvariantCulture) : "unknown")}");
         foreach (var run in Runs)
         {
@@ -448,6 +457,7 @@ public sealed class GameAgentPerformanceSummary
             .FirstOrDefault();
         var usage = ReadObject(completed, "usage");
         var cost = usage is null ? null : ReadObject(usage.Value, "cost");
+        var repeatEvents = entries.Where(value => value.Kind == "kernel.toolrepeatdetected").ToArray();
         var latency = new GameAgentLatencyBreakdown(
             queue,
             ReadDouble(input, "inputPreparationMilliseconds"),
@@ -490,6 +500,8 @@ public sealed class GameAgentPerformanceSummary
             ReadString(completed, "status") ?? "Unknown",
             latency,
             Array.AsReadOnly(tools),
+            repeatEvents.Count(value => ReadString(value, "toolRepeatAction") == "Advisory"),
+            repeatEvents.Count(value => ReadString(value, "toolRepeatAction") == "Terminated"),
             entries.Sum(ReadRetries),
             entries.Sum(ReadFallbacks),
             ReadInt64(usage, "totalTokens"),

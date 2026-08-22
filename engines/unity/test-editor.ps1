@@ -23,10 +23,12 @@ New-Item -ItemType Directory -Path $testParent -Force | Out-Null
 $creation = Start-Process `
     -FilePath $UnityEditor `
     -ArgumentList @('-batchmode', '-nographics', '-quit', '-createProject', $testRoot, '-logFile', $createLog) `
-    -Wait `
     -PassThru `
     -WindowStyle Hidden
-if ($creation.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $testRoot 'Assets') -PathType Container)) {
+$creation.WaitForExit()
+$creationExitCode = $creation.ExitCode
+$creation.Dispose()
+if ($creationExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $testRoot 'Assets') -PathType Container)) {
     $creationDetails = if (Test-Path -LiteralPath $createLog) { Get-Content -LiteralPath $createLog -Raw } else { 'No creation log was written.' }
     throw "Unity could not create the smoke project. $creationDetails"
 }
@@ -144,17 +146,19 @@ public static class OpenGameAgentEditorSmoke
         -FilePath $UnityEditor `
         -ArgumentList @('-batchmode', '-nographics', '-quit', '-projectPath', '.', '-executeMethod', 'OpenGameAgentEditorSmoke.Run', '-logFile', 'unity-smoke.log') `
         -WorkingDirectory $testRoot `
-        -Wait `
         -PassThru `
         -WindowStyle Hidden
-    if ($run.ExitCode -ne 0) {
+    $run.WaitForExit()
+    $runExitCode = $run.ExitCode
+    $run.Dispose()
+    if ($runExitCode -ne 0) {
         $failureLog = if (Test-Path -LiteralPath $logPath) {
             Get-Content -LiteralPath $logPath -Tail 200 | Out-String
         }
         else {
             'Unity did not write a smoke log.'
         }
-        throw "Unity Editor smoke test failed with exit code $($run.ExitCode). $failureLog"
+        throw "Unity Editor smoke test failed with exit code $runExitCode. $failureLog"
     }
 
     $log = Get-Content -LiteralPath $logPath -Raw

@@ -14,10 +14,34 @@ public enum AgentEventKind
     ToolStarted,
     ToolProgressed,
     ToolEnded,
+    ToolRepeatDetected,
     TurnEnded,
     RunFaulted,
     RunEnded,
     ModelRequestStarted,
+}
+
+public enum ToolRepeatPolicyAction
+{
+    Advisory,
+    Terminated,
+}
+
+public sealed class ToolRepeatDetection
+{
+    internal ToolRepeatDetection(int consecutiveCount, ToolRepeatPolicyAction action)
+    {
+        ConsecutiveCount = consecutiveCount > 0
+            ? consecutiveCount
+            : throw new ArgumentOutOfRangeException(nameof(consecutiveCount));
+        Action = Enum.IsDefined(typeof(ToolRepeatPolicyAction), action)
+            ? action
+            : throw new ArgumentOutOfRangeException(nameof(action));
+    }
+
+    public int ConsecutiveCount { get; }
+
+    public ToolRepeatPolicyAction Action { get; }
 }
 
 public enum AgentRunStatus
@@ -103,7 +127,8 @@ public sealed class AgentEvent
         ToolResult? toolResult = null,
         string? error = null,
         AgentRunStatus? status = null,
-        IReadOnlyList<AgentMessage>? messages = null)
+        IReadOnlyList<AgentMessage>? messages = null,
+        ToolRepeatDetection? toolRepeat = null)
     {
         Kind = kind;
         RunId = runId;
@@ -116,6 +141,7 @@ public sealed class AgentEvent
         ToolResult = toolResult;
         Error = error;
         Status = status;
+        ToolRepeat = toolRepeat;
         Messages = messages is null
             ? Array.Empty<AgentMessage>()
             : Array.AsReadOnly(messages.ToArray());
@@ -142,6 +168,8 @@ public sealed class AgentEvent
     public string? Error { get; }
 
     public AgentRunStatus? Status { get; }
+
+    public ToolRepeatDetection? ToolRepeat { get; }
 
     public IReadOnlyList<AgentMessage> Messages { get; }
 }

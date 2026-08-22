@@ -71,6 +71,18 @@ public sealed class AgentLimits
 
     public int MaxConcurrentTools { get; set; } = 8;
 
+    /// <summary>
+    /// Emits a bounded policy advisory after this many consecutive calls to the same tracked tool
+    /// with the same prepared arguments. Set to zero to disable advisories.
+    /// </summary>
+    public int ExactToolRepeatAdvisoryThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// Stops the model/tool loop before dispatching this consecutive exact repeat. Set to zero to
+    /// disable repeat termination while retaining the normal turn and tool-call limits.
+    /// </summary>
+    public int ExactToolRepeatTerminationThreshold { get; set; } = 8;
+
     public int ToolTimeoutMilliseconds { get; set; } = 120_000;
 
     public int ModelTimeoutMilliseconds { get; set; } = 120_000;
@@ -116,6 +128,17 @@ public sealed class AgentLimits
         RequireRange(MaxAddedToolNamesPerResult, 0, 100_000, nameof(MaxAddedToolNamesPerResult));
         RequireRange(MaxQueuedMessages, 1, 100_000, nameof(MaxQueuedMessages));
         RequireRange(MaxConcurrentTools, 1, 1024, nameof(MaxConcurrentTools));
+        RequireRange(ExactToolRepeatAdvisoryThreshold, 0, 10_000, nameof(ExactToolRepeatAdvisoryThreshold));
+        RequireRange(ExactToolRepeatTerminationThreshold, 0, 10_000, nameof(ExactToolRepeatTerminationThreshold));
+        if (ExactToolRepeatAdvisoryThreshold > 0
+            && ExactToolRepeatTerminationThreshold > 0
+            && ExactToolRepeatTerminationThreshold <= ExactToolRepeatAdvisoryThreshold)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ExactToolRepeatTerminationThreshold),
+                ExactToolRepeatTerminationThreshold,
+                "The exact-repeat termination threshold must be greater than the advisory threshold.");
+        }
         RequireRange(ToolTimeoutMilliseconds, 1, 86_400_000, nameof(ToolTimeoutMilliseconds));
         RequireRange(ModelTimeoutMilliseconds, 1, 86_400_000, nameof(ModelTimeoutMilliseconds));
         RequireRange(MaxProgressEventsPerTool, 0, 1_000_000, nameof(MaxProgressEventsPerTool));

@@ -267,6 +267,7 @@ public sealed class MetadataGameAgentAudiencePolicy : IGameAgentAudiencePolicy
         if (context.AgentEvent?.Kind is AgentEventKind.ToolStarted
             or AgentEventKind.ToolProgressed
             or AgentEventKind.ToolEnded
+            or AgentEventKind.ToolRepeatDetected
             || context.Message?.Role == AgentRole.Tool)
         {
             return new ValueTask<GameAgentAudience>(GameAgentAudience.Internal);

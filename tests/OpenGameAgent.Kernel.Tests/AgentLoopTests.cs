@@ -2171,6 +2171,276 @@ public sealed class AgentLoopTests
     }
 
     [Fact]
+    public async Task SequentialBarrierPreservesParallelReadEpochsInSourceOrder()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(
+                ModelStopReason.ToolUse,
+                new ToolCallContent("read-1", "read", "{\"group\":1}"),
+                new ToolCallContent("read-2", "read", "{\"group\":1}"),
+                new ToolCallContent("write", "write", "{}"),
+                new ToolCallContent("read-3", "read", "{\"group\":2}"),
+                new ToolCallContent("read-4", "read", "{\"group\":2}")),
+            Responses.Text("done"));
+        var gate = new object();
+        var activeReads = 0;
+        var maximumReads = 0;
+        var completedReads = 0;
+        var writeSawFirstEpoch = false;
+        var secondEpochStartedAfterWrite = true;
+        var writeCompleted = false;
+        var options = new AgentOptions(provider, "test");
+        options.Tools.Add(Responses.Tool(
+            "read",
+            async (arguments, _, cancellationToken) =>
+            {
+                var group = arguments.GetProperty("group").GetInt32();
+                lock (gate)
+                {
+                    if (group == 2 && !writeCompleted)
+                    {
+                        secondEpochStartedAfterWrite = false;
+                    }
+
+                    activeReads++;
+                    maximumReads = Math.Max(maximumReads, activeReads);
+                }
+
+                await Task.Delay(30, cancellationToken);
+                lock (gate)
+                {
+                    activeReads--;
+                    completedReads++;
+                }
+
+                return Responses.Result("read");
+            },
+            schema: "{\"type\":\"object\",\"properties\":{\"group\":{\"type\":\"integer\"}},\"required\":[\"group\"],\"additionalProperties\":false}"));
+        options.Tools.Add(Responses.Tool(
+            "write",
+            (_, _, _) =>
+            {
+                lock (gate)
+                {
+                    writeSawFirstEpoch = completedReads == 2 && activeReads == 0;
+                    writeCompleted = true;
+                }
+
+                return new ValueTask<ToolResult>(Responses.Result("write"));
+            },
+            ToolRisk.IdempotentWrite,
+            mode: ToolExecutionMode.Sequential));
+
+        var result = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, maximumReads);
+        Assert.True(writeSawFirstEpoch);
+        Assert.True(secondEpochStartedAfterWrite);
+    }
+
+    [Fact]
+    public async Task CancellationDoesNotDispatchLaterExecutionEpochs()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = ScriptedProvider.FromResponses(Responses.Tools(
+            ModelStopReason.ToolUse,
+            new ToolCallContent("read", "read", "{}"),
+            new ToolCallContent("write", "write", "{}")));
+        var writes = 0;
+        var options = new AgentOptions(provider, "test");
+        options.Tools.Add(Responses.Tool("read", async (_, _, cancellationToken) =>
+        {
+            started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return Responses.Result("unreachable");
+        }));
+        options.Tools.Add(Responses.Tool("write", (_, _, _) =>
+        {
+            writes++;
+            return new ValueTask<ToolResult>(Responses.Result("unsafe"));
+        }, ToolRisk.NonIdempotentWrite, mode: ToolExecutionMode.Sequential));
+        var agent = new Agent(options);
+
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        agent.Abort();
+        var result = await run;
+
+        Assert.Equal(AgentRunStatus.Aborted, result.Status);
+        Assert.Equal(0, writes);
+        var write = Assert.Single(result.NewMessages, message => message.ToolCallId == "write");
+        Assert.True(write.IsError);
+        Assert.Contains("before dispatch", Assert.IsType<TextContent>(Assert.Single(write.Content)).Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExactPreparedToolRepeatsAreCanonicalizedAdvisedAndMeasured()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "inspect", "{\"a\":1,\"b\":2}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("2", "inspect", "{\"b\":2,\"a\":1}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("3", "inspect", "{\"a\":1.0,\"b\":2}")),
+            Responses.Text("done"));
+        var options = new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits
+            {
+                ExactToolRepeatAdvisoryThreshold = 3,
+                ExactToolRepeatTerminationThreshold = 6,
+            },
+        };
+        options.Tools.Add(Responses.Tool(
+            "inspect",
+            (_, _, _) => new ValueTask<ToolResult>(Responses.Result("same")),
+            schema: "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"],\"additionalProperties\":false}"));
+        var detected = new List<ToolRepeatDetection>();
+        var agent = new Agent(options);
+        agent.Subscribe((agentEvent, _) =>
+        {
+            if (agentEvent.ToolRepeat is not null)
+            {
+                detected.Add(agentEvent.ToolRepeat);
+            }
+
+            return default;
+        });
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        var advisory = Assert.Single(detected);
+        Assert.Equal(3, advisory.ConsecutiveCount);
+        Assert.Equal(ToolRepeatPolicyAction.Advisory, advisory.Action);
+        var policyMessage = Assert.Single(result.NewMessages, message => message.CustomRole == "agent_policy");
+        Assert.Equal("exact-tool-repeat", policyMessage.Metadata["oga.policy"]);
+        Assert.Contains(provider.Requests.ToArray()[3].Messages, message => message.CustomRole == "agent_policy");
+    }
+
+    [Fact]
+    public async Task ExactRepeatTerminationBlocksDispatchAndEndsTheLoop()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "write", "{}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("2", "write", "{}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("3", "write", "{}")),
+            Responses.Text("must not run"));
+        var executions = 0;
+        var options = new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits
+            {
+                ExactToolRepeatAdvisoryThreshold = 2,
+                ExactToolRepeatTerminationThreshold = 3,
+            },
+        };
+        options.Tools.Add(Responses.Tool("write", (_, _, _) =>
+        {
+            executions++;
+            return new ValueTask<ToolResult>(Responses.Result("written"));
+        }, ToolRisk.IdempotentWrite));
+        var events = new List<ToolRepeatDetection>();
+        var agent = new Agent(options);
+        agent.Subscribe((agentEvent, _) =>
+        {
+            if (agentEvent.ToolRepeat is not null)
+            {
+                events.Add(agentEvent.ToolRepeat);
+            }
+
+            return default;
+        });
+
+        var result = await agent.RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, executions);
+        Assert.Equal(3, provider.CallCount);
+        Assert.Contains(events, value => value.Action == ToolRepeatPolicyAction.Advisory);
+        Assert.Contains(events, value => value.Action == ToolRepeatPolicyAction.Terminated);
+        var blocked = Assert.Single(result.NewMessages, message => message.ToolCallId == "3");
+        Assert.True(blocked.IsError);
+        Assert.Contains("not dispatched", Assert.IsType<TextContent>(Assert.Single(blocked.Content)).Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UntrackedPollingToolIsExemptAndDoesNotResetTrackedRepeats()
+    {
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "inspect", "{}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("poll", "poll", "{}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("2", "inspect", "{}")),
+            Responses.Text("done"));
+        var executions = 0;
+        var options = new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits
+            {
+                ExactToolRepeatAdvisoryThreshold = 1,
+                ExactToolRepeatTerminationThreshold = 2,
+            },
+        };
+        options.Tools.Add(Responses.Tool("inspect", (_, _, _) =>
+        {
+            executions++;
+            return new ValueTask<ToolResult>(Responses.Result("inspect"));
+        }));
+        options.Tools.Add(Responses.Tool(
+            "poll",
+            (_, _, _) => new ValueTask<ToolResult>(Responses.Result("poll")),
+            trackExactRepeats: false));
+
+        var result = await new Agent(options).RunAsync("go", TestContext.Current.CancellationToken);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, executions);
+        Assert.Equal(3, provider.CallCount);
+        Assert.True(Assert.Single(result.NewMessages, message => message.ToolCallId == "2").IsError);
+    }
+
+    [Fact]
+    public async Task SteeringResetsExactRepeatSequence()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = ScriptedProvider.FromResponses(
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("1", "inspect", "{}")),
+            Responses.Tools(ModelStopReason.ToolUse, new ToolCallContent("2", "inspect", "{}")),
+            Responses.Text("done"));
+        var executions = 0;
+        var options = new AgentOptions(provider, "test")
+        {
+            Limits = new AgentLimits
+            {
+                ExactToolRepeatAdvisoryThreshold = 1,
+                ExactToolRepeatTerminationThreshold = 2,
+            },
+        };
+        options.Tools.Add(Responses.Tool("inspect", async (_, _, cancellationToken) =>
+        {
+            executions++;
+            if (executions == 1)
+            {
+                started.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+            }
+
+            return Responses.Result("inspect");
+        }));
+        var agent = new Agent(options);
+        var run = agent.RunAsync("go", TestContext.Current.CancellationToken);
+        await started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        agent.Steer("new evidence");
+        release.TrySetResult();
+
+        var result = await run;
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, executions);
+        Assert.Equal(3, provider.CallCount);
+    }
+
+    [Fact]
     public async Task SafeParallelConflictKeysSerializeOnlyConflictingWrites()
     {
         var provider = ScriptedProvider.FromResponses(

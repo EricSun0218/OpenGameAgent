@@ -67,6 +67,7 @@ $assemblies = [ordered]@{
     'OpenGameAgent.Kernel.dll' = 'b62e147235cd4b60bf2b3ec44621214f'
     'OpenGameAgent.dll' = 'b8a23b387de04f5d8b59f0d59028cb6d'
     'OpenGameAgent.Client.dll' = '36eb78a2d19d407fbe9308d746ed42fd'
+    'OpenGameAgent.Runtime.Protocol.dll' = '7b12c6c9e8d44a2a9b5f0187d3ce624f'
     'Microsoft.Bcl.AsyncInterfaces.dll' = '9b8649054b3045538a0c970541601e20'
     'System.Buffers.dll' = '8fd925030a224e299e0360380b4cce95'
     'System.Memory.dll' = 'f3ff769890dd4a0984c60e9fe60a057b'

@@ -14,6 +14,8 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Change prompts or context per turn | `AgentHooks` |
 | Validate an imported canonical transcript | `AgentValidation.ValidateTranscript` |
 | Restrict latency and resource use | `AgentLimits`, `ModelParameters` |
+| Keep independent tools parallel around ordered barriers | `ToolExecutionMode`, `AgentTool.ExecutionMode`, `AgentLimits.MaxConcurrentTools` |
+| Detect and stop exact prepared tool-call loops | `AgentLimits.ExactToolRepeatAdvisoryThreshold`, `AgentLimits.ExactToolRepeatTerminationThreshold`, `AgentEvent.ToolRepeat` |
 | Enforce a model-call deadline | `AgentLimits.ModelTimeoutMilliseconds` |
 | Retry transient model failures | `RetryingModelProvider` |
 | Fall back across endpoints/models | `FallbackModelProvider` |

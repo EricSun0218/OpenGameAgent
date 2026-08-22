@@ -154,6 +154,7 @@ public sealed class GameRuntimeAgentEventProjector
             AgentEventKind.ToolStarted => Item(GameRuntimeItemKind.Tool, GameRuntimeLifecycle.Started, "tool_started", ToolSource()),
             AgentEventKind.ToolProgressed => Item(GameRuntimeItemKind.Tool, GameRuntimeLifecycle.Delta, "tool_progress", ToolSource()),
             AgentEventKind.ToolEnded => Item(GameRuntimeItemKind.Tool, GameRuntimeLifecycle.Completed, "tool_completed", ToolSource()),
+            AgentEventKind.ToolRepeatDetected => Item(GameRuntimeItemKind.Tool, GameRuntimeLifecycle.Delta, "tool_repeat_detected", ToolSource()),
             AgentEventKind.TurnEnded => Draft(GameRuntimeEventKind.Turn, GameRuntimeLifecycle.Completed, "turn_completed"),
             AgentEventKind.RunFaulted => Draft(GameRuntimeEventKind.Run, GameRuntimeLifecycle.Delta, "run_faulted"),
             AgentEventKind.RunEnded => Draft(

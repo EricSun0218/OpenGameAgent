@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Execute compatible tools in ordered parallel epochs around sequential barriers, retaining source-order
+  transcripts, bounded concurrency, conflict-key serialization, uncertain-write blocking, and cancellation safety.
+- Detect deep-canonicalized exact prepared tool-call loops across turns, with host-configurable polling
+  exemptions, bounded advisory/termination thresholds, typed events, wire projection, and performance metrics.
+- Ship the Runtime Protocol dependency in the Unity package and make real-editor smoke tests wait only for
+  the editor process, rather than persistent compiler-server descendants.
 - Add provider-neutral composable local speech using bounded VAD, transcription, and streaming speech
   synthesis through the existing realtime bridge, plus OpenAI-compatible local STT/TTS adapters.
 - Add explicit, host-authorized local model inventory, warmup, load, unload, and acquisition lifecycle

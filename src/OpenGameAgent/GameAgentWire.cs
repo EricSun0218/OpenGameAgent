@@ -137,6 +137,11 @@ public static class GameAgentWire
                     ? (JsonElement?)null
                     : ParseElement(agentEvent.Progress.DetailsJson),
             },
+            toolRepeat = agentEvent.ToolRepeat is null ? null : new
+            {
+                consecutiveCount = agentEvent.ToolRepeat.ConsecutiveCount,
+                action = agentEvent.ToolRepeat.Action.ToString(),
+            },
             error = agentEvent.Error,
             status = agentEvent.Status?.ToString(),
         }, JsonOptions);

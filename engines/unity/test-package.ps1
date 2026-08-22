@@ -31,7 +31,9 @@ $required = @(
     'Runtime\Plugins\OpenGameAgent.dll.meta',
     'Runtime\Plugins\OpenGameAgent.Client.dll',
     'Runtime\Plugins\OpenGameAgent.Client.dll.meta',
-    'Runtime\Plugins\System.Text.Json.dll'
+    'Runtime\Plugins\OpenGameAgent.Runtime.Protocol.dll',
+    'Runtime\Plugins\OpenGameAgent.Runtime.Protocol.dll.meta',
+    'Runtime\Plugins\System.Text.Json.dll',
     'Samples~\Minimal Local Agent\OpenGameAgentQuickstart.cs'
 )
 foreach ($relative in $required) {

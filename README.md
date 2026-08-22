@@ -139,7 +139,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Area | Capability |
 | --- | --- |
 | Agent kernel | Streaming typed messages, tool loop, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
-| Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, safe parallel reads, conflict-key serialization, policy blocking/termination, host-attested explicit/task scopes, durable one-time approval, timeouts, uncertain write outcomes |
+| Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, ordered parallel epochs around sequential barriers, conflict-key serialization, exact-repeat loop protection, policy blocking/termination, host-attested explicit/task scopes, durable one-time approval, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, auto/quick/direct/plan/workflow routing, shared per-input usage budget, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, subtitle timing, barge-in cancellation/truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
@@ -263,6 +263,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Engine integration](docs/engine-integration.md)
 - [Deployment and security](docs/deployment-and-security.md)
 - [High-risk tool approval](docs/tool-approvals.md)
+- [Tool execution safety and concurrency](docs/tool-execution.md)
 - [Generated media](docs/media.md)
 - [Local models, speech, and media](docs/local-models.md)
 - [Generated assets and authoritative import](docs/generated-assets.md)

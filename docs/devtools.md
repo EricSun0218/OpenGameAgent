@@ -42,7 +42,7 @@ Each entry keeps game time (`timelineId`, `tick`, optional calendar JSON) separa
 
 ## Performance and reliability summary
 
-`GameAgentPerformanceSummary.Create(recording)` derives per-input and aggregate JSON/JSONL/text metrics without replaying work. It separates queue, framework preparation, provider request/TTFT, tool, authoritative host-action, durable-action framework, and total latency; categorizes tool failures; and counts retries, fallbacks, uncertain writes, recoveries, duplicate-write prevention, tokens, and known/unknown cost. Aggregates are keyed by tool, failure category, route, resolved provider, and model.
+`GameAgentPerformanceSummary.Create(recording)` derives per-input and aggregate JSON/JSONL/text metrics without replaying work. It separates queue, framework preparation, provider request/TTFT, tool, authoritative host-action, durable-action framework, and total latency; categorizes tool failures; and counts retries, fallbacks, uncertain writes, recoveries, duplicate-write prevention, exact-repeat advisories/terminations, tokens, and known/unknown cost. Aggregates are keyed by tool, failure category, route, resolved provider, and model.
 
 For repeatable load and failure testing, use `GameAgentBenchmarkRunner` with a scenario that returns a bounded trace recording. The runner supports fixed or fake providers, injected faults, warmups, concurrency, iteration timeouts, and caller-owned thresholds. `RealtimeMetricsCollector` and `GameMediaMetricsCollector` add optional bounded STT/TTS/barge-in and media asset-ready timings.
 

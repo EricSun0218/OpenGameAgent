@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Numerics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -115,6 +118,7 @@ public static class AgentLoop
         var provider = options.Provider;
         var model = options.Model;
         var parameters = options.Parameters.Copy();
+        var toolRepeatTracker = new ExactToolRepeatTracker();
         var ended = false;
         var emitGate = new SemaphoreSlim(1, 1);
 
@@ -208,6 +212,7 @@ public static class AgentLoop
 
                     if (pendingMessages.Count > 0)
                     {
+                        toolRepeatTracker.Reset();
                         EnsureMessageCapacity(current.Messages.Count, pendingMessages.Count, limits);
                         foreach (var pending in pendingMessages)
                         {
@@ -222,7 +227,7 @@ public static class AgentLoop
 
                     var responseMessageReserve = current.Tools.Count == 0
                         ? 1
-                        : checked(1 + limits.MaxToolCallsPerTurn);
+                        : checked(2 + limits.MaxToolCallsPerTurn);
                     EnsureMessageCapacity(current.Messages.Count, responseMessageReserve, limits);
 
                     var streamed = await StreamAssistantAsync(
@@ -305,6 +310,7 @@ public static class AgentLoop
                             current,
                             options,
                             limits,
+                            toolRepeatTracker,
                             EmitAsync,
                             cancellationToken).ConfigureAwait(false);
                     }
@@ -863,6 +869,7 @@ public static class AgentLoop
         MutableLoopContext current,
         AgentLoopOptions options,
         AgentLimits limits,
+        ExactToolRepeatTracker repeatTracker,
         Func<AgentEvent, ValueTask> emit,
         CancellationToken cancellationToken)
     {
@@ -943,146 +950,254 @@ public static class AgentLoop
             prepared.Clear();
         }
 
-        var executeInParallel = ShouldExecuteInParallel(prepared, options.ToolExecution);
-        if (executeInParallel)
+        AgentMessage? repeatAdvisory = null;
+        var repeatTerminated = false;
+        var repeatBlockedIndexes = new HashSet<int>();
+        var preparedByIndex = prepared.ToDictionary(value => value.Index);
+        for (var index = 0; index < calls.Count; index++)
         {
-            using var globalGate = new SemaphoreSlim(limits.MaxConcurrentTools, limits.MaxConcurrentTools);
-            var conflictGates = new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
-            var uncertainConflicts = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
-
-            async Task<ToolCallOutcome> ExecuteBoundedAsync(PreparedToolCall item)
+            if (!preparedByIndex.TryGetValue(index, out var item))
             {
-                var globalGateAcquired = false;
-                SemaphoreSlim? conflictGate = null;
-                var conflictGateAcquired = false;
-                try
-                {
-                    await globalGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    globalGateAcquired = true;
-                    if (!string.IsNullOrEmpty(item.ConflictKey))
-                    {
-                        conflictGate = conflictGates.GetOrAdd(item.ConflictKey!, _ => new SemaphoreSlim(1, 1));
-                        await conflictGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                        conflictGateAcquired = true;
-                        if (uncertainConflicts.ContainsKey(item.ConflictKey!))
-                        {
-                            return new ToolCallOutcome(
-                                item.Index,
-                                item.Call,
-                                CreateToolError(
-                                    "The tool was not executed because an earlier write with the same conflict key has an uncertain outcome.",
-                                    limits,
-                                    failureCategory: ToolFailureCategory.Conflict));
-                        }
-                    }
-
-                    var outcome = await ExecutePreparedToolCallAsync(
-                        item,
-                        assistantMessage,
-                        runId,
-                        turn,
-                        current.Snapshot(),
-                        options,
-                        limits,
-                        emit,
-                        cancellationToken).ConfigureAwait(false);
-                    if (outcome.UncertainSideEffect && !string.IsNullOrEmpty(item.ConflictKey))
-                    {
-                        uncertainConflicts.TryAdd(item.ConflictKey!, 0);
-                    }
-
-                    return outcome;
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    return new ToolCallOutcome(
-                        item.Index,
-                        item.Call,
-                        CreateToolError(
-                            "Tool execution was aborted.",
-                            limits,
-                            failureCategory: ToolFailureCategory.Cancelled));
-                }
-                finally
-                {
-                    if (conflictGateAcquired)
-                    {
-                        conflictGate!.Release();
-                    }
-
-                    if (globalGateAcquired)
-                    {
-                        globalGate.Release();
-                    }
-                }
+                repeatTracker.Reset();
+                continue;
             }
 
-            var pending = prepared
-                .Select(ExecuteBoundedAsync)
-                .ToList();
-            while (pending.Count > 0)
+            var repeat = repeatTracker.Observe(item, limits);
+            if (repeat is null)
             {
-                var completed = await Task.WhenAny(pending).ConfigureAwait(false);
-                pending.Remove(completed);
-                var outcome = await completed.ConfigureAwait(false);
-                outcomes[outcome.Index] = outcome;
-                await emit(new AgentEvent(
-                    AgentEventKind.ToolEnded,
-                    runId,
-                    turn,
-                    toolCall: outcome.Call,
-                    toolResult: outcome.Result)).ConfigureAwait(false);
+                continue;
             }
 
-            foreach (var gate in conflictGates.Values)
+            await emit(new AgentEvent(
+                AgentEventKind.ToolRepeatDetected,
+                runId,
+                turn,
+                toolCall: item.Call,
+                toolRepeat: new ToolRepeatDetection(repeat.Count, repeat.Action))).ConfigureAwait(false);
+            if (repeat.Action == ToolRepeatPolicyAction.Advisory)
             {
-                gate.Dispose();
+                repeatAdvisory ??= CreateToolRepeatAdvisory(item.Call.Name, repeat.Count, options.Clock());
+                continue;
+            }
+
+            repeatTerminated = true;
+            repeatBlockedIndexes.Add(item.Index);
+            var result = CreateToolError(
+                $"Tool '{item.Call.Name}' was not dispatched because the same prepared call repeated {repeat.Count} consecutive times.",
+                limits,
+                terminate: true,
+                failureCategory: ToolFailureCategory.Conflict);
+            outcomes[item.Index] = new ToolCallOutcome(item.Index, item.Call, result);
+            await emit(new AgentEvent(
+                AgentEventKind.ToolEnded,
+                runId,
+                turn,
+                toolCall: item.Call,
+                toolResult: result)).ConfigureAwait(false);
+        }
+
+        if (repeatBlockedIndexes.Count > 0)
+        {
+            prepared.RemoveAll(item => repeatBlockedIndexes.Contains(item.Index));
+        }
+
+        using var globalGate = new SemaphoreSlim(limits.MaxConcurrentTools, limits.MaxConcurrentTools);
+        var conflictGates = new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
+        var uncertainConflicts = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+        var hasUnscopedUncertainWrite = 0;
+
+        bool IsBlockedByUncertainWrite(PreparedToolCall item)
+        {
+            if (item.Tool.Risk == ToolRisk.ReadOnly)
+            {
+                return false;
+            }
+
+            if (Volatile.Read(ref hasUnscopedUncertainWrite) != 0)
+            {
+                return true;
+            }
+
+            return string.IsNullOrEmpty(item.ConflictKey)
+                ? !uncertainConflicts.IsEmpty
+                : uncertainConflicts.ContainsKey(item.ConflictKey!);
+        }
+
+        void RecordUncertainWrite(PreparedToolCall item, ToolCallOutcome outcome)
+        {
+            if (!outcome.UncertainSideEffect || item.Tool.Risk == ToolRisk.ReadOnly)
+            {
+                return;
+            }
+
+            if (string.IsNullOrEmpty(item.ConflictKey))
+            {
+                Interlocked.Exchange(ref hasUnscopedUncertainWrite, 1);
+            }
+            else
+            {
+                uncertainConflicts.TryAdd(item.ConflictKey!, 0);
             }
         }
-        else
+
+        ToolCallOutcome BlockUncertain(PreparedToolCall item)
         {
-            var hasUncertainWrite = false;
-            foreach (var item in prepared.OrderBy(item => item.Index))
+            var sameKey = !string.IsNullOrEmpty(item.ConflictKey)
+                && uncertainConflicts.ContainsKey(item.ConflictKey!);
+            return new ToolCallOutcome(
+                item.Index,
+                item.Call,
+                CreateToolError(
+                    sameKey
+                        ? "The tool was not executed because an earlier write with the same conflict key has an uncertain outcome."
+                        : "The tool was not executed because an earlier potentially conflicting write has an uncertain outcome.",
+                    limits,
+                    failureCategory: ToolFailureCategory.Conflict));
+        }
+
+        async Task<ToolCallOutcome> ExecuteBoundedAsync(PreparedToolCall item)
+        {
+            var globalGateAcquired = false;
+            SemaphoreSlim? conflictGate = null;
+            var conflictGateAcquired = false;
+            try
             {
-                ToolCallOutcome outcome;
-                if (hasUncertainWrite && item.Tool.Risk != ToolRisk.ReadOnly)
+                await globalGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                globalGateAcquired = true;
+                if (!string.IsNullOrEmpty(item.ConflictKey))
                 {
-                    outcome = new ToolCallOutcome(
-                        item.Index,
-                        item.Call,
-                        CreateToolError(
-                            "The tool was not executed because an earlier write in this sequential batch has an uncertain outcome.",
-                            limits,
-                            failureCategory: ToolFailureCategory.Conflict));
-                }
-                else
-                {
-                    outcome = await ExecutePreparedToolCallAsync(
-                        item,
-                        assistantMessage,
-                        runId,
-                        turn,
-                        current.Snapshot(),
-                        options,
-                        limits,
-                        emit,
-                        cancellationToken).ConfigureAwait(false);
-                    hasUncertainWrite |= outcome.UncertainSideEffect && item.Tool.Risk != ToolRisk.ReadOnly;
+                    conflictGate = conflictGates.GetOrAdd(item.ConflictKey!, _ => new SemaphoreSlim(1, 1));
+                    await conflictGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    conflictGateAcquired = true;
                 }
 
-                outcomes[outcome.Index] = outcome;
-                await emit(new AgentEvent(
-                    AgentEventKind.ToolEnded,
+                if (IsBlockedByUncertainWrite(item))
+                {
+                    return BlockUncertain(item);
+                }
+
+                var outcome = await ExecutePreparedToolCallAsync(
+                    item,
+                    assistantMessage,
                     runId,
                     turn,
-                    toolCall: outcome.Call,
-                    toolResult: outcome.Result)).ConfigureAwait(false);
+                    current.Snapshot(),
+                    options,
+                    limits,
+                    emit,
+                    cancellationToken).ConfigureAwait(false);
+                RecordUncertainWrite(item, outcome);
+                return outcome;
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return new ToolCallOutcome(
+                    item.Index,
+                    item.Call,
+                    CreateToolError(
+                        "Tool execution was aborted.",
+                        limits,
+                        failureCategory: ToolFailureCategory.Cancelled));
+            }
+            finally
+            {
+                if (conflictGateAcquired)
+                {
+                    conflictGate!.Release();
+                }
+
+                if (globalGateAcquired)
+                {
+                    globalGate.Release();
+                }
+            }
+        }
+
+        var epochs = CreateToolExecutionEpochs(prepared, options.ToolExecution);
+        for (var epochIndex = 0; epochIndex < epochs.Count; epochIndex++)
+        {
+            var epoch = epochs[epochIndex];
+            if (cancellationToken.IsCancellationRequested)
+            {
+                foreach (var remaining in epochs.Skip(epochIndex).SelectMany(value => value.Calls))
+                {
+                    var cancelled = new ToolCallOutcome(
+                        remaining.Index,
+                        remaining.Call,
+                        CreateToolError(
+                            "Tool execution was aborted before dispatch.",
+                            limits,
+                            failureCategory: ToolFailureCategory.Cancelled));
+                    outcomes[cancelled.Index] = cancelled;
+                    await emit(new AgentEvent(
+                        AgentEventKind.ToolEnded,
+                        runId,
+                        turn,
+                        toolCall: cancelled.Call,
+                        toolResult: cancelled.Result)).ConfigureAwait(false);
+                }
+
+                break;
+            }
+
+            if (epoch.Parallel)
+            {
+                var pending = epoch.Calls.Select(ExecuteBoundedAsync).ToList();
+                while (pending.Count > 0)
+                {
+                    var completed = await Task.WhenAny(pending).ConfigureAwait(false);
+                    pending.Remove(completed);
+                    var outcome = await completed.ConfigureAwait(false);
+                    outcomes[outcome.Index] = outcome;
+                    await emit(new AgentEvent(
+                        AgentEventKind.ToolEnded,
+                        runId,
+                        turn,
+                        toolCall: outcome.Call,
+                        toolResult: outcome.Result)).ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
+            var item = epoch.Calls[0];
+            ToolCallOutcome sequentialOutcome;
+            if (IsBlockedByUncertainWrite(item))
+            {
+                sequentialOutcome = BlockUncertain(item);
+            }
+            else
+            {
+                sequentialOutcome = await ExecutePreparedToolCallAsync(
+                    item,
+                    assistantMessage,
+                    runId,
+                    turn,
+                    current.Snapshot(),
+                    options,
+                    limits,
+                    emit,
+                    cancellationToken).ConfigureAwait(false);
+                RecordUncertainWrite(item, sequentialOutcome);
+            }
+
+            outcomes[sequentialOutcome.Index] = sequentialOutcome;
+            await emit(new AgentEvent(
+                AgentEventKind.ToolEnded,
+                runId,
+                turn,
+                toolCall: sequentialOutcome.Call,
+                toolResult: sequentialOutcome.Result)).ConfigureAwait(false);
+        }
+
+        foreach (var gate in conflictGates.Values)
+        {
+            gate.Dispose();
         }
 
         var ordered = outcomes.Select((outcome, index) =>
             outcome ?? new ToolCallOutcome(index, calls[index], CreateToolError("Tool execution did not produce a result.", limits))).ToArray();
-        var messages = new List<AgentMessage>(ordered.Length);
+        var messages = new List<AgentMessage>(ordered.Length + (repeatAdvisory is null ? 0 : 1));
         foreach (var outcome in ordered)
         {
             var message = AgentMessage.ToolResult(outcome.Call, outcome.Result, options.Clock());
@@ -1090,7 +1205,15 @@ public static class AgentLoop
             await EmitMessageAsync(message, runId, turn, emit).ConfigureAwait(false);
         }
 
-        return new ToolBatchOutcome(messages, ordered.Length > 0 && ordered.All(outcome => outcome.Result.Terminate));
+        if (repeatAdvisory is not null)
+        {
+            messages.Add(repeatAdvisory);
+            await EmitMessageAsync(repeatAdvisory, runId, turn, emit).ConfigureAwait(false);
+        }
+
+        return new ToolBatchOutcome(
+            messages,
+            repeatTerminated || ordered.Length > 0 && ordered.All(outcome => outcome.Result.Terminate));
     }
 
     private static async Task<ToolPreparation> PrepareToolCallAsync(
@@ -1545,30 +1668,64 @@ public static class AgentLoop
             : value.Substring(0, limits.MaxTextCharactersPerPart);
     }
 
-    private static bool ShouldExecuteInParallel(IReadOnlyList<PreparedToolCall> calls, ToolExecutionMode mode)
+    private static IReadOnlyList<ToolExecutionEpoch> CreateToolExecutionEpochs(
+        IReadOnlyList<PreparedToolCall> calls,
+        ToolExecutionMode mode)
     {
-        if (calls.Count < 2 || mode == ToolExecutionMode.Sequential)
-        {
-            return false;
-        }
+        var result = new List<ToolExecutionEpoch>();
+        var parallel = new List<PreparedToolCall>();
 
-        foreach (var call in calls)
+        void FlushParallel()
         {
-            if (call.Tool.ExecutionMode == ToolExecutionMode.Sequential)
+            if (parallel.Count == 0)
             {
-                return false;
+                return;
             }
 
-            if (mode == ToolExecutionMode.SafeParallel
-                && call.Tool.ExecutionMode != ToolExecutionMode.Parallel
-                && call.Tool.Risk != ToolRisk.ReadOnly)
-            {
-                return false;
-            }
+            result.Add(new ToolExecutionEpoch(parallel.ToArray(), parallel: parallel.Count > 1));
+            parallel.Clear();
         }
 
-        return true;
+        foreach (var call in calls.OrderBy(value => value.Index))
+        {
+            var canRunInParallel = mode != ToolExecutionMode.Sequential
+                && call.Tool.ExecutionMode != ToolExecutionMode.Sequential
+                && (mode == ToolExecutionMode.Parallel
+                    || call.Tool.ExecutionMode == ToolExecutionMode.Parallel
+                    || call.Tool.Risk == ToolRisk.ReadOnly);
+            if (!canRunInParallel)
+            {
+                FlushParallel();
+                result.Add(new ToolExecutionEpoch(new[] { call }, parallel: false));
+                continue;
+            }
+
+            parallel.Add(call);
+        }
+
+        FlushParallel();
+        return result;
     }
+
+    private static AgentMessage CreateToolRepeatAdvisory(
+        string toolName,
+        int count,
+        DateTimeOffset timestamp) => new(
+            AgentRole.Custom,
+            new AgentContent[]
+            {
+                new TextContent(
+                    $"The same prepared call to '{toolName}' has been requested {count} consecutive times. "
+                    + "Re-evaluate progress and change the approach or arguments before repeating it again."),
+            },
+            timestamp,
+            customRole: "agent_policy",
+            metadata: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["oga.policy"] = "exact-tool-repeat",
+                ["oga.tool"] = toolName,
+                ["oga.repeatCount"] = count.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            });
 
     private static AgentMessage ToAssistantMessage(ModelResponse response, DateTimeOffset timestamp, string? model) =>
         new(
@@ -1702,6 +1859,181 @@ public static class AgentLoop
         public JsonElement Arguments { get; }
 
         public string? ConflictKey { get; }
+    }
+
+    private sealed class ToolExecutionEpoch
+    {
+        public ToolExecutionEpoch(IReadOnlyList<PreparedToolCall> calls, bool parallel)
+        {
+            Calls = calls;
+            Parallel = parallel;
+        }
+
+        public IReadOnlyList<PreparedToolCall> Calls { get; }
+
+        public bool Parallel { get; }
+    }
+
+    private sealed class ExactToolRepeatTracker
+    {
+        private string? _fingerprint;
+        private int _count;
+
+        public ToolRepeatObservation? Observe(PreparedToolCall call, AgentLimits limits)
+        {
+            if (!call.Tool.TrackExactRepeats
+                || limits.ExactToolRepeatAdvisoryThreshold == 0
+                    && limits.ExactToolRepeatTerminationThreshold == 0)
+            {
+                return null;
+            }
+
+            var fingerprint = CreateFingerprint(call);
+            if (string.Equals(_fingerprint, fingerprint, StringComparison.Ordinal))
+            {
+                _count = checked(_count + 1);
+            }
+            else
+            {
+                _fingerprint = fingerprint;
+                _count = 1;
+            }
+
+            if (limits.ExactToolRepeatTerminationThreshold > 0
+                && _count >= limits.ExactToolRepeatTerminationThreshold)
+            {
+                return new ToolRepeatObservation(_count, ToolRepeatPolicyAction.Terminated);
+            }
+
+            return limits.ExactToolRepeatAdvisoryThreshold > 0
+                   && _count == limits.ExactToolRepeatAdvisoryThreshold
+                ? new ToolRepeatObservation(_count, ToolRepeatPolicyAction.Advisory)
+                : null;
+        }
+
+        public void Reset()
+        {
+            _fingerprint = null;
+            _count = 0;
+        }
+
+        private static string CreateFingerprint(PreparedToolCall call)
+        {
+            using var buffer = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(buffer))
+            {
+                WriteCanonical(writer, call.Arguments);
+            }
+
+            using var algorithm = SHA256.Create();
+            var hash = algorithm.ComputeHash(buffer.ToArray());
+            return call.Call.Name + ":" + Convert.ToBase64String(hash);
+        }
+
+        private static void WriteCanonical(Utf8JsonWriter writer, JsonElement value)
+        {
+            switch (value.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    writer.WriteStartObject();
+                    foreach (var property in value.EnumerateObject().OrderBy(item => item.Name, StringComparer.Ordinal))
+                    {
+                        writer.WritePropertyName(property.Name);
+                        WriteCanonical(writer, property.Value);
+                    }
+
+                    writer.WriteEndObject();
+                    break;
+
+                case JsonValueKind.Array:
+                    writer.WriteStartArray();
+                    foreach (var item in value.EnumerateArray())
+                    {
+                        WriteCanonical(writer, item);
+                    }
+
+                    writer.WriteEndArray();
+                    break;
+
+                case JsonValueKind.String:
+                    writer.WriteStringValue(value.GetString());
+                    break;
+
+                case JsonValueKind.Number:
+                    writer.WriteStringValue("number:" + CanonicalizeNumber(value.GetRawText()));
+                    break;
+
+                case JsonValueKind.True:
+                    writer.WriteBooleanValue(true);
+                    break;
+
+                case JsonValueKind.False:
+                    writer.WriteBooleanValue(false);
+                    break;
+
+                case JsonValueKind.Null:
+                    writer.WriteNullValue();
+                    break;
+
+                default:
+                    throw new InvalidOperationException("Prepared tool arguments contain an unsupported JSON value.");
+            }
+        }
+
+        private static string CanonicalizeNumber(string raw)
+        {
+            var value = raw;
+            var negative = value.Length > 0 && value[0] == '-';
+            if (negative)
+            {
+                value = value.Substring(1);
+            }
+
+            var exponentIndex = value.IndexOfAny(new[] { 'e', 'E' });
+            var exponent = BigInteger.Zero;
+            if (exponentIndex >= 0)
+            {
+                exponent = BigInteger.Parse(
+                    value.Substring(exponentIndex + 1),
+                    System.Globalization.CultureInfo.InvariantCulture);
+                value = value.Substring(0, exponentIndex);
+            }
+
+            var decimalIndex = value.IndexOf('.');
+            var decimalPlaces = decimalIndex < 0 ? 0 : value.Length - decimalIndex - 1;
+            var digits = decimalIndex < 0 ? value : value.Remove(decimalIndex, 1);
+            digits = digits.TrimStart('0');
+            if (digits.Length == 0)
+            {
+                return "0e0";
+            }
+
+            var trailingZeros = 0;
+            while (digits.Length > 1 && digits[digits.Length - 1] == '0')
+            {
+                trailingZeros++;
+                digits = digits.Substring(0, digits.Length - 1);
+            }
+
+            exponent = exponent - decimalPlaces + trailingZeros;
+            return (negative ? "-" : string.Empty)
+                + digits
+                + "e"
+                + exponent.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
+    private sealed class ToolRepeatObservation
+    {
+        public ToolRepeatObservation(int count, ToolRepeatPolicyAction action)
+        {
+            Count = count;
+            Action = action;
+        }
+
+        public int Count { get; }
+
+        public ToolRepeatPolicyAction Action { get; }
     }
 
     private sealed class ToolCallOutcome

@@ -758,6 +758,8 @@ public sealed class LocalGameAgentDelegateExecutor : IGameAgentDelegateExecutor
             MaxMetadataValueCharacters = source.MaxMetadataValueCharacters,
             MaxQueuedMessages = source.MaxQueuedMessages,
             MaxConcurrentTools = source.MaxConcurrentTools,
+            ExactToolRepeatAdvisoryThreshold = source.ExactToolRepeatAdvisoryThreshold,
+            ExactToolRepeatTerminationThreshold = source.ExactToolRepeatTerminationThreshold,
             ToolTimeoutMilliseconds = source.ToolTimeoutMilliseconds,
             ModelTimeoutMilliseconds = source.ModelTimeoutMilliseconds,
             MaxProgressEventsPerTool = source.MaxProgressEventsPerTool,

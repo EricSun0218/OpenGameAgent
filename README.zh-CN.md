@@ -137,7 +137,7 @@ GameAgentRuntime
 | 模块 | 能力 |
 | --- | --- |
 | Agent 内核 | 流式类型化消息、工具循环、类型化工具中间结果、steering、follow-up、hooks、取消、严格会话校验、提供方错误结果化 |
-| 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、安全并行读、冲突键串行、策略拦截/终止、宿主证明的显式/任务范围、持久一次性批准、超时与写入结果未知语义 |
+| 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、顺序屏障前后的有序并行分段、冲突键串行、精确重复循环保护、策略拦截/终止、宿主证明的显式/任务范围、持久一次性批准、超时与写入结果未知语义 |
 | 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、auto/quick/direct/plan/Workflow 路由、共享单次输入用量预算、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
 | 实时对话 | 有界 PCM16 流、实时转写/音频事件、字幕时间、插话取消/截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
@@ -262,6 +262,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [引擎集成](docs/engine-integration.md)
 - [部署与安全](docs/deployment-and-security.md)
 - [高风险工具批准](docs/tool-approvals.zh-CN.md)
+- [工具执行安全与并发](docs/tool-execution.zh-CN.md)
 - [生成式媒体](docs/media.md)
 - [本地模型、语音与媒体](docs/local-models.zh-CN.md)
 - [生成资产与权威导入](docs/generated-assets.md)

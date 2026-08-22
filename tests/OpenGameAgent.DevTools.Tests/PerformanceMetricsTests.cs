@@ -26,7 +26,9 @@ public sealed class PerformanceMetricsTests
             Entry(14, "model.request.started", "{\"runId\":\"run\",\"turn\":2,\"model\":\"requested\"}", 32),
             Entry(15, "kernel.messagestarted", "{\"runId\":\"run\",\"turn\":2}", 35),
             Entry(16, "kernel.messageended", "{\"runId\":\"run\",\"turn\":2,\"provider\":\"provider\",\"responseModel\":\"resolved\"}", 40),
-            Entry(17, "run.completed", "{\"status\":\"Completed\",\"usage\":{\"totalTokens\":12,\"cost\":{\"known\":true,\"total\":0.25}}}", 50),
+            Entry(17, "kernel.toolrepeatdetected", "{\"runId\":\"run\",\"turn\":2,\"tool\":\"build\",\"toolRepeatCount\":3,\"toolRepeatAction\":\"Advisory\"}", 41),
+            Entry(18, "kernel.toolrepeatdetected", "{\"runId\":\"run\",\"turn\":2,\"tool\":\"build\",\"toolRepeatCount\":8,\"toolRepeatAction\":\"Terminated\"}", 42),
+            Entry(19, "run.completed", "{\"status\":\"Completed\",\"usage\":{\"totalTokens\":12,\"cost\":{\"known\":true,\"total\":0.25}}}", 50),
         });
 
         var summary = GameAgentPerformanceSummary.Create(recording);
@@ -68,6 +70,10 @@ public sealed class PerformanceMetricsTests
         Assert.Equal(1, summary.ProviderFallbacks);
         Assert.Equal(1, summary.RouteClassificationFailures);
         Assert.Equal(1, summary.RouteFallbacks);
+        Assert.Equal(1, run.ExactToolRepeatAdvisories);
+        Assert.Equal(1, run.ExactToolRepeatTerminations);
+        Assert.Equal(1, summary.ExactToolRepeatAdvisories);
+        Assert.Equal(1, summary.ExactToolRepeatTerminations);
         Assert.Equal(1, summary.Replans);
         Assert.All(run.Tools, tool =>
         {
@@ -83,6 +89,7 @@ public sealed class PerformanceMetricsTests
         Assert.Contains("classifierReasoningChars=128", summary.ToText(), StringComparison.Ordinal);
         Assert.Contains("classifierProviderStatus=429", summary.ToText(), StringComparison.Ordinal);
         Assert.Contains("classifierProviderFailure=rate-limit", summary.ToText(), StringComparison.Ordinal);
+        Assert.Contains("terminated loops: 1", summary.ToText(), StringComparison.Ordinal);
         Assert.Single(summary.ToJsonLines().Split(Environment.NewLine));
     }
 
