@@ -92,6 +92,8 @@ These readers are read-only projections over `IGameSessionStore`. They do not ru
 
 Use `TaskPlanExtension` for an ordered checklist that must survive later inputs. It is separate from `GoalLoopExtension`: goals describe durable intent and game-time waits, while a task plan records an ordered execution path. An active or paused plan always retains one `InProgress` step, a completed prefix, and a pending suffix. The model cannot advance a step merely by claiming success; the host-supplied `GameTaskPlanEvidenceValidator` must accept the evidence against the current input, plan, and step.
 
+When the host can prove that one committed input produced exactly one authoritative action receipt for exactly one active plan, it can keep mechanical evidence bookkeeping out of the model loop. Set `TaskPlanOptions.AllowModelAdvancement = false` to remove `advance` from the model-visible `manage_task_plan` schema, then call `TaskPlanExtension.AdvanceAsync` after the matching input is durably committed. The API reuses the same evidence validator, plan revision, once-per-input guard, terminal retention, and session-store compare-and-swap as the model tool. It rejects pending or unknown inputs and never requires the host to parse extension-owned JSON. Leave model advancement enabled when selecting a plan or evidence receipt is itself a real high-level choice.
+
 ```csharp
 var plans = new TaskPlanExtension(
     async (request, cancellationToken) =>

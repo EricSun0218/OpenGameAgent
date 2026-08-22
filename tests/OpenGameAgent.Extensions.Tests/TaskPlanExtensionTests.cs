@@ -88,6 +88,78 @@ public sealed class TaskPlanExtensionTests
     }
 
     [Fact]
+    public async Task HostCanAdvanceFromOneCommittedInputWithoutExposingAdvanceToModel()
+    {
+        var store = new InMemoryGameSessionStore();
+        var extension = new TaskPlanExtension(
+            (request, _) => new ValueTask<bool>(request.Reference == "trusted-operation"),
+            new TaskPlanOptions { AllowModelAdvancement = false });
+        var createProvider = new ScriptedProvider(new[]
+        {
+            ToolCall(
+                "create",
+                "{\"action\":\"create\",\"planId\":\"host-owned\",\"objective\":\"verify\",\"steps\":[\"inspect\",\"conclude\"]}"),
+            TextResponse("created"),
+        });
+        await using (var runtime = new GameAgentBuilder(createProvider, "model")
+            .UseSessionStore(store)
+            .UseExtension(extension)
+            .Build())
+        {
+            var created = await runtime.RunAsync(Input("create"), TestContext.Current.CancellationToken);
+            Assert.True(created.Succeeded, created.Error ?? created.AgentResult?.Error);
+        }
+
+        var manage = Assert.Single(createProvider.Requests.First().Tools, tool => tool.Name == "manage_task_plan");
+        Assert.DoesNotContain("\"advance\"", manage.InputSchemaJson, StringComparison.Ordinal);
+        Assert.Contains("\"replace_remaining\"", manage.InputSchemaJson, StringComparison.Ordinal);
+
+        await RunAsync(
+            store,
+            extension,
+            Input("host-step"),
+            TextResponse("world action already committed"));
+        var advanced = await extension.AdvanceAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            Input("host-step"),
+            "host-owned",
+            expectedRevision: 1,
+            evidenceKind: "action_receipt",
+            evidenceReference: "trusted-operation",
+            TestContext.Current.CancellationToken);
+
+        Assert.True(advanced.Advanced);
+        Assert.Equal(GameTaskPlanAdvanceStatus.Advanced, advanced.Status);
+        Assert.Equal(2, advanced.Plan!.Revision);
+        Assert.Equal(
+            new[] { GameTaskPlanStepStatus.Completed, GameTaskPlanStepStatus.InProgress },
+            advanced.Plan.Steps.Select(step => step.Status).ToArray());
+
+        var duplicate = await extension.AdvanceAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            Input("host-step"),
+            "host-owned",
+            expectedRevision: 2,
+            evidenceKind: "action_receipt",
+            evidenceReference: "trusted-operation",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(GameTaskPlanAdvanceStatus.AlreadyAdvancedForInput, duplicate.Status);
+
+        var uncommitted = await extension.AdvanceAsync(
+            store,
+            new GameSessionKey("session", "actor"),
+            Input("future-input"),
+            "host-owned",
+            expectedRevision: 2,
+            evidenceKind: "action_receipt",
+            evidenceReference: "trusted-operation",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(GameTaskPlanAdvanceStatus.InputNotCommitted, uncommitted.Status);
+    }
+
+    [Fact]
     public async Task ReplaceRemainingPreservesCompletedPrefix()
     {
         var store = new InMemoryGameSessionStore();

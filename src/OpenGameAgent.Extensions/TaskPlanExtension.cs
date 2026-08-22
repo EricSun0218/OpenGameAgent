@@ -131,6 +131,42 @@ public sealed class GameTaskPlanQueryResult
     public IReadOnlyList<GameTaskPlanSnapshot> Plans { get; }
 }
 
+public enum GameTaskPlanAdvanceStatus
+{
+    Advanced,
+    SessionNotFound,
+    PlanNotFound,
+    RevisionConflict,
+    PlanNotActive,
+    InputNotCommitted,
+    AlreadyAdvancedForInput,
+    EvidenceRejected,
+    SessionConflict,
+}
+
+public sealed class GameTaskPlanAdvanceResult
+{
+    internal GameTaskPlanAdvanceResult(
+        GameTaskPlanAdvanceStatus status,
+        long sessionRevision,
+        GameTaskPlanSnapshot? plan)
+    {
+        Status = status;
+        SessionRevision = sessionRevision >= 0
+            ? sessionRevision
+            : throw new ArgumentOutOfRangeException(nameof(sessionRevision));
+        Plan = plan;
+    }
+
+    public GameTaskPlanAdvanceStatus Status { get; }
+
+    public bool Advanced => Status == GameTaskPlanAdvanceStatus.Advanced;
+
+    public long SessionRevision { get; }
+
+    public GameTaskPlanSnapshot? Plan { get; }
+}
+
 public sealed class GameTaskPlanEvidenceRequest
 {
     public GameTaskPlanEvidenceRequest(
@@ -182,6 +218,8 @@ public sealed class TaskPlanOptions
 
     public int MaximumStepsPerPlan { get; set; } = 32;
 
+    public bool AllowModelAdvancement { get; set; } = true;
+
     internal TaskPlanOptions CopyAndValidate()
     {
         var copy = (TaskPlanOptions)MemberwiseClone();
@@ -225,6 +263,10 @@ public sealed class TaskPlanExtension : IGameAgentExtension
           "additionalProperties":false
         }
         """;
+    private static readonly string ManageWithoutAdvanceSchema = ManageSchema.Replace(
+        "[\"create\",\"advance\",\"replace_remaining\"",
+        "[\"create\",\"replace_remaining\"",
+        StringComparison.Ordinal);
     private const string ListSchema = """
         {"type":"object","properties":{"includeTerminal":{"type":"boolean"}},"additionalProperties":false}
         """;
@@ -245,7 +287,7 @@ public sealed class TaskPlanExtension : IGameAgentExtension
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
         ExtensionId,
-        "1.1.0",
+        "1.2.0",
         "Persistent ordered task checklists with host-validated advancement and durable pause/resume.",
         new[] { "task-plan", "checklist", "pending-work", "evidence", "pause-resume" });
 
@@ -280,6 +322,142 @@ public sealed class TaskPlanExtension : IGameAgentExtension
             .OrderBy(plan => plan.Id, StringComparer.Ordinal)
             .ToArray();
         return new GameTaskPlanQueryResult(key, snapshot.Revision, plans);
+    }
+
+    public async ValueTask<GameTaskPlanAdvanceResult> AdvanceAsync(
+        IGameSessionStore sessionStore,
+        GameSessionKey session,
+        GameInput input,
+        string planId,
+        long expectedRevision,
+        string evidenceKind,
+        string evidenceReference,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionStore is null)
+        {
+            throw new ArgumentNullException(nameof(sessionStore));
+        }
+
+        if (input is null)
+        {
+            throw new ArgumentNullException(nameof(input));
+        }
+
+        if (string.IsNullOrWhiteSpace(planId) || planId.Length > 128)
+        {
+            throw new ArgumentException("A plan ID must contain 1 to 128 characters.", nameof(planId));
+        }
+
+        if (expectedRevision < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedRevision));
+        }
+
+        var key = new GameSessionKey(session.SessionId, session.ActorId);
+        if (!string.Equals(input.SessionId, key.SessionId, StringComparison.Ordinal)
+            || !string.Equals(input.ActorId, key.ActorId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The input must belong to the task-plan session.", nameof(input));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var snapshot = await sessionStore.LoadAsync(key, cancellationToken).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            return new GameTaskPlanAdvanceResult(GameTaskPlanAdvanceStatus.SessionNotFound, 0, null);
+        }
+
+        if (snapshot.PendingInputId is not null
+            || !snapshot.ProcessedInputIds.Contains(input.InputId, StringComparer.Ordinal))
+        {
+            return new GameTaskPlanAdvanceResult(
+                GameTaskPlanAdvanceStatus.InputNotCommitted,
+                snapshot.Revision,
+                null);
+        }
+
+        var extensionState = new Dictionary<string, string>(
+            StoredExtensionStateReader.Read(snapshot, ExtensionId),
+            StringComparer.Ordinal);
+        if (!extensionState.TryGetValue(PlanPrefix + planId, out var json))
+        {
+            return new GameTaskPlanAdvanceResult(
+                GameTaskPlanAdvanceStatus.PlanNotFound,
+                snapshot.Revision,
+                null);
+        }
+
+        var document = Decode(json, planId, _options.MaximumStepsPerPlan);
+        var advance = await AdvanceDocumentAsync(
+                input,
+                document,
+                expectedRevision,
+                evidenceKind,
+                evidenceReference,
+                () => NextTerminalSequence(extensionState),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (advance != GameTaskPlanAdvanceStatus.Advanced)
+        {
+            return new GameTaskPlanAdvanceResult(
+                advance,
+                snapshot.Revision,
+                new GameTaskPlanSnapshot(document));
+        }
+
+        document.Revision = checked(document.Revision + 1);
+        document.LastTimelineId = input.Moment.TimelineId;
+        document.LastTick = input.Moment.Tick;
+        ValidateDocument(document, planId, _options.MaximumStepsPerPlan);
+        extensionState[PlanPrefix + planId] = JsonSerializer.Serialize(document);
+        if (IsTerminal(document.Status))
+        {
+            PruneTerminalPlans(extensionState);
+        }
+
+        var storedState = new Dictionary<string, string>(snapshot.ExtensionState, StringComparer.Ordinal);
+        var storedPrefix = Uri.EscapeDataString(ExtensionId) + ":";
+        foreach (var storedKey in storedState.Keys
+                     .Where(candidate => candidate.StartsWith(storedPrefix, StringComparison.Ordinal))
+                     .ToArray())
+        {
+            storedState.Remove(storedKey);
+        }
+
+        foreach (var pair in extensionState)
+        {
+            storedState.Add(
+                storedPrefix + Uri.EscapeDataString(pair.Key),
+                pair.Value);
+        }
+
+        var next = new GameSessionSnapshot(
+            snapshot.Key,
+            checked(snapshot.Revision + 1),
+            snapshot.Messages,
+            snapshot.ProcessedInputIds,
+            snapshot.LastMoment,
+            storedState,
+            snapshot.PendingInputId,
+            snapshot.UsageLedger);
+        var save = await sessionStore.SaveAsync(next, snapshot.Revision, cancellationToken).ConfigureAwait(false);
+        if (!save.Saved)
+        {
+            var currentState = StoredExtensionStateReader.Read(save.Current, ExtensionId);
+            var currentPlan = currentState.TryGetValue(PlanPrefix + planId, out var currentJson)
+                ? new GameTaskPlanSnapshot(Decode(currentJson, planId, _options.MaximumStepsPerPlan))
+                : null;
+            return new GameTaskPlanAdvanceResult(
+                GameTaskPlanAdvanceStatus.SessionConflict,
+                save.Current.Revision,
+                currentPlan);
+        }
+
+        return new GameTaskPlanAdvanceResult(
+            GameTaskPlanAdvanceStatus.Advanced,
+            save.Current.Revision,
+            new GameTaskPlanSnapshot(document));
     }
 
     public void Configure(GameAgentExtensionApi api)
@@ -347,8 +525,10 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         new(
             new ToolDefinition(
                 "manage_task_plan",
-                "Create, advance, replan, pause, resume, fail, or cancel a persistent ordered checklist for the current actor session. Advancing the final step completes the plan.",
-                ManageSchema),
+                _options.AllowModelAdvancement
+                    ? "Create, advance, replan, pause, resume, fail, or cancel a persistent ordered checklist for the current actor session. Advancing the final step completes the plan."
+                    : "Create, replan, pause, resume, fail, or cancel a persistent ordered checklist for the current actor session. The host owns evidence advancement.",
+                _options.AllowModelAdvancement ? ManageSchema : ManageWithoutAdvanceSchema),
             async (arguments, _, cancellationToken) =>
             {
                 var action = arguments.GetProperty("action").GetString() ?? string.Empty;
@@ -439,11 +619,11 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                     switch (action)
                     {
                         case "advance":
-                            if (string.Equals(document.LastAdvancedInputId, context.Input.InputId, StringComparison.Ordinal))
+                            if (!_options.AllowModelAdvancement)
                             {
                                 return ToolResult.Error(
-                                    "A task plan may advance at most once per agent input.",
-                                    ToolFailureCategory.Conflict);
+                                    "The host owns evidence advancement for this task-plan extension.",
+                                    ToolFailureCategory.RuleRejected);
                             }
 
                             if (!arguments.TryGetProperty("evidence", out var evidenceElement))
@@ -453,32 +633,36 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                                     ToolFailureCategory.InvalidArguments);
                             }
 
-                            var current = document.Steps.Single(step => step.Status == GameTaskPlanStepStatus.InProgress);
-                            if (!await ValidateEvidenceAsync(
-                                context.Input,
-                                document,
-                                current,
-                                evidenceElement,
-                                cancellationToken).ConfigureAwait(false))
+                            var advance = await AdvanceDocumentAsync(
+                                    context.Input,
+                                    document,
+                                    document.Revision,
+                                    evidenceElement.GetProperty("kind").GetString() ?? string.Empty,
+                                    evidenceElement.GetProperty("reference").GetString() ?? string.Empty,
+                                    () => NextTerminalSequence(context.State),
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                            if (advance == GameTaskPlanAdvanceStatus.AlreadyAdvancedForInput)
+                            {
+                                return ToolResult.Error(
+                                    "A task plan may advance at most once per agent input.",
+                                    ToolFailureCategory.Conflict);
+                            }
+
+                            if (advance == GameTaskPlanAdvanceStatus.EvidenceRejected)
                             {
                                 return ToolResult.Error(
                                     "The host rejected the evidence for advancing this task plan.",
                                     ToolFailureCategory.RuleRejected);
                             }
 
-                            current.Status = GameTaskPlanStepStatus.Completed;
-                            var next = document.Steps.FirstOrDefault(step => step.Status == GameTaskPlanStepStatus.Pending);
-                            if (next is null)
+                            if (advance != GameTaskPlanAdvanceStatus.Advanced)
                             {
-                                document.Status = GameTaskPlanStatus.Completed;
-                                document.TerminalSequence = NextTerminalSequence(context.State);
-                            }
-                            else
-                            {
-                                next.Status = GameTaskPlanStepStatus.InProgress;
+                                return ToolResult.Error(
+                                    $"The task plan cannot advance ({advance}).",
+                                    ToolFailureCategory.Conflict);
                             }
 
-                            document.LastAdvancedInputId = context.Input.InputId;
                             break;
                         case "replace_remaining":
                             if (!arguments.TryGetProperty("steps", out var replacementElement))
@@ -603,24 +787,41 @@ public sealed class TaskPlanExtension : IGameAgentExtension
             },
             ToolRisk.ReadOnly);
 
-    private async ValueTask<bool> ValidateEvidenceAsync(
+    private async ValueTask<GameTaskPlanAdvanceStatus> AdvanceDocumentAsync(
         GameInput input,
         TaskPlanDocument document,
-        TaskPlanStepDocument current,
-        JsonElement evidence,
+        long expectedRevision,
+        string evidenceKind,
+        string evidenceReference,
+        Func<long> nextTerminalSequence,
         CancellationToken cancellationToken)
     {
-        var kind = evidence.GetProperty("kind").GetString() ?? string.Empty;
-        var reference = evidence.GetProperty("reference").GetString() ?? string.Empty;
+        if (document.Revision != expectedRevision)
+        {
+            return GameTaskPlanAdvanceStatus.RevisionConflict;
+        }
+
+        if (document.Status != GameTaskPlanStatus.Active)
+        {
+            return GameTaskPlanAdvanceStatus.PlanNotActive;
+        }
+
+        if (string.Equals(document.LastAdvancedInputId, input.InputId, StringComparison.Ordinal))
+        {
+            return GameTaskPlanAdvanceStatus.AlreadyAdvancedForInput;
+        }
+
+        var current = document.Steps.Single(step => step.Status == GameTaskPlanStepStatus.InProgress);
         var request = new GameTaskPlanEvidenceRequest(
             input,
             new GameTaskPlanSnapshot(document),
             new GameTaskPlanStepSnapshot(current),
-            kind,
-            reference);
+            evidenceKind,
+            evidenceReference);
+        bool accepted;
         try
         {
-            return await _evidenceValidator(request, cancellationToken).ConfigureAwait(false);
+            accepted = await _evidenceValidator(request, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -628,8 +829,28 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         }
         catch (Exception)
         {
-            return false;
+            accepted = false;
         }
+
+        if (!accepted)
+        {
+            return GameTaskPlanAdvanceStatus.EvidenceRejected;
+        }
+
+        current.Status = GameTaskPlanStepStatus.Completed;
+        var next = document.Steps.FirstOrDefault(step => step.Status == GameTaskPlanStepStatus.Pending);
+        if (next is null)
+        {
+            document.Status = GameTaskPlanStatus.Completed;
+            document.TerminalSequence = nextTerminalSequence();
+        }
+        else
+        {
+            next.Status = GameTaskPlanStepStatus.InProgress;
+        }
+
+        document.LastAdvancedInputId = input.InputId;
+        return GameTaskPlanAdvanceStatus.Advanced;
     }
 
     private static List<string> ReadSteps(JsonElement element) =>
@@ -666,9 +887,36 @@ public sealed class TaskPlanExtension : IGameAgentExtension
         return checked(maximum + 1);
     }
 
+    private long NextTerminalSequence(IReadOnlyDictionary<string, string> state)
+    {
+        var maximum = ReadAll(state, _options.MaximumStepsPerPlan)
+            .Where(plan => IsTerminal(plan.Status))
+            .Select(plan => plan.TerminalSequence)
+            .DefaultIfEmpty()
+            .Max();
+        return checked(maximum + 1);
+    }
+
     private void PruneTerminalPlans(GameAgentExtensionState state)
     {
         var expired = ReadAll(state)
+            .Where(plan => IsTerminal(plan.Status))
+            .OrderByDescending(plan => plan.TerminalSequence)
+            .ThenBy(plan => plan.Id, StringComparer.Ordinal)
+            .Skip(_options.MaximumRetainedTerminalPlans)
+            .ToArray();
+        foreach (var plan in expired)
+        {
+            state.Remove(PlanPrefix + plan.Id);
+        }
+    }
+
+    private void PruneTerminalPlans(IDictionary<string, string> state)
+    {
+        var expired = ReadAll(
+                new ReadOnlyDictionary<string, string>(
+                    new Dictionary<string, string>(state, StringComparer.Ordinal)),
+                _options.MaximumStepsPerPlan)
             .Where(plan => IsTerminal(plan.Status))
             .OrderByDescending(plan => plan.TerminalSequence)
             .ThenBy(plan => plan.Id, StringComparer.Ordinal)

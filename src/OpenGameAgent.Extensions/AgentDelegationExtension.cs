@@ -1060,6 +1060,19 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
         }
     }
 
+    private static void TryCancelHandle(IGameAgentDelegateHandle handle)
+    {
+        try
+        {
+            handle.TryCancel();
+        }
+        catch
+        {
+            // Cancellation is best-effort. The durable running record remains
+            // recoverable even when an executor refuses or fails to stop.
+        }
+    }
+
     private AgentTool CreateDelegateTool(GameAgentExtensionApi api, GameAgentExtensionRunContext context) =>
         new(
             new ToolDefinition(
@@ -1380,6 +1393,8 @@ public sealed class AgentDelegationExtension : IGameAgentExtension, IAsyncDispos
                 token => ValidateLeaseAsync(key, leaseId, token));
             using var handle = _executor.Start(executionRequest, cancellationToken)
                 ?? throw new InvalidOperationException("The delegate executor returned null.");
+            using var lifetimeCancellation = _lifetime.Token.Register(
+                () => TryCancelHandle(handle));
             if (!_active.TryAdd(key, handle))
             {
                 throw new InvalidOperationException($"Delegation '{request.Id}' is already active.");
