@@ -481,7 +481,8 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 .ConfigureAwait(false);
         ValidateCredential(apiKey, nameof(OpenAICompatibleProviderOptions.GetApiKeyAsync));
         ApplyHeaders(httpRequest, apiKey, request.SessionId);
-        httpRequest.Content = new ByteArrayContent(SerializeRequest(request));
+        var requestBody = SerializeRequest(request, out var requestFields);
+        httpRequest.Content = new ByteArrayContent(requestBody);
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json")
         {
             CharSet = "utf-8",
@@ -531,6 +532,8 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                             version = 1,
                             statusCode = (int)response.StatusCode,
                             category = ClassifyHttpFailure(response.StatusCode),
+                            requestFields,
+                            providerRequestId = ReadProviderRequestId(response),
                         })),
                 },
                 retry.IsTransient,
@@ -662,7 +665,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         }
     }
 
-    private byte[] SerializeRequest(ModelRequest request)
+    private byte[] SerializeRequest(ModelRequest request, out IReadOnlyList<string> requestFields)
     {
         EnsureRequestCanFit(request);
         var normalizedMessages = ProviderTranscript.Normalize(
@@ -724,6 +727,12 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         }
 
         MergeSamplingParameters(payload, request.Parameters.SamplingParametersJson);
+
+        requestFields = Array.AsReadOnly(payload.Keys
+            .Where(IsSafeRequestFieldName)
+            .OrderBy(field => field, StringComparer.Ordinal)
+            .Take(64)
+            .ToArray());
 
         var body = JsonSerializer.SerializeToUtf8Bytes(payload);
         if (body.Length > _maxRequestBytes)
@@ -921,7 +930,16 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 payload["thinking"] = hasEffort ? effort : "disabled";
                 break;
             default:
-                AddReasoningEffort(payload, effort);
+                // "off" and "disabled" are provider-neutral control values, not portable
+                // OpenAI reasoning_effort values. Known providers use an explicit thinking
+                // format above; an unconfigured compatible endpoint must not receive an
+                // invented value that can turn a bounded request into HTTP 400.
+                AddReasoningEffort(
+                    payload,
+                    string.Equals(effort, "off", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(effort, "disabled", StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : effort);
                 break;
         }
 
@@ -1017,6 +1035,36 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         {
             payload["reasoning_effort"] = effort;
         }
+    }
+
+    private static bool IsSafeRequestFieldName(string field) =>
+        field.Length is > 0 and <= 64
+        && field.All(character => character is >= 'a' and <= 'z'
+            or >= 'A' and <= 'Z'
+            or >= '0' and <= '9'
+            or '_' or '-' or '.');
+
+    private static string? ReadProviderRequestId(HttpResponseMessage response)
+    {
+        foreach (var name in new[] { "x-request-id", "request-id", "x-trace-id" })
+        {
+            if (!response.Headers.TryGetValues(name, out var values))
+            {
+                continue;
+            }
+
+            var value = values.FirstOrDefault();
+            if (value is { Length: > 0 and <= 256 }
+                && value.All(character => character is >= 'a' and <= 'z'
+                    or >= 'A' and <= 'Z'
+                    or >= '0' and <= '9'
+                    or '-' or '_' or '.' or ':' or '/'))
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private void ApplyPromptCache(IDictionary<string, object?> payload, ModelRequest request)

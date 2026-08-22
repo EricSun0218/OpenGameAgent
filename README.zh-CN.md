@@ -158,6 +158,8 @@ GameAgentRuntime
 
 `OpenGameAgent.Models.BuiltIn` 会把内置模型目录变成可直接执行的运行时。目前它通过 9 种线路协议分发 27 个提供方定义与数百个可执行文本/工具模型，并统一应用提供方请求格式、推理参数、兼容性、成本、认证、取消与响应限界。开发者也可以绕过目录，直接使用底层 Provider 包连接一个明确的模型和端点。
 
+对于已知的托管 Provider，路由分类与主 Agent 应共用目录驱动 Runtime。底层 OpenAI-compatible 适配器有意要求显式协议设置，不会根据 URL 或模型名猜测供应商。
+
 `OpenGameAgent.Models.Auth.BuiltIn` 为支持的订阅服务提供可选浏览器或设备授权。框架不会内嵌公共客户端注册信息：需要 Client ID 的流程只有在游戏开发者显式提供后才会启用。`OpenGameAgent.ProviderTransport` 只向观察器暴露白名单内且有界的响应元数据，不会把凭证或任意响应头交给追踪代码。
 
 图片、语音和视频生成使用独立的模型注册表，因为生成任务、渐进预览、轮询和输出并不是聊天补全。框架提供中立注册表、通用及专用 Provider，以及先物化并验证输出、再请求游戏权威导入的生成资产流水线。本地生成器、其他 API、内容审核与引擎导入器都可以替换，不需要修改 Agent 内核。详见[生成资产](docs/generated-assets.md)。

@@ -40,7 +40,10 @@ public sealed class RoutingProviderIntegrationTests
         Assert.Equal(GameRouteKind.QuickResponse, decision.Route);
         Assert.Equal("ordinary-question", decision.Reason);
         Assert.True(decision.Classification!.Selected);
-        Assert.DoesNotContain("\"tools\"", handler.RequestBody, StringComparison.Ordinal);
+        using var request = System.Text.Json.JsonDocument.Parse(handler.RequestBody);
+        Assert.Equal(128, request.RootElement.GetProperty("max_tokens").GetInt32());
+        Assert.False(request.RootElement.TryGetProperty("reasoning_effort", out _));
+        Assert.False(request.RootElement.TryGetProperty("tools", out _));
     }
 
     [Fact]
@@ -78,13 +81,15 @@ public sealed class RoutingProviderIntegrationTests
     [Fact]
     public async Task DeepSeekClassifierUsesOfficialBoundedShapeAndProjectsSafeHttpFailure()
     {
-        var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.BadRequest)
+        var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
         {
             Content = new StringContent(
                 "provider-body-secret prompt-body-secret",
                 Encoding.UTF8,
                 "text/plain"),
-        });
+        };
+        response.Headers.TryAddWithoutValidation("x-request-id", "req-safe-123");
+        var handler = new RecordingHandler(response);
         var options = Options(handler);
         options.Protocol.ThinkingFormat = OpenAICompatibleThinkingFormat.DeepSeek;
         options.Protocol.MaxTokensField = OpenAICompatibleMaxTokensField.MaxTokens;
@@ -100,6 +105,10 @@ public sealed class RoutingProviderIntegrationTests
         Assert.Equal(GameRouteClassificationFailure.Provider, decision.Classification!.Failure);
         Assert.Equal(400, decision.Classification.ProviderStatusCode);
         Assert.Equal("invalid-request", decision.Classification.ProviderFailureCategory);
+        Assert.Equal("req-safe-123", decision.Classification.ProviderRequestId);
+        Assert.Equal(
+            new[] { "max_tokens", "messages", "model", "stream", "stream_options", "temperature", "thinking" },
+            decision.Classification.ProviderRequestFields);
         using var request = System.Text.Json.JsonDocument.Parse(handler.RequestBody);
         Assert.Equal(128, request.RootElement.GetProperty("max_tokens").GetInt32());
         Assert.False(request.RootElement.TryGetProperty("max_completion_tokens", out _));

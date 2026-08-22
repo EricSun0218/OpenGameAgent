@@ -96,7 +96,9 @@ public sealed class GameRouteClassification
         long visibleContentCharacters = 0,
         long reasoningCharacters = 0,
         int? providerStatusCode = null,
-        string? providerFailureCategory = null)
+        string? providerFailureCategory = null,
+        IReadOnlyList<string>? providerRequestFields = null,
+        string? providerRequestId = null)
     {
         if (usedFallback != (fallbackReason is not null))
         {
@@ -135,6 +137,22 @@ public sealed class GameRouteClassification
         ProviderFailureCategory = providerFailureCategory is null
             ? null
             : GameJson.RequireId(providerFailureCategory, nameof(providerFailureCategory));
+        var fields = (providerRequestFields ?? Array.Empty<string>())
+            .Select(field => GameJson.RequireId(field, nameof(providerRequestFields)))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(field => field, StringComparer.Ordinal)
+            .ToArray();
+        if (fields.Length > 64)
+        {
+            throw new ArgumentException("Provider request diagnostics cannot contain more than 64 fields.", nameof(providerRequestFields));
+        }
+
+        ProviderRequestFields = Array.AsReadOnly(fields);
+        ProviderRequestId = providerRequestId is null
+            ? null
+            : IsSafeProviderRequestId(providerRequestId)
+                ? providerRequestId
+                : throw new ArgumentException("The provider request ID is not a safe bounded identifier.", nameof(providerRequestId));
     }
 
     public bool Selected => Failure is null && !UsedFallback;
@@ -163,12 +181,18 @@ public sealed class GameRouteClassification
 
     public string? ProviderFailureCategory { get; }
 
+    public IReadOnlyList<string> ProviderRequestFields { get; }
+
+    public string? ProviderRequestId { get; }
+
     internal static GameRouteClassification Success(ClassifierResponseShape shape = default) =>
         new(failure: null, responseContentKinds: shape.ContentKinds,
             visibleContentCharacters: shape.VisibleContentCharacters,
             reasoningCharacters: shape.ReasoningCharacters,
             providerStatusCode: shape.ProviderStatusCode,
-            providerFailureCategory: shape.ProviderFailureCategory);
+            providerFailureCategory: shape.ProviderFailureCategory,
+            providerRequestFields: shape.ProviderRequestFields,
+            providerRequestId: shape.ProviderRequestId);
 
     internal static GameRouteClassification Failed(
         GameRouteClassificationFailure failure,
@@ -177,13 +201,22 @@ public sealed class GameRouteClassification
             visibleContentCharacters: shape.VisibleContentCharacters,
             reasoningCharacters: shape.ReasoningCharacters,
             providerStatusCode: shape.ProviderStatusCode,
-            providerFailureCategory: shape.ProviderFailureCategory);
+            providerFailureCategory: shape.ProviderFailureCategory,
+            providerRequestFields: shape.ProviderRequestFields,
+            providerRequestId: shape.ProviderRequestId);
 
     internal GameRouteClassification WithFallback(string reason) =>
         new(Failure ?? GameRouteClassificationFailure.NoDecision, usedFallback: true,
             GameJson.RequireId(reason, nameof(reason)), ResponseContentKinds,
             VisibleContentCharacters, ReasoningCharacters,
-            ProviderStatusCode, ProviderFailureCategory);
+            ProviderStatusCode, ProviderFailureCategory, ProviderRequestFields, ProviderRequestId);
+
+    private static bool IsSafeProviderRequestId(string value) =>
+        value.Length is > 0 and <= 256
+        && value.All(character => character is >= 'a' and <= 'z'
+            or >= 'A' and <= 'Z'
+            or >= '0' and <= '9'
+            or '-' or '_' or '.' or ':' or '/');
 
     internal static string FailureName(GameRouteClassificationFailure failure) => failure switch
     {
@@ -205,13 +238,17 @@ internal readonly struct ClassifierResponseShape
         long visibleContentCharacters,
         long reasoningCharacters,
         int? providerStatusCode = null,
-        string? providerFailureCategory = null)
+        string? providerFailureCategory = null,
+        IReadOnlyList<string>? providerRequestFields = null,
+        string? providerRequestId = null)
     {
         ContentKinds = contentKinds ?? throw new ArgumentNullException(nameof(contentKinds));
         VisibleContentCharacters = visibleContentCharacters;
         ReasoningCharacters = reasoningCharacters;
         ProviderStatusCode = providerStatusCode;
         ProviderFailureCategory = providerFailureCategory;
+        ProviderRequestFields = providerRequestFields;
+        ProviderRequestId = providerRequestId;
     }
 
     public IReadOnlyList<AgentContentKind>? ContentKinds { get; }
@@ -223,6 +260,10 @@ internal readonly struct ClassifierResponseShape
     public int? ProviderStatusCode { get; }
 
     public string? ProviderFailureCategory { get; }
+
+    public IReadOnlyList<string>? ProviderRequestFields { get; }
+
+    public string? ProviderRequestId { get; }
 }
 
 public sealed class GameRouteContext
@@ -776,6 +817,8 @@ public sealed class ModelGameRouteClassifier
             reasoningCharacters = responseShape.ReasoningCharacters,
             providerStatusCode = responseShape.ProviderStatusCode,
             providerFailureCategory = responseShape.ProviderFailureCategory,
+            providerRequestFields = responseShape.ProviderRequestFields ?? Array.Empty<string>(),
+            providerRequestId = responseShape.ProviderRequestId,
             durationMilliseconds,
         });
 
@@ -802,10 +845,12 @@ public sealed class ModelGameRouteClassifier
             visibleCharacters,
             reasoningCharacters,
             providerFailure.StatusCode,
-            providerFailure.Category);
+            providerFailure.Category,
+            providerFailure.RequestFields,
+            providerFailure.RequestId);
     }
 
-    private static (int? StatusCode, string? Category) InspectProviderFailure(
+    private static (int? StatusCode, string? Category, IReadOnlyList<string> RequestFields, string? RequestId) InspectProviderFailure(
         IReadOnlyList<ModelDiagnostic> diagnostics)
     {
         for (var index = diagnostics.Count - 1; index >= 0; index--)
@@ -831,9 +876,16 @@ public sealed class ModelGameRouteClassifier
                                && IsSafeProviderCategory(parsedCategory)
                     ? parsedCategory
                     : null;
-                if (statusCode is not null || category is not null)
+                var requestFields = ReadSafeRequestFields(root);
+                var requestId = root.TryGetProperty("providerRequestId", out var requestIdElement)
+                                && requestIdElement.ValueKind == JsonValueKind.String
+                                && requestIdElement.GetString() is { } parsedRequestId
+                                && IsSafeProviderRequestId(parsedRequestId)
+                    ? parsedRequestId
+                    : null;
+                if (statusCode is not null || category is not null || requestFields.Count > 0 || requestId is not null)
                 {
-                    return (statusCode, category);
+                    return (statusCode, category, requestFields, requestId);
                 }
             }
             catch (JsonException)
@@ -842,8 +894,40 @@ public sealed class ModelGameRouteClassifier
             }
         }
 
-        return (null, null);
+        return (null, null, Array.Empty<string>(), null);
     }
+
+    private static IReadOnlyList<string> ReadSafeRequestFields(JsonElement root)
+    {
+        if (!root.TryGetProperty("requestFields", out var fieldsElement)
+            || fieldsElement.ValueKind != JsonValueKind.Array
+            || fieldsElement.GetArrayLength() > 64)
+        {
+            return Array.Empty<string>();
+        }
+
+        var fields = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var fieldElement in fieldsElement.EnumerateArray())
+        {
+            if (fieldElement.ValueKind != JsonValueKind.String
+                || fieldElement.GetString() is not { Length: > 0 and <= 64 } field
+                || !IsSafeProviderCategory(field))
+            {
+                return Array.Empty<string>();
+            }
+
+            fields.Add(field);
+        }
+
+        return Array.AsReadOnly(fields.ToArray());
+    }
+
+    private static bool IsSafeProviderRequestId(string value) =>
+        value.Length is > 0 and <= 256
+        && value.All(character => character is >= 'a' and <= 'z'
+            or >= 'A' and <= 'Z'
+            or >= '0' and <= '9'
+            or '-' or '_' or '.' or ':' or '/');
 
     private static bool IsSafeProviderCategory(string value) =>
         value.All(character => character is >= 'a' and <= 'z'

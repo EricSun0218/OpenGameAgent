@@ -1574,6 +1574,49 @@ public sealed class BuiltInGameModelRuntimeTests
     }
 
     [Fact]
+    public async Task BundledDeepSeekClassifierShapeDisablesThinkingWithoutInvalidEffort()
+    {
+        var handler = new RecordingHandler(BuiltInGameModelApis.OpenAiCompletions);
+        using var client = new HttpClient(handler);
+        var options = new BuiltInGameModelRuntimeOptions(client)
+        {
+            GetEnvironmentVariable = _ => null,
+        };
+        options.Authentications.Add(
+            "deepseek",
+            new StaticGameProviderAuthentication(
+                credential: new GameCredential(GameCredentialKind.ApiKey, "test-key")));
+        var runtime = new BuiltInGameModelRuntime(options);
+        var request = new ModelRequest(
+            "deepseek-v4-pro",
+            "classify",
+            Array.Empty<AgentMessage>(),
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters
+            {
+                Temperature = 0,
+                MaxOutputTokens = 128,
+                ReasoningLevel = "off",
+            },
+            "session",
+            "route",
+            1);
+
+        var events = await CollectAsync(runtime.CreateProvider("deepseek").StreamAsync(
+            request,
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(ModelStreamEventKind.Completed, Assert.Single(events, item => item.IsTerminal).Kind);
+        using var document = JsonDocument.Parse(handler.Body);
+        var root = document.RootElement;
+        Assert.Equal(128, root.GetProperty("max_tokens").GetInt32());
+        Assert.Equal("disabled", root.GetProperty("thinking").GetProperty("type").GetString());
+        Assert.False(root.TryGetProperty("max_completion_tokens", out _));
+        Assert.False(root.TryGetProperty("reasoning_effort", out _));
+        Assert.False(root.TryGetProperty("tools", out _));
+    }
+
+    [Fact]
     public async Task BundledXaiResponsesCompatibilityReachesTheWire()
     {
         var handler = new RecordingHandler(BuiltInGameModelApis.OpenAiResponses);

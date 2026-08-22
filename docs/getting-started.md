@@ -62,6 +62,8 @@ var runtime = new GameAgentRuntime(options);
 
 `GameAgentRuntimeOptions` is snapshotted by the constructor. Build a new runtime to deploy a different model, prompt, tool set, or limit policy.
 
+The snippet above is the explicit low-level path for an endpoint whose wire contract the host controls. `OpenAICompatibleProvider` cannot safely infer compatibility from an arbitrary model name or URL. For a known hosted provider such as DeepSeek, prefer the bundled model directory shown under **Choose models and credentials**; it applies the model's token field, thinking format, tool constraints, and other compatibility flags to both routing and main requests.
+
 For a composition that third-party packages can extend, use the one-shot builder:
 
 ```csharp
@@ -286,6 +288,28 @@ var selected = available.First();
 var provider = modelRuntime.CreateProvider("openai");
 var agent = new Agent(new AgentOptions(provider, selected.ModelId));
 ```
+
+For a protected DeepSeek key and trusted endpoint override, configure the existing directory-backed factory directly:
+
+```csharp
+var options = new BuiltInGameModelRuntimeOptions(httpClient)
+{
+    GetEnvironmentVariable = _ => null
+};
+options.Authentications["deepseek"] = new StaticGameProviderAuthentication(
+    credential: new GameCredential(GameCredentialKind.ApiKey, apiKey));
+options.ProviderConfigurations["deepseek"] = new GameModelProviderTransportConfiguration
+{
+    BaseUrl = trustedEndpoint
+};
+
+var models = new BuiltInGameModelRuntime(options);
+var provider = models.CreateProvider("deepseek");
+var classifier = new ModelGameRouteClassifier(provider, "deepseek-v4-pro");
+var runtimeOptions = new GameAgentRuntimeOptions(provider, "deepseek-v4-pro");
+```
+
+Use the same directory-backed provider and model for the classifier and runtime. Credentials stay inside the authentication boundary and are not placed in prompts, transcripts, traces, or provider diagnostics.
 
 Availability checks use the configured authentication chain, so a provider with no usable credentials is not presented as ready. A game may select by required input/output capability and reasoning level rather than taking the first result. Direct provider packages remain appropriate when a title intentionally supports only one endpoint.
 

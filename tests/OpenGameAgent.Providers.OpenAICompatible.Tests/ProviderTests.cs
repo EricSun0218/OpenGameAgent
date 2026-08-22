@@ -315,10 +315,16 @@ public sealed class ProviderTests
     [Fact]
     public async Task HttpFailureBecomesProviderFailureWithoutIncludingApiKey()
     {
-        var handler = new StubHandler(_ => Response(
-            HttpStatusCode.TooManyRequests,
-            "provider-body-secret prompt-body-secret",
-            "text/plain"));
+        var handler = new StubHandler(_ =>
+        {
+            var response = Response(
+                HttpStatusCode.TooManyRequests,
+                "provider-body-secret prompt-body-secret",
+                "text/plain");
+            response.Headers.TryAddWithoutValidation("x-request-id", "req-safe-123");
+            response.Headers.TryAddWithoutValidation("x-trace-id", "unsafe trace value");
+            return response;
+        });
         var options = new OpenAICompatibleProviderOptions(
             new HttpClient(handler),
             new Uri("https://example.test/v1/chat/completions"))
@@ -342,6 +348,13 @@ public sealed class ProviderTests
         using var data = JsonDocument.Parse(diagnostic.DataJson!);
         Assert.Equal(429, data.RootElement.GetProperty("statusCode").GetInt32());
         Assert.Equal("rate-limit", data.RootElement.GetProperty("category").GetString());
+        Assert.Equal("req-safe-123", data.RootElement.GetProperty("providerRequestId").GetString());
+        Assert.Equal(
+            new[] { "messages", "model", "stream", "stream_options" },
+            data.RootElement.GetProperty("requestFields").EnumerateArray().Select(value => value.GetString()).ToArray());
+        Assert.DoesNotContain("provider-body-secret", diagnostic.DataJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("prompt-body-secret", diagnostic.DataJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-expose", diagnostic.DataJson, StringComparison.Ordinal);
     }
 
     [Fact]
