@@ -2,17 +2,17 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/opengameagent-mark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/brand/opengameagent-mark-light.svg">
-    <img src="docs/brand/opengameagent-mark-light.svg" alt="OpenGameAgent OGA monogram" width="112">
+    <img src="docs/brand/opengameagent-mark-light.svg" alt="OpenGameAgent AI NPC Agent Runtime 标志" width="112">
   </picture>
 </p>
 
 <h1 align="center">OpenGameAgent</h1>
 
-<p align="center"><strong>面向 AI 原生游戏、自主 NPC 与互动世界的开源 Agent Runtime。</strong></p>
+<p align="center"><strong>让 NPC 和游戏内 Agent 真正理解环境、运行 ReAct 循环、拆解复杂任务并可靠行动。</strong></p>
 
-<p align="center"><a href="README.md">English</a></p>
+<p align="center"><a href="https://opengameagent.com">官网</a> · <a href="docs/getting-started.md">快速开始</a> · <a href="README.md">English</a></p>
 
-OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够观察结构化状态、制定计划、调用工具、检查权威结果、形成记忆并持续完成目标。它可以运行在 Godot、Unity、Unreal 原生客户端背后的 sidecar 或 .NET 服务端中，而每次状态变更仍由游戏代码裁决。同一权威边界现在也覆盖实时语音、持久图片观察、生成式媒体，以及可在崩溃后恢复的生成资产存档/世界导入。
+OpenGameAgent 是专门驱动游戏内 NPC 和 Agent 的开源 C# Runtime。它不是用来帮开发者编写游戏的 Agent，也不是一键生成游戏的工具。它让角色能够理解结构化世界状态，在 ReAct 循环中推理、调用工具并读取结果，把复杂目标拆成可持久化计划，再根据世界变化、执行结果、失败和玩家的新指令动态调整。所有状态变更仍由游戏代码裁决。
 
 <p align="center">
   <a href="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EricSun0218/OpenGameAgent/actions/workflows/ci.yml/badge.svg"></a>
@@ -20,23 +20,24 @@ OpenGameAgent 是一个紧凑、可修改的 C# Runtime，让游戏角色能够�
   <a href="CHANGELOG.md"><img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange.svg"></a>
 </p>
 
-OpenGameAgent 从小型、可组合的 Agent 内核出发。有状态核心会流式接收模型输出、执行经过校验的工具、在运行中接受 steering，并持续进行模型/工具循环直到任务结束。开发者既可以只使用内核，也可以叠加游戏 Runtime 获得游戏时间与可靠状态，再按需加入记忆、目标、宿主证据校验的任务清单、产物、委派、外部工具、结构化交互和工作流图等扩展。
+## OpenGameAgent 是什么？
 
-输入是有大小限制的 JSON，并可携带持久化图片观察，可以表示对话、战斗观察、模拟 Tick、UI 事件、计划、传感状态、截图或任意游戏数据，不要求是自然语言。项目不捆绑模型，同时支持云端和本地 API。
+OpenGameAgent 把模型从“对话接口”变成可编程的 NPC 或游戏内 Agent。开发者负责选择模型、提供结构化上下文、注册游戏工具和组合扩展；框架可以边执行边流式输出进度、工具调用和回复，也能在执行过程中调整指令或取消任务。紧凑内核可以单独使用，上层游戏 Runtime 则补齐会话、角色身份、游戏时间线、记忆、计划、多 NPC 调度、引擎线程交接和可靠动作回执。
 
-## 为游戏构建的可编程 Agent Runtime
+短任务可以直接运行完整的 ReAct 循环：观察当前状态，判断下一步，调用一个或多个工具，读取结构化结果，再决定继续行动还是回复。复杂任务可以拆成跨输入保存的目标与有序计划，等待游戏事件，保留已经完成的步骤，并在新证据使原方案失效时替换未完成部分。执行路径必须固定的场景，则使用确定性 Workflow。
 
-开发者可以选择模型、注册游戏自有工具、组合扩展、订阅流式事件、在运行中 steering，并让模型/工具循环持续执行到任务结束。内核本身可以作为通用 Agent Loop 单独使用。可选的游戏 Runtime 则增加互动模拟真正需要的坐标：会话与角色、游戏时间线与 Tick、结构化世界上下文、多 NPC 有界并发、持久记忆与任务、引擎主线程交接，以及可恢复的动作回执。这些能力通过类型化接口组合，不绑定某一种玩法、题材或世界数据模型。
+OpenGameAgent 可以放在 Godot 或 Unity 进程内，也可以运行在 Unreal Engine 原生客户端背后的 sidecar、.NET 游戏服务端或独立 Agent 服务中。输入是有明确大小限制的 JSON，并可携带持久化图片观察，因此既能表示对话，也能表示战斗状态、模拟 Tick、UI 事件、传感数据、截图或任何游戏自有上下文；输入不必是自然语言。框架不内置模型，同时支持云端和本地 API。
 
-## 不止对话：观察、决策、行动并持续推进
+## 从一句回复，到推理、规划和行动
 
-仅对话角色接收一段提示词，然后返回一句对话。Agent 驱动的角色接收目标和当前环境，选择工具、执行工作、观察结果，并持续行动直到得到明确结果。在 OpenGameAgent 中，这些工具就是普通的游戏业务能力：移动、观察、交易、建造、安排日程、招募、调查，或开发者允许角色使用的任何操作。
+普通对话角色收到提示词后只生成下一句话。真正的游戏内 Agent 会读取目标和环境，判断下一步，调用开发者开放的工具，核对游戏返回的权威结果，再据此调整方案。移动、观察、交易、建造、安排日程、招募、调查，都只是游戏可以注册给 Agent 的普通业务工具。
 
 | 仅对话角色 | Agent 驱动角色 |
 | --- | --- |
 | 主要读取最近的对话 | 观察有界 JSON，其中可以包含对话、世界状态、事件、UI 输入、传感数据或模拟 Tick |
 | 生成下一句文本 | 流式生成文本和类型化工具调用，并读取结构化工具结果 |
-| 一次模型回复后结束 | 可以“观察 → 决策 → 行动 → 检查结果 → 继续”，跨多轮完成任务 |
+| 一次模型回复后结束 | 在模型回复、工具调用与结构化结果之间运行有界 ReAct 循环 |
+| 没有可靠的任务结构 | 可以把复杂目标拆成持久步骤，并在环境变化时重新规划未完成部分 |
 | 把生成文本本身当作结果 | 只提出动作请求，由游戏代码校验权限、规则、版本和状态变更 |
 | 通常依赖现实时间与聊天记录 | 可以使用游戏时间、时间线、存档/会话身份、角色身份和作用域记忆 |
 | 一次处理一段对话 | 同一角色串行，不同 NPC 之间有界并发 |
@@ -44,7 +45,7 @@ OpenGameAgent 从小型、可组合的 Agent 内核出发。有状态核心会�
 
 OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的工具行动，模型不能直接控制游戏状态；所有状态变更始终由游戏裁决。
 
-也不是每次互动都必须运行完整 Agent Loop。问候等简单输入可以走快速回复路由，开放式任务使用完整循环，需要固定执行图的场景则可以使用确定性 Workflow。
+不是每次互动都需要完整循环。问候和事实回答可以走无副作用的 Quick 路由；需要少量工具的短任务走 Agent 路由；复杂任务再升级为持久计划；执行图固定的流程则交给确定性 Workflow。
 
 > 当前源码预发布版本：`0.3.0-alpha.4`。在 `1.0` 前公开 API 仍可能调整；正式游戏应锁定不可变 tag 或精确源码提交。
 
@@ -78,7 +79,7 @@ https://github.com/EricSun0218/OpenGameAgent.git#upm/0.3.0-alpha.4
 
 请根据游戏项目的位置调整相对路径，并删除没有使用的可选项目引用。内核、持久化、模型提供方、记忆、图片附件、插件和引擎兼容客户端也分别提供 `OpenGameAgent.*` Release 产物。接入游戏前请阅读[快速开始](docs/getting-started.md)和[引擎接入](docs/engine-integration.md)。
 
-## 为什么要做游戏专用层
+## 为什么 NPC Agent 需要游戏专用 Runtime？
 
 通用 Agent 往往默认单用户、现实时间和线性对话。游戏却可能拥有多条时间线、存档分支、成千上万个角色、离线时间跳跃、引擎主线程限制，以及不能在故障后盲目重试的状态变更。
 
@@ -112,7 +113,7 @@ Runtime **不会**判断攻击是否合法、物品能否使用、资源够不�
 ## 架构
 
 ```text
-Godot / Unity / Unreal sidecar / .NET 游戏服务
+Godot / Unity / Unreal Engine sidecar / .NET 游戏服务
         |
         | GameInput（JSON + GameMoment）
         v
@@ -120,7 +121,7 @@ GameAgentRuntime
   上下文 | Skills | 路由 | 会话 | 角色队列 | 扩展
         |
         v
-小型有状态 Agent 内核 <---- steering / follow-up
+紧凑的有状态 Agent 内核 <---- 调整指令 / 追加输入
   模型流 -> 工具调用 -> 工具结果 -> 下一轮
         |                         |
         |                         v
@@ -136,13 +137,13 @@ GameAgentRuntime
 
 | 模块 | 能力 |
 | --- | --- |
-| Agent 内核 | 流式类型化消息、工具循环、类型化工具中间结果、steering、follow-up、hooks、取消、严格会话校验、提供方错误结果化 |
+| Agent 内核 | 有界 ReAct 模型/工具循环、流式类型化消息、工具中间结果、执行中调整指令、追加输入、Hooks、取消、严格会话校验、提供方错误结果化 |
 | 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、顺序屏障前后的有序并行分段、冲突键串行、精确重复循环保护、策略拦截/终止、宿主证明的显式/任务范围、持久一次性批准、超时与写入结果未知语义 |
 | 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、auto/quick/direct/plan/Workflow 路由、共享单次输入用量预算、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
 | 实时对话 | 有界 PCM16 流、实时转写/音频事件、字幕时间、插话取消/截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
-| 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派、追踪和可持久并行工作流图 |
+| 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持动态重规划与持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派、追踪和可持久并行工作流图 |
 | 开发工具 | 有界 JSONL 轨迹、命名上下文 Provider 与记忆召回分段耗时、Provider/框架/宿主归因、工具失败与 durable write 指标、并发 Benchmark runtime、本地仅观察 HTML 回放和离线/CI 评测规则 |
 | 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
@@ -151,7 +152,7 @@ GameAgentRuntime
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；中立 Provider 一致性 runner 与 fixture；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览、OpenAI Images、火山方舟/Seedream，以及可选的 LocalAI 与可信 ComfyUI Workflow 适配器 |
 | 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
-| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、支持旧扁平布局迁移的 session/owner 分区记忆、邮箱、产物、委派、Skills 与提示词模板 |
+| 持久化 | 崩溃安全的本地会话快照、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、支持旧扁平布局迁移的 session/owner 分区记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、单次快照权威核验、分区可重建本地向量索引、词法/向量混合召回、无正文分段指标与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端以及 C#、原生 C++ 客户端 |
 | Runtime 协议 | 可选的版本化 Session/Run/Turn/Item 契约、能力协商、稳定事件 ID、有界重放与 gap 对账、精确 Run/Turn 控制、C# 客户端、Schema/fixture、C++ DTO，以及生成的 TypeScript/Python 客户端和 reducer |
@@ -272,9 +273,9 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [执行路由与性能](docs/execution-routing-and-performance.zh-CN.md)
 - [轨迹、回放与离线评测](docs/devtools.md)
 
-## 项目边界
+## OpenGameAgent 提供什么？
 
-这是面向开发者的框架，不是通用人物卡、战斗系统、世界包格式、可视化编辑器或 C 端游戏。具体玩法属于每一个游戏。框架提供构建对话角色、自主伙伴、社会模拟、AI 导演、动态任务与道具、策略 Agent、建造 Agent 和持续互动世界所需的 Agent Loop 与游戏原语。
+这是驱动游戏内 Agent 的 Runtime 框架，不是替开发者编写游戏的编程 Agent。它也不规定通用人物卡、战斗系统、世界包格式、可视化编辑器或最终游戏；这些都属于具体项目。OpenGameAgent 提供推理循环与游戏执行原语，可用于构建对话 NPC、自主伙伴、社会模拟、AI 导演、动态任务与道具、策略 Agent、建造 Agent 和互动世界。
 
 ## 署名
 
