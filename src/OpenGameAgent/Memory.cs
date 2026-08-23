@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -234,6 +235,133 @@ public interface IGameMemoryStore
     ValueTask<IReadOnlyList<GameMemory>> SearchAsync(GameMemoryQuery query, CancellationToken cancellationToken);
 }
 
+public enum GameMemorySearchStageKind
+{
+    StorageMigration,
+    AuthoritativeSnapshot,
+    LexicalSearch,
+    VectorIndexRead,
+    Embedding,
+    VectorScoring,
+    Rerank,
+}
+
+/// <summary>
+/// Bounded operational metadata for one memory-search stage. It intentionally
+/// contains no query text, memory content, identifiers, or provider secrets.
+/// </summary>
+public sealed class GameMemorySearchStageMetric
+{
+    public GameMemorySearchStageMetric(
+        GameMemorySearchStageKind stage,
+        TimeSpan duration,
+        int scannedCount = 0,
+        int candidateCount = 0,
+        bool reused = false)
+    {
+        if (!Enum.IsDefined(typeof(GameMemorySearchStageKind), stage))
+        {
+            throw new ArgumentOutOfRangeException(nameof(stage));
+        }
+
+        if (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration));
+        }
+
+        if (scannedCount < 0 || scannedCount > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(scannedCount));
+        }
+
+        if (candidateCount < 0 || candidateCount > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(candidateCount));
+        }
+
+        Stage = stage;
+        Duration = duration;
+        ScannedCount = scannedCount;
+        CandidateCount = candidateCount;
+        Reused = reused;
+    }
+
+    public GameMemorySearchStageKind Stage { get; }
+
+    public TimeSpan Duration { get; }
+
+    public int ScannedCount { get; }
+
+    public int CandidateCount { get; }
+
+    public bool Reused { get; }
+}
+
+/// <summary>
+/// A query result coupled to the exact authoritative identity partition used
+/// to produce it. Wrappers such as vector recall can validate derived records
+/// against this snapshot without reading the authoritative store a second time.
+/// </summary>
+public sealed class GameMemorySearchSnapshot
+{
+    public GameMemorySearchSnapshot(
+        IReadOnlyList<GameMemory> memories,
+        IReadOnlyList<GameMemory> authoritativeMemories,
+        IReadOnlyList<GameMemorySearchStageMetric>? stages = null)
+    {
+        Memories = CopyMemories(memories, nameof(memories));
+        AuthoritativeMemories = CopyMemories(authoritativeMemories, nameof(authoritativeMemories));
+        var copiedStages = (stages ?? Array.Empty<GameMemorySearchStageMetric>()).ToArray();
+        if (copiedStages.Length > 64 || copiedStages.Any(value => value is null))
+        {
+            throw new ArgumentException("A memory search snapshot contains invalid stage metrics.", nameof(stages));
+        }
+
+        Stages = Array.AsReadOnly(copiedStages);
+    }
+
+    public IReadOnlyList<GameMemory> Memories { get; }
+
+    public IReadOnlyList<GameMemory> AuthoritativeMemories { get; }
+
+    public IReadOnlyList<GameMemorySearchStageMetric> Stages { get; }
+
+    private static IReadOnlyList<GameMemory> CopyMemories(IReadOnlyList<GameMemory> values, string name)
+    {
+        var copy = (values ?? throw new ArgumentNullException(name)).ToArray();
+        if (copy.Length > 1_000_000 || copy.Any(value => value is null))
+        {
+            throw new ArgumentException("A memory search snapshot contains invalid memories.", name);
+        }
+
+        return Array.AsReadOnly(copy);
+    }
+}
+
+/// <summary>
+/// Optional store capability for returning search results and the exact
+/// authoritative session/owner partition in one bounded read.
+/// </summary>
+public interface IGameMemorySearchSnapshotSource
+{
+    ValueTask<GameMemorySearchSnapshot> SearchSnapshotAsync(
+        GameMemoryQuery query,
+        int maximumSnapshotEntries,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Optional owner-partition snapshot capability used when callers already
+/// possess an owner-scoped authorization decision.
+/// </summary>
+public interface IGameMemoryPartitionSnapshotSource
+{
+    IAsyncEnumerable<GameMemory> EnumerateAsync(
+        string sessionId,
+        string ownerId,
+        CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Provides a deterministic, authoritative memory snapshot for rebuilding
 /// optional derived indexes. Implementations must not return memories from a
@@ -386,7 +514,11 @@ public sealed class RankedGameMemoryStore : IGameMemoryStore
     }
 }
 
-public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnapshotSource
+public sealed class InMemoryGameMemoryStore :
+    IGameMemoryStore,
+    IGameMemorySnapshotSource,
+    IGameMemoryPartitionSnapshotSource,
+    IGameMemorySearchSnapshotSource
 {
     private readonly object _gate = new();
     private readonly Dictionary<(string SessionId, string OwnerId, string MemoryId), GameMemory> _memories = new();
@@ -434,8 +566,17 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnaps
         return default;
     }
 
-    public ValueTask<IReadOnlyList<GameMemory>> SearchAsync(
+    public async ValueTask<IReadOnlyList<GameMemory>> SearchAsync(
         GameMemoryQuery query,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await SearchSnapshotAsync(query, _capacity, cancellationToken).ConfigureAwait(false);
+        return snapshot.Memories;
+    }
+
+    public ValueTask<GameMemorySearchSnapshot> SearchSnapshotAsync(
+        GameMemoryQuery query,
+        int maximumSnapshotEntries,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -444,18 +585,40 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnaps
             throw new ArgumentNullException(nameof(query));
         }
 
+        if (maximumSnapshotEntries < 1 || maximumSnapshotEntries > 1_000_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumSnapshotEntries));
+        }
+
+        maximumSnapshotEntries = Math.Min(maximumSnapshotEntries, _capacity);
+
+        var snapshotStartedAt = Stopwatch.GetTimestamp();
         GameMemory[] snapshot;
         lock (_gate)
         {
-            snapshot = _memories.Values.ToArray();
+            snapshot = _memories.Values
+                .Where(memory => string.Equals(memory.SessionId, query.SessionId, StringComparison.Ordinal))
+                .Where(memory => query.OwnerId is null || string.Equals(memory.OwnerId, query.OwnerId, StringComparison.Ordinal))
+                .OrderBy(memory => memory.OwnerId, StringComparer.Ordinal)
+                .ThenBy(memory => memory.MemoryId, StringComparer.Ordinal)
+                .Take(maximumSnapshotEntries + 1)
+                .ToArray();
         }
+
+        if (snapshot.Length > maximumSnapshotEntries)
+        {
+            throw new GameRuntimeLimitException(
+                nameof(maximumSnapshotEntries),
+                "The authoritative memory partition exceeded the requested snapshot bound.");
+        }
+
+        var snapshotDuration = Elapsed(snapshotStartedAt);
+        var lexicalStartedAt = Stopwatch.GetTimestamp();
 
         var scopes = new HashSet<string>(query.Scopes, StringComparer.Ordinal);
         var kinds = new HashSet<GameMemoryKind>(query.Kinds);
         var tags = new HashSet<string>(query.Tags, StringComparer.Ordinal);
         var visible = snapshot
-            .Where(memory => string.Equals(memory.SessionId, query.SessionId, StringComparison.Ordinal))
-            .Where(memory => query.OwnerId is null || string.Equals(memory.OwnerId, query.OwnerId, StringComparison.Ordinal))
             .Where(memory => scopes.Count == 0 || scopes.Contains(memory.Scope))
             .Where(memory => kinds.Count == 0 || kinds.Contains(memory.Kind))
             .Where(memory => tags.Count == 0 || tags.All(tag => memory.Tags.Contains(tag, StringComparer.Ordinal)))
@@ -470,7 +633,23 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnaps
             .Select(candidate => candidate.Memory)
             .ToArray();
 
-        return new ValueTask<IReadOnlyList<GameMemory>>(Array.AsReadOnly(candidates));
+        var result = new GameMemorySearchSnapshot(
+            candidates,
+            snapshot,
+            new[]
+            {
+                new GameMemorySearchStageMetric(
+                    GameMemorySearchStageKind.AuthoritativeSnapshot,
+                    snapshotDuration,
+                    snapshot.Length,
+                    snapshot.Length),
+                new GameMemorySearchStageMetric(
+                    GameMemorySearchStageKind.LexicalSearch,
+                    Elapsed(lexicalStartedAt),
+                    snapshot.Length,
+                    candidates.Length),
+            });
+        return new ValueTask<GameMemorySearchSnapshot>(result);
     }
 
     public async IAsyncEnumerable<GameMemory> EnumerateAsync(
@@ -485,6 +664,31 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnaps
                 .Where(memory => string.Equals(memory.SessionId, sessionId, StringComparison.Ordinal))
                 .OrderBy(memory => memory.OwnerId, StringComparer.Ordinal)
                 .ThenBy(memory => memory.MemoryId, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        foreach (var memory in snapshot)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return memory;
+            await Task.Yield();
+        }
+    }
+
+    public async IAsyncEnumerable<GameMemory> EnumerateAsync(
+        string sessionId,
+        string ownerId,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        sessionId = GameJson.RequireId(sessionId, nameof(sessionId));
+        ownerId = GameJson.RequireId(ownerId, nameof(ownerId));
+        GameMemory[] snapshot;
+        lock (_gate)
+        {
+            snapshot = _memories.Values
+                .Where(memory => string.Equals(memory.SessionId, sessionId, StringComparison.Ordinal)
+                                 && string.Equals(memory.OwnerId, ownerId, StringComparison.Ordinal))
+                .OrderBy(memory => memory.MemoryId, StringComparer.Ordinal)
                 .ToArray();
         }
 
@@ -675,4 +879,10 @@ public sealed class InMemoryGameMemoryStore : IGameMemoryStore, IGameMemorySnaps
         && left.ExpiresAt == right.ExpiresAt
         && left.Metadata.OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .SequenceEqual(right.Metadata.OrderBy(pair => pair.Key, StringComparer.Ordinal));
+
+    private static TimeSpan Elapsed(long startedAt)
+    {
+        var ticks = checked(Stopwatch.GetTimestamp() - startedAt);
+        return TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
+    }
 }

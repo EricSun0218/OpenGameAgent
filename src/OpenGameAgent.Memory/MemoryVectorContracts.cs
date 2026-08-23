@@ -192,6 +192,19 @@ public interface IVectorMemoryIndex
         CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Optional owner-partition read capability. Implementations must return only
+/// entries matching both identities and preserve the same bounds as ListAsync.
+/// </summary>
+public interface IVectorMemoryPartitionIndex
+{
+    ValueTask<IReadOnlyList<VectorMemoryIndexEntry>> ListAsync(
+        string sessionId,
+        string ownerId,
+        int maximumEntries,
+        CancellationToken cancellationToken);
+}
+
 public enum MemoryVectorDiagnosticSeverity
 {
     Information,

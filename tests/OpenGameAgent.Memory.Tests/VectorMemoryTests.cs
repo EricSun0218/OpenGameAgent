@@ -264,7 +264,7 @@ public sealed class VectorMemoryTests
             var file = Assert.Single(Directory.GetFiles(indexPath, "*.vector-memory.json"));
             await File.WriteAllTextAsync(file, "{broken", TestCancellation);
 
-            await Assert.ThrowsAsync<JsonException>(async () =>
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
                 await new FileVectorMemoryIndex(indexPath).ListAsync("session", 100, TestCancellation));
             Assert.Equal("safe", Assert.Single(await authoritative.SearchAsync(Query("orchard"), TestCancellation)).MemoryId);
         }
@@ -309,6 +309,128 @@ public sealed class VectorMemoryTests
         }
 
         Assert.Equal(new[] { "a", "b" }, items.Select(item => item.MemoryId));
+    }
+
+    [Fact]
+    public async Task HybridSearchReusesOneAuthoritativeSnapshotAndReportsEveryStage()
+    {
+        var authoritative = new RecordingSnapshotStore();
+        await using var store = new VectorMemoryStore(
+            authoritative,
+            new InMemoryVectorMemoryIndex(),
+            new TestEmbeddingProvider(version: "1"),
+            reranker: new GameAwareMemoryReranker());
+        await store.AppendAsync(Memory("one", "feline archive"), TestCancellation);
+        await store.AppendAsync(Memory("two", "orchard ledger"), TestCancellation);
+        authoritative.ResetCounters();
+
+        var snapshot = await store.SearchSnapshotAsync(Query("cat"), 100, TestCancellation);
+
+        Assert.Contains(snapshot.Memories, memory => memory.MemoryId == "one");
+        Assert.Equal(1, authoritative.SearchSnapshotCalls);
+        Assert.Equal(0, authoritative.SearchCalls);
+        Assert.Equal(0, authoritative.EnumerateCalls);
+        var authoritativeStage = Assert.Single(
+            snapshot.Stages,
+            stage => stage.Stage == GameMemorySearchStageKind.AuthoritativeSnapshot);
+        Assert.True(authoritativeStage.Reused);
+        Assert.Contains(snapshot.Stages, stage => stage.Stage == GameMemorySearchStageKind.LexicalSearch);
+        Assert.Contains(snapshot.Stages, stage => stage.Stage == GameMemorySearchStageKind.Embedding);
+        Assert.Contains(snapshot.Stages, stage => stage.Stage == GameMemorySearchStageKind.VectorIndexRead);
+        Assert.Contains(snapshot.Stages, stage => stage.Stage == GameMemorySearchStageKind.VectorScoring);
+        Assert.Contains(snapshot.Stages, stage => stage.Stage == GameMemorySearchStageKind.Rerank);
+    }
+
+    [Fact]
+    public async Task FileVectorIndexMigratesLegacyFlatFilesAndRestartsWithOwnerPartitions()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var index = new FileVectorMemoryIndex(root, capacity: 100);
+            var identity = new MemoryEmbeddingIdentity("local", "test", "1", 2);
+            await index.UpsertAsync(
+                new VectorMemoryIndexEntry(Memory("one", "alpha", owner: "owner-a"), identity, new float[] { 1, 0 }),
+                TestCancellation);
+            await index.UpsertAsync(
+                new VectorMemoryIndexEntry(Memory("two", "beta", owner: "owner-b"), identity, new float[] { 0, 1 }),
+                TestCancellation);
+
+            Directory.Delete(Path.Combine(root, ".vector-partitions-v2"), recursive: true);
+            var migrated = new FileVectorMemoryIndex(root, capacity: 100);
+            Assert.Equal(2, await migrated.MigrateLegacyIndexAsync(TestCancellation));
+            Assert.Equal(
+                "one",
+                Assert.Single(await migrated.ListAsync("session", "owner-a", 100, TestCancellation)).Memory.MemoryId);
+
+            var restarted = new FileVectorMemoryIndex(root, capacity: 100);
+            Assert.Equal(
+                "two",
+                Assert.Single(await restarted.ListAsync("session", "owner-b", 100, TestCancellation)).Memory.MemoryId);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FileVectorOwnerLookupDoesNotReadAnUnrelatedCorruptPartition()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var index = new FileVectorMemoryIndex(root, capacity: 100);
+            var identity = new MemoryEmbeddingIdentity("local", "test", "1", 2);
+            await index.UpsertAsync(
+                new VectorMemoryIndexEntry(Memory("target", "alpha", owner: "target"), identity, new float[] { 1, 0 }),
+                TestCancellation);
+            await index.UpsertAsync(
+                new VectorMemoryIndexEntry(Memory("unrelated", "beta", owner: "unrelated"), identity, new float[] { 0, 1 }),
+                TestCancellation);
+            var unrelatedPath = Directory.GetFiles(root, "*.vector-memory.json", SearchOption.TopDirectoryOnly)
+                .Single(path => File.ReadAllText(path).Contains("unrelated", StringComparison.Ordinal));
+            await File.WriteAllTextAsync(unrelatedPath, "{broken", TestCancellation);
+
+            var restarted = new FileVectorMemoryIndex(root, capacity: 100);
+            Assert.Equal(
+                "target",
+                Assert.Single(await restarted.ListAsync("session", "target", 100, TestCancellation)).Memory.MemoryId);
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await restarted.ListAsync("session", 100, TestCancellation));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentFileVectorWritersRemainBoundedAndRestartable()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var first = new FileVectorMemoryIndex(root, capacity: 100);
+            var second = new FileVectorMemoryIndex(root, capacity: 100);
+            var identity = new MemoryEmbeddingIdentity("local", "test", "1", 2);
+            await Task.WhenAll(Enumerable.Range(0, 40).Select(index =>
+                (index % 2 == 0 ? first : second).UpsertAsync(
+                        new VectorMemoryIndexEntry(
+                            Memory("memory-" + index, "value", owner: "owner"),
+                            identity,
+                            new float[] { 1, 0 }),
+                        TestCancellation)
+                    .AsTask()));
+
+            var restarted = new FileVectorMemoryIndex(root, capacity: 100);
+            Assert.Equal(40, (await restarted.ListAsync("session", "owner", 100, TestCancellation)).Count);
+            Assert.Equal(40, await restarted.MigrateLegacyIndexAsync(TestCancellation));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -378,6 +500,71 @@ public sealed class VectorMemoryTests
             cancellationToken.ThrowIfCancellationRequested();
             Items.Add(diagnostic);
             return default;
+        }
+    }
+
+    private sealed class RecordingSnapshotStore :
+        IGameMemoryStore,
+        IGameMemorySnapshotSource,
+        IGameMemoryPartitionSnapshotSource,
+        IGameMemorySearchSnapshotSource
+    {
+        private readonly InMemoryGameMemoryStore _inner = new();
+
+        public int SearchCalls { get; private set; }
+
+        public int SearchSnapshotCalls { get; private set; }
+
+        public int EnumerateCalls { get; private set; }
+
+        public ValueTask AppendAsync(GameMemory memory, CancellationToken cancellationToken) =>
+            _inner.AppendAsync(memory, cancellationToken);
+
+        public async ValueTask<IReadOnlyList<GameMemory>> SearchAsync(
+            GameMemoryQuery query,
+            CancellationToken cancellationToken)
+        {
+            SearchCalls++;
+            return await _inner.SearchAsync(query, cancellationToken);
+        }
+
+        public async ValueTask<GameMemorySearchSnapshot> SearchSnapshotAsync(
+            GameMemoryQuery query,
+            int maximumSnapshotEntries,
+            CancellationToken cancellationToken)
+        {
+            SearchSnapshotCalls++;
+            return await _inner.SearchSnapshotAsync(query, maximumSnapshotEntries, cancellationToken);
+        }
+
+        public async IAsyncEnumerable<GameMemory> EnumerateAsync(
+            string sessionId,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            EnumerateCalls++;
+            await foreach (var memory in _inner.EnumerateAsync(sessionId, cancellationToken))
+            {
+                yield return memory;
+            }
+        }
+
+        public async IAsyncEnumerable<GameMemory> EnumerateAsync(
+            string sessionId,
+            string ownerId,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            EnumerateCalls++;
+            await foreach (var memory in _inner.EnumerateAsync(sessionId, ownerId, cancellationToken))
+            {
+                yield return memory;
+            }
+        }
+
+        public void ResetCounters()
+        {
+            SearchCalls = 0;
+            SearchSnapshotCalls = 0;
+            EnumerateCalls = 0;
         }
     }
 

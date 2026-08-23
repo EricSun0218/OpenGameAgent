@@ -83,9 +83,11 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Execute on an engine-owned main thread | wrap the authoritative `IGameActionHandler` in `QueuedGameActionHandler`, then call `Pump` from the engine thread |
 | Store long-term NPC facts/events | `IGameMemoryStore`, `GameMemory` |
 | Apply custom semantic ranking | `IGameMemoryRanker`, `RankedGameMemoryStore` |
-| Add local or remote vector embeddings and hybrid recall | `IMemoryEmbeddingProvider`, `VectorMemoryStore` |
+| Add local or remote vector embeddings and single-snapshot hybrid recall | `IMemoryEmbeddingProvider`, `IGameMemorySearchSnapshotSource`, `VectorMemoryStore` |
 | Run BGE-M3 INT8 embeddings in-process without Python or a model service | `BgeM3OnnxEmbeddingProvider` (`OpenGameAgent.Memory.Onnx`) |
 | Inspect or explicitly rebuild vectors after a model change | `RuntimeMemoryLifecycle`, `VectorMemoryStatus` |
+| Migrate flat memory/vector files into bounded session/owner partitions | `FileGameMemoryStore.MigrateLegacyLayoutAsync`, `FileVectorMemoryIndex.MigrateLegacyIndexAsync` |
+| Attribute context and recall latency without recording content | `context.provider.completed`, `memory.search.completed`, `GameAgentPerformanceSummary` |
 | Add reusable behavior instructions | `IGameSkillSource`, `GameSkill` |
 | Load portable or game-filtered skills | `DirectoryGameSkillSource` (`SKILL.md` or `skill.json`) |
 | Load reusable prompt templates with bounded arguments | `FileGamePromptTemplateLoader`, `GamePromptTemplate` |

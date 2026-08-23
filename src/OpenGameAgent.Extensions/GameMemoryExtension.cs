@@ -14,6 +14,55 @@ public delegate ValueTask<GameMemoryQuery?> GameMemoryRecallQueryFactory(
     GameAgentExtensionRunContext context,
     CancellationToken cancellationToken);
 
+public sealed class GameMemorySearchObservedEvent
+{
+    public GameMemorySearchObservedEvent(
+        string sessionId,
+        string actorId,
+        string inputId,
+        GameMoment moment,
+        string source,
+        IReadOnlyList<GameMemorySearchStageMetric> stages)
+    {
+        SessionId = RequireId(sessionId, nameof(sessionId));
+        ActorId = RequireId(actorId, nameof(actorId));
+        InputId = RequireId(inputId, nameof(inputId));
+        Moment = moment;
+        Source = RequireId(source, nameof(source));
+        var copy = (stages ?? throw new ArgumentNullException(nameof(stages))).ToArray();
+        if (copy.Length > 64 || copy.Any(value => value is null))
+        {
+            throw new ArgumentException("Memory search observations require bounded stage metrics.", nameof(stages));
+        }
+
+        Stages = Array.AsReadOnly(copy);
+    }
+
+    public string SessionId { get; }
+
+    public string ActorId { get; }
+
+    public string InputId { get; }
+
+    public GameMoment Moment { get; }
+
+    public string Source { get; }
+
+    public IReadOnlyList<GameMemorySearchStageMetric> Stages { get; }
+
+    private static string RequireId(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Length > 1_024
+            || value.Any(char.IsControl))
+        {
+            throw new ArgumentException("A bounded memory-search observation identifier is required.", name);
+        }
+
+        return value;
+    }
+}
+
 public sealed class GameMemoryExtension : IGameAgentExtension
 {
     private const string RememberSchema = """
@@ -53,6 +102,8 @@ public sealed class GameMemoryExtension : IGameAgentExtension
 
     public static GameAgentExtensionChannel<GameMemory> MemoryAppended { get; } = new("memory.appended");
 
+    public static GameAgentExtensionChannel<GameMemorySearchObservedEvent> SearchObserved { get; } = new("memory.search.observed");
+
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
         "opengameagent.memory",
         "1.0.0",
@@ -66,7 +117,7 @@ public sealed class GameMemoryExtension : IGameAgentExtension
             (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
             {
                 CreateRememberTool(api, context),
-                CreateSearchTool(context),
+                CreateSearchTool(api, context),
             }));
         if (_rememberToolVisibility is not null)
         {
@@ -90,7 +141,10 @@ public sealed class GameMemoryExtension : IGameAgentExtension
 
         if (_recall is not null)
         {
-            api.RegisterContextProvider("memory-recall", RecallAsync, priority: 20);
+            api.RegisterContextProvider(
+                "memory-recall",
+                (context, cancellationToken) => RecallAsync(api, context, cancellationToken),
+                priority: 20);
         }
     }
 
@@ -138,7 +192,7 @@ public sealed class GameMemoryExtension : IGameAgentExtension
             ToolRisk.IdempotentWrite,
             ToolExecutionMode.Sequential);
 
-    private AgentTool CreateSearchTool(GameAgentExtensionRunContext context) =>
+    private AgentTool CreateSearchTool(GameAgentExtensionApi api, GameAgentExtensionRunContext context) =>
         new(
             new ToolDefinition(
                 "search_game_memory",
@@ -180,14 +234,14 @@ public sealed class GameMemoryExtension : IGameAgentExtension
                     arguments.TryGetProperty("text", out var text) ? text.GetString() : null,
                     moment,
                     arguments.TryGetProperty("minimumImportance", out var minimum) ? minimum.GetDouble() : 0);
-                var memories = await _store.SearchAsync(query, cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("The memory store returned null.");
+                var memories = await SearchAsync(api, context, "tool", query, cancellationToken).ConfigureAwait(false);
                 ValidateResults(query, memories);
                 return SerializeMemories(memories, query.Limit);
             },
             ToolRisk.ReadOnly);
 
     private async ValueTask<IReadOnlyList<GameContextSlice>> RecallAsync(
+        GameAgentExtensionApi api,
         GameAgentExtensionRunContext context,
         CancellationToken cancellationToken)
     {
@@ -226,11 +280,56 @@ public sealed class GameMemoryExtension : IGameAgentExtension
             query.Text,
             query.AtOrBefore ?? context.Input.Moment,
             query.MinimumImportance);
-        var memories = await _store.SearchAsync(effectiveQuery, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("The memory store returned null.");
+        var memories = await SearchAsync(api, context, "context", effectiveQuery, cancellationToken).ConfigureAwait(false);
         ValidateResults(effectiveQuery, memories);
         var json = SerializeMemoryJson(memories, effectiveQuery.Limit);
         return new[] { new GameContextSlice("memory", json, priority: 20, version: context.Input.Moment.Tick.ToString()) };
+    }
+
+    private async ValueTask<IReadOnlyList<GameMemory>> SearchAsync(
+        GameAgentExtensionApi api,
+        GameAgentExtensionRunContext context,
+        string source,
+        GameMemoryQuery query,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<GameMemory> memories;
+        IReadOnlyList<GameMemorySearchStageMetric> stages;
+        if (_store is IGameMemorySearchSnapshotSource detailed)
+        {
+            var result = await detailed.SearchSnapshotAsync(query, 100_000, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The memory store returned null.");
+            memories = result.Memories;
+            stages = result.Stages;
+        }
+        else
+        {
+            var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            memories = await _store.SearchAsync(query, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The memory store returned null.");
+            var elapsedTicks = checked(System.Diagnostics.Stopwatch.GetTimestamp() - startedAt);
+            stages = new[]
+            {
+                new GameMemorySearchStageMetric(
+                    GameMemorySearchStageKind.LexicalSearch,
+                    TimeSpan.FromSeconds((double)elapsedTicks / System.Diagnostics.Stopwatch.Frequency),
+                    memories.Count,
+                    memories.Count),
+            };
+        }
+
+        await api.PublishAsync(
+                SearchObserved,
+                new GameMemorySearchObservedEvent(
+                    context.Input.SessionId,
+                    context.Input.ActorId,
+                    context.Input.InputId,
+                    context.Input.Moment,
+                    source,
+                    stages),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return memories;
     }
 
     private ToolResult SerializeMemories(IReadOnlyList<GameMemory> memories, int requestedLimit) =>

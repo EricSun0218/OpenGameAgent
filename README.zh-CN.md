@@ -91,8 +91,8 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 宿主推导的执行 scope：未授权角色仍可使用 auto/Quick/短 Agent，但无法看到、唤醒或创建持久计划；
 - 同一角色串行、不同角色有界并行；
 - 先记日志的动作意图与游戏权威回执；
-- 按游戏时间过滤、过期并可自定义排序的记忆；
-- 可选本地/远程嵌入、可重建向量索引与词法/向量混合召回；
+- 按游戏时间过滤、过期并可自定义排序，且按 session/owner 持久分区的记忆；
+- 可选本地/远程嵌入、分区可重建向量索引，以及复用单次权威快照的词法/向量混合召回；
 - 根据输入类型和可用工具选择的 Skills；
 - 宿主证明的工具调用范围，以及面向高风险调用、可持久化、一次性、绑定世界版本的批准门禁；
 - 在每次模型请求前按输入计算工具可见性；
@@ -143,7 +143,7 @@ GameAgentRuntime
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
 | 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派、追踪和可持久并行工作流图 |
-| 开发工具 | 有界 JSONL 轨迹、Provider/框架/宿主耗时归因、工具失败与 durable write 指标、并发 Benchmark runtime、本地仅观察 HTML 回放和离线/CI 评测规则 |
+| 开发工具 | 有界 JSONL 轨迹、命名上下文 Provider 与记忆召回分段耗时、Provider/框架/宿主归因、工具失败与 durable write 指标、并发 Benchmark runtime、本地仅观察 HTML 回放和离线/CI 评测规则 |
 | 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
@@ -151,8 +151,8 @@ GameAgentRuntime
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；中立 Provider 一致性 runner 与 fixture；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览、OpenAI Images、火山方舟/Seedream，以及可选的 LocalAI 与可信 ComfyUI Workflow 适配器 |
 | 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
-| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、记忆、邮箱、产物、委派、Skills 与提示词模板 |
-| 语义记忆 | 可选模型无关嵌入、权威存档核验、可重建本地向量索引、词法/向量混合召回、结构化诊断与游戏时间重排 |
+| 持久化 | 崩溃安全本地快照、可选追加式会话历史、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、支持旧扁平布局迁移的 session/owner 分区记忆、邮箱、产物、委派、Skills 与提示词模板 |
+| 语义记忆 | 可选模型无关嵌入、单次快照权威核验、分区可重建本地向量索引、词法/向量混合召回、无正文分段指标与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端以及 C#、原生 C++ 客户端 |
 | Runtime 协议 | 可选的版本化 Session/Run/Turn/Item 契约、能力协商、稳定事件 ID、有界重放与 gap 对账、精确 Run/Turn 控制、C# 客户端、Schema/fixture、C++ DTO，以及生成的 TypeScript/Python 客户端和 reducer |
 | 引擎 | Godot 4.7 .NET 与 Unity 6 进程内包；Unreal Engine 5.8 原生 C++ sidecar 插件 |

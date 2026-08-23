@@ -195,6 +195,8 @@ public static class GameAgentExtensionEvents
 
     public static GameAgentExtensionEvent<GameAgentContextEvent> ContextCollected { get; } = new("context.collected");
 
+    public static GameAgentExtensionEvent<GameAgentContextProviderEvent> ContextProviderCompleted { get; } = new("context.provider.completed");
+
     public static GameAgentExtensionEvent<GameAgentToolsEvent> ToolsCollected { get; } = new("tools.collected");
 
     public static GameAgentExtensionEvent<GameAgentRouteEvent> RouteSelected { get; } = new("route.selected");
@@ -274,6 +276,43 @@ public sealed class GameAgentContextEvent
         value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
             ? throw new ArgumentOutOfRangeException(name)
             : value;
+}
+
+public sealed class GameAgentContextProviderEvent
+{
+    public GameAgentContextProviderEvent(
+        string providerName,
+        string phase,
+        int sliceCount,
+        TimeSpan duration,
+        string? extensionId = null)
+    {
+        ProviderName = GameJson.RequireId(providerName, nameof(providerName));
+        Phase = GameJson.RequireId(phase, nameof(phase));
+        if (sliceCount < 0 || sliceCount > 100_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sliceCount));
+        }
+
+        if (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(duration));
+        }
+
+        ExtensionId = extensionId is null ? null : GameJson.RequireId(extensionId, nameof(extensionId));
+        SliceCount = sliceCount;
+        Duration = duration;
+    }
+
+    public string ProviderName { get; }
+
+    public string Phase { get; }
+
+    public int SliceCount { get; }
+
+    public TimeSpan Duration { get; }
+
+    public string? ExtensionId { get; }
 }
 
 public sealed class GameAgentToolsEvent

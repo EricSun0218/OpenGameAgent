@@ -79,6 +79,16 @@ Console.WriteLine(metrics.ToText());
 
 `GameAgentLatencyBreakdown` separates actor-queue delay, input preparation, session load, context, tool collection, routing, skill selection, end-to-end TTFT, provider TTFT, response completion, first tool, model request time, tool execution, authoritative host action time, durable-action framework time, other framework overhead, execution, and total queue-to-completion time.
 
+Context time is also attributable instead of remaining one opaque total.
+`context.provider.completed` records each host or extension context provider's
+stable name, `initial`/`refresh` phase, slice count, duration, and optional
+extension ID. Memory recall adds `memory.search.completed` stages for storage
+migration, authoritative snapshot, lexical search, vector-index read,
+embedding, vector scoring, and reranking. `GameAgentRunPerformance` projects
+these into `ContextProviders` and `MemorySearchStages`. The events contain
+counts and timings only; query text, memory content, IDs, credentials, and
+hidden reasoning are excluded. See [Hybrid and vector memory](memory.md).
+
 The `route.selected` trace includes `classificationStatus` (`selected` or `fallback`), `classificationFailure` (`provider`, `timeout`, `empty`, `reasoning-only`, `invalid-json`, `invalid-route`, `budget-exhausted`, or `no-decision`), and `classificationFallbackReason`. It also records only bounded response shape: `classificationContentKinds`, `classificationVisibleContentCharacters`, and `classificationReasoningCharacters`. For an HTTP provider failure, `classificationProviderStatusCode` and a stable `classificationProviderFailureCategory` expose safe transport diagnostics such as `invalid-request`, `authentication`, `rate-limit`, or `server`. `classificationProviderRequestFields` lists only bounded top-level JSON field names, and `classificationProviderRequestId` contains only a validated allowlisted response-header identifier. Provider response bodies, field values, prompts, credentials, and reasoning text are never copied into routing trace data. `GameAgentRunPerformance` exposes the same fields together with `RouteReason`; `GameAgentPerformanceSummary` counts route-classification failures and fallbacks. Routing-model latency remains separate from framework routing overhead, and routing usage remains in the routing ledger cause.
 
 The bundled DeepSeek chat-completions definitions use the provider's `max_tokens` field for bounded classifier requests and use `thinking.type=disabled` when classifier reasoning is off. This matters because ordinary agent requests may omit a maximum-output field while the bounded classifier always sends one.

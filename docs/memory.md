@@ -1,5 +1,7 @@
 # Hybrid and vector memory
 
+[中文](memory.zh-CN.md)
+
 `OpenGameAgent.Memory` is an optional package for semantic memory. It keeps the
 game's `IGameMemoryStore` authoritative and treats vectors as a rebuildable
 derived index. It does not ship model weights. Games can supply any local or
@@ -176,6 +178,69 @@ Use this `memory` instance anywhere an `IGameMemoryStore` is accepted, including
 `GameMemoryExtension`. `RuntimeMemoryLifecycle` is a small optional owner for
 inspection, explicit rebuild, and provider disposal.
 
+## Partitioned file storage and migration
+
+`FileGameMemoryStore` persists authoritative records under hashed
+`sessionId`/`ownerId` partitions. A query with both identities enumerates only
+that owner partition; a session-only query enumerates only that session. The
+store therefore scales with the relevant identity partition instead of every
+memory in every save or actor.
+
+Flat `*.memory.json` stores written by the previous layout are migrated
+automatically on first access. Production hosts should perform the same
+idempotent migration before admitting Agent runs, so one-time disk work is not
+charged to an NPC's first context build:
+
+```csharp
+var authoritative = new FileGameMemoryStore(saveMemoryDirectory);
+var migration = await authoritative.MigrateLegacyLayoutAsync(cancellationToken);
+Console.WriteLine($"Migrated {migration.MigratedEntries}; total {migration.PartitionedEntries}");
+
+var vectors = new FileVectorMemoryIndex(derivedVectorDirectory);
+var vectorEntries = await vectors.MigrateLegacyIndexAsync(cancellationToken);
+```
+
+Migration validates every legacy document before an atomic same-store rename,
+is serialized across processes, resumes safely after cancellation or a crash,
+and fails closed on corrupt or conflicting identities. New appends use a
+versioned count plus a pending-mutation journal, so capacity remains bounded
+without rescanning the store. Paths and every enumerated file/directory reject
+symbolic links and reparse points. Keep a save backup before upgrading: the new
+runtime reads and migrates the flat layout, but an older runtime does not know
+the partitioned layout and is not a supported rollback reader.
+
+`FileVectorMemoryIndex` keeps its derived vector records in their existing
+location and builds small hashed partition markers. Its migration can always be
+rerun because vectors remain disposable derived data.
+
+## Single-snapshot hybrid recall
+
+`IGameMemorySearchSnapshotSource` optionally returns lexical results together
+with the exact bounded authoritative session/owner snapshot used to produce
+them. `VectorMemoryStore` consumes that capability when available, validates
+all derived candidates against the same snapshot, and does not enumerate the
+authoritative store a second time. `IGameMemoryPartitionSnapshotSource` and
+`IVectorMemoryPartitionIndex` provide owner-bounded fallback reads for custom
+stores and indexes. These are optimization capabilities, not alternate
+authority or visibility rules.
+
+## Search observability
+
+`GameMemorySearchSnapshot.Stages` reports bounded operational metrics for
+storage migration, authoritative snapshot, lexical search, vector-index read,
+embedding, vector scoring, and reranking. Each stage contains only duration,
+scanned/candidate counts, and whether an authoritative snapshot was reused; it
+contains no query text, memory content, identifiers, credentials, or hidden
+model reasoning.
+
+When `GameMemoryExtension` and `GameAgentTracingExtension` are installed, the
+same values appear as `memory.search.completed`. Every host or extension
+context provider also emits `context.provider.completed` with its stable name,
+phase (`initial` or `refresh`), slice count, duration, and optional extension
+ID. `GameAgentPerformanceSummary` exposes these as `ContextProviders` and
+`MemorySearchStages`, so a slow host context builder, lexical read, vector
+index, embedding call, or reranker can be separated without recording content.
+
 ## Save and failure boundaries
 
 - `FileGameMemoryStore` is authoritative save data. It is written before any
@@ -213,6 +278,21 @@ dotnet test tests/OpenGameAgent.Memory.Tests/OpenGameAgent.Memory.Tests.csproj -
 dotnet test tests/OpenGameAgent.Memory.Onnx.Tests/OpenGameAgent.Memory.Onnx.Tests.csproj -c Release
 dotnet test OpenGameAgent.sln -c Release
 ```
+
+The opt-in scale benchmark creates 10,000 legacy records across many
+session/owner identities, compares an old-layout full-directory scan, performs
+the real migration, and measures seven hot owner queries:
+
+```powershell
+dotnet run --project benchmarks/OpenGameAgent.Memory.Benchmarks/OpenGameAgent.Memory.Benchmarks.csproj -c Release -- --entries 10000
+```
+
+One Windows/.NET 8 run on 2026-08-23 measured 2,016.4 ms for the repeated
+full-directory scan, 33,376.7 ms for the one-time crash-safe migration, and a
+3.47 ms median partitioned query that scanned exactly the eight relevant
+records (about 581x lower repeated query latency). This is a reproducible
+example, not a hardware-independent performance guarantee; use the emitted
+JSON on the target machine as the authoritative result.
 
 Set `OGA_BGE_M3_MODEL_DIR` to a compatible local model directory to include the
 real-weight smoke test. Model files are never copied into the repository or

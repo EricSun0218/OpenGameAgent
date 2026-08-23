@@ -131,6 +131,64 @@ public sealed class GameAgentToolMetric
     public bool Recovered { get; }
 }
 
+public sealed class GameAgentContextProviderMetric
+{
+    internal GameAgentContextProviderMetric(
+        string provider,
+        string phase,
+        string? extensionId,
+        int sliceCount,
+        double durationMilliseconds)
+    {
+        Provider = provider;
+        Phase = phase;
+        ExtensionId = extensionId;
+        SliceCount = sliceCount;
+        DurationMilliseconds = durationMilliseconds;
+    }
+
+    public string Provider { get; }
+
+    public string Phase { get; }
+
+    public string? ExtensionId { get; }
+
+    public int SliceCount { get; }
+
+    public double DurationMilliseconds { get; }
+}
+
+public sealed class GameAgentMemorySearchMetric
+{
+    internal GameAgentMemorySearchMetric(
+        string source,
+        string stage,
+        double durationMilliseconds,
+        int scannedCount,
+        int candidateCount,
+        bool reused)
+    {
+        Source = source;
+        Stage = stage;
+        DurationMilliseconds = durationMilliseconds;
+        ScannedCount = scannedCount;
+        CandidateCount = candidateCount;
+        Reused = reused;
+    }
+
+    public string Source { get; }
+
+    public string Stage { get; }
+
+    public double DurationMilliseconds { get; }
+
+    public int ScannedCount { get; }
+
+    public int CandidateCount { get; }
+
+    public bool Reused { get; }
+}
+
 public sealed class GameAgentRunPerformance
 {
     internal GameAgentRunPerformance(
@@ -154,6 +212,8 @@ public sealed class GameAgentRunPerformance
         string status,
         GameAgentLatencyBreakdown latency,
         IReadOnlyList<GameAgentToolMetric> tools,
+        IReadOnlyList<GameAgentContextProviderMetric> contextProviders,
+        IReadOnlyList<GameAgentMemorySearchMetric> memorySearchStages,
         int exactToolRepeatAdvisories,
         int exactToolRepeatTerminations,
         int retries,
@@ -182,6 +242,8 @@ public sealed class GameAgentRunPerformance
         Status = status;
         Latency = latency;
         Tools = tools;
+        ContextProviders = contextProviders;
+        MemorySearchStages = memorySearchStages;
         ExactToolRepeatAdvisories = exactToolRepeatAdvisories;
         ExactToolRepeatTerminations = exactToolRepeatTerminations;
         Retries = retries;
@@ -211,6 +273,8 @@ public sealed class GameAgentRunPerformance
     public string Status { get; }
     public GameAgentLatencyBreakdown Latency { get; }
     public IReadOnlyList<GameAgentToolMetric> Tools { get; }
+    public IReadOnlyList<GameAgentContextProviderMetric> ContextProviders { get; }
+    public IReadOnlyList<GameAgentMemorySearchMetric> MemorySearchStages { get; }
     public int ExactToolRepeatAdvisories { get; }
     public int ExactToolRepeatTerminations { get; }
     public int Retries { get; }
@@ -416,6 +480,17 @@ public sealed class GameAgentPerformanceSummary
         {
             text.AppendLine(
                 $"{run.SessionId}/{run.ActorId}/{run.InputId} route={run.Route} reason={run.RouteReason} classification={run.RouteClassificationStatus ?? "n/a"} classificationFailure={run.RouteClassificationFailure ?? "n/a"} routeFallback={run.RouteFallbackReason ?? "n/a"} classifierContent={string.Join(",", run.RouteClassificationContentKinds)} classifierVisibleChars={run.RouteClassificationVisibleContentCharacters} classifierReasoningChars={run.RouteClassificationReasoningCharacters} classifierProviderStatus={run.RouteClassificationProviderStatusCode?.ToString(CultureInfo.InvariantCulture) ?? "n/a"} classifierProviderFailure={run.RouteClassificationProviderFailureCategory ?? "n/a"} classifierRequestFields={string.Join(",", run.RouteClassificationProviderRequestFields)} classifierRequestId={run.RouteClassificationProviderRequestId ?? "n/a"} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
+            foreach (var provider in run.ContextProviders)
+            {
+                text.AppendLine(
+                    $"  context provider={provider.Provider} phase={provider.Phase} slices={provider.SliceCount} duration={provider.DurationMilliseconds:0.###}ms");
+            }
+
+            foreach (var memory in run.MemorySearchStages)
+            {
+                text.AppendLine(
+                    $"  memory source={memory.Source} stage={memory.Stage} scanned={memory.ScannedCount} candidates={memory.CandidateCount} reused={memory.Reused} duration={memory.DurationMilliseconds:0.###}ms");
+            }
         }
 
         return text.ToString();
@@ -458,6 +533,8 @@ public sealed class GameAgentPerformanceSummary
         var usage = ReadObject(completed, "usage");
         var cost = usage is null ? null : ReadObject(usage.Value, "cost");
         var repeatEvents = entries.Where(value => value.Kind == "kernel.toolrepeatdetected").ToArray();
+        var contextProviders = CreateContextProviders(entries);
+        var memorySearchStages = CreateMemorySearchStages(entries);
         var latency = new GameAgentLatencyBreakdown(
             queue,
             ReadDouble(input, "inputPreparationMilliseconds"),
@@ -500,6 +577,8 @@ public sealed class GameAgentPerformanceSummary
             ReadString(completed, "status") ?? "Unknown",
             latency,
             Array.AsReadOnly(tools),
+            Array.AsReadOnly(contextProviders),
+            Array.AsReadOnly(memorySearchStages),
             repeatEvents.Count(value => ReadString(value, "toolRepeatAction") == "Advisory"),
             repeatEvents.Count(value => ReadString(value, "toolRepeatAction") == "Terminated"),
             entries.Sum(ReadRetries),
@@ -507,6 +586,51 @@ public sealed class GameAgentPerformanceSummary
             ReadInt64(usage, "totalTokens"),
             ReadBoolean(cost, "known", defaultValue: false),
             ReadNullableDouble(cost, "total"));
+    }
+
+    private static GameAgentContextProviderMetric[] CreateContextProviders(
+        IReadOnlyList<GameAgentTraceEntry> entries) =>
+        entries
+            .Where(entry => entry.Kind == "context.provider.completed")
+            .Select(entry => new GameAgentContextProviderMetric(
+                ReadString(entry, "provider") ?? "unknown",
+                ReadString(entry, "phase") ?? "unknown",
+                ReadString(entry, "extensionId"),
+                (int)ReadInt64(ReadDetails(entry), "sliceCount"),
+                ReadDouble(entry, "durationMilliseconds")))
+            .ToArray();
+
+    private static GameAgentMemorySearchMetric[] CreateMemorySearchStages(
+        IReadOnlyList<GameAgentTraceEntry> entries)
+    {
+        var metrics = new List<GameAgentMemorySearchMetric>();
+        foreach (var entry in entries.Where(value => value.Kind == "memory.search.completed"))
+        {
+            var details = ReadDetails(entry);
+            var source = ReadString(details, "source") ?? "unknown";
+            if (!details.TryGetProperty("stages", out var stages) || stages.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var stage in stages.EnumerateArray().Take(64))
+            {
+                if (stage.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                metrics.Add(new GameAgentMemorySearchMetric(
+                    source,
+                    ReadString(stage, "stage") ?? "Unknown",
+                    ReadNullableDouble(stage, "durationMilliseconds") ?? 0,
+                    (int)ReadInt64(stage, "scannedCount"),
+                    (int)ReadInt64(stage, "candidateCount"),
+                    ReadBoolean(stage, "reused", defaultValue: false)));
+            }
+        }
+
+        return metrics.ToArray();
     }
 
     private static GameAgentToolMetric[] CreateTools(IReadOnlyList<GameAgentTraceEntry> entries)

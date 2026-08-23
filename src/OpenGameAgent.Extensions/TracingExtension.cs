@@ -184,6 +184,8 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
     {
         api.Subscribe(ToolApprovalExtension.ApprovalChanged, (value, token) =>
             WriteApprovalAsync(value, token));
+        api.Subscribe(GameMemoryExtension.SearchObserved, (value, token) =>
+            WriteMemorySearchAsync(value, token));
         api.On(GameAgentExtensionEvents.InputReceived, (value, context, token) =>
             WriteAsync(
                 "input.received",
@@ -223,6 +225,19 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                     count = value.Context.Count,
                     sources = value.Context.Select(slice => slice.Source).ToArray(),
                     durationMilliseconds = value.Duration?.TotalMilliseconds,
+                },
+                token));
+        api.On(GameAgentExtensionEvents.ContextProviderCompleted, (value, context, token) =>
+            WriteAsync(
+                "context.provider.completed",
+                context,
+                new
+                {
+                    provider = value.ProviderName,
+                    value.ExtensionId,
+                    value.Phase,
+                    value.SliceCount,
+                    durationMilliseconds = value.Duration.TotalMilliseconds,
                 },
                 token));
         api.On(GameAgentExtensionEvents.ToolsCollected, (value, context, token) =>
@@ -404,6 +419,42 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
             new GameAgentTraceEntry(
                 Interlocked.Increment(ref _sequence),
                 value.Status == GameToolApprovalStatus.Pending ? "tool.approval.pending" : "tool.approval.completed",
+                value.SessionId,
+                value.ActorId,
+                value.InputId,
+                value.Moment,
+                _options.OperationalClock(),
+                json),
+            cancellationToken);
+    }
+
+    private ValueTask WriteMemorySearchAsync(
+        GameMemorySearchObservedEvent value,
+        CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(
+            new
+            {
+                value.Source,
+                stages = value.Stages.Select(stage => new
+                {
+                    stage = stage.Stage.ToString(),
+                    durationMilliseconds = stage.Duration.TotalMilliseconds,
+                    stage.ScannedCount,
+                    stage.CandidateCount,
+                    stage.Reused,
+                }).ToArray(),
+            },
+            TraceJsonOptions);
+        if (json.Length > _options.MaximumDetailsCharacters)
+        {
+            json = JsonSerializer.Serialize(new { truncated = true, originalCharacters = json.Length });
+        }
+
+        return _sink.WriteAsync(
+            new GameAgentTraceEntry(
+                Interlocked.Increment(ref _sequence),
+                "memory.search.completed",
                 value.SessionId,
                 value.ActorId,
                 value.InputId,

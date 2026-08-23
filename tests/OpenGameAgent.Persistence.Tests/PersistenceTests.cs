@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenGameAgent.Attachments;
 using OpenGameAgent.Extensions;
@@ -864,6 +867,280 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public async Task FileMemoryStoreMigratesFlatFilesOnceWithoutLosingIdentityOrRestartability()
+    {
+        using var directory = new TemporaryDirectory();
+        await WriteLegacyMemoryAsync(directory.Path, "session-a", "owner-a", "one", "alpha");
+        await WriteLegacyMemoryAsync(directory.Path, "session-b", "owner-b", "two", "beta");
+        var store = new FileGameMemoryStore(directory.Path);
+
+        var migration = await store.MigrateLegacyLayoutAsync(TestContext.Current.CancellationToken);
+        var result = await store.SearchAsync(
+            new GameMemoryQuery("session-a", 8, ownerId: "owner-a", text: "alpha"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, migration.MigratedEntries);
+        Assert.Equal(2, migration.PartitionedEntries);
+        Assert.Equal("one", Assert.Single(result).MemoryId);
+        Assert.Empty(Directory.GetFiles(directory.Path, "*.memory.json", SearchOption.TopDirectoryOnly));
+        Assert.Equal(
+            "two",
+            Assert.Single(await new FileGameMemoryStore(directory.Path).SearchAsync(
+                new GameMemoryQuery("session-b", 8, ownerId: "owner-b", text: "beta"),
+                TestContext.Current.CancellationToken)).MemoryId);
+        Assert.False((await new FileGameMemoryStore(directory.Path)
+            .MigrateLegacyLayoutAsync(TestContext.Current.CancellationToken)).PerformedWork);
+    }
+
+    [Fact]
+    public async Task FileMemoryStoreResumesAnInterruptedLegacyMigration()
+    {
+        using var directory = new TemporaryDirectory();
+        await WriteLegacyMemoryAsync(directory.Path, "session-a", "owner-a", "one", "alpha");
+        await WriteLegacyMemoryAsync(directory.Path, "session-b", "owner-b", "two", "beta");
+
+        var firstLegacyPath = System.IO.Path.Combine(
+            directory.Path,
+            HashString("session-a\nowner-a\none") + ".memory.json");
+        var interruptedTargetDirectory = System.IO.Path.Combine(
+            directory.Path,
+            ".memory-v2",
+            "s-" + HashString("session-a"),
+            "o-" + HashString("owner-a"));
+        Directory.CreateDirectory(interruptedTargetDirectory);
+        File.Move(
+            firstLegacyPath,
+            System.IO.Path.Combine(interruptedTargetDirectory, HashString("one") + ".memory.json"));
+
+        var restarted = new FileGameMemoryStore(directory.Path);
+        var migration = await restarted.MigrateLegacyLayoutAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, migration.MigratedEntries);
+        Assert.Equal(2, migration.PartitionedEntries);
+        Assert.Equal(
+            "one",
+            Assert.Single(await restarted.SearchAsync(
+                new GameMemoryQuery("session-a", 8, ownerId: "owner-a", text: "alpha"),
+                TestContext.Current.CancellationToken)).MemoryId);
+        Assert.Equal(
+            "two",
+            Assert.Single(await new FileGameMemoryStore(directory.Path).SearchAsync(
+                new GameMemoryQuery("session-b", 8, ownerId: "owner-b", text: "beta"),
+                TestContext.Current.CancellationToken)).MemoryId);
+    }
+
+    [Fact]
+    public async Task FileMemorySearchScansOnlyTheRequestedOwnerPartition()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new FileGameMemoryStore(directory.Path, maximumEntries: 1_000);
+        for (var index = 0; index < 120; index++)
+        {
+            await store.AppendAsync(
+                new GameMemory(
+                    "unrelated-" + index,
+                    "session-" + (index % 6),
+                    "owner-" + (index % 12),
+                    "fact",
+                    GameMemoryKind.Fact,
+                    "{\"value\":" + index + "}",
+                    new GameMoment("world", index),
+                    searchableText: "unrelated"),
+                TestContext.Current.CancellationToken);
+        }
+
+        for (var index = 0; index < 3; index++)
+        {
+            await store.AppendAsync(
+                new GameMemory(
+                    "target-" + index,
+                    "target-session",
+                    "target-owner",
+                    "fact",
+                    GameMemoryKind.Fact,
+                    "{\"target\":true}",
+                    new GameMoment("world", index),
+                    searchableText: "target"),
+                TestContext.Current.CancellationToken);
+        }
+
+        var snapshot = await new FileGameMemoryStore(directory.Path, maximumEntries: 1_000).SearchSnapshotAsync(
+            new GameMemoryQuery("target-session", 8, ownerId: "target-owner", text: "target"),
+            maximumSnapshotEntries: 1_000,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, snapshot.Memories.Count);
+        var authoritative = Assert.Single(
+            snapshot.Stages,
+            stage => stage.Stage == GameMemorySearchStageKind.AuthoritativeSnapshot);
+        Assert.Equal(3, authoritative.ScannedCount);
+        Assert.DoesNotContain(snapshot.AuthoritativeMemories, memory => memory.SessionId != "target-session");
+        Assert.DoesNotContain(snapshot.AuthoritativeMemories, memory => memory.OwnerId != "target-owner");
+    }
+
+    [Fact]
+    public async Task FileMemoryPartitionRejectsCorruptionAndConcurrentWritersSurviveRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var first = new FileGameMemoryStore(directory.Path, maximumEntries: 1_000);
+        var second = new FileGameMemoryStore(directory.Path, maximumEntries: 1_000);
+        await Task.WhenAll(Enumerable.Range(0, 40).Select(index =>
+            (index % 2 == 0 ? first : second).AppendAsync(
+                    new GameMemory(
+                        "memory-" + index,
+                        "session",
+                        "owner",
+                        "fact",
+                        GameMemoryKind.Fact,
+                        "{\"value\":" + index + "}",
+                        new GameMoment("world", index),
+                        searchableText: "value"),
+                    TestContext.Current.CancellationToken)
+                .AsTask()));
+
+        var restarted = new FileGameMemoryStore(directory.Path, maximumEntries: 1_000);
+        Assert.Equal(
+            40,
+            (await restarted.SearchSnapshotAsync(
+                new GameMemoryQuery("session", 40, ownerId: "owner"),
+                1_000,
+                TestContext.Current.CancellationToken)).AuthoritativeMemories.Count);
+
+        var target = Directory.GetFiles(directory.Path, "*.memory.json", SearchOption.AllDirectories).First();
+        await File.WriteAllTextAsync(target, "{broken", TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<PersistenceException>(async () =>
+            await new FileGameMemoryStore(directory.Path, maximumEntries: 1_000).SearchAsync(
+                new GameMemoryQuery("session", 40, ownerId: "owner"),
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FileMemoryPendingAddIsRecoveredOnceAfterRestart()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new FileGameMemoryStore(directory.Path, maximumEntries: 100);
+        await store.AppendAsync(
+            new GameMemory(
+                "one",
+                "session",
+                "owner",
+                "fact",
+                GameMemoryKind.Fact,
+                "{\"value\":1}",
+                new GameMoment("world", 1),
+                searchableText: "one"),
+            TestContext.Current.CancellationToken);
+        var layoutDirectory = System.IO.Path.Combine(directory.Path, ".memory-v2");
+        var sessionHash = HashString("session");
+        var ownerHash = HashString("owner");
+        var memoryHash = HashString("two");
+        var ownerDirectory = System.IO.Path.Combine(layoutDirectory, "s-" + sessionHash, "o-" + ownerHash);
+        Directory.CreateDirectory(ownerDirectory);
+        await WriteMemoryDocumentAsync(
+            System.IO.Path.Combine(ownerDirectory, memoryHash + ".memory.json"),
+            "session",
+            "owner",
+            "two",
+            "two");
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(layoutDirectory, "pending-add.json"),
+            JsonSerializer.Serialize(new
+            {
+                FormatVersion = 1,
+                ExpectedEntryCount = 1,
+                SessionHash = sessionHash,
+                OwnerHash = ownerHash,
+                MemoryHash = memoryHash,
+            }),
+            TestContext.Current.CancellationToken);
+
+        var restarted = new FileGameMemoryStore(directory.Path, maximumEntries: 100);
+        var recovered = await restarted.SearchSnapshotAsync(
+            new GameMemoryQuery("session", 8, ownerId: "owner"),
+            100,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, recovered.AuthoritativeMemories.Count);
+        Assert.False(File.Exists(System.IO.Path.Combine(layoutDirectory, "pending-add.json")));
+        Assert.Equal(
+            2,
+            (await new FileGameMemoryStore(directory.Path, maximumEntries: 100).SearchSnapshotAsync(
+                new GameMemoryQuery("session", 8, ownerId: "owner"),
+                100,
+                TestContext.Current.CancellationToken)).AuthoritativeMemories.Count);
+    }
+
+    [Fact]
+    public async Task FileMemoryCancellationDoesNotCreateAnEntry()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new FileGameMemoryStore(directory.Path);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await store.AppendAsync(
+                new GameMemory(
+                    "cancelled",
+                    "session",
+                    "owner",
+                    "fact",
+                    GameMemoryKind.Fact,
+                    "{}",
+                    new GameMoment("world", 1)),
+                cancellation.Token));
+
+        Assert.Empty(await new FileGameMemoryStore(directory.Path).SearchAsync(
+            new GameMemoryQuery("session", 8, ownerId: "owner"),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task FileMemoryLayoutCorruptionFailsClosedAfterWarmup()
+    {
+        using var directory = new TemporaryDirectory();
+        var store = new FileGameMemoryStore(directory.Path);
+        await store.AppendAsync(
+            new GameMemory(
+                "memory",
+                "session",
+                "owner",
+                "fact",
+                GameMemoryKind.Fact,
+                "{}",
+                new GameMoment("world", 1)),
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(directory.Path, ".memory-v2", "layout.json"),
+            "{broken",
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<PersistenceException>(async () =>
+            await store.SearchAsync(
+                new GameMemoryQuery("session", 8, ownerId: "owner"),
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void FileMemoryRejectsReparseStorageWhenThePlatformAllowsCreatingIt()
+    {
+        using var directory = new TemporaryDirectory();
+        var real = System.IO.Path.Combine(directory.Path, "real");
+        var link = System.IO.Path.Combine(directory.Path, "link");
+        Directory.CreateDirectory(real);
+        try
+        {
+            Directory.CreateSymbolicLink(link, real);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        Assert.Throws<PersistenceException>(() => new FileGameMemoryStore(link));
+    }
+
+    [Fact]
     public async Task DirectorySkillSourceLoadsDeclarativeInstructionsOnly()
     {
         using var directory = new TemporaryDirectory();
@@ -1570,6 +1847,52 @@ public sealed class PersistenceTests
             document.ToJsonString(),
             TestContext.Current.CancellationToken);
     }
+
+    private static async Task WriteLegacyMemoryAsync(
+        string directory,
+        string sessionId,
+        string ownerId,
+        string memoryId,
+        string searchableText)
+    {
+        var path = System.IO.Path.Combine(
+            directory,
+            HashString(sessionId + "\n" + ownerId + "\n" + memoryId) + ".memory.json");
+        await WriteMemoryDocumentAsync(path, sessionId, ownerId, memoryId, searchableText);
+    }
+
+    private static async Task WriteMemoryDocumentAsync(
+        string path,
+        string sessionId,
+        string ownerId,
+        string memoryId,
+        string searchableText)
+    {
+        var document = new
+        {
+            FormatVersion = 1,
+            MemoryId = memoryId,
+            SessionId = sessionId,
+            OwnerId = ownerId,
+            Scope = "fact",
+            Kind = nameof(GameMemoryKind.Fact),
+            PayloadJson = JsonSerializer.Serialize(new { text = searchableText }),
+            Moment = new { TimelineId = "world", Tick = 1L, CalendarJson = (string?)null },
+            Importance = 0.5,
+            SearchableText = searchableText,
+            Tags = Array.Empty<string>(),
+            SourceInputId = (string?)null,
+            ExpiresAt = (object?)null,
+            Metadata = new Dictionary<string, string>(),
+        };
+        await File.WriteAllTextAsync(
+            path,
+            JsonSerializer.Serialize(document),
+            TestContext.Current.CancellationToken);
+    }
+
+    private static string HashString(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
     private sealed class CallbackActionHandler : IGameActionHandler
     {

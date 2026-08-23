@@ -79,6 +79,14 @@ Console.WriteLine(metrics.ToText());
 
 `GameAgentLatencyBreakdown` 会分别统计角色排队、输入准备、会话加载、上下文、工具收集、路由、Skills、端到端首响应、Provider 首响应、完整回答、首次工具、模型请求、工具执行、游戏宿主权威动作、durable action 框架处理、其他框架开销、执行总时长以及含排队总时长。
 
+上下文耗时也不再只是一个不透明总数。`context.provider.completed` 会记录
+每个宿主或扩展上下文 Provider 的稳定名称、`initial`/`refresh` 阶段、切片
+数、耗时和可选扩展 ID。记忆召回还会通过 `memory.search.completed` 分别
+记录存储迁移、权威快照、词法搜索、向量索引读取、Embedding、向量打分与
+重排。`GameAgentRunPerformance.ContextProviders` 和 `MemorySearchStages` 可
+直接机器读取。这些事件只包含计数和耗时，不包含查询、记忆正文、身份、
+凭证或隐藏推理。详见[混合与向量记忆](memory.zh-CN.md)。
+
 `route.selected` trace 现在包含 `classificationStatus`（`selected` 或 `fallback`）、`classificationFailure`（`provider`、`timeout`、`empty`、`reasoning-only`、`invalid-json`、`invalid-route`、`budget-exhausted` 或 `no-decision`）以及 `classificationFallbackReason`。它还只记录有界的响应形态：`classificationContentKinds`、`classificationVisibleContentCharacters` 和 `classificationReasoningCharacters`。HTTP Provider 失败时，`classificationProviderStatusCode` 与稳定的 `classificationProviderFailureCategory` 会提供 `invalid-request`、`authentication`、`rate-limit`、`server` 等安全传输诊断；`classificationProviderRequestFields` 只列出有界的顶层 JSON 字段名，`classificationProviderRequestId` 只接受来自白名单响应头且通过校验的标识符。Provider 响应正文、字段值、提示词、凭证和推理文本都不会被复制进路由 trace。`GameAgentRunPerformance` 会暴露同样字段和 `RouteReason`，`GameAgentPerformanceSummary` 会统计分类失败数与路由回退数。路由模型耗时继续与路由框架开销分开，路由 token/cost 仍归入 routing cause。
 
 内置 DeepSeek Chat Completions 定义会在有界分类请求中使用该 Provider 的 `max_tokens` 字段，并在关闭分类器推理时发送 `thinking.type=disabled`。这很重要，因为普通 Agent 请求可能不设置最大输出字段，而有界分类器一定会发送。

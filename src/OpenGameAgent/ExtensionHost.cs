@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -469,12 +470,15 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
     public async ValueTask<IReadOnlyList<GameContextSlice>> CollectContextAsync(
         GameAgentExtensionRunContext baseContext,
         IReadOnlyList<GameContextSlice> initial,
+        string phase,
         CancellationToken cancellationToken)
     {
+        phase = GameJson.RequireId(phase, nameof(phase));
         var values = new List<GameContextSlice>(initial);
         foreach (var entry in GetEntries(GameAgentExtensionResourceKind.ContextProvider))
         {
             var provider = (GameExtensionContextProvider)entry.Value;
+            var startedAt = Stopwatch.GetTimestamp();
             var contributed = await provider(ForOwner(baseContext, entry.Resource.ExtensionId), cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException($"Context provider '{entry.Resource.Name}' returned null.");
             if (contributed.Any(value => value is null))
@@ -483,9 +487,26 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
             }
 
             values.AddRange(contributed);
+            await PublishAsync(
+                    GameAgentExtensionEvents.ContextProviderCompleted,
+                    new GameAgentContextProviderEvent(
+                        entry.Resource.Name,
+                        phase,
+                        contributed.Count,
+                        Elapsed(startedAt),
+                        entry.Resource.ExtensionId),
+                    baseContext,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         return Array.AsReadOnly(values.ToArray());
+    }
+
+    private static TimeSpan Elapsed(long startedAt)
+    {
+        var ticks = checked(Stopwatch.GetTimestamp() - startedAt);
+        return TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 
     public async ValueTask<IReadOnlyList<AgentTool>> CollectToolsAsync(

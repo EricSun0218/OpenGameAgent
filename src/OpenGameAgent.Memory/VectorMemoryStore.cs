@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace OpenGameAgent.Memory;
@@ -107,7 +108,12 @@ public sealed class VectorMemoryStoreOptions
 /// memory store. The authoritative store is always written first. Embedding
 /// failures therefore degrade recall to lexical search without losing memory.
 /// </summary>
-public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSource, IAsyncDisposable
+public sealed class VectorMemoryStore :
+    IGameMemoryStore,
+    IGameMemorySnapshotSource,
+    IGameMemoryPartitionSnapshotSource,
+    IGameMemorySearchSnapshotSource,
+    IAsyncDisposable
 {
     private readonly IGameMemoryStore _authoritativeStore;
     private readonly IGameMemorySnapshotSource _snapshotSource;
@@ -206,23 +212,77 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
         GameMemoryQuery query,
         CancellationToken cancellationToken)
     {
+        var result = await SearchSnapshotAsync(query, _options.MaximumIndexEntries, cancellationToken)
+            .ConfigureAwait(false);
+        return result.Memories;
+    }
+
+    public async ValueTask<GameMemorySearchSnapshot> SearchSnapshotAsync(
+        GameMemoryQuery query,
+        int maximumSnapshotEntries,
+        CancellationToken cancellationToken)
+    {
         ThrowIfDisposed();
         if (query is null)
         {
             throw new ArgumentNullException(nameof(query));
         }
 
-        if (query.Limit == 0)
+        if (maximumSnapshotEntries < 1 || maximumSnapshotEntries > 1_000_000)
         {
-            return Array.Empty<GameMemory>();
+            throw new ArgumentOutOfRangeException(nameof(maximumSnapshotEntries));
         }
+
+        maximumSnapshotEntries = Math.Min(maximumSnapshotEntries, _options.MaximumIndexEntries);
 
         var candidateLimit = Math.Min(
             _options.MaximumCandidates,
             Math.Max(query.Limit, checked(query.Limit * _options.CandidateMultiplier)));
         var expandedQuery = CopyQuery(query, candidateLimit);
-        var lexical = await _authoritativeStore.SearchAsync(expandedQuery, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("The authoritative memory store returned null.");
+        var stages = new List<GameMemorySearchStageMetric>();
+        IReadOnlyList<GameMemory> lexical;
+        IReadOnlyDictionary<(string OwnerId, string MemoryId), GameMemory> authoritative;
+        if (_authoritativeStore is IGameMemorySearchSnapshotSource combined)
+        {
+            var combinedSnapshot = await combined.SearchSnapshotAsync(
+                    expandedQuery,
+                    maximumSnapshotEntries,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The authoritative memory store returned null.");
+            lexical = combinedSnapshot.Memories;
+            authoritative = BuildAuthoritativeSnapshot(query, combinedSnapshot.AuthoritativeMemories, maximumSnapshotEntries);
+            stages.AddRange(combinedSnapshot.Stages.Select(stage =>
+                stage.Stage == GameMemorySearchStageKind.AuthoritativeSnapshot
+                    ? new GameMemorySearchStageMetric(
+                        stage.Stage,
+                        stage.Duration,
+                        stage.ScannedCount,
+                        stage.CandidateCount,
+                        reused: true)
+                    : stage));
+        }
+        else
+        {
+            var lexicalStartedAt = Stopwatch.GetTimestamp();
+            lexical = await _authoritativeStore.SearchAsync(expandedQuery, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("The authoritative memory store returned null.");
+            stages.Add(new GameMemorySearchStageMetric(
+                GameMemorySearchStageKind.LexicalSearch,
+                Elapsed(lexicalStartedAt),
+                lexical.Count,
+                lexical.Count));
+            var authoritativeStartedAt = Stopwatch.GetTimestamp();
+            authoritative = await LoadAuthoritativeSnapshotAsync(query, maximumSnapshotEntries, cancellationToken)
+                .ConfigureAwait(false);
+            stages.Add(new GameMemorySearchStageMetric(
+                GameMemorySearchStageKind.AuthoritativeSnapshot,
+                Elapsed(authoritativeStartedAt),
+                authoritative.Count,
+                authoritative.Count,
+                reused: true));
+        }
+
         ValidateCandidates(expandedQuery, lexical);
 
         IReadOnlyList<GameMemory> vector = Array.Empty<GameMemory>();
@@ -230,7 +290,13 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
         {
             try
             {
-                vector = await SearchVectorAsync(query, candidateLimit, cancellationToken).ConfigureAwait(false);
+                vector = await SearchVectorAsync(
+                        query,
+                        candidateLimit,
+                        authoritative,
+                        stages,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -257,12 +323,24 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
         var fused = Fuse(lexical, vector, candidateLimit);
         if (_reranker is not null && fused.Count > 0)
         {
+            var rerankStartedAt = Stopwatch.GetTimestamp();
             var reranked = await _reranker.RankAsync(query, fused, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The memory reranker returned null.");
             fused = ValidateReranked(fused, reranked);
+            stages.Add(new GameMemorySearchStageMetric(
+                GameMemorySearchStageKind.Rerank,
+                Elapsed(rerankStartedAt),
+                fused.Count,
+                reranked.Count));
         }
 
-        return Array.AsReadOnly(fused.Take(query.Limit).ToArray());
+        return new GameMemorySearchSnapshot(
+            Array.AsReadOnly(fused.Take(query.Limit).ToArray()),
+            authoritative.Values
+                .OrderBy(memory => memory.OwnerId, StringComparer.Ordinal)
+                .ThenBy(memory => memory.MemoryId, StringComparer.Ordinal)
+                .ToArray(),
+            stages);
     }
 
     public async IAsyncEnumerable<GameMemory> EnumerateAsync(
@@ -274,6 +352,33 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
         await foreach (var memory in _snapshotSource.EnumerateAsync(sessionId, cancellationToken).ConfigureAwait(false))
         {
             yield return memory;
+        }
+    }
+
+    public async IAsyncEnumerable<GameMemory> EnumerateAsync(
+        string sessionId,
+        string ownerId,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        sessionId = MemoryVectorGuard.Id(sessionId, nameof(sessionId), 1_024);
+        ownerId = MemoryVectorGuard.Id(ownerId, nameof(ownerId), 1_024);
+        if (_snapshotSource is IGameMemoryPartitionSnapshotSource partitioned)
+        {
+            await foreach (var memory in partitioned.EnumerateAsync(sessionId, ownerId, cancellationToken).ConfigureAwait(false))
+            {
+                yield return memory;
+            }
+
+            yield break;
+        }
+
+        await foreach (var memory in _snapshotSource.EnumerateAsync(sessionId, cancellationToken).ConfigureAwait(false))
+        {
+            if (string.Equals(memory.OwnerId, ownerId, StringComparison.Ordinal))
+            {
+                yield return memory;
+            }
         }
     }
 
@@ -445,6 +550,8 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
     private async ValueTask<IReadOnlyList<GameMemory>> SearchVectorAsync(
         GameMemoryQuery query,
         int candidateLimit,
+        IReadOnlyDictionary<(string OwnerId, string MemoryId), GameMemory> authoritative,
+        ICollection<GameMemorySearchStageMetric> stages,
         CancellationToken cancellationToken)
     {
         var text = _projector.ProjectQuery(query);
@@ -453,19 +560,37 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
             return Array.Empty<GameMemory>();
         }
 
+        var embeddingStartedAt = Stopwatch.GetTimestamp();
         var queryVector = await InvokeEmbeddingAsync(
                 token => _embeddingProvider.EmbedQueryAsync(text, token),
                 cancellationToken)
             .ConfigureAwait(false);
         var normalized = MemoryVectorGuard.Normalize(queryVector, ActiveIdentity, nameof(queryVector));
-        var entries = await _index.ListAsync(query.SessionId, _options.MaximumIndexEntries, cancellationToken)
-            .ConfigureAwait(false);
-        var authoritative = await LoadAuthoritativeSnapshotAsync(query.SessionId, cancellationToken).ConfigureAwait(false);
+        stages.Add(new GameMemorySearchStageMetric(
+            GameMemorySearchStageKind.Embedding,
+            Elapsed(embeddingStartedAt),
+            scannedCount: 1,
+            candidateCount: 1));
+        var indexStartedAt = Stopwatch.GetTimestamp();
+        var listed = query.OwnerId is not null && _index is IVectorMemoryPartitionIndex partitioned
+            ? await partitioned.ListAsync(query.SessionId, query.OwnerId, _options.MaximumIndexEntries, cancellationToken)
+                .ConfigureAwait(false)
+            : await _index.ListAsync(query.SessionId, _options.MaximumIndexEntries, cancellationToken)
+                .ConfigureAwait(false);
+        var entries = query.OwnerId is null
+            ? listed
+            : listed.Where(entry => string.Equals(entry.Memory.OwnerId, query.OwnerId, StringComparison.Ordinal)).ToArray();
+        stages.Add(new GameMemorySearchStageMetric(
+            GameMemorySearchStageKind.VectorIndexRead,
+            Elapsed(indexStartedAt),
+            entries.Count,
+            entries.Count));
         if (checked((long)entries.Count * ActiveIdentity.Dimensions) > _options.MaximumVectorComparisonsPerSearch)
         {
             throw new InvalidOperationException("Vector recall exceeded the configured comparison bound.");
         }
 
+        var scoringStartedAt = Stopwatch.GetTimestamp();
         var ranked = new List<(GameMemory Memory, double Score)>();
         foreach (var entry in entries)
         {
@@ -493,7 +618,7 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
             ranked.Add((authoritativeMemory, Math.Max(-1, Math.Min(1, score))));
         }
 
-        return Array.AsReadOnly(ranked
+        var result = Array.AsReadOnly(ranked
             .OrderByDescending(value => value.Score)
             .ThenByDescending(value => value.Memory.Importance)
             .ThenByDescending(value => value.Memory.Moment.Tick)
@@ -502,6 +627,12 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
             .Take(candidateLimit)
             .Select(value => value.Memory)
             .ToArray());
+        stages.Add(new GameMemorySearchStageMetric(
+            GameMemorySearchStageKind.VectorScoring,
+            Elapsed(scoringStartedAt),
+            entries.Count,
+            result.Count));
+        return result;
     }
 
     private async ValueTask<T> InvokeEmbeddingAsync<T>(
@@ -613,23 +744,77 @@ public sealed class VectorMemoryStore : IGameMemoryStore, IGameMemorySnapshotSou
     private async ValueTask<IReadOnlyDictionary<(string OwnerId, string MemoryId), GameMemory>> LoadAuthoritativeSnapshotAsync(
         string sessionId,
         CancellationToken cancellationToken)
+        => await LoadAuthoritativeSnapshotAsync(
+                new GameMemoryQuery(sessionId, 0),
+                _options.MaximumIndexEntries,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+    private async ValueTask<IReadOnlyDictionary<(string OwnerId, string MemoryId), GameMemory>> LoadAuthoritativeSnapshotAsync(
+        GameMemoryQuery query,
+        int maximumEntries,
+        CancellationToken cancellationToken)
+    {
+        var values = new List<GameMemory>();
+        if (query.OwnerId is not null && _snapshotSource is IGameMemoryPartitionSnapshotSource partitioned)
+        {
+            await foreach (var memory in partitioned.EnumerateAsync(query.SessionId, query.OwnerId, cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                values.Add(memory);
+                if (values.Count > maximumEntries)
+                {
+                    throw new InvalidOperationException("The authoritative memory snapshot exceeded the configured bound.");
+                }
+            }
+        }
+        else
+        {
+            await foreach (var memory in _snapshotSource.EnumerateAsync(query.SessionId, cancellationToken).ConfigureAwait(false))
+            {
+                if (query.OwnerId is null || string.Equals(memory.OwnerId, query.OwnerId, StringComparison.Ordinal))
+                {
+                    values.Add(memory);
+                }
+
+                if (values.Count > maximumEntries)
+                {
+                    throw new InvalidOperationException("The authoritative memory snapshot exceeded the configured bound.");
+                }
+            }
+        }
+
+        return BuildAuthoritativeSnapshot(query, values, maximumEntries);
+    }
+
+    private static IReadOnlyDictionary<(string OwnerId, string MemoryId), GameMemory> BuildAuthoritativeSnapshot(
+        GameMemoryQuery query,
+        IReadOnlyList<GameMemory> values,
+        int maximumEntries)
     {
         var memories = new Dictionary<(string OwnerId, string MemoryId), GameMemory>();
-        await foreach (var memory in _snapshotSource.EnumerateAsync(sessionId, cancellationToken).ConfigureAwait(false))
+        foreach (var memory in values)
         {
-            if (!string.Equals(memory.SessionId, sessionId, StringComparison.Ordinal)
+            if (!string.Equals(memory.SessionId, query.SessionId, StringComparison.Ordinal)
+                || (query.OwnerId is not null && !string.Equals(memory.OwnerId, query.OwnerId, StringComparison.Ordinal))
                 || !memories.TryAdd((memory.OwnerId, memory.MemoryId), memory))
             {
                 throw new InvalidOperationException("The authoritative memory snapshot returned an invalid identity.");
             }
 
-            if (memories.Count > _options.MaximumIndexEntries)
+            if (memories.Count > maximumEntries)
             {
                 throw new InvalidOperationException("The authoritative memory snapshot exceeded the configured bound.");
             }
         }
 
         return new ReadOnlyDictionary<(string OwnerId, string MemoryId), GameMemory>(memories);
+    }
+
+    private static TimeSpan Elapsed(long startedAt)
+    {
+        var ticks = checked(Stopwatch.GetTimestamp() - startedAt);
+        return TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 
     private async ValueTask ReportAsync(

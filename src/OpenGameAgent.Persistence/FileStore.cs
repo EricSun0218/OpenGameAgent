@@ -94,6 +94,17 @@ internal sealed class FileStore
 
     public async ValueTask<T?> ReadAsync<T>(string path, CancellationToken cancellationToken)
         where T : class
+        => await ReadAsync<T>(path, FileShare.Read, cancellationToken).ConfigureAwait(false);
+
+    public async ValueTask<T?> ReadAtomicSnapshotAsync<T>(string path, CancellationToken cancellationToken)
+        where T : class
+        => await ReadAsync<T>(path, FileShare.ReadWrite | FileShare.Delete, cancellationToken).ConfigureAwait(false);
+
+    private async ValueTask<T?> ReadAsync<T>(
+        string path,
+        FileShare fileShare,
+        CancellationToken cancellationToken)
+        where T : class
     {
         if (!File.Exists(path))
         {
@@ -106,7 +117,7 @@ internal sealed class FileStore
                 path,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.Read,
+                fileShare,
                 4096,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             if (stream.Length > _maximumFileBytes)

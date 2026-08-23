@@ -1,4 +1,4 @@
-Microsoft Visual Studio Solution File, Format Version 12.00
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
@@ -155,6 +155,10 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Runtime.Hosting", "src\OpenGameAgent.Runtime.Hosting\OpenGameAgent.Runtime.Hosting.csproj", "{A7645943-B42B-4C5B-8859-079CF7296B23}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Runtime.Hosting.Tests", "tests\OpenGameAgent.Runtime.Hosting.Tests\OpenGameAgent.Runtime.Hosting.Tests.csproj", "{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "benchmarks", "benchmarks", "{0DF746F6-BFEB-4E6C-848E-034F30F38984}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Memory.Benchmarks", "benchmarks\OpenGameAgent.Memory.Benchmarks\OpenGameAgent.Memory.Benchmarks.csproj", "{7431AFE2-9CE4-44CD-BBD3-61B2CF1C0D6F}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -458,6 +462,10 @@ Global
 		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7431AFE2-9CE4-44CD-BBD3-61B2CF1C0D6F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7431AFE2-9CE4-44CD-BBD3-61B2CF1C0D6F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7431AFE2-9CE4-44CD-BBD3-61B2CF1C0D6F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7431AFE2-9CE4-44CD-BBD3-61B2CF1C0D6F}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
@@ -517,5 +525,6 @@ Global
 		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 		{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{7431AFE2-9CE4-44CD-BBD3-61B2CF1C0D6F} = {0DF746F6-BFEB-4E6C-848E-034F30F38984}
 	EndGlobalSection
 EndGlobal

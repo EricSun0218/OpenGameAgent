@@ -91,8 +91,8 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - host-derived execution scopes that keep auto/Quick/short Agent available while withholding persistent planning from unauthorized actors;
 - per-actor serialization with bounded cross-actor concurrency;
 - journaled action intents and authoritative game receipts;
-- game-time memory filtering, expiry, and optional custom ranking;
-- optional local/remote embeddings, rebuildable vector indexes, and lexical/vector hybrid recall;
+- game-time-filtered, expiring, rankable memory with session/owner-partitioned durable storage;
+- optional local/remote embeddings, partitioned rebuildable vector indexes, and single-authoritative-snapshot lexical/vector hybrid recall;
 - skills selected by input type and available tools;
 - input-aware tool visibility resolved before every model request;
 - host-attested tool modes and durable, one-time, world-version-bound approval for high-risk calls;
@@ -145,7 +145,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; per-input tool visibility; typed lifecycle events and channels; namespaced persistent state |
 | Official extensions | Tool policy, high-risk execution approval and search, structured player questions/recommended replies, goals, host-verified ordered task plans with durable pause/resume, memory, artifacts, knowledge, restart-resumable delegated agents with lineage/leases, tracing, and durable parallel workflow graphs |
-| DevTools | Bounded JSONL recordings, provider/framework/host latency attribution, failure and durable-write metrics, concurrent benchmark runtime, local observation-only HTML playback, and offline/CI evaluation rules |
+| DevTools | Bounded JSONL recordings, named context-provider and staged memory-recall timing, provider/framework/host attribution, failure and durable-write metrics, concurrent benchmark runtime, local observation-only HTML playback, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
 | External tools | Lazy on-demand search/describe/call by default; explicit direct exposure for small trusted catalogs |
@@ -153,8 +153,8 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Providers | Native Anthropic, Amazon Bedrock, Google Gemini/Vertex, Mistral, OpenAI Responses/Azure, OpenAI-compatible, OpenAI Realtime, Volcengine realtime speech, remote gateway, and message-gateway transports; retry/fallback decorators; provider-neutral conformance runner and fixtures; optional local discovery for Ollama, LM Studio, LocalAI, llama.cpp, and vLLM |
 | Generated media | Provider-neutral image/audio/video registry, generic async HTTP jobs, OpenRouter previews, official OpenAI Images, Volcengine Ark/Seedream, plus optional LocalAI and trusted ComfyUI workflow adapters |
 | Generated assets | Stable operations, content-addressed resources, persistent lifecycle state, explicit uncertain outcomes, resumable import, and durable authoritative engine receipts |
-| Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, ordinary-tool replay journals, generated-asset jobs/resources, workflow checkpoints, memories, mailboxes, artifacts, delegations, skills, and prompt templates |
-| Semantic memory | Optional model-agnostic embeddings, authoritative-save verification, rebuildable local vector index, hybrid lexical/vector recall, structured diagnostics, and game-time reranking |
+| Persistence | Crash-tolerant local snapshots plus optional append-only session history, cross-process coordination, action journals, ordinary-tool replay journals, generated-asset jobs/resources, workflow checkpoints, session/owner-partitioned memory with flat-layout migration, mailboxes, artifacts, delegations, skills, and prompt templates |
+| Semantic memory | Optional model-agnostic embeddings, single-snapshot authoritative verification, partitioned rebuildable local vector indexes, lexical/vector hybrid recall, content-free stage metrics, and game-time reranking |
 | Placement | Shared `netstandard2.1` runtime in Godot, Unity, or another C# host; optional .NET 8 HTTP/SSE service with C# and native C++ clients |
 | Runtime protocol | Optional versioned Session/Run/Turn/Item contract, capability negotiation, stable event IDs, bounded replay/gap reconciliation, exact run/turn control, C# client, Schema/fixtures, C++ DTOs, and generated TypeScript/Python clients and reducers |
 | Engines | Godot 4.7 .NET and Unity 6 in-process packages; Unreal Engine 5.8 native C++ sidecar plugin |

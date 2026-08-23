@@ -1415,6 +1415,49 @@ public sealed class OfficialExtensionTests
     }
 
     [Fact]
+    public async Task MemoryRecallTraceExposesProviderAndBoundedStagesWithoutMemoryContent()
+    {
+        const string secretMemoryText = "private-memory-body-must-not-enter-traces";
+        var store = new InMemoryGameMemoryStore();
+        await store.AppendAsync(
+            new GameMemory(
+                "memory",
+                "session",
+                "actor",
+                "facts",
+                GameMemoryKind.Fact,
+                "{\"secret\":\"" + secretMemoryText + "\"}",
+                new GameMoment("world", 4),
+                searchableText: secretMemoryText),
+            TestContext.Current.CancellationToken);
+        var sink = new InMemoryGameAgentTraceSink();
+        var provider = new ScriptedProvider(_ => TextResponse("done"));
+        await using var runtime = new GameAgentBuilder(provider, "model")
+            .UseExtension(new GameAgentTracingExtension(sink))
+            .UseExtension(new GameMemoryExtension(
+                store,
+                (context, _) => new ValueTask<GameMemoryQuery?>(new GameMemoryQuery(
+                    context.Input.SessionId,
+                    8,
+                    ownerId: context.Input.ActorId,
+                    atOrBefore: context.Input.Moment))))
+            .Build();
+
+        Assert.True((await runtime.RunAsync(Input(), TestContext.Current.CancellationToken)).Succeeded);
+
+        var traces = sink.Snapshot();
+        var memory = Assert.Single(traces, trace => trace.Kind == "memory.search.completed");
+        Assert.Contains("AuthoritativeSnapshot", memory.DetailsJson, StringComparison.Ordinal);
+        Assert.Contains("LexicalSearch", memory.DetailsJson, StringComparison.Ordinal);
+        var providerTrace = Assert.Single(
+            traces,
+            trace => trace.Kind == "context.provider.completed"
+                     && trace.DetailsJson.Contains("memory-recall", StringComparison.Ordinal));
+        Assert.Contains("opengameagent.memory", providerTrace.DetailsJson, StringComparison.Ordinal);
+        Assert.All(traces, trace => Assert.DoesNotContain(secretMemoryText, trace.DetailsJson, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task MemorySearchToolRejectsFutureGameTime()
     {
         var provider = new ScriptedProvider(call => call == 1

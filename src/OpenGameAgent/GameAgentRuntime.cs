@@ -957,13 +957,28 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var baseUsageLedger = loaded.UsageLedger;
 
             var contextStartedAt = Stopwatch.GetTimestamp();
-            var baseContext = _contextProvider is null
-                ? Array.Empty<GameContextSlice>()
-                : (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
+            var baseContext = Array.Empty<GameContextSlice>();
+            if (_contextProvider is not null)
+            {
+                var providerStartedAt = Stopwatch.GetTimestamp();
+                baseContext = (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
                     ?? throw new InvalidOperationException("The game context provider returned null.")).ToArray();
+                await _extensions.PublishAsync(
+                        GameAgentExtensionEvents.ContextProviderCompleted,
+                        new GameAgentContextProviderEvent(
+                            "host-context",
+                            "initial",
+                            baseContext.Length,
+                            Elapsed(providerStartedAt)),
+                        extensionContext,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             var context = await _extensions.CollectContextAsync(
                 extensionContext,
                 baseContext,
+                "initial",
                 cancellationToken).ConfigureAwait(false);
             _limits.Validate(context);
             await _extensions.PublishAsync(
@@ -2558,13 +2573,28 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         RunUsageAccounting usageAccounting,
         CancellationToken cancellationToken)
     {
-        var baseContext = _contextProvider is null
-            ? Array.Empty<GameContextSlice>()
-            : (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
+        var baseContext = Array.Empty<GameContextSlice>();
+        if (_contextProvider is not null)
+        {
+            var providerStartedAt = Stopwatch.GetTimestamp();
+            baseContext = (await _contextProvider.GetContextAsync(input, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The game context provider returned null.")).ToArray();
+            await _extensions.PublishAsync(
+                    GameAgentExtensionEvents.ContextProviderCompleted,
+                    new GameAgentContextProviderEvent(
+                        "host-context",
+                        "refresh",
+                        baseContext.Length,
+                        Elapsed(providerStartedAt)),
+                    extensionContext,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var context = await _extensions.CollectContextAsync(
             extensionContext,
             baseContext,
+            "refresh",
             cancellationToken).ConfigureAwait(false);
         _limits.Validate(context);
 

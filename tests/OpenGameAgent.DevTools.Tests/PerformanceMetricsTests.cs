@@ -28,7 +28,9 @@ public sealed class PerformanceMetricsTests
             Entry(16, "kernel.messageended", "{\"runId\":\"run\",\"turn\":2,\"provider\":\"provider\",\"responseModel\":\"resolved\"}", 40),
             Entry(17, "kernel.toolrepeatdetected", "{\"runId\":\"run\",\"turn\":2,\"tool\":\"build\",\"toolRepeatCount\":3,\"toolRepeatAction\":\"Advisory\"}", 41),
             Entry(18, "kernel.toolrepeatdetected", "{\"runId\":\"run\",\"turn\":2,\"tool\":\"build\",\"toolRepeatCount\":8,\"toolRepeatAction\":\"Terminated\"}", 42),
-            Entry(19, "run.completed", "{\"status\":\"Completed\",\"usage\":{\"totalTokens\":12,\"cost\":{\"known\":true,\"total\":0.25}}}", 50),
+            Entry(19, "context.provider.completed", "{\"provider\":\"memory-recall\",\"extensionId\":\"opengameagent.memory\",\"phase\":\"initial\",\"sliceCount\":1,\"durationMilliseconds\":2.5}", 43),
+            Entry(20, "memory.search.completed", "{\"source\":\"context\",\"stages\":[{\"stage\":\"AuthoritativeSnapshot\",\"durationMilliseconds\":1.25,\"scannedCount\":8,\"candidateCount\":8,\"reused\":true},{\"stage\":\"Embedding\",\"durationMilliseconds\":0.75,\"scannedCount\":1,\"candidateCount\":1,\"reused\":false}]}", 44),
+            Entry(21, "run.completed", "{\"status\":\"Completed\",\"usage\":{\"totalTokens\":12,\"cost\":{\"known\":true,\"total\":0.25}}}", 50),
         });
 
         var summary = GameAgentPerformanceSummary.Create(recording);
@@ -75,6 +77,16 @@ public sealed class PerformanceMetricsTests
         Assert.Equal(1, summary.ExactToolRepeatAdvisories);
         Assert.Equal(1, summary.ExactToolRepeatTerminations);
         Assert.Equal(1, summary.Replans);
+        var contextProvider = Assert.Single(run.ContextProviders);
+        Assert.Equal("memory-recall", contextProvider.Provider);
+        Assert.Equal("opengameagent.memory", contextProvider.ExtensionId);
+        Assert.Equal(2.5, contextProvider.DurationMilliseconds);
+        Assert.Equal(2, run.MemorySearchStages.Count);
+        var authoritativeMemory = Assert.Single(
+            run.MemorySearchStages,
+            stage => stage.Stage == "AuthoritativeSnapshot");
+        Assert.True(authoritativeMemory.Reused);
+        Assert.Equal(8, authoritativeMemory.ScannedCount);
         Assert.All(run.Tools, tool =>
         {
             Assert.Equal("tool-provider", tool.Provider);
@@ -90,6 +102,8 @@ public sealed class PerformanceMetricsTests
         Assert.Contains("classifierProviderStatus=429", summary.ToText(), StringComparison.Ordinal);
         Assert.Contains("classifierProviderFailure=rate-limit", summary.ToText(), StringComparison.Ordinal);
         Assert.Contains("terminated loops: 1", summary.ToText(), StringComparison.Ordinal);
+        Assert.Contains("context provider=memory-recall", summary.ToText(), StringComparison.Ordinal);
+        Assert.Contains("memory source=context stage=AuthoritativeSnapshot", summary.ToText(), StringComparison.Ordinal);
         Assert.Single(summary.ToJsonLines().Split(Environment.NewLine));
     }
 
