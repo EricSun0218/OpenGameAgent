@@ -86,6 +86,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Models.Auth.B
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Models.Auth.BuiltIn.Tests", "tests\OpenGameAgent.Models.Auth.BuiltIn.Tests\OpenGameAgent.Models.Auth.BuiltIn.Tests.csproj", "{9A687BE1-F8B4-4B89-9991-464914D69E28}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Models.Credentials.Windows", "src\OpenGameAgent.Models.Credentials.Windows\OpenGameAgent.Models.Credentials.Windows.csproj", "{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Models.Credentials.Windows.Tests", "tests\OpenGameAgent.Models.Credentials.Windows.Tests\OpenGameAgent.Models.Credentials.Windows.Tests.csproj", "{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.OpenRouter", "src\OpenGameAgent.Providers.OpenRouter\OpenGameAgent.Providers.OpenRouter.csproj", "{3C22F458-B759-4DAC-B367-AD876679A2FC}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenGameAgent.Providers.OpenRouter.Tests", "tests\OpenGameAgent.Providers.OpenRouter.Tests\OpenGameAgent.Providers.OpenRouter.Tests.csproj", "{11929951-6AC8-445D-9539-F859E583EEC2}"
@@ -446,6 +450,14 @@ Global
 		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{01759D73-7B80-47A2-9D7D-154CC64C6851} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
@@ -503,5 +515,7 @@ Global
 		{F4467AFD-D58A-4CFA-A5C3-AD4F9480D603} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 		{A7645943-B42B-4C5B-8859-079CF7296B23} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
 		{A0725BD3-B9C7-4390-8F75-E5AD4C9E6B25} = {86AE6217-BFEE-4349-945A-70ECEC211437}
+		{F2A7B6C1-0B11-4A9F-9FD6-841B1FE93D21} = {EA3AF59A-9A1C-4197-B2A3-F93894D131B8}
+		{F2A7B6C2-0B11-4A9F-9FD6-841B1FE93D22} = {86AE6217-BFEE-4349-945A-70ECEC211437}
 	EndGlobalSection
 EndGlobal

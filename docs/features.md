@@ -117,6 +117,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Validate a provider's normalized stream, cancellation, bounds, and diagnostic secrecy | `GameProviderConformance`, `GameProviderConformanceFixtures` |
 | Refresh a provider's model list safely | `GameModelProviderRegistration.RefreshModels`, `GameModelCatalog.RefreshAsync` |
 | Resolve API keys, OAuth-style tokens, or local/no-auth modes | `IGameProviderAuthentication`, `IGameCredentialStore` |
+| Persist player-supplied credentials for the current Windows user | `WindowsDpapiGameCredentialStore` in `OpenGameAgent.Models.Credentials.Windows` |
 | Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |
 | Read durable per-session usage and explicit known/unknown cost | `GameAgentRuntime.ReadUsageAsync`, `GameSessionUsageLedger` |
 | Read usage caused by one input, including routing and workflow work | `GameAgentRunResult.RunUsage` |

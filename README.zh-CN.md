@@ -169,7 +169,7 @@ GameAgentRuntime
 
 对于已知的托管 Provider，路由分类与主 Agent 应共用目录驱动 Runtime。底层 OpenAI-compatible 适配器有意要求显式协议设置，不会根据 URL 或模型名猜测供应商。
 
-`OpenGameAgent.Models.Auth.BuiltIn` 为支持的订阅服务提供可选浏览器或设备授权。框架不会内嵌公共客户端注册信息：需要 Client ID 的流程只有在游戏开发者显式提供后才会启用。`OpenGameAgent.ProviderTransport` 只向观察器暴露白名单内且有界的响应元数据，不会把凭证或任意响应头交给追踪代码。
+`OpenGameAgent.Models.Auth.BuiltIn` 为支持的订阅服务提供可选浏览器或设备授权。框架不会内嵌公共客户端注册信息：需要 Client ID 的流程只有在游戏开发者显式提供后才会启用。Windows 桌面宿主可以增加 `OpenGameAgent.Models.Credentials.Windows`，通过同一个 `IGameCredentialStore` 获得有界、原子且使用 CurrentUser DPAPI 的持久化；其他平台可以提供自己的原生安全存储实现而无需修改认证代码。`OpenGameAgent.ProviderTransport` 只向观察器暴露白名单内且有界的响应元数据，不会把凭证或任意响应头交给追踪代码。详见 [Windows 凭据持久化](docs/windows-credentials.zh-CN.md)。
 
 图片、语音和视频生成使用独立的模型注册表，因为生成任务、渐进预览、轮询和输出并不是聊天补全。框架提供中立注册表、通用及专用 Provider，以及先物化并验证输出、再请求游戏权威导入的生成资产流水线。本地生成器、其他 API、内容审核与引擎导入器都可以替换，不需要修改 Agent 内核。详见[生成资产](docs/generated-assets.md)。
 

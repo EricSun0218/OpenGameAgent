@@ -330,7 +330,7 @@ Availability checks use the configured authentication chain, so a provider with 
 
 Authentication is replaceable: static credentials, environment resolution, game-owned credential stores, or local/no-auth providers can share the same catalog. If the developer pays for inference, use `DeveloperGatewayProvider` to obtain short-lived scoped access from the developer's authenticated gateway. Never ship a permanent upstream provider key in a client build.
 
-`OpenGameAgent.Models.Auth.BuiltIn` registers optional browser and device flows against the same credential store. Client IDs are developer configuration, not framework defaults; a flow that requires one stays disabled until it is explicitly supplied. Use an encrypted platform credential store in a shipped product—the included in-memory store is for composition and tests, not durable secret protection.
+`OpenGameAgent.Models.Auth.BuiltIn` registers optional browser and device flows against the same credential store. Client IDs are developer configuration, not framework defaults; a flow that requires one stays disabled until it is explicitly supplied. Use an encrypted platform credential store in a shipped product—the included in-memory store is for composition and tests, not durable secret protection. Windows desktop hosts can use the optional `OpenGameAgent.Models.Credentials.Windows` package; see [Windows credential persistence](windows-credentials.md).
 
 ## Steer or abort an active actor
 

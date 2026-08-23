@@ -126,6 +126,10 @@
       "project": "src/OpenGameAgent.Models.Auth.BuiltIn/OpenGameAgent.Models.Auth.BuiltIn.csproj"
     },
     {
+      "id": "OpenGameAgent.Models.Credentials.Windows",
+      "project": "src/OpenGameAgent.Models.Credentials.Windows/OpenGameAgent.Models.Credentials.Windows.csproj"
+    },
+    {
       "id": "OpenGameAgent.Persistence",
       "project": "src/OpenGameAgent.Persistence/OpenGameAgent.Persistence.csproj"
     },
