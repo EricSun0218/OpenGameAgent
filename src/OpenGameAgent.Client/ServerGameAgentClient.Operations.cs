@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using static OpenGameAgent.Client.GameServerClientTransport;
 
 namespace OpenGameAgent.Client;
 

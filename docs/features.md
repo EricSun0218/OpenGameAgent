@@ -70,8 +70,6 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Read the current persisted transcript without parsing a store | `GameAgentRuntime.ReadTranscriptAsync`, `ServerGameAgentClient.ReadTranscriptAsync` |
 | Consume one versioned cross-language run/item stream with reconnect and exact control | `OpenGameAgent.Runtime.Protocol`, `GameRuntimeServerClient` |
 | Read capabilities, complete usage, and durable action exchange from C# | `ServerGameAgentClient.ReadCapabilitiesAsync`, `ReadUsageAsync`, `ClaimActionsAsync`, `StreamActionsAsync`, `SubmitActionReceiptAsync`, `ReconcileActionAsync` |
-| Build a standalone append-only branch/lane audit history | `IGameSessionHistoryRepository`, `GameSessionHistory` |
-| Fork, search, page, or project that explicit history | `GameSessionHistory`, `GameHistoryContextProjection` |
 | Compact a long transcript | `IGameTranscriptCompactor` |
 
 ## World actions and simulation

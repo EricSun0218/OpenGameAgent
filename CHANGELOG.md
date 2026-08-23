@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Remove the unused standalone immutable session-history subsystem; the runtime transcript remains the
+  canonical conversation record, while products can keep separate host-owned audit or trace storage.
+- Centralize shared .NET test-project and xUnit configuration, and refresh locked dependencies to the
+  current package version so every test project follows one release-tested configuration.
+- Share bounded HTTP/SSE transport validation and parsing across the stock server and Runtime Protocol
+  clients without changing their public contracts.
 - Add a provider-neutral model-stream conformance runner with standard request fixtures, bounded
   lifecycle/terminal checks, cancellation probes, resolved-identity checks, and sensitive-diagnostic guards.
 - Generate dependency-free TypeScript and standard-library Python Runtime Protocol v1 clients and

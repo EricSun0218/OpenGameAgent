@@ -1,7 +1,21 @@
 <Project>
   <Import Project="..\Directory.Build.props" />
 
+  <PropertyGroup Condition="$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('.Tests'))">
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
   <ItemGroup Condition="$([System.String]::Copy('$(MSBuildProjectName)').EndsWith('.Tests'))">
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
     <!-- Override legacy transitive test-runner dependencies with maintained builds. -->
     <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="10.0.10" PrivateAssets="all" />
     <PackageReference Include="System.Security.AccessControl" Version="6.0.1" PrivateAssets="all" />

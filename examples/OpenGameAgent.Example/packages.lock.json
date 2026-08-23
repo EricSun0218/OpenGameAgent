@@ -10,7 +10,7 @@
       "opengameagent": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.4, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
@@ -20,15 +20,15 @@
       "opengameagent.kernel": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Attachments": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Attachments": "[0.3.0-alpha.4, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },
       "opengameagent.providers.openaicompatible": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.2, )",
-          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.2, )",
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.4, )",
+          "OpenGameAgent.ProviderTransport": "[0.3.0-alpha.4, )",
           "System.Text.Json": "[8.0.6, )"
         }
       },

@@ -1,16 +1,15 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenGameAgent.Attachments;
+using static OpenGameAgent.Client.GameServerClientTransport;
 
 namespace OpenGameAgent.Client;
 
@@ -274,39 +273,20 @@ public sealed partial class ServerGameAgentClient
         }
 
 
-        if (options.ServerBaseUri is null
-            || !options.ServerBaseUri.IsAbsoluteUri
-            || options.ServerBaseUri.UserInfo.Length > 0
-            || options.ServerBaseUri.Query.Length > 0
-            || options.ServerBaseUri.Fragment.Length > 0
-            || (!string.Equals(options.ServerBaseUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(options.ServerBaseUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
-        {
-            throw new ArgumentException("The server base URI must be an absolute HTTP or HTTPS URI.", nameof(options));
-        }
-
-        if (string.Equals(options.ServerBaseUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && !options.ServerBaseUri.IsLoopback
-            && !options.AllowInsecureHttp)
-        {
-            throw new ArgumentException(
-                "Remote agent servers must use HTTPS unless insecure HTTP is explicitly enabled.",
-                nameof(options));
-        }
+        ValidateBaseUri(
+            options.ServerBaseUri,
+            options.AllowInsecureHttp,
+            nameof(options),
+            "The server base URI must be an absolute HTTP or HTTPS URI.",
+            "Remote agent servers must use HTTPS unless insecure HTTP is explicitly enabled.");
 
         if (!IsValidHeaderName(options.ApiKeyHeader) || options.ApiKeyHeader.Length > 256)
         {
             throw new ArgumentException("A valid API key header name is required.", nameof(options));
         }
 
-        if ((options.ApiKey?.Contains('\r') ?? false)
-            || (options.ApiKey?.Contains('\n') ?? false)
-            || (options.ApiKey?.Contains('\0') ?? false)
-            || (options.ApiKey?.Length ?? 0) > 65_536
-            || (options.ApiKeyScheme?.Contains('\r') ?? false)
-            || (options.ApiKeyScheme?.Contains('\n') ?? false)
-            || (options.ApiKeyScheme?.Contains('\0') ?? false)
-            || (options.ApiKeyScheme?.Length ?? 0) > 256)
+        if (ContainsInvalidCredentialCharacters(options.ApiKey, 65_536)
+            || ContainsInvalidCredentialCharacters(options.ApiKeyScheme, 256))
         {
             throw new ArgumentException("API key credentials contain invalid characters or exceed their size limit.", nameof(options));
         }
@@ -344,24 +324,6 @@ public sealed partial class ServerGameAgentClient
         _maxResponseCharacters = options.MaxResponseCharacters;
         _maxEventCharacters = options.MaxEventCharacters;
         _maxRequestCharacters = options.MaxRequestCharacters;
-    }
-
-    private static bool IsValidHeaderName(string? name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return false;
-        }
-
-        try
-        {
-            using var request = new HttpRequestMessage();
-            return request.Headers.TryAddWithoutValidation(name, "value");
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
     }
 
     public async Task<RemoteGameAgentResult> RunAsync(
@@ -709,7 +671,7 @@ public sealed partial class ServerGameAgentClient
 
     private static void ValidatePresentedCredential(string? value)
     {
-        if ((value?.Length ?? 0) > 4_096 || value?.Any(char.IsControl) == true)
+        if (ContainsInvalidCredentialCharacters(value, 4_096, rejectAllControlCharacters: true))
         {
             throw new ArgumentException("The presented credential is invalid.", nameof(value));
         }
@@ -953,140 +915,6 @@ public sealed partial class ServerGameAgentClient
             errorValue);
     }
 
-    private static async Task<string> ReadBoundedAsync(
-        HttpContent content,
-        int maximumCharacters,
-        CancellationToken cancellationToken)
-    {
-        using var stream = await content.ReadAsStreamAsync().ConfigureAwait(false);
-        using var registration = cancellationToken.Register(stream.Dispose);
-        using var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, leaveOpen: false);
-        var buffer = new char[Math.Min(4096, maximumCharacters)];
-        var result = new StringBuilder();
-        while (result.Length < maximumCharacters)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var read = await reader.ReadAsync(
-                buffer,
-                0,
-                Math.Min(buffer.Length, maximumCharacters - result.Length)).ConfigureAwait(false);
-            if (read == 0)
-            {
-                return result.ToString();
-            }
-
-            result.Append(buffer, 0, read);
-        }
-
-        if (await reader.ReadAsync(buffer, 0, 1).ConfigureAwait(false) != 0)
-        {
-            throw new InvalidDataException("The server response exceeded the configured size limit.");
-        }
-
-        return result.ToString();
-    }
-
-    private static async IAsyncEnumerable<string> ReadBoundedLinesAsync(
-        StreamReader reader,
-        int maximumCharacters,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var buffer = ArrayPool<char>.Shared.Rent(Math.Min(4096, maximumCharacters + 1));
-        var line = new StringBuilder(Math.Min(4096, maximumCharacters));
-        try
-        {
-            while (true)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                int read;
-                try
-                {
-                    read = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
-                }
-                catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw new OperationCanceledException(cancellationToken);
-                }
-                catch (IOException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw new OperationCanceledException(cancellationToken);
-                }
-
-                if (read == 0)
-                {
-                    if (line.Length > 0)
-                    {
-                        yield return TrimCarriageReturn(line);
-                    }
-
-                    yield break;
-                }
-
-                for (var index = 0; index < read; index++)
-                {
-                    if (buffer[index] == '\n')
-                    {
-                        yield return TrimCarriageReturn(line);
-                        line.Clear();
-                        continue;
-                    }
-
-                    line.Append(buffer[index]);
-                    if (line.Length > maximumCharacters)
-                    {
-                        throw new InvalidDataException("A server event line exceeded the configured size limit.");
-                    }
-                }
-            }
-        }
-        finally
-        {
-            ArrayPool<char>.Shared.Return(buffer);
-        }
-    }
-
-    private static string TrimCarriageReturn(StringBuilder line)
-    {
-        var length = line.Length;
-        if (length > 0 && line[length - 1] == '\r')
-        {
-            length--;
-        }
-
-        return line.ToString(0, length);
-    }
-
-    private static void EnsureSuccess(HttpResponseMessage response, string body)
-    {
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new HttpRequestException(
-                $"The agent server returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). {body}");
-        }
-    }
-
-    private static Uri EnsureTrailingSlash(Uri value) =>
-        value.AbsoluteUri.EndsWith('/')
-            ? value
-            : new Uri(value.AbsoluteUri + "/");
-
-    private static Uri CreateEndpoint(Uri serverBaseUri, string path, string parameterName)
-    {
-        if (string.IsNullOrWhiteSpace(path) || !Uri.TryCreate(path, UriKind.Relative, out _))
-        {
-            throw new ArgumentException("A server endpoint path must be relative.", parameterName);
-        }
-
-        var endpoint = new Uri(EnsureTrailingSlash(serverBaseUri), path);
-        if (!string.Equals(endpoint.Scheme, serverBaseUri.Scheme, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(endpoint.Host, serverBaseUri.Host, StringComparison.OrdinalIgnoreCase)
-            || endpoint.Port != serverBaseUri.Port)
-        {
-            throw new ArgumentException("A server endpoint path cannot change the configured server origin.", parameterName);
-        }
-
-        return endpoint;
-    }
 }
 
 internal static class RemoteJson
