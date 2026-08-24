@@ -173,19 +173,21 @@ public sealed class ExtensionRuntimeTests
     public async Task RuntimeShutdownWaitsForActorLanesBeforeDisposingExtensions()
     {
         var provider = new BlockingProvider();
-        var extension = new ShutdownProbeExtension(() => provider.Stopped);
+        Task<GameAgentRunResult>? active = null;
+        var extension = new ShutdownProbeExtension(
+            () => provider.CancellationObserved && active?.IsCompleted == true);
         var options = new GameAgentRuntimeOptions(provider, "model");
         options.Extensions.Add(extension);
         var runtime = new GameAgentRuntime(options);
-        var active = runtime.RunAsync(Input("chat", "active"), TestContext.Current.CancellationToken);
+        active = runtime.RunAsync(Input("chat", "active"), TestContext.Current.CancellationToken);
         await provider.Entered.Task.WaitAsync(TestContext.Current.CancellationToken);
         var queued = runtime.RunAsync(Input("chat", "queued"), TestContext.Current.CancellationToken);
 
         await runtime.DisposeAsync();
 
-        Assert.True(provider.Stopped);
+        Assert.True(provider.CancellationObserved);
         Assert.True(extension.Disposed);
-        Assert.True(extension.ProviderWasStoppedAtDispose);
+        Assert.True(extension.ActorLaneWasSettledAtDispose);
         Assert.Equal(1, provider.CallCount);
         var settled = await active;
         Assert.Equal(AgentRunStatus.Aborted, settled.AgentResult?.Status);
@@ -631,13 +633,13 @@ public sealed class ExtensionRuntimeTests
     private sealed class BlockingProvider : IModelProvider
     {
         private int _calls;
-        private int _stopped;
+        private int _cancellationObserved;
 
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int CallCount => Volatile.Read(ref _calls);
 
-        public bool Stopped => Volatile.Read(ref _stopped) != 0;
+        public bool CancellationObserved => Volatile.Read(ref _cancellationObserved) != 0;
 
         public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
             ModelRequest request,
@@ -645,15 +647,10 @@ public sealed class ExtensionRuntimeTests
         {
             _ = request;
             Interlocked.Increment(ref _calls);
+            using var cancellationRegistration = cancellationToken.Register(
+                () => Interlocked.Exchange(ref _cancellationObserved, 1));
             Entered.TrySetResult();
-            try
-            {
-                await Task.Delay(Timeout.Infinite, cancellationToken);
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _stopped, 1);
-            }
+            await Task.Delay(Timeout.Infinite, cancellationToken);
 
             yield break;
         }
@@ -661,18 +658,18 @@ public sealed class ExtensionRuntimeTests
 
     private sealed class ShutdownProbeExtension : IGameAgentExtension, IAsyncDisposable
     {
-        private readonly Func<bool> _providerStopped;
+        private readonly Func<bool> _actorLaneSettled;
 
-        public ShutdownProbeExtension(Func<bool> providerStopped)
+        public ShutdownProbeExtension(Func<bool> actorLaneSettled)
         {
-            _providerStopped = providerStopped;
+            _actorLaneSettled = actorLaneSettled;
         }
 
         public GameAgentExtensionDescriptor Descriptor { get; } = new("shutdown-probe", "1");
 
         public bool Disposed { get; private set; }
 
-        public bool ProviderWasStoppedAtDispose { get; private set; }
+        public bool ActorLaneWasSettledAtDispose { get; private set; }
 
         public void Configure(GameAgentExtensionApi api)
         {
@@ -681,7 +678,7 @@ public sealed class ExtensionRuntimeTests
 
         public ValueTask DisposeAsync()
         {
-            ProviderWasStoppedAtDispose = _providerStopped();
+            ActorLaneWasSettledAtDispose = _actorLaneSettled();
             Disposed = true;
             return ValueTask.CompletedTask;
         }

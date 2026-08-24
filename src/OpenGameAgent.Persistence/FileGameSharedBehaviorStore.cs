@@ -867,7 +867,12 @@ public sealed class FileGameSharedBehaviorStore : IGameSharedBehaviorStore
         var manifest = await ReadAudienceManifestAsync(audience, cancellationToken).ConfigureAwait(false);
         if (index is null && manifest is null)
         {
-            return new AudienceState(NewAudienceIndex(audience), NewAudienceManifest(audience));
+            return catalog.EntryCount == 0
+                ? new AudienceState(NewAudienceIndex(audience), NewAudienceManifest(audience))
+                : await RebuildMissingAudienceStateUnderLeaseAsync(
+                    audience,
+                    catalog,
+                    cancellationToken).ConfigureAwait(false);
         }
 
         if (manifest is null)
@@ -891,11 +896,6 @@ public sealed class FileGameSharedBehaviorStore : IGameSharedBehaviorStore
     {
         var index = await ReadAudienceIndexAsync(audience, cancellationToken).ConfigureAwait(false);
         var manifest = await ReadAudienceManifestAsync(audience, cancellationToken).ConfigureAwait(false);
-        if (index is null && manifest is null)
-        {
-            return NewAudienceIndex(audience);
-        }
-
         if (index is not null && manifest is not null && AudienceStateMatches(index, manifest))
         {
             return index;
@@ -913,7 +913,16 @@ public sealed class FileGameSharedBehaviorStore : IGameSharedBehaviorStore
             manifest = await ReadAudienceManifestAsync(audience, cancellationToken).ConfigureAwait(false);
             if (index is null && manifest is null)
             {
-                return NewAudienceIndex(audience);
+                var recoveredCatalog = await ReadIndexAsync(cancellationToken).ConfigureAwait(false);
+                if (recoveredCatalog.EntryCount == 0)
+                {
+                    return NewAudienceIndex(audience);
+                }
+
+                return (await RebuildMissingAudienceStateUnderLeaseAsync(
+                    audience,
+                    recoveredCatalog,
+                    cancellationToken).ConfigureAwait(false)).Index;
             }
 
             if (manifest is null)
@@ -944,6 +953,52 @@ public sealed class FileGameSharedBehaviorStore : IGameSharedBehaviorStore
         GameSharedBehaviorAudience audience,
         CatalogIndexDocument catalog,
         AudienceManifestDocument manifest,
+        CancellationToken cancellationToken)
+    {
+        var rebuilt = await BuildAudienceIndexFromCommittedPublicationsAsync(
+            audience,
+            catalog,
+            cancellationToken).ConfigureAwait(false);
+        if (rebuilt.PublicationIds.Count != manifest.PublicationCount
+            || !string.Equals(manifest.PublicationIdsHash, AudienceIndexHash(rebuilt), StringComparison.Ordinal))
+        {
+            throw new PersistenceException("The shared behavior audience index cannot be rebuilt consistently.");
+        }
+
+        EnsureDocumentFits(rebuilt, "audience index");
+        await WriteAudienceIndexAsync(rebuilt, cancellationToken).ConfigureAwait(false);
+        return rebuilt;
+    }
+
+    private async ValueTask<AudienceState> RebuildMissingAudienceStateUnderLeaseAsync(
+        GameSharedBehaviorAudience audience,
+        CatalogIndexDocument catalog,
+        CancellationToken cancellationToken)
+    {
+        var rebuilt = await BuildAudienceIndexFromCommittedPublicationsAsync(
+            audience,
+            catalog,
+            cancellationToken).ConfigureAwait(false);
+        var manifest = NewAudienceManifest(audience);
+        manifest.PublicationCount = rebuilt.PublicationIds.Count;
+        manifest.PublicationIdsHash = AudienceIndexHash(rebuilt);
+        if (rebuilt.PublicationIds.Count == 0)
+        {
+            return new AudienceState(rebuilt, manifest);
+        }
+
+        EnsureDocumentFits(rebuilt, "audience index");
+        EnsureDocumentFits(manifest, "audience manifest");
+        // The manifest is authoritative recovery evidence for this derived index. Writing it first
+        // leaves a recoverable manifest-without-index state if the process stops between writes.
+        await WriteAudienceManifestAsync(manifest, cancellationToken).ConfigureAwait(false);
+        await WriteAudienceIndexAsync(rebuilt, cancellationToken).ConfigureAwait(false);
+        return new AudienceState(rebuilt, manifest);
+    }
+
+    private async ValueTask<CatalogAudienceIndexDocument> BuildAudienceIndexFromCommittedPublicationsAsync(
+        GameSharedBehaviorAudience audience,
+        CatalogIndexDocument catalog,
         CancellationToken cancellationToken)
     {
         var rebuilt = NewAudienceIndex(audience);
@@ -984,15 +1039,11 @@ public sealed class FileGameSharedBehaviorStore : IGameSharedBehaviorStore
             }
         }
 
-        if (total != catalog.EntryCount
-            || rebuilt.PublicationIds.Count != manifest.PublicationCount
-            || !string.Equals(manifest.PublicationIdsHash, AudienceIndexHash(rebuilt), StringComparison.Ordinal))
+        if (total != catalog.EntryCount)
         {
-            throw new PersistenceException("The shared behavior audience index cannot be rebuilt consistently.");
+            throw new PersistenceException("The shared behavior catalog cannot rebuild an audience index consistently.");
         }
 
-        EnsureDocumentFits(rebuilt, "audience index");
-        await WriteAudienceIndexAsync(rebuilt, cancellationToken).ConfigureAwait(false);
         return rebuilt;
     }
 

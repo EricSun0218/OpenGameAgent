@@ -386,6 +386,82 @@ public sealed class SharedBehaviorCatalogPersistenceTests
     }
 
     [Fact]
+    public async Task MissingAudienceIndexAndManifestAreRebuiltFromCommittedPublications()
+    {
+        using var directory = new TemporaryDirectory();
+        var worker = new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, "worker");
+        var outsider = new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, "outsider");
+        var store = new FileGameSharedBehaviorStore(directory.Path);
+        var workerPublication = Publication("rebuild-worker-both", worker);
+        Assert.True((await store.SaveAsync(
+            workerPublication,
+            0,
+            TestContext.Current.CancellationToken)).Saved);
+        Assert.True((await store.SaveAsync(
+            Publication("rebuild-outsider-both", outsider),
+            0,
+            TestContext.Current.CancellationToken)).Saved);
+        var workerIndex = AudienceMetadataPath(directory.Path, worker, ".index.json");
+        var workerManifest = AudienceMetadataPath(directory.Path, worker, ".manifest.json");
+        File.Delete(workerIndex);
+        File.Delete(workerManifest);
+
+        var rebuilt = await new FileGameSharedBehaviorStore(directory.Path).QueryAsync(
+            new GameSharedBehaviorStoreQuery(new[] { worker }),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(workerPublication.PublicationId, Assert.Single(rebuilt).PublicationId);
+        Assert.True(File.Exists(workerIndex));
+        Assert.True(File.Exists(workerManifest));
+    }
+
+    [Fact]
+    public async Task InsertRebuildsMissingAudienceMetadataBeforeAppending()
+    {
+        using var directory = new TemporaryDirectory();
+        var worker = new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, "worker");
+        var store = new FileGameSharedBehaviorStore(directory.Path);
+        var first = Publication("rebuild-before-insert-a", worker);
+        var second = Publication("rebuild-before-insert-b", worker);
+        Assert.True((await store.SaveAsync(first, 0, TestContext.Current.CancellationToken)).Saved);
+        File.Delete(AudienceMetadataPath(directory.Path, worker, ".index.json"));
+        File.Delete(AudienceMetadataPath(directory.Path, worker, ".manifest.json"));
+
+        Assert.True((await new FileGameSharedBehaviorStore(directory.Path).SaveAsync(
+            second,
+            0,
+            TestContext.Current.CancellationToken)).Saved);
+        var results = await new FileGameSharedBehaviorStore(directory.Path).QueryAsync(
+            new GameSharedBehaviorStoreQuery(new[] { worker }, maximumResults: 10),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { first.PublicationId, second.PublicationId },
+            results.Select(value => value.PublicationId).OrderBy(value => value, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task UnknownAudienceQueryDoesNotCreateEmptyMetadataFiles()
+    {
+        using var directory = new TemporaryDirectory();
+        var worker = new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, "worker");
+        var unknown = new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, "unknown");
+        var store = new FileGameSharedBehaviorStore(directory.Path);
+        Assert.True((await store.SaveAsync(
+            Publication("known-audience", worker),
+            0,
+            TestContext.Current.CancellationToken)).Saved);
+        var indexesBefore = Directory.GetFiles(directory.Path, "shared-behavior-audience-*.index.json").Length;
+        var manifestsBefore = Directory.GetFiles(directory.Path, "shared-behavior-audience-*.manifest.json").Length;
+
+        Assert.Empty(await store.QueryAsync(
+            new GameSharedBehaviorStoreQuery(new[] { unknown }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(indexesBefore, Directory.GetFiles(directory.Path, "shared-behavior-audience-*.index.json").Length);
+        Assert.Equal(manifestsBefore, Directory.GetFiles(directory.Path, "shared-behavior-audience-*.manifest.json").Length);
+    }
+
+    [Fact]
     public async Task FamilyVersionReservationRejectsConflictingPublicationIdsAcrossStores()
     {
         using var directory = new TemporaryDirectory();
@@ -773,6 +849,22 @@ public sealed class SharedBehaviorCatalogPersistenceTests
 
     private static GameInput Input(string inputId, long tick = 1) =>
         new("session", "actor", "request", "{}", new GameMoment("world", tick), inputId);
+
+    private static string AudienceMetadataPath(
+        string directory,
+        GameSharedBehaviorAudience audience,
+        string suffix) =>
+        Directory.GetFiles(directory, "shared-behavior-audience-*" + suffix)
+            .Single(path =>
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(path));
+                var root = document.RootElement;
+                return root.GetProperty("Kind").GetInt32() == (int)audience.Kind
+                       && string.Equals(
+                           root.GetProperty("AudienceId").GetString(),
+                           audience.AudienceId,
+                           StringComparison.Ordinal);
+            });
 
     private static async Task RunAsync(
         IGameSessionStore sessions,
