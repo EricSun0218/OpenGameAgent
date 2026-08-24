@@ -173,13 +173,11 @@ public sealed class ExtensionRuntimeTests
     public async Task RuntimeShutdownWaitsForActorLanesBeforeDisposingExtensions()
     {
         var provider = new BlockingProvider();
-        Task<GameAgentRunResult>? active = null;
-        var extension = new ShutdownProbeExtension(
-            () => provider.CancellationObserved && active?.IsCompleted == true);
+        var extension = new ShutdownProbeExtension(() => provider.CancellationObserved);
         var options = new GameAgentRuntimeOptions(provider, "model");
         options.Extensions.Add(extension);
         var runtime = new GameAgentRuntime(options);
-        active = runtime.RunAsync(Input("chat", "active"), TestContext.Current.CancellationToken);
+        var active = runtime.RunAsync(Input("chat", "active"), TestContext.Current.CancellationToken);
         await provider.Entered.Task.WaitAsync(TestContext.Current.CancellationToken);
         var queued = runtime.RunAsync(Input("chat", "queued"), TestContext.Current.CancellationToken);
 
@@ -187,7 +185,7 @@ public sealed class ExtensionRuntimeTests
 
         Assert.True(provider.CancellationObserved);
         Assert.True(extension.Disposed);
-        Assert.True(extension.ActorLaneWasSettledAtDispose);
+        Assert.True(extension.RunWasCompletedAtDispose);
         Assert.Equal(1, provider.CallCount);
         var settled = await active;
         Assert.Equal(AgentRunStatus.Aborted, settled.AgentResult?.Status);
@@ -658,27 +656,35 @@ public sealed class ExtensionRuntimeTests
 
     private sealed class ShutdownProbeExtension : IGameAgentExtension, IAsyncDisposable
     {
-        private readonly Func<bool> _actorLaneSettled;
+        private readonly Func<bool> _providerCancellationObserved;
+        private int _runCompleted;
 
-        public ShutdownProbeExtension(Func<bool> actorLaneSettled)
+        public ShutdownProbeExtension(Func<bool> providerCancellationObserved)
         {
-            _actorLaneSettled = actorLaneSettled;
+            _providerCancellationObserved = providerCancellationObserved;
         }
 
         public GameAgentExtensionDescriptor Descriptor { get; } = new("shutdown-probe", "1");
 
         public bool Disposed { get; private set; }
 
-        public bool ActorLaneWasSettledAtDispose { get; private set; }
+        public bool RunWasCompletedAtDispose { get; private set; }
 
         public void Configure(GameAgentExtensionApi api)
         {
-            _ = api;
+            api.On(
+                GameAgentExtensionEvents.RunCompleted,
+                (_, _, _) =>
+                {
+                    Interlocked.Exchange(ref _runCompleted, 1);
+                    return ValueTask.CompletedTask;
+                });
         }
 
         public ValueTask DisposeAsync()
         {
-            ActorLaneWasSettledAtDispose = _actorLaneSettled();
+            RunWasCompletedAtDispose = Volatile.Read(ref _runCompleted) != 0
+                                       && _providerCancellationObserved();
             Disposed = true;
             return ValueTask.CompletedTask;
         }
