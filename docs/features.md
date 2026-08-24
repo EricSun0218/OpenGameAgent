@@ -42,6 +42,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Ask the player structured questions and recommend choices | `StructuredInteractionExtension`, `IGameInteractionBroker` |
 | Track goals and resume them after game-time waits | `GoalLoopExtension` |
 | Keep a persistent ordered checklist with host-verified progress and durable pause/resume | `TaskPlanExtension` |
+| Let an NPC propose evidence-backed procedural improvements with host-selected disabled/review/validated-auto activation, evaluation, demotion, and exact-version rollback | `BehaviorLearningExtension` |
 | Delegate bounded foreground or background work | `AgentDelegationExtension` |
 | Query a game-owned knowledge source | `ExternalKnowledgeExtension` |
 | Capture bounded lifecycle traces | `GameAgentTracingExtension` |

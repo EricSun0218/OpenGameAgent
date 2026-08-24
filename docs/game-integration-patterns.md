@@ -245,18 +245,18 @@ Long-lived NPCs can improve without allowing a model to rewrite code or game rul
 - experiences, relationships, preferences, and world facts belong in scoped `GameMemory` records;
 - reusable procedures belong in versioned `GameSkill` instructions selected for that actor's input and available tools.
 
-Implement adaptation as an optional game extension or tool pipeline:
+`BehaviorLearningExtension` implements this pattern as an optional official extension:
 
-1. the NPC proposes a bounded memory or procedure revision;
+1. the NPC proposes a bounded procedure revision while ordinary facts remain in `GameMemory`;
 2. the proposal cites game-owned evidence such as input IDs, committed action operation IDs, receipts, or offline evaluation findings;
 3. a host validator checks that evidence and verifies the proposal cannot add tools, permissions, executable code, credentials, or hidden world data;
-4. the host activates a new immutable version for that session/actor scope;
+4. the host-selected policy either holds the validated immutable version for explicit activation or activates it immediately;
 5. older versions remain available for audit and rollback, while rejected and obsolete proposals have bounded retention;
 6. later traces and evaluations can demote or roll back a version that performs worse.
 
-The model may propose; the host decides what becomes active. A learned instruction never changes the authority of the tools available to the NPC. Prefer dry-run evaluation before activation, require explicit approval for shared or global behavior, and keep per-NPC learning isolated unless the game deliberately publishes a reviewed common skill.
+The model may call `propose_behavior_learning` only when the trusted execution scope grants `GameExecutionCapabilities.BehaviorLearning` and the extension's optional in-run policy opts that input in. The default adds no proposal tool to normal NPC runs; an isolated reviewer can submit a typed candidate with `ProposeAsync`. `BehaviorLearningOptions.Mode` can disable the feature, retain validated candidates for explicit review (the default), or auto-activate a candidate after the host validator accepts it. In review mode, the host reads candidates with `BehaviorLearningExtension.ReadAsync` and activates one exact version with `ActivateAsync`, binding the first activation to the current timeline, world generation, world revision, and session CAS revision. `RecordEvaluationAsync` tracks outcomes and demotes a version after the configured consecutive-failure threshold; `DemoteAsync`, `RejectAsync`, and reactivating an older version provide explicit recovery paths.
 
-OpenGameAgent already supplies the composition points for this pattern: persistent memory, dynamic skill providers, namespaced extension state, durable action receipts, lifecycle traces, and offline evaluation rules. The framework does not automatically turn private reasoning or an unverified successful-looking response into a learned rule. This keeps adaptation optional and avoids adding a self-modifying policy engine to the stable kernel.
+The model may propose; the host decides what becomes active. Active versions are projected through the normal dynamic skill provider, so their declared tools must already be present for the current input; a learned instruction cannot register a tool, expand authority, change game rules, execute code, expose credentials, or consume private reasoning. World-generation-scoped versions disappear from model context after a load boundary changes. Actor-wide versions are disabled by default and require an explicit option. Rejected, superseded, and demoted audit versions have bounded retention; active and pending proposals are never pruned by retention cleanup. See [Bounded behavior learning](behavior-learning.md) for the complete contract and example.
 
 ## Save and replay
 

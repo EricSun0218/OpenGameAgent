@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add optional bounded NPC behavior learning: model or isolated-reviewer proposals require
+  authoritative evidence validation, become immutable dynamic skills only under the selected
+  activation policy, and support evaluation-driven demotion, rollback, scoped saves,
+  bounded audit retention, restart-safe persistence, and host-selected disabled, review-required,
+  or validated-auto-activation modes without expanding tool authority.
+- Make concurrent content-addressed image attachment publication retry the bounded verification
+  read on Windows sharing races without repeating the staged write or atomic move.
 - Remove the unused standalone immutable session-history subsystem; the runtime transcript remains the
   canonical conversation record, while products can keep separate host-owned audit or trace storage.
 - Centralize shared .NET test-project and xUnit configuration, and refresh locked dependencies to the

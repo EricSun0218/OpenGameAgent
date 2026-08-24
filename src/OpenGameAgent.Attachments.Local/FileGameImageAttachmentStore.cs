@@ -16,6 +16,7 @@ namespace OpenGameAgent.Attachments.Local;
 public sealed class FileGameImageAttachmentStore : IGameImageAttachmentStore
 {
     private const string IdPrefix = "sha256:";
+    private const int ConcurrentPublishReadAttempts = 8;
     private readonly string _root;
 
     public FileGameImageAttachmentStore(string rootDirectory, GameImageAttachmentLimits? imageLimits = null)
@@ -61,7 +62,10 @@ public sealed class FileGameImageAttachmentStore : IGameImageAttachmentStore
             }
             catch (IOException) when (File.Exists(target))
             {
-                var existing = await ReadBoundedAsync(target, data.Length, cancellationToken).ConfigureAwait(false);
+                var existing = await ReadAfterConcurrentPublishAsync(
+                    target,
+                    data.Length,
+                    cancellationToken).ConfigureAwait(false);
                 if (!FixedEquals(hash, ComputeSha256(existing)))
                 {
                     throw new GameAttachmentException(
@@ -390,6 +394,28 @@ public sealed class FileGameImageAttachmentStore : IGameImageAttachmentStore
         }
 
         return data;
+    }
+
+    private static async Task<byte[]> ReadAfterConcurrentPublishAsync(
+        string path,
+        int expectedBytes,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await ReadBoundedAsync(path, expectedBytes, cancellationToken).ConfigureAwait(false);
+            }
+            catch (IOException) when (attempt + 1 < ConcurrentPublishReadAttempts && File.Exists(path))
+            {
+                // A concurrent content-addressed publish can make the final path visible
+                // just before Windows releases the move handle. Retry only this verification
+                // read; the staged write and atomic publish are never repeated.
+                await Task.Delay(TimeSpan.FromMilliseconds(10 * (attempt + 1)), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
     }
 
     private static void EnsurePrivateDirectory(string path)

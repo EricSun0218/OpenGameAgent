@@ -15,6 +15,12 @@ namespace OpenGameAgent;
 public static class GameExecutionCapabilities
 {
     public const string PersistentPlanning = "opengameagent.persistent-planning";
+
+    /// <summary>
+    /// Allows an installed behavior-learning extension to accept bounded learning proposals for
+    /// this input. The grant never permits a model to activate a proposal or expand its tools.
+    /// </summary>
+    public const string BehaviorLearning = "opengameagent.behavior-learning";
 }
 
 /// <summary>

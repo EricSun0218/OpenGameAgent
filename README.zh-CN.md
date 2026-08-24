@@ -95,6 +95,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 按游戏时间过滤、过期并可自定义排序，且按 session/owner 持久分区的记忆；
 - 可选本地/远程嵌入、分区可重建向量索引，以及复用单次权威快照的词法/向量混合召回；
 - 根据输入类型和可用工具选择的 Skills；
+- 有证据校验、不可变版本、宿主可选激活策略、评测降级和精确回滚的有界 NPC 行为学习；
 - 宿主证明的工具调用范围，以及面向高风险调用、可持久化、一次性、绑定世界版本的批准门禁；
 - 在每次模型请求前按输入计算工具可见性；
 - 游戏时间触发器，以及支持无 payload 积压查询的持久邮箱；
@@ -143,7 +144,7 @@ GameAgentRuntime
 | 实时对话 | 有界 PCM16 流、实时转写/音频事件、字幕时间、插话取消/截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
-| 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持动态重规划与持久暂停/恢复且由宿主校验证据的有序任务清单、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派、追踪和可持久并行工作流图 |
+| 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持动态重规划与持久暂停/恢复且由宿主校验证据的有序任务清单、有界行为学习、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派、追踪和可持久并行工作流图 |
 | 开发工具 | 有界 JSONL 轨迹、命名上下文 Provider 与记忆召回分段耗时、Provider/框架/宿主归因、工具失败与 durable write 指标、并发 Benchmark runtime、本地仅观察 HTML 回放和离线/CI 评测规则 |
 | 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
@@ -259,6 +260,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [架构与权威边界](docs/architecture.md)
 - [功能与 API 地图](docs/features.md)
 - [游戏集成模式](docs/game-integration-patterns.md)
+- [有界行为学习](docs/behavior-learning.zh-CN.md)
 - [扩展开发套件](docs/extensions.zh-CN.md)
 - [Provider 一致性测试](docs/provider-conformance.zh-CN.md)
 - [Runtime Protocol 与跨语言 SDK](docs/runtime-protocol.zh-CN.md)
