@@ -75,6 +75,10 @@ Manifest dependencies express required extension versions. Runtime collaboration
 
 Avoid hidden global state. A dynamic registration may be disposed while the runtime remains alive; retained run contexts become invalid when their lease closes. The runtime waits for active actor lanes before disposing extensions.
 
+## Dynamic skill budgets
+
+`RegisterSkillProvider` receives both `maximumSkills` and `maximumCharacters` for the current provider call. They are the remaining run budget after the base skill source and higher-priority providers. Select and format candidates incrementally, skip candidates that do not fit, and never return more than either bound. The host rechecks the returned list before prompt serialization. `GameSkill.CharacterCount` and `GameSkillQuery.MaximumCharacters` expose the same accounting used by built-in, directory, plugin, behavior-learning, and shared-catalog sources.
+
 ## Reload boundary
 
 Data resources such as skills can be refreshed by their source. Executable C# extensions are compiled host code: replace them only at an editor-controlled boundary after gameplay is stopped, dispose the old `GameAgentRuntime`, load the new host generation, and construct a new runtime. Never unload or replace executable extension code during an active run. This boundary keeps Unity, Godot, Unreal sidecars, and server placement deterministic and prevents stale callbacks from mutating a replacement session.

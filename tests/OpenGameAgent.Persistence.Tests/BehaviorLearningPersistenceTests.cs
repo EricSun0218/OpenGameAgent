@@ -101,7 +101,7 @@ public sealed class BehaviorLearningPersistenceTests
                         new ToolCallContent(
                             "proposal",
                             "propose_behavior_learning",
-                            "{\"behaviorId\":\"safe-procedure\",\"title\":\"Safe procedure\",\"instructions\":\"Use only verified observations.\",\"scope\":\"world_generation\",\"evidence\":[{\"kind\":\"receipt\",\"reference\":\"operation-1\"}]}"),
+                            "{\"behaviorId\":\"safe-procedure\",\"title\":\"Safe procedure\",\"instructions\":\"Use only verified observations.\",\"scope\":\"world_generation\",\"reflection\":{\"observation\":\"The action committed.\",\"strategy\":\"Use verified observations.\",\"outcome\":\"The task succeeded.\",\"applicability\":\"Use in the same world generation.\"},\"evidence\":[{\"kind\":\"receipt\",\"reference\":\"operation-1\"}]}"),
                     },
                     ModelStopReason.ToolUse,
                     responseId: "response-1"));

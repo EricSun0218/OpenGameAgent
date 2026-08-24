@@ -587,14 +587,24 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
         IReadOnlyList<GameSkill> initial,
         IReadOnlyCollection<string> activeToolNames,
         int maximumSkills,
+        int maximumCharacters,
         CancellationToken cancellationToken)
     {
         var values = new List<GameSkill>(initial);
+        var usedCharacters = initial.Sum(value => value.CharacterCount);
+        if (usedCharacters > maximumCharacters)
+        {
+            throw new GameRuntimeLimitException(
+                nameof(maximumCharacters),
+                "The initial skills exceed the run character budget.");
+        }
+
         foreach (var entry in GetEntries(GameAgentExtensionResourceKind.SkillProvider))
         {
             var provider = (GameExtensionSkillProvider)entry.Value;
             var remaining = Math.Max(0, maximumSkills - values.Count);
-            if (remaining == 0)
+            var remainingCharacters = Math.Max(0, maximumCharacters - checked((int)usedCharacters));
+            if (remaining == 0 || remainingCharacters == 0)
             {
                 break;
             }
@@ -603,6 +613,7 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
                 ForOwner(baseContext, entry.Resource.ExtensionId),
                 activeToolNames,
                 remaining,
+                remainingCharacters,
                 cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException($"Skill provider '{entry.Resource.Name}' returned null.");
             if (contributed.Any(value => value is null))
@@ -610,7 +621,16 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
                 throw new InvalidOperationException($"Skill provider '{entry.Resource.Name}' returned a null skill.");
             }
 
+            var contributedCharacters = contributed.Sum(value => value.CharacterCount);
+            if (contributed.Count > remaining || contributedCharacters > remainingCharacters)
+            {
+                throw new GameRuntimeLimitException(
+                    nameof(maximumCharacters),
+                    $"Skill provider '{entry.Resource.Name}' exceeded its remaining run budget.");
+            }
+
             values.AddRange(contributed);
+            usedCharacters += contributedCharacters;
         }
 
         var duplicate = values.GroupBy(value => value.SkillId, StringComparer.Ordinal)

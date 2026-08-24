@@ -676,6 +676,7 @@ public delegate ValueTask<IReadOnlyList<GameSkill>> GameExtensionSkillProvider(
     GameAgentExtensionRunContext context,
     IReadOnlyCollection<string> activeToolNames,
     int maximumSkills,
+    int maximumCharacters,
     CancellationToken cancellationToken);
 
 public delegate ValueTask<GameRouteDecision?> GameExtensionRouteRule(

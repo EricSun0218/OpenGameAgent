@@ -2,11 +2,18 @@
 
 ## Unreleased
 
-- Add optional bounded NPC behavior learning: model or isolated-reviewer proposals require
-  authoritative evidence validation, become immutable dynamic skills only under the selected
-  activation policy, and support evaluation-driven demotion, rollback, scoped saves,
-  bounded audit retention, restart-safe persistence, and host-selected disabled, review-required,
-  or validated-auto-activation modes without expanding tool authority.
+- Expand optional NPC behavior learning with bounded structured reflection and ordered composite
+  procedures over existing tools. Model or isolated-reviewer proposals require authoritative
+  evidence validation, become immutable dynamic skills only under the selected activation policy,
+  and support evaluation-driven demotion, exact rollback, scoped saves, bounded audit retention,
+  and restart-safe persistence without expanding tool authority. An independent optional shared
+  catalog lets hosts publish immutable procedures under catalog-wide family versions for discovery
+  and lets each eligible NPC adopt, evaluate, upgrade, or roll back them explicitly; personal
+  experience is never propagated automatically. Built-in stores atomically reserve each catalog
+  family-version, while shared file discovery uses crash-recoverable hash-partitioned audience
+  indexes, hash-verifying manifests, atomic reader reconciliation, bounded scans, and bounded
+  rebuild after index loss. All skill sources/providers now receive and
+  incrementally honor the remaining per-run skill character budget before prompt serialization.
 - Make concurrent content-addressed image attachment publication retry the bounded verification
   read on Windows sharing races without repeating the staged write or atomic move.
 - Remove the unused standalone immutable session-history subsystem; the runtime transcript remains the

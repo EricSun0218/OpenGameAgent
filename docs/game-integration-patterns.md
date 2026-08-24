@@ -247,16 +247,20 @@ Long-lived NPCs can improve without allowing a model to rewrite code or game rul
 
 `BehaviorLearningExtension` implements this pattern as an optional official extension:
 
-1. the NPC proposes a bounded procedure revision while ordinary facts remain in `GameMemory`;
-2. the proposal cites game-owned evidence such as input IDs, committed action operation IDs, receipts, or offline evaluation findings;
-3. a host validator checks that evidence and verifies the proposal cannot add tools, permissions, executable code, credentials, or hidden world data;
-4. the host-selected policy either holds the validated immutable version for explicit activation or activates it immediately;
-5. older versions remain available for audit and rollback, while rejected and obsolete proposals have bounded retention;
-6. later traces and evaluations can demote or roll back a version that performs worse.
+1. the NPC records a bounded structured reflection: observation, strategy, authoritative outcome, applicability, and known failure modes;
+2. it proposes a behavior Skill revision while ordinary facts remain in `GameMemory`;
+3. the proposal cites game-owned evidence such as input IDs, committed action operation IDs, receipts, or offline evaluation findings;
+4. a host validator checks that evidence and verifies the proposal cannot add tools, permissions, executable code, credentials, or hidden world data;
+5. the host-selected policy either holds the validated immutable version for explicit activation or activates it immediately;
+6. a composite Skill may contain ordered steps such as `collect_resource -> construct_structure -> install_light`, but each step can only reference a declared tool and is executed by the normal Agent loop;
+7. older versions remain available for audit and rollback, while rejected and obsolete proposals have bounded retention;
+8. later traces and evaluations can demote or roll back a version that performs worse.
 
 The model may call `propose_behavior_learning` only when the trusted execution scope grants `GameExecutionCapabilities.BehaviorLearning` and the extension's optional in-run policy opts that input in. The default adds no proposal tool to normal NPC runs; an isolated reviewer can submit a typed candidate with `ProposeAsync`. `BehaviorLearningOptions.Mode` can disable the feature, retain validated candidates for explicit review (the default), or auto-activate a candidate after the host validator accepts it. In review mode, the host reads candidates with `BehaviorLearningExtension.ReadAsync` and activates one exact version with `ActivateAsync`, binding the first activation to the current timeline, world generation, world revision, and session CAS revision. `RecordEvaluationAsync` tracks outcomes and demotes a version after the configured consecutive-failure threshold; `DemoteAsync`, `RejectAsync`, and reactivating an older version provide explicit recovery paths.
 
-The model may propose; the host decides what becomes active. Active versions are projected through the normal dynamic skill provider, so their declared tools must already be present for the current input; a learned instruction cannot register a tool, expand authority, change game rules, execute code, expose credentials, or consume private reasoning. World-generation-scoped versions disappear from model context after a load boundary changes. Actor-wide versions are disabled by default and require an explicit option. Rejected, superseded, and demoted audit versions have bounded retention; active and pending proposals are never pruned by retention cleanup. See [Bounded behavior learning](behavior-learning.md) for the complete contract and example.
+The model may propose; the host decides what becomes active. Active versions are projected through the normal dynamic skill provider, so their declared tools must already be present for the current input. Composite steps do not execute behind the runtime: every call still passes normal tool visibility, policy, approval, schema validation, conflict coordination, durable action dispatch, and game authority. A learned instruction cannot register a tool, expand authority, change game rules, execute code, expose credentials, or consume private reasoning. World-generation-scoped versions disappear from model context after a load boundary changes. Actor-wide versions are disabled by default and require an explicit option. Rejected, superseded, and demoted audit versions have bounded retention; active and pending proposals are never pruned by retention cleanup.
+
+Individual learning remains scoped to `(sessionId, actorId)`. If a host wants reusable common procedures, it may install `SharedBehaviorCatalogExtension`, publish one validated immutable version for a game/world/role/faction audience, and let each eligible NPC explicitly adopt it. Publishing only makes the behavior discoverable; it never pushes it into every NPC. The host assigns a catalog-wide behavior family and family version independently from the source NPC's local version. Adoption is guarded by the current world boundary, audience membership, a per-actor validator, and session CAS. Failures suspend only that actor's adoption, while host revocation removes the publication from future runs and skill selections. Active/suspended adoption capacity, inactive audit retention, returned discovery count, and paged discovery scan work are bounded independently. See [NPC behavior learning and self-evolution](behavior-learning.md) for the complete contract and examples.
 
 ## Save and replay
 

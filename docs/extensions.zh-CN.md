@@ -62,6 +62,10 @@ var report = await GameExtensionConformance.RunAsync(
 
 请把它加入扩展测试和打包门禁。假模型不会调用工具；游戏自有动作适配器仍须测试成功、拒绝、不确定结果、重复请求、重启和 revision 冲突。
 
+### 动态 Skill 预算
+
+Skill Provider 在每次收集时同时收到剩余的 `maximumSkills` 与 `maximumCharacters`。Provider 必须在这两个上限内返回资源；宿主还会用 `GameSkill.CharacterCount` 再次校验，超限时拒绝本次扩展输出。自定义 `IGameSkillSource` 应同时遵守 `GameSkillQuery.MaximumResults` 与 `MaximumCharacters`，避免先构造或序列化无法进入模型请求的内容。
+
 ## 依赖、重载与打包边界
 
 - 清单依赖表达所需扩展版本；运行时协作应使用命名类型化服务或通道，不使用隐藏全局状态。

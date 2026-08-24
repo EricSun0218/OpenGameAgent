@@ -170,6 +170,7 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
             .OrderByDescending(manifest => manifest.Document.Priority)
             .ThenBy(manifest => manifest.Document.Id, StringComparer.Ordinal);
         var selected = new List<GameSkill>();
+        var characters = 0L;
         foreach (var manifest in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -180,7 +181,13 @@ public sealed class DirectoryGameSkillSource : IGameSkillSource
 
             if (TryLoadSkill(manifest, diagnostics, out var skill))
             {
-                selected.Add(skill!);
+                if (characters + skill!.CharacterCount > query.MaximumCharacters)
+                {
+                    continue;
+                }
+
+                selected.Add(skill);
+                characters += skill.CharacterCount;
             }
         }
 

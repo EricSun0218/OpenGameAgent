@@ -10,6 +10,46 @@ using OpenGameAgent.Kernel;
 
 namespace OpenGameAgent.Extensions;
 
+internal static class GameBehaviorCollection
+{
+    public static T[] CopyBounded<T>(
+        IEnumerable<T>? values,
+        int maximum,
+        string parameterName,
+        bool allowNullCollection = false)
+    {
+        if (maximum < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximum));
+        }
+
+        if (values is null)
+        {
+            if (allowNullCollection)
+            {
+                return Array.Empty<T>();
+            }
+
+            throw new ArgumentNullException(parameterName);
+        }
+
+        var copied = new List<T>(Math.Min(maximum, 256));
+        foreach (var value in values)
+        {
+            if (copied.Count == maximum)
+            {
+                throw new ArgumentException(
+                    $"The collection cannot contain more than {maximum} values.",
+                    parameterName);
+            }
+
+            copied.Add(value);
+        }
+
+        return copied.ToArray();
+    }
+}
+
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum GameLearnedBehaviorStatus
 {
@@ -74,6 +114,91 @@ public sealed class GameBehaviorEvidence
             : value;
 }
 
+/// <summary>
+/// A bounded, explicit post-task reflection. It records conclusions that may be audited and
+/// reused; it is not a model's hidden chain of thought.
+/// </summary>
+public sealed class GameBehaviorReflection
+{
+    public GameBehaviorReflection(
+        string observation,
+        string strategy,
+        string outcome,
+        string applicability,
+        IEnumerable<string>? failureModes = null)
+    {
+        Observation = Require(observation, 4_096, nameof(observation));
+        Strategy = Require(strategy, 4_096, nameof(strategy));
+        Outcome = Require(outcome, 4_096, nameof(outcome));
+        Applicability = Require(applicability, 4_096, nameof(applicability));
+        var bounded = GameBehaviorCollection.CopyBounded(
+            failureModes,
+            16,
+            nameof(failureModes),
+            allowNullCollection: true);
+        var copied = bounded
+            .Select(value => Require(value, 1_024, nameof(failureModes)))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (copied.Length > 16)
+        {
+            throw new ArgumentException("A behavior reflection can contain at most 16 failure modes.", nameof(failureModes));
+        }
+
+        FailureModes = Array.AsReadOnly(copied);
+    }
+
+    public string Observation { get; }
+
+    public string Strategy { get; }
+
+    public string Outcome { get; }
+
+    public string Applicability { get; }
+
+    public IReadOnlyList<string> FailureModes { get; }
+
+    private static string Require(string value, int maximum, string name) =>
+        string.IsNullOrWhiteSpace(value) || value.Length > maximum || value.Any(char.IsControl)
+            ? throw new ArgumentException($"The value must contain 1 to {maximum} printable characters.", name)
+            : value;
+}
+
+/// <summary>
+/// One ordered step in a learned composite procedure. The step declares a tool dependency and
+/// describes when to call it. The learned Skill is only projected when every dependency is
+/// currently visible; normal tool policy, approval, validation, receipts, and recovery still
+/// govern the actual invocation.
+/// </summary>
+public sealed class GameBehaviorStep
+{
+    public GameBehaviorStep(string stepId, string toolName, string instruction)
+    {
+        StepId = RequireId(stepId, nameof(stepId));
+        ToolName = RequireId(toolName, nameof(toolName));
+        Instruction = Require(instruction, 2_048, nameof(instruction));
+    }
+
+    public string StepId { get; }
+
+    public string ToolName { get; }
+
+    public string Instruction { get; }
+
+    private static string RequireId(string value, string name)
+    {
+        var result = Require(value, 256, name);
+        return result.Any(char.IsWhiteSpace)
+            ? throw new ArgumentException("Behavior step IDs and tool names cannot contain whitespace.", name)
+            : result;
+    }
+
+    private static string Require(string value, int maximum, string name) =>
+        string.IsNullOrWhiteSpace(value) || value.Length > maximum || value.Any(char.IsControl)
+            ? throw new ArgumentException($"The value must contain 1 to {maximum} printable characters.", name)
+            : value;
+}
+
 public sealed class GameBehaviorEvaluationSnapshot
 {
     internal GameBehaviorEvaluationSnapshot(BehaviorEvaluationDocument document)
@@ -103,6 +228,15 @@ public sealed class GameLearnedBehaviorSnapshot
         Instructions = document.Instructions;
         InputTypes = Array.AsReadOnly(document.InputTypes.ToArray());
         ToolNames = Array.AsReadOnly(document.ToolNames.ToArray());
+        Reflection = new GameBehaviorReflection(
+            document.Reflection.Observation,
+            document.Reflection.Strategy,
+            document.Reflection.Outcome,
+            document.Reflection.Applicability,
+            document.Reflection.FailureModes);
+        Steps = Array.AsReadOnly(document.Steps
+            .Select(value => new GameBehaviorStep(value.StepId, value.ToolName, value.Instruction))
+            .ToArray());
         Evidence = Array.AsReadOnly(document.Evidence
             .Select(value => new GameBehaviorEvidence(value.Kind, value.Reference))
             .ToArray());
@@ -138,6 +272,10 @@ public sealed class GameLearnedBehaviorSnapshot
     public IReadOnlyList<string> InputTypes { get; }
 
     public IReadOnlyList<string> ToolNames { get; }
+
+    public GameBehaviorReflection Reflection { get; }
+
+    public IReadOnlyList<GameBehaviorStep> Steps { get; }
 
     public IReadOnlyList<GameBehaviorEvidence> Evidence { get; }
 
@@ -208,9 +346,11 @@ public sealed class GameBehaviorLearningProposal
         string title,
         string instructions,
         GameLearnedBehaviorScope scope,
+        GameBehaviorReflection reflection,
         IEnumerable<GameBehaviorEvidence> evidence,
         IEnumerable<string>? inputTypes = null,
-        IEnumerable<string>? toolNames = null)
+        IEnumerable<string>? toolNames = null,
+        IEnumerable<GameBehaviorStep>? steps = null)
     {
         BehaviorId = RequireBehaviorId(behaviorId, nameof(behaviorId));
         Title = RequireValue(title, 256, nameof(title));
@@ -222,8 +362,11 @@ public sealed class GameBehaviorLearningProposal
 
         Scope = scope;
         Evidence = CopyEvidence(evidence);
-        InputTypes = CopyIds(inputTypes, nameof(inputTypes));
-        ToolNames = CopyIds(toolNames, nameof(toolNames));
+        InputTypes = CopyIds(inputTypes, nameof(inputTypes), 64);
+        ToolNames = CopyIds(toolNames, nameof(toolNames), 128);
+        Reflection = reflection ?? throw new ArgumentNullException(nameof(reflection));
+        Steps = CopySteps(steps);
+        ValidateComposition(ToolNames, Steps);
     }
 
     public string BehaviorId { get; }
@@ -240,9 +383,13 @@ public sealed class GameBehaviorLearningProposal
 
     public IReadOnlyList<string> ToolNames { get; }
 
+    public GameBehaviorReflection Reflection { get; }
+
+    public IReadOnlyList<GameBehaviorStep> Steps { get; }
+
     private static IReadOnlyList<GameBehaviorEvidence> CopyEvidence(IEnumerable<GameBehaviorEvidence> values)
     {
-        var copied = (values ?? throw new ArgumentNullException(nameof(values))).ToArray();
+        var copied = GameBehaviorCollection.CopyBounded(values, 64, nameof(values));
         if (copied.Length == 0 || copied.Any(value => value is null))
         {
             throw new ArgumentException("At least one non-null evidence item is required.", nameof(values));
@@ -251,13 +398,55 @@ public sealed class GameBehaviorLearningProposal
         return Array.AsReadOnly(copied);
     }
 
-    private static IReadOnlyList<string> CopyIds(IEnumerable<string>? values, string name)
+    private static IReadOnlyList<string> CopyIds(IEnumerable<string>? values, string name, int maximum)
     {
-        var copied = (values ?? Array.Empty<string>())
+        var bounded = GameBehaviorCollection.CopyBounded(
+            values,
+            maximum,
+            name,
+            allowNullCollection: true);
+        var copied = bounded
             .Select(value => RequireValue(value, 256, name))
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         return Array.AsReadOnly(copied);
+    }
+
+    private static IReadOnlyList<GameBehaviorStep> CopySteps(IEnumerable<GameBehaviorStep>? values)
+    {
+        var copied = GameBehaviorCollection.CopyBounded(
+            values,
+            128,
+            nameof(values),
+            allowNullCollection: true);
+        if (copied.Any(value => value is null))
+        {
+            throw new ArgumentException("A behavior can contain at most 128 non-null steps.", nameof(values));
+        }
+
+        if (copied.Select(value => value.StepId).Distinct(StringComparer.Ordinal).Count() != copied.Length)
+        {
+            throw new ArgumentException("Behavior step IDs must be unique.", nameof(values));
+        }
+
+        return Array.AsReadOnly(copied);
+    }
+
+    private static void ValidateComposition(
+        IReadOnlyCollection<string> toolNames,
+        IReadOnlyCollection<GameBehaviorStep> steps)
+    {
+        var declared = new HashSet<string>(toolNames, StringComparer.Ordinal);
+        if (steps.Any(step => !declared.Contains(step.ToolName)))
+        {
+            throw new ArgumentException("Every behavior step must use a declared tool.", nameof(steps));
+        }
+
+        if (declared.Count > 0
+            && !declared.SetEquals(steps.Select(step => step.ToolName)))
+        {
+            throw new ArgumentException("Every declared tool must be used by at least one behavior step.", nameof(steps));
+        }
     }
 
     private static string RequireValue(string value, int maximum, string name) =>
@@ -301,6 +490,8 @@ public sealed class BehaviorLearningOptions
 
     public int MaximumToolNames { get; set; } = 32;
 
+    public int MaximumSteps { get; set; } = 32;
+
     public int ConsecutiveFailuresBeforeDemotion { get; set; } = 3;
 
     public int MaximumRetainedEvaluationsPerVersion { get; set; } = 32;
@@ -322,6 +513,7 @@ public sealed class BehaviorLearningOptions
         RequireRange(copy.MaximumEvidenceItems, 1, 64, nameof(MaximumEvidenceItems));
         RequireRange(copy.MaximumInputTypes, 0, 64, nameof(MaximumInputTypes));
         RequireRange(copy.MaximumToolNames, 0, 128, nameof(MaximumToolNames));
+        RequireRange(copy.MaximumSteps, 0, 128, nameof(MaximumSteps));
         RequireRange(copy.ConsecutiveFailuresBeforeDemotion, 1, 100, nameof(ConsecutiveFailuresBeforeDemotion));
         RequireRange(copy.MaximumRetainedEvaluationsPerVersion, 1, 1_000, nameof(MaximumRetainedEvaluationsPerVersion));
         return copy;
@@ -439,7 +631,7 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
     private const string ProposeSchema = """
         {
           "type":"object",
-          "required":["behaviorId","title","instructions","scope","evidence"],
+          "required":["behaviorId","title","instructions","scope","reflection","evidence"],
           "properties":{
             "behaviorId":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"},
             "title":{"type":"string","minLength":1,"maxLength":256},
@@ -447,6 +639,8 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
             "scope":{"type":"string","enum":["actor","world_generation"]},
             "inputTypes":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":256}},
             "toolNames":{"type":"array","maxItems":32,"items":{"type":"string","minLength":1,"maxLength":256}},
+            "reflection":{"type":"object","required":["observation","strategy","outcome","applicability"],"properties":{"observation":{"type":"string","minLength":1,"maxLength":4096},"strategy":{"type":"string","minLength":1,"maxLength":4096},"outcome":{"type":"string","minLength":1,"maxLength":4096},"applicability":{"type":"string","minLength":1,"maxLength":4096},"failureModes":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":1024},"uniqueItems":true}},"additionalProperties":false},
+            "steps":{"type":"array","maxItems":32,"items":{"type":"object","required":["stepId","toolName","instruction"],"properties":{"stepId":{"type":"string","minLength":1,"maxLength":256},"toolName":{"type":"string","minLength":1,"maxLength":256},"instruction":{"type":"string","minLength":1,"maxLength":2048}},"additionalProperties":false}},
             "evidence":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","required":["kind","reference"],"properties":{"kind":{"type":"string","minLength":1,"maxLength":128},"reference":{"type":"string","minLength":1,"maxLength":2048}},"additionalProperties":false}}
           },
           "additionalProperties":false
@@ -475,7 +669,7 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
 
     public GameAgentExtensionDescriptor Descriptor { get; } = new(
         ExtensionId,
-        "1.0.0",
+        "2.0.0",
         "Evidence-backed, host-authorized, versioned behavior learning for game actors.",
         new[] { "behavior-learning", "skills", "audit", "rollback" });
 
@@ -490,7 +684,7 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
                         new GameContextSlice(
                             "behavior-learning-guidance",
                             JsonSerializer.Serialize(
-                                "After a complex task has actually succeeded, you may propose a reusable procedure with propose_behavior_learning. Cite durable, host-verifiable evidence. Do not propose one-off facts, preferences, transient environment failures, unresolved failures, guesses about tools, permissions, secrets, or world rules. Only the host-selected validation and activation policy can make a proposal active.")),
+                                "After a complex task has actually succeeded, you may propose a reusable procedure with propose_behavior_learning. Record a concise structured reflection (observation, strategy, outcome, applicability, and known failure modes), cite durable host-verifiable evidence, and use ordered steps only to declare existing tool dependencies. A learned procedure is projected only when every dependency is currently visible. Do not propose one-off facts, preferences, transient environment failures, unresolved failures, guesses about tools, permissions, secrets, or world rules. Only the host-selected validation and activation policy can make a proposal active.")),
                     }
                     : Array.Empty<GameContextSlice>()));
         api.RegisterToolProvider(
@@ -645,6 +839,8 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
             proposal.Scope,
             proposal.InputTypes,
             proposal.ToolNames,
+            proposal.Reflection,
+            proposal.Steps,
             proposal.Evidence,
             version,
             sourceInput.InputId,
@@ -825,6 +1021,8 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
                 scope,
                 ReadStrings(arguments, "inputTypes", _options.MaximumInputTypes),
                 ReadStrings(arguments, "toolNames", _options.MaximumToolNames),
+                ReadReflection(arguments.GetProperty("reflection")),
+                ReadSteps(arguments),
                 ReadEvidence(arguments.GetProperty("evidence"))
                     .Select(value => new GameBehaviorEvidence(value.Kind, value.Reference)),
                 1,
@@ -889,9 +1087,10 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         GameAgentExtensionRunContext context,
         IReadOnlyCollection<string> activeToolNames,
         int maximumSkills,
+        int maximumCharacters,
         CancellationToken cancellationToken)
     {
-        if (maximumSkills <= 0)
+        if (maximumSkills <= 0 || maximumCharacters <= 0)
         {
             return Array.Empty<GameSkill>();
         }
@@ -925,20 +1124,28 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         }
 
         var tools = new HashSet<string>(activeToolNames, StringComparer.Ordinal);
-        return active
+        var candidates = active
             .Where(value => value.Scope == GameLearnedBehaviorScope.Actor
                 || (string.Equals(value.TimelineId, boundary.TimelineId, StringComparison.Ordinal)
                     && string.Equals(value.WorldGeneration, boundary.Generation, StringComparison.Ordinal)))
             .Where(value => value.InputTypes.Count == 0
                 || value.InputTypes.Contains(context.Input.Type, StringComparer.Ordinal))
             .Where(value => value.ToolNames.All(tools.Contains))
-            .OrderBy(value => value.BehaviorId, StringComparer.Ordinal)
-            .Take(maximumSkills)
-            .Select(value => new GameSkill(
+            .OrderBy(value => value.BehaviorId, StringComparer.Ordinal);
+        var skills = new List<GameSkill>();
+        var characters = 0L;
+        foreach (var value in candidates)
+        {
+            if (skills.Count >= maximumSkills)
+            {
+                break;
+            }
+
+            var skill = new GameSkill(
                 $"learned.{value.BehaviorId}.v{value.Version}",
                 value.Title,
                 "Host-validated behavior learned from prior game evidence.",
-                value.Instructions,
+                FormatSkillInstructions(value),
                 value.InputTypes,
                 value.ToolNames,
                 priority: 100,
@@ -947,8 +1154,17 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
                     ["behaviorId"] = value.BehaviorId,
                     ["version"] = value.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     ["provenance"] = "host-validated-learning",
-                }))
-            .ToArray();
+                });
+            if (characters + skill.CharacterCount > maximumCharacters)
+            {
+                continue;
+            }
+
+            skills.Add(skill);
+            characters += skill.CharacterCount;
+        }
+
+        return skills;
     }
 
     private async ValueTask<GameBehaviorLearningMutationResult> MutateAsync(
@@ -1132,6 +1348,8 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         GameLearnedBehaviorScope scope,
         IEnumerable<string> inputTypes,
         IEnumerable<string> toolNames,
+        GameBehaviorReflection reflection,
+        IEnumerable<GameBehaviorStep> steps,
         IEnumerable<GameBehaviorEvidence> evidence,
         int version,
         string inputId,
@@ -1147,6 +1365,20 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
             Instructions = instructions,
             InputTypes = inputTypes.ToList(),
             ToolNames = toolNames.ToList(),
+            Reflection = new BehaviorReflectionDocument
+            {
+                Observation = reflection.Observation,
+                Strategy = reflection.Strategy,
+                Outcome = reflection.Outcome,
+                Applicability = reflection.Applicability,
+                FailureModes = reflection.FailureModes.ToList(),
+            },
+            Steps = steps.Select(value => new BehaviorStepDocument
+            {
+                StepId = value.StepId,
+                ToolName = value.ToolName,
+                Instruction = value.Instruction,
+            }).ToList(),
             Evidence = evidence.Select(value => new BehaviorEvidenceDocument
             {
                 Kind = value.Kind,
@@ -1185,20 +1417,40 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         }
     }
 
-    private string SchemaForOptions() => ProposeSchema
-        .Replace("\"maxLength\":8192", $"\"maxLength\":{_options.MaximumInstructionCharacters}", StringComparison.Ordinal)
-        .Replace(
+    private string SchemaForOptions()
+    {
+        var schema = ReplaceSchemaBound(
+            ProposeSchema,
+            "\"maxLength\":8192",
+            $"\"maxLength\":{_options.MaximumInstructionCharacters}");
+        schema = ReplaceSchemaBound(
+            schema,
             "\"inputTypes\":{\"type\":\"array\",\"maxItems\":16",
-            $"\"inputTypes\":{{\"type\":\"array\",\"maxItems\":{_options.MaximumInputTypes}",
-            StringComparison.Ordinal)
-        .Replace(
+            $"\"inputTypes\":{{\"type\":\"array\",\"maxItems\":{_options.MaximumInputTypes}");
+        schema = ReplaceSchemaBound(
+            schema,
             "\"toolNames\":{\"type\":\"array\",\"maxItems\":32",
-            $"\"toolNames\":{{\"type\":\"array\",\"maxItems\":{_options.MaximumToolNames}",
-            StringComparison.Ordinal)
-        .Replace(
+            $"\"toolNames\":{{\"type\":\"array\",\"maxItems\":{_options.MaximumToolNames}");
+        schema = ReplaceSchemaBound(
+            schema,
+            "\"steps\":{\"type\":\"array\",\"maxItems\":32",
+            $"\"steps\":{{\"type\":\"array\",\"maxItems\":{_options.MaximumSteps}");
+        return ReplaceSchemaBound(
+            schema,
             "\"evidence\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":16",
-            $"\"evidence\":{{\"type\":\"array\",\"minItems\":1,\"maxItems\":{_options.MaximumEvidenceItems}",
-            StringComparison.Ordinal);
+            $"\"evidence\":{{\"type\":\"array\",\"minItems\":1,\"maxItems\":{_options.MaximumEvidenceItems}");
+    }
+
+    private static string ReplaceSchemaBound(string schema, string expected, string replacement)
+    {
+        var first = schema.IndexOf(expected, StringComparison.Ordinal);
+        if (first < 0 || schema.IndexOf(expected, first + expected.Length, StringComparison.Ordinal) >= 0)
+        {
+            throw new InvalidOperationException("The behavior proposal schema template is inconsistent with its option binding.");
+        }
+
+        return schema.Substring(0, first) + replacement + schema.Substring(first + expected.Length);
+    }
 
     private static List<string> ReadStrings(JsonElement arguments, string name, int maximum)
     {
@@ -1236,6 +1488,36 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         return evidence;
     }
 
+    private static GameBehaviorReflection ReadReflection(JsonElement element) => new(
+        element.GetProperty("observation").GetString() ?? string.Empty,
+        element.GetProperty("strategy").GetString() ?? string.Empty,
+        element.GetProperty("outcome").GetString() ?? string.Empty,
+        element.GetProperty("applicability").GetString() ?? string.Empty,
+        element.TryGetProperty("failureModes", out var failureModes)
+            ? failureModes.EnumerateArray().Select(value => value.GetString() ?? string.Empty).ToArray()
+            : Array.Empty<string>());
+
+    private List<GameBehaviorStep> ReadSteps(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("steps", out var element))
+        {
+            return new List<GameBehaviorStep>();
+        }
+
+        var steps = element.EnumerateArray()
+            .Select(value => new GameBehaviorStep(
+                value.GetProperty("stepId").GetString() ?? string.Empty,
+                value.GetProperty("toolName").GetString() ?? string.Empty,
+                value.GetProperty("instruction").GetString() ?? string.Empty))
+            .ToList();
+        if (steps.Count > _options.MaximumSteps)
+        {
+            throw new InvalidOperationException("The learned behavior has too many steps.");
+        }
+
+        return steps;
+    }
+
     private static IReadOnlyList<LearnedBehaviorDocument> ReadAll(GameAgentExtensionState state) =>
         ReadAll(state.Snapshot());
 
@@ -1269,16 +1551,25 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
 
         if (!Enum.IsDefined(typeof(GameLearnedBehaviorStatus), document.Status)
             || !Enum.IsDefined(typeof(GameLearnedBehaviorScope), document.Scope)
-            || document.InputTypes is null
-            || document.ToolNames is null
-            || document.Evidence is null
+             || document.InputTypes is null
+             || document.ToolNames is null
+             || document.Reflection is null
+             || document.Reflection.FailureModes is null
+             || document.Steps is null
+             || document.Evidence is null
             || document.RecentEvaluations is null
             || document.RecentEvaluations.Count > 1_000
             || document.InputTypes.Count > 64
-            || document.ToolNames.Count > 128
-            || document.Evidence.Count is < 1 or > 64
+             || document.ToolNames.Count > 128
+             || document.Steps.Count > 128
+             || document.Reflection.FailureModes.Count > 16
+             || document.Evidence.Count is < 1 or > 64
             || !IsBounded(document.Title, 256)
-            || !IsBounded(document.Instructions, 100_000)
+             || !IsBounded(document.Instructions, 100_000)
+             || !IsBounded(document.Reflection.Observation, 4_096)
+             || !IsBounded(document.Reflection.Strategy, 4_096)
+             || !IsBounded(document.Reflection.Outcome, 4_096)
+             || !IsBounded(document.Reflection.Applicability, 4_096)
             || !IsBounded(document.CreatedInputId, 2_048)
             || (document.CreatedRunId is not null && !IsBounded(document.CreatedRunId, 512))
             || !IsBounded(document.TimelineId, 512)
@@ -1293,6 +1584,13 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         }
 
         if (document.InputTypes.Concat(document.ToolNames).Any(value => !IsBounded(value, 256))
+            || document.Reflection.FailureModes.Any(value => !IsBounded(value, 1_024))
+            || document.Steps.Any(value => value is null
+                || !IsBounded(value.StepId, 256)
+                || value.StepId.Any(char.IsWhiteSpace)
+                || !IsBounded(value.ToolName, 256)
+                || value.ToolName.Any(char.IsWhiteSpace)
+                || !IsBounded(value.Instruction, 2_048))
             || document.Evidence.Any(value => value is null
                 || !IsBounded(value.Kind, 128)
                 || !IsBounded(value.Reference, 2_048)))
@@ -1308,6 +1606,24 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         {
             throw new InvalidOperationException($"Learned behavior '{key}' has invalid evaluation audit data.");
         }
+
+        if (document.InputTypes.Distinct(StringComparer.Ordinal).Count() != document.InputTypes.Count
+            || document.ToolNames.Distinct(StringComparer.Ordinal).Count() != document.ToolNames.Count
+            || document.Reflection.FailureModes.Distinct(StringComparer.Ordinal).Count()
+                != document.Reflection.FailureModes.Count
+            || document.Steps.Select(value => value.StepId).Distinct(StringComparer.Ordinal).Count()
+                != document.Steps.Count)
+        {
+            throw new InvalidOperationException($"Learned behavior '{key}' contains duplicate resources or steps.");
+        }
+
+        var declaredTools = new HashSet<string>(document.ToolNames, StringComparer.Ordinal);
+        if (document.Steps.Any(value => !declaredTools.Contains(value.ToolName))
+            || (declaredTools.Count > 0
+                && !declaredTools.SetEquals(document.Steps.Select(value => value.ToolName))))
+        {
+            throw new InvalidOperationException($"Learned behavior '{key}' has an invalid composite tool dependency.");
+        }
     }
 
     private static void ValidateDocument(LearnedBehaviorDocument document, BehaviorLearningOptions options)
@@ -1317,6 +1633,7 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         RequireBounded(document.Instructions, options.MaximumInstructionCharacters, nameof(document.Instructions));
         if (document.InputTypes.Count > options.MaximumInputTypes
             || document.ToolNames.Count > options.MaximumToolNames
+            || document.Steps.Count > options.MaximumSteps
             || document.Evidence.Count < 1
             || document.Evidence.Count > options.MaximumEvidenceItems
             || document.RecentEvaluations.Count > options.MaximumRetainedEvaluationsPerVersion)
@@ -1333,7 +1650,68 @@ public sealed class BehaviorLearningExtension : IGameAgentExtension
         {
             _ = new GameBehaviorEvidence(evidence.Kind, evidence.Reference);
         }
+
+        _ = new GameBehaviorReflection(
+            document.Reflection.Observation,
+            document.Reflection.Strategy,
+            document.Reflection.Outcome,
+            document.Reflection.Applicability,
+            document.Reflection.FailureModes);
+        var steps = document.Steps
+            .Select(value => new GameBehaviorStep(value.StepId, value.ToolName, value.Instruction))
+            .ToArray();
+        if (steps.Select(value => value.StepId).Distinct(StringComparer.Ordinal).Count() != steps.Length)
+        {
+            throw new InvalidOperationException("Learned behavior step IDs must be unique.");
+        }
+
+        var declared = new HashSet<string>(document.ToolNames, StringComparer.Ordinal);
+        if (steps.Any(value => !declared.Contains(value.ToolName))
+            || (declared.Count > 0 && !declared.SetEquals(steps.Select(value => value.ToolName))))
+        {
+            throw new InvalidOperationException("Learned behavior steps must cover exactly the declared tool set.");
+        }
     }
+
+    internal static string FormatSkillInstructions(GameLearnedBehaviorSnapshot behavior)
+    {
+        if (behavior is null)
+        {
+            throw new ArgumentNullException(nameof(behavior));
+        }
+
+        return FormatSkillInstructions(
+            behavior.Instructions,
+            behavior.Reflection,
+            behavior.Steps);
+    }
+
+    internal static string FormatSkillInstructions(
+        string instructions,
+        GameBehaviorReflection reflection,
+        IReadOnlyList<GameBehaviorStep> steps)
+    {
+        var lines = new List<string>
+        {
+            instructions,
+            "Applicability: " + reflection.Applicability,
+        };
+        if (reflection.FailureModes.Count > 0)
+        {
+            lines.Add("Known failure modes: " + string.Join("; ", reflection.FailureModes));
+        }
+
+        for (var index = 0; index < steps.Count; index++)
+        {
+            var step = steps[index];
+            lines.Add($"Step {index + 1} ({step.ToolName}): {step.Instruction}");
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private static string FormatSkillInstructions(LearnedBehaviorDocument document) =>
+        FormatSkillInstructions(new GameLearnedBehaviorSnapshot(document));
 
     private static void Write(GameAgentExtensionState state, LearnedBehaviorDocument document) =>
         state.Set(KeyFor(document), JsonSerializer.Serialize(document));
@@ -1630,6 +2008,10 @@ internal sealed class LearnedBehaviorDocument
 
     public List<string> ToolNames { get; set; } = new();
 
+    public BehaviorReflectionDocument Reflection { get; set; } = new();
+
+    public List<BehaviorStepDocument> Steps { get; set; } = new();
+
     public List<BehaviorEvidenceDocument> Evidence { get; set; } = new();
 
     public List<BehaviorEvaluationDocument> RecentEvaluations { get; set; } = new();
@@ -1660,6 +2042,28 @@ internal sealed class BehaviorEvidenceDocument
     public string Kind { get; set; } = string.Empty;
 
     public string Reference { get; set; } = string.Empty;
+}
+
+internal sealed class BehaviorReflectionDocument
+{
+    public string Observation { get; set; } = string.Empty;
+
+    public string Strategy { get; set; } = string.Empty;
+
+    public string Outcome { get; set; } = string.Empty;
+
+    public string Applicability { get; set; } = string.Empty;
+
+    public List<string> FailureModes { get; set; } = new();
+}
+
+internal sealed class BehaviorStepDocument
+{
+    public string StepId { get; set; } = string.Empty;
+
+    public string ToolName { get; set; } = string.Empty;
+
+    public string Instruction { get; set; } = string.Empty;
 }
 
 internal sealed class BehaviorEvaluationDocument

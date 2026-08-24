@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <RootNamespace>OpenGameAgent.Persistence</RootNamespace>
-    <Description>Crash-tolerant local persistence for OpenGameAgent sessions, actions, generated assets, workflows, memories, mailboxes, artifacts, delegations, and skills.</Description>
+    <Description>Crash-tolerant local persistence for OpenGameAgent sessions, actions, generated assets, workflows, memories, mailboxes, artifacts, delegations, skills, and shared behavior catalogs.</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.6" />

@@ -366,13 +366,7 @@ public sealed class GameRuntimeLimits
                 throw new InvalidOperationException("The game skill source returned a null skill.");
             }
 
-            total += skill.SkillId.Length;
-            total += skill.Name.Length;
-            total += skill.Description.Length;
-            total += skill.Instructions.Length;
-            total += skill.InputTypes.Sum(name => (long)name.Length);
-            total += skill.ToolNames.Sum(name => (long)name.Length);
-            total += skill.Metadata.Sum(pair => (long)pair.Key.Length + pair.Value.Length);
+            total += skill.CharacterCount;
             if (skill.SkillId.Length > MaxIdentifierCharacters
                 || skill.Name.Length > MaxIdentifierCharacters
                 || skill.InputTypes.Any(value => value.Length > MaxIdentifierCharacters)

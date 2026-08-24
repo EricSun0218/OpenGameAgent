@@ -113,9 +113,9 @@ public sealed class AgentPluginPackage : IGameAgentExtension, IAsyncDisposable
         {
             api.RegisterSkillProvider(
                 "portable-skills",
-                (context, activeTools, maximumSkills, cancellationToken) =>
+                (context, activeTools, maximumSkills, maximumCharacters, cancellationToken) =>
                     _skillSource.SelectAsync(
-                        new GameSkillQuery(context.Input, activeTools, maximumSkills),
+                        new GameSkillQuery(context.Input, activeTools, maximumSkills, maximumCharacters),
                         cancellationToken));
         }
 

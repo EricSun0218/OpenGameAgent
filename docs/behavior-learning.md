@@ -1,6 +1,6 @@
-# Bounded behavior learning
+# NPC behavior learning and self-evolution
 
-`BehaviorLearningExtension` lets a long-lived NPC improve reusable procedures without turning the model into a policy administrator or code editor. It is an optional `OpenGameAgent.Extensions` feature; nothing is added to the stable kernel loop.
+`BehaviorLearningExtension` lets a long-lived NPC improve reusable procedures without turning the model into a policy administrator or code editor. The separately installed `SharedBehaviorCatalogExtension` lets a host publish a validated immutable procedure for discovery and lets each eligible NPC adopt it explicitly. Both are optional `OpenGameAgent.Extensions` features; nothing is added to the stable kernel loop.
 
 ## Authority model
 
@@ -13,7 +13,7 @@ The lifecycle is deliberately asymmetric:
 5. only the active immutable version is projected as a normal `GameSkill` on later inputs;
 6. host-recorded evaluations can demote a bad version, and an older version can be reactivated exactly.
 
-A learned version contains instructions, input types, and names of tools it may depend on. It cannot register a tool. The skill provider exposes it only when every named tool is already available after normal collection and visibility policy. Tool policy, approval, durable action dispatch, and game authority remain unchanged.
+A learned version contains instructions, a required `GameBehaviorReflection`, ordered `GameBehaviorStep` entries, input types, and names of tools it may depend on. Reflection records explicit observation, strategy, outcome, applicability, and known failure modes; it is not hidden reasoning. A step can only name one of the proposal's declared tool dependencies; it cannot register or invoke tools behind the runtime. The resulting `GameSkill` is projected only when every dependency is currently registered and visible, then tells the normal ReAct loop how to compose those tools. Policy, approval, schema validation, durable action dispatch, and game authority remain unchanged.
 
 The host selects the learning posture through `BehaviorLearningOptions.Mode`:
 
@@ -88,6 +88,71 @@ The first activation fails closed if the session revision changed or if the time
 
 For a lower-priority post-run reviewer, construct a typed `GameBehaviorLearningProposal` and call `ProposeAsync` with the already committed source input, its current session revision, the trusted boundary, and the review run ID. This path invokes the same validator and persistence bounds without inserting the review prompt or response into the NPC transcript. An uncommitted input is rejected, and a retry for the same behavior/source input returns `AlreadyExists` instead of creating another version.
 
+```csharp
+var proposal = new GameBehaviorLearningProposal(
+    "safe-resource-route",
+    "Safe resource route",
+    "Reuse the verified route and stop if its preconditions no longer hold.",
+    GameLearnedBehaviorScope.WorldGeneration,
+    new GameBehaviorReflection(
+        observation: "The direct route was blocked by an authoritative hazard observation.",
+        strategy: "Use the inspected alternate route.",
+        outcome: "The actor reached the destination and the action receipt committed.",
+        applicability: "Only while the alternate route remains traversable.",
+        failureModes: new[] { "A later world update may block the alternate route." }),
+    evidence: new[] { new GameBehaviorEvidence("action-receipt", operationId) },
+    inputTypes: new[] { "npc.travel" },
+    toolNames: new[] { "move_to" },
+    steps: new[]
+    {
+        new GameBehaviorStep("move-alternate", "move_to", "Move through the validated alternate route."),
+    });
+```
+
+## Individual learning and shared discovery
+
+Personal versions stay in the `(sessionId, actorId)` session state. Sharing is a separate host operation; the model has no publish or adopt tool. `SharedBehaviorCatalogExtension.PublishAsync` copies one active immutable definition into `IGameSharedBehaviorStore` only after `GameSharedBehaviorPublicationValidator` approves it. The catalog supports host-defined `Game`, `WorldGeneration`, `Role`, and `Faction` audiences.
+
+The source `BehaviorId` and version are local to one actor session. A publication therefore also requires a host-assigned, catalog-wide `BehaviorFamilyId` and monotonic `FamilyVersion`. Those two values define shared upgrades and rollbacks; they must come from the host's trusted registry, not from the NPC. The publication validator receives the publication ID, family ID, and family version so it can reject regressing or unauthorized lineage, while every built-in store atomically reserves each `(BehaviorFamilyId, FamilyVersion)` for exactly one publication and content hash. Adopting an older family version is an explicit rollback and supersedes the actor's currently active adoption in that family. Identical source-local IDs from unrelated NPCs do not collide when their family IDs differ.
+
+Publication means **discoverable**, not active. `DiscoverAsync` returns eligible records, while `AdoptAsync` checks the current trusted boundary, audience membership, per-NPC `GameSharedBehaviorAdoptionValidator`, and session CAS before recording that actor's adoption. The extension projects only active adoptions whose publication is still published, whose content hash is unchanged, whose audience still matches, and whose required tools are currently visible.
+
+```csharp
+var shared = new SharedBehaviorCatalogExtension(
+    sharedBehaviorStore,
+    boundaryProvider,
+    audienceProvider: (input, cancellationToken) =>
+        new ValueTask<IReadOnlyList<GameSharedBehaviorAudience>>(new[]
+        {
+            new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, GetRole(input.ActorId)),
+            new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Faction, GetFaction(input.ActorId)),
+        }),
+    publicationValidator: ValidateForSharingAsync,
+    adoptionValidator: ValidateForActorAsync);
+
+var publication = await shared.PublishAsync(
+    sessionStore,
+    sourceSession,
+    behaviorId: "build-with-light",
+    behaviorVersion: 4,              // source-session version
+    behaviorFamilyId: "safe-house", // host catalog identity
+    familyVersion: 2,                // host catalog version
+    expectedSessionRevision: expectedSessionRevision,
+    publicationId: "safe-house-v2-review-17",
+    audience: new GameSharedBehaviorAudience(GameSharedBehaviorAudienceKind.Role, "builder"),
+    boundary: boundary,
+    auditReference: "publication-review-17",
+    cancellationToken: cancellationToken);
+
+await using var runtime = new GameAgentBuilder(provider, model)
+    .UseSessionStore(sessionStore)
+    .UseExtension(learning) // optional individual learning
+    .UseExtension(shared)   // optional shared catalog
+    .Build();
+```
+
+Use `InMemoryGameSharedBehaviorStore` for tests or `FileGameSharedBehaviorStore` for crash-tolerant local persistence. The file store keeps crash-recoverable hash-partitioned audience indexes, hash-verifying audience manifests, and family-version reservations, so normal discovery reads only matching catalog partitions instead of deserializing unrelated publications. A family reservation is the insert linearization point: readers either see the prior state or reconcile the pending insert before exposing the new immutable publication. Missing derived audience indexes are rebuilt under the catalog lease from committed records, while malformed, same-count-tampered, or cross-audience mappings fail closed. `RevokeAsync` removes a publication from future runs and later skill selections without mutating individual NPC histories; it does not rewrite an already-issued model request. Adoption evaluation is intentionally isolated: consecutive failures suspend only that NPC's adoption. Another NPC continues using the same publication until its own evidence or a host-level revocation says otherwise. Re-adopting a suspended exact publication is an explicit rollback/retry decision; the host may also withdraw an active or suspended adoption to free its capacity slot. `MaximumAdoptionsPerActor` bounds active and suspended adoptions; `MaximumRetainedInactiveAdoptions` separately bounds withdrawn and superseded audit records without pruning active or suspended entries. `MaximumDiscoverableBehaviors` caps returned records, while `MaximumCatalogRecordsScannedPerDiscovery` counts both published and revoked records and independently bounds world-boundary filtering across paged catalog results.
+
 ## Scope, evaluation, and recovery
 
 `WorldGeneration` is the default and recommended scope. Such a behavior is selected only while the trusted boundary provider returns the same timeline and generation. This prevents a procedure derived from a discarded save branch from silently affecting a new world.
@@ -104,6 +169,6 @@ Reactivating a demoted or superseded version is the rollback operation: it activ
 
 - No private reasoning or hidden chain-of-thought is harvested.
 - No background model call is started implicitly. A game may schedule a lower-priority reviewer and submit its typed result through `ProposeAsync`, but it must account for that model usage separately.
-- No shared or global skill publication is automatic. Review and publish common skills through a host-controlled package or content pipeline.
-- No model training, weight updates, executable skill generation, or provider credential mutation occurs here.
+- No personal experience is broadcast automatically. Shared publication and per-NPC adoption are separate host-authorized operations.
+- No model training, weight updates, generated executable code/tool implementation, or provider credential mutation occurs here. Learned skills are declarative procedures over tools the host already registered.
 - Memory remains the place for facts, relationships, preferences, and events. Behavior learning is only for reusable procedural instructions.

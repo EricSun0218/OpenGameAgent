@@ -68,6 +68,14 @@ public sealed class GameSkill
         Metadata = new ReadOnlyDictionary<string, string>(copiedMetadata);
         DisableModelInvocation = disableModelInvocation;
         SourceInfo = sourceInfo;
+        CharacterCount = checked(
+            (long)SkillId.Length
+            + Name.Length
+            + Description.Length
+            + Instructions.Length
+            + InputTypes.Sum(value => (long)value.Length)
+            + ToolNames.Sum(value => (long)value.Length)
+            + Metadata.Sum(pair => (long)pair.Key.Length + pair.Value.Length));
     }
 
     public string SkillId { get; }
@@ -89,11 +97,18 @@ public sealed class GameSkill
     public bool DisableModelInvocation { get; }
 
     public GameResourceSourceInfo? SourceInfo { get; }
+
+    /// <summary>Total prompt-facing characters contributed by this skill.</summary>
+    public long CharacterCount { get; }
 }
 
 public sealed class GameSkillQuery
 {
-    public GameSkillQuery(GameInput input, IReadOnlyCollection<string> availableTools, int limit)
+    public GameSkillQuery(
+        GameInput input,
+        IReadOnlyCollection<string> availableTools,
+        int limit,
+        int maximumCharacters = int.MaxValue)
     {
         Input = input ?? throw new ArgumentNullException(nameof(input));
         AvailableTools = Array.AsReadOnly(
@@ -102,6 +117,9 @@ public sealed class GameSkillQuery
                 .Distinct(StringComparer.Ordinal)
                 .ToArray());
         Limit = limit >= 0 ? limit : throw new ArgumentOutOfRangeException(nameof(limit));
+        MaximumCharacters = maximumCharacters >= 0
+            ? maximumCharacters
+            : throw new ArgumentOutOfRangeException(nameof(maximumCharacters));
     }
 
     public GameInput Input { get; }
@@ -109,6 +127,8 @@ public sealed class GameSkillQuery
     public IReadOnlyCollection<string> AvailableTools { get; }
 
     public int Limit { get; }
+
+    public int MaximumCharacters { get; }
 }
 
 public interface IGameSkillSource
@@ -163,14 +183,30 @@ public sealed class InMemoryGameSkillSource : IGameSkillSource
         }
 
         var tools = new HashSet<string>(query.AvailableTools, StringComparer.Ordinal);
-        var selected = _skills
+        var candidates = _skills
             .Where(skill => !skill.DisableModelInvocation)
             .Where(skill => skill.InputTypes.Count == 0 || skill.InputTypes.Contains(query.Input.Type, StringComparer.Ordinal))
             .Where(skill => skill.ToolNames.All(tools.Contains))
             .OrderByDescending(skill => skill.Priority)
-            .ThenBy(skill => skill.SkillId, StringComparer.Ordinal)
-            .Take(query.Limit)
-            .ToArray();
-        return new ValueTask<IReadOnlyList<GameSkill>>(selected);
+            .ThenBy(skill => skill.SkillId, StringComparer.Ordinal);
+        var selected = new List<GameSkill>();
+        var characters = 0L;
+        foreach (var skill in candidates)
+        {
+            if (selected.Count >= query.Limit)
+            {
+                break;
+            }
+
+            if (characters + skill.CharacterCount > query.MaximumCharacters)
+            {
+                continue;
+            }
+
+            selected.Add(skill);
+            characters += skill.CharacterCount;
+        }
+
+        return new ValueTask<IReadOnlyList<GameSkill>>(Array.AsReadOnly(selected.ToArray()));
     }
 }

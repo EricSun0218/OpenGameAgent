@@ -3121,7 +3121,7 @@ public sealed class RuntimeTests
     }
 
     [Fact]
-    public async Task OversizedSelectedSkillsAreRejectedBeforePromptSerialization()
+    public async Task OversizedSkillsAreSkippedBeforePromptSerialization()
     {
         var provider = new RecordingProvider(_ => Text("should not run"));
         var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
@@ -3131,11 +3131,43 @@ public sealed class RuntimeTests
             Limits = new GameRuntimeLimits { MaxSkillCharactersPerRun = 16 },
         });
 
-        var exception = await Assert.ThrowsAsync<GameRuntimeLimitException>(async () =>
-            await runtime.RunAsync(Input("chat", "{}"), TestContext.Current.CancellationToken));
+        var result = await runtime.RunAsync(Input("chat", "{}"), TestContext.Current.CancellationToken);
 
-        Assert.Equal(nameof(GameRuntimeLimits.MaxSkillCharactersPerRun), exception.Limit);
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, provider.CallCount);
+        Assert.DoesNotContain(new string('x', 64), Assert.Single(provider.Requests).SystemPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExtensionSkillProvidersReceiveAndCannotExceedTheRemainingCharacterBudget()
+    {
+        var provider = new RecordingProvider(_ => Text("should not run"));
+        var observedBudget = -1;
+        var extension = new DelegateGameAgentExtension(
+            new GameAgentExtensionDescriptor("test.skill-budget", "1.0.0"),
+            api => api.RegisterSkillProvider(
+                "oversized",
+                (_, _, _, maximumCharacters, _) =>
+                {
+                    observedBudget = maximumCharacters;
+                    IReadOnlyList<GameSkill> result = new[]
+                    {
+                        new GameSkill("large", "Large", "description", new string('x', 64)),
+                    };
+                    return new ValueTask<IReadOnlyList<GameSkill>>(result);
+                }));
+        var runtime = new GameAgentBuilder(provider, "model")
+            .Configure(options => options.Limits = new GameRuntimeLimits { MaxSkillCharactersPerRun = 32 })
+            .UseExtension(extension)
+            .Build();
+
+        var exception = await Assert.ThrowsAsync<GameRuntimeLimitException>(() => runtime.RunAsync(
+            Input("chat", "{}", "extension-skill-budget"),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(32, observedBudget);
         Assert.Equal(0, provider.CallCount);
+        Assert.Equal("maximumCharacters", exception.Limit);
     }
 
     [Fact]
@@ -3719,9 +3751,9 @@ public sealed class RuntimeTests
                 }),
             }),
         });
-        await Assert.ThrowsAsync<GameRuntimeLimitException>(() => skillOnly.RunAsync(
+        Assert.True((await skillOnly.RunAsync(
             Input("chat", "{}", "skill-limit"),
-            TestContext.Current.CancellationToken));
+            TestContext.Current.CancellationToken)).Succeeded);
     }
 
     [Fact]

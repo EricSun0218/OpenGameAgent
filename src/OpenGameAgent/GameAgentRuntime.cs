@@ -1080,7 +1080,11 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var baseSkills = _skillSource is null
                 ? Array.Empty<GameSkill>()
                 : (await _skillSource.SelectAsync(
-                    new GameSkillQuery(input, activeTools.Select(tool => tool.Definition.Name).ToArray(), _limits.MaxSkillsPerRun),
+                    new GameSkillQuery(
+                        input,
+                        activeTools.Select(tool => tool.Definition.Name).ToArray(),
+                        _limits.MaxSkillsPerRun,
+                        _limits.MaxSkillCharactersPerRun),
                     cancellationToken).ConfigureAwait(false)
                     ?? throw new InvalidOperationException("The game skill source returned null.")).ToArray();
             var skills = await _extensions.CollectSkillsAsync(
@@ -1088,6 +1092,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 baseSkills,
                 activeTools.Select(tool => tool.Definition.Name).ToArray(),
                 _limits.MaxSkillsPerRun,
+                _limits.MaxSkillCharactersPerRun,
                 cancellationToken).ConfigureAwait(false);
             _limits.Validate(skills);
             await _extensions.PublishAsync(
@@ -2615,7 +2620,11 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         var baseSkills = _skillSource is null
             ? Array.Empty<GameSkill>()
             : (await _skillSource.SelectAsync(
-                new GameSkillQuery(input, tools.Select(tool => tool.Definition.Name).ToArray(), _limits.MaxSkillsPerRun),
+                new GameSkillQuery(
+                    input,
+                    tools.Select(tool => tool.Definition.Name).ToArray(),
+                    _limits.MaxSkillsPerRun,
+                    _limits.MaxSkillCharactersPerRun),
                 cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The game skill source returned null.")).ToArray();
         var skills = await _extensions.CollectSkillsAsync(
@@ -2623,6 +2632,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             baseSkills,
             tools.Select(tool => tool.Definition.Name).ToArray(),
             _limits.MaxSkillsPerRun,
+            _limits.MaxSkillCharactersPerRun,
             cancellationToken).ConfigureAwait(false);
         _limits.Validate(skills);
         var systemPrompt = ComposeSystemPrompt(context, skills);

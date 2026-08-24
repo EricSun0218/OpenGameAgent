@@ -95,7 +95,8 @@ OpenGameAgent keeps the reusable agent machinery independent from the game while
 - game-time-filtered, expiring, rankable memory with session/owner-partitioned durable storage;
 - optional local/remote embeddings, partitioned rebuildable vector indexes, and single-authoritative-snapshot lexical/vector hybrid recall;
 - skills selected by input type and available tools;
-- bounded NPC behavior learning with evidence validation, immutable versions, host-selected activation policy, evaluation, demotion, and rollback;
+- optional NPC self-evolution that turns structured reflection and host-verifiable evidence into immutable versioned behavior skills, composes currently visible tools into ordered procedures, and supports validation, evaluation, demotion, and exact rollback;
+- optional host-published shared behavior discovery with explicit per-NPC adoption and isolated evaluation instead of automatic propagation;
 - input-aware tool visibility resolved before every model request;
 - host-attested tool modes and durable, one-time, world-version-bound approval for high-risk calls;
 - recurring game-time triggers and persistent actor mailboxes with payload-free backlog queries;
@@ -146,7 +147,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 | Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, subtitle timing, barge-in cancellation/truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |
 | Image input | PNG/JPEG/WebP/GIF admission, immutable content-addressed storage, reference-only transcripts, capability preflight, tool-result images, and authorized server retrieval |
 | Extension API | Immutable builder; prompt/context/tool/skill/route/workflow/hook/provider/service registration; per-input tool visibility; typed lifecycle events and channels; namespaced persistent state |
-| Official extensions | Tool policy, high-risk execution approval and search, structured player questions/recommended replies, goals, host-verified ordered task plans with dynamic replanning and durable pause/resume, bounded behavior learning, memory, artifacts, knowledge, restart-resumable delegated agents with lineage/leases, tracing, and durable parallel workflow graphs |
+| Official extensions | Tool policy, high-risk execution approval and search, structured player questions/recommended replies, goals, host-verified ordered task plans with dynamic replanning and durable pause/resume, structured behavior learning and composite skills over existing tools, explicit shared behavior discovery/adoption, memory, artifacts, knowledge, restart-resumable delegated agents with lineage/leases, tracing, and durable parallel workflow graphs |
 | DevTools | Bounded JSONL recordings, named context-provider and staged memory-recall timing, provider/framework/host attribution, failure and durable-write metrics, concurrent benchmark runtime, local observation-only HTML playback, and offline/CI evaluation rules |
 | World primitives | Durable actions, bounded engine-thread action handoff, resumable workflows, memories, skills, signals, game-time schedules, actor mailboxes with batch read-only pending status |
 | Models and auth | Bundled capability/context/reasoning/cost directory, dynamic refresh, API-key/environment/stored/OAuth/local auth, developer-hosted short-lived credential gateway |
@@ -261,7 +262,7 @@ Real-editor gates are documented in [Engine integration](docs/engine-integration
 - [Architecture and authority boundaries](docs/architecture.md)
 - [Feature and API map](docs/features.md)
 - [Game integration patterns](docs/game-integration-patterns.md)
-- [Bounded behavior learning](docs/behavior-learning.md)
+- [NPC behavior learning and self-evolution](docs/behavior-learning.md)
 - [Extension development kit](docs/extensions.md)
 - [Provider conformance](docs/provider-conformance.md)
 - [Runtime Protocol and cross-language SDKs](docs/runtime-protocol.md)
