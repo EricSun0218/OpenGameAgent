@@ -133,7 +133,13 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
 
         if (_options.SteerActiveRun
             && active is not null
-            && _runtime.TrySteer(_key, AgentMessage.User(value.Handoff.Transcript)))
+            && active.TryReadControlCoordinates(out var runId, out var turn)
+            && _runtime.TrySteer(
+                    _key,
+                    AgentMessage.User(value.Handoff.Transcript),
+                    runId,
+                    turn)
+                .Accepted)
         {
             if (!value.Handoff.IsTranscriptTail)
             {
@@ -273,8 +279,13 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (!string.Equals(input.SessionId, _key.SessionId, StringComparison.Ordinal)
-            || !string.Equals(input.ActorId, _key.ActorId, StringComparison.Ordinal)
-            || agentEvent.Kind != AgentEventKind.MessageUpdated
+            || !string.Equals(input.ActorId, _key.ActorId, StringComparison.Ordinal))
+        {
+            return default;
+        }
+
+        active.Observe(agentEvent);
+        if (agentEvent.Kind != AgentEventKind.MessageUpdated
             || agentEvent.ModelEvent?.Kind != ModelStreamEventKind.TextDelta
             || string.IsNullOrEmpty(agentEvent.ModelEvent.Delta))
         {
@@ -295,7 +306,17 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
         _registration.Dispose();
         _lifetime.Cancel();
         _handoffs.Complete();
-        _runtime.TryAbort(_key);
+        ActiveRun? active;
+        lock (_gate)
+        {
+            active = _active;
+        }
+
+        if (active is not null
+            && active.TryReadControlCoordinates(out var runId, out var turn))
+        {
+            _runtime.TryAbort(_key, runId, turn);
+        }
         try
         {
             using var timeout = new CancellationTokenSource(_options.ShutdownTimeoutMilliseconds);
@@ -365,6 +386,9 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
         private readonly bool _emitOutput;
         private readonly CancellationTokenSource _stop;
         private readonly Task _flushPump;
+        private string? _runId;
+        private int _turn;
+        private bool _controlClosed;
         private int _stopped;
 
         public ActiveRun(
@@ -383,6 +407,54 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
         }
 
         public string HandoffId { get; }
+
+        public void Observe(AgentEvent agentEvent)
+        {
+            lock (_gate)
+            {
+                if (_runId is null)
+                {
+                    if (agentEvent.Kind != AgentEventKind.RunStarted)
+                    {
+                        return;
+                    }
+
+                    _runId = agentEvent.RunId;
+                }
+
+                if (!string.Equals(_runId, agentEvent.RunId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                if (agentEvent.Turn > _turn)
+                {
+                    _turn = agentEvent.Turn;
+                }
+
+                if (agentEvent.Kind is AgentEventKind.RunFaulted or AgentEventKind.RunEnded)
+                {
+                    _controlClosed = true;
+                }
+            }
+        }
+
+        public bool TryReadControlCoordinates(out string runId, out int turn)
+        {
+            lock (_gate)
+            {
+                if (_controlClosed || _runId is null || _turn < 1)
+                {
+                    runId = string.Empty;
+                    turn = 0;
+                    return false;
+                }
+
+                runId = _runId;
+                turn = _turn;
+                return true;
+            }
+        }
 
         public void Append(string delta)
         {

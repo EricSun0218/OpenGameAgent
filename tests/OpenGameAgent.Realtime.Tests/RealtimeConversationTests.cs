@@ -494,6 +494,251 @@ public sealed class RealtimeConversationTests
     }
 
     [Fact]
+    public async Task DisposingAStaleBridgeDoesNotAbortANewerRunForTheSameActor()
+    {
+        var provider = new StaleBridgeProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["realtime"] = GameRouteDecision.Agent("realtime"),
+            }),
+        });
+        var session = new FakeTransportSession { BlockCompletedHandoff = true };
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) => new ValueTask<GameInput>(new GameInput(
+                "session",
+                "actor",
+                "realtime",
+                "{}",
+                new GameMoment("world", 10),
+                handoff.HandoffId)));
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("old", "finish the old run")));
+        await session.CompletedHandoffEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        var newerRun = runtime.RunAsync(new GameInput(
+            "session",
+            "actor",
+            "realtime",
+            "{}",
+            new GameMoment("world", 11),
+            "new"), TestContext.Current.CancellationToken);
+        await provider.SecondRequestStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        await bridge.DisposeAsync();
+
+        provider.ReleaseSecondRequest.TrySetResult();
+        var result = await newerRun.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task BridgeWithoutOwnedRunCoordinatesDoesNotSteerAnExistingRun()
+    {
+        var provider = new BlockingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["realtime"] = GameRouteDecision.Agent("realtime"),
+            }),
+        });
+        var session = new FakeTransportSession();
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        long bridgeSequence = 10;
+        await using var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) => new ValueTask<GameInput>(new GameInput(
+                "session",
+                "actor",
+                "realtime",
+                "{}",
+                new GameMoment("world", Interlocked.Increment(ref bridgeSequence)),
+                handoff.HandoffId)));
+        var secondObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = manager.RegisterHandler((value, _) =>
+        {
+            if (string.Equals(value.Handoff?.HandoffId, "second", StringComparison.Ordinal))
+            {
+                secondObserved.TrySetResult();
+            }
+
+            return default;
+        });
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+        var existingRun = runtime.RunAsync(new GameInput(
+            "session",
+            "actor",
+            "realtime",
+            "{}",
+            new GameMoment("world", 10),
+            "existing"), TestContext.Current.CancellationToken);
+        await provider.FirstRequestStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("first", "wait for the bridge run")));
+        await WaitUntilAsync(() => bridge.HasActiveAgentRun, TestContext.Current.CancellationToken);
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("second", "do not steer the existing run")));
+        await secondObserved.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        provider.ReleaseFirst.TrySetResult();
+        var result = await existingRun.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, result.AgentResult!.Turns);
+    }
+
+    [Fact]
+    public async Task LateHandoffFromAStaleBridgeDoesNotSteerANewerRun()
+    {
+        var provider = new StaleBridgeProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["realtime"] = GameRouteDecision.Agent("realtime"),
+            }),
+        });
+        var session = new FakeTransportSession { BlockCompletedHandoff = true };
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        await using var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) => new ValueTask<GameInput>(new GameInput(
+                "session",
+                "actor",
+                "realtime",
+                "{}",
+                new GameMoment("world", 10),
+                handoff.HandoffId)));
+        var lateObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = manager.RegisterHandler((value, _) =>
+        {
+            if (string.Equals(value.Handoff?.HandoffId, "late", StringComparison.Ordinal))
+            {
+                lateObserved.TrySetResult();
+            }
+
+            return default;
+        });
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("old", "finish the old run")));
+        await session.CompletedHandoffEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        var newerRun = runtime.RunAsync(new GameInput(
+            "session",
+            "actor",
+            "realtime",
+            "{}",
+            new GameMoment("world", 11),
+            "new"), TestContext.Current.CancellationToken);
+        await provider.SecondRequestStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("late", "do not steer the new run")));
+        await lateObserved.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        provider.ReleaseSecondRequest.TrySetResult();
+
+        var result = await newerRun.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, result.AgentResult!.Turns);
+        Assert.Equal(2, provider.Requests.Count);
+    }
+
+    [Fact]
+    public async Task BridgeDisposalDoesNotAbortRunsForAnotherActorOrSession()
+    {
+        var provider = new IsolatedBlockingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
+            {
+                ["realtime"] = GameRouteDecision.Agent("realtime"),
+            }),
+        });
+        var session = new FakeTransportSession();
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) => new ValueTask<GameInput>(new GameInput(
+                "session",
+                "actor",
+                "realtime",
+                "{\"id\":\"bridge\"}",
+                new GameMoment("world", 10),
+                handoff.HandoffId)));
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("bridge", "start")));
+        await provider.Started("bridge").WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        var otherActor = runtime.RunAsync(new GameInput(
+            "session",
+            "other-actor",
+            "realtime",
+            "{\"id\":\"other-actor\"}",
+            new GameMoment("world", 10),
+            "other-actor"), TestContext.Current.CancellationToken);
+        var otherSession = runtime.RunAsync(new GameInput(
+            "other-session",
+            "actor",
+            "realtime",
+            "{\"id\":\"other-session\"}",
+            new GameMoment("world", 10),
+            "other-session"), TestContext.Current.CancellationToken);
+        await Task.WhenAll(
+            provider.Started("other-actor"),
+            provider.Started("other-session")).WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        await bridge.DisposeAsync();
+
+        provider.Release("other-actor");
+        provider.Release("other-session");
+        Assert.True((await otherActor).Succeeded);
+        Assert.True((await otherSession).Succeeded);
+    }
+
+    [Fact]
     public async Task BridgeFlushesAgentDeltasWithoutWaitingForTheRunToFinish()
     {
         var provider = new StreamingBlockingProvider();
@@ -605,6 +850,8 @@ public sealed class RealtimeConversationTests
 
         public bool BlockAudio { get; set; }
 
+        public bool BlockCompletedHandoff { get; set; }
+
         public bool Closed { get; private set; }
 
         public int CancelCount { get; private set; }
@@ -631,6 +878,12 @@ public sealed class RealtimeConversationTests
         public TaskCompletionSource<string> HandoffAcknowledged { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        public TaskCompletionSource CompletedHandoffEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseCompletedHandoff { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public void Emit(RealtimeConversationEvent value) => _events.Enqueue(value);
 
         public async IAsyncEnumerable<RealtimeConversationEvent> ReadEventsAsync(
@@ -655,7 +908,12 @@ public sealed class RealtimeConversationTests
 
         public ValueTask SendTextAsync(string text, RealtimeTextRole role, CancellationToken cancellationToken) => default;
 
-        public ValueTask SendHandoffAsync(string handoffId, string text, RealtimeHandoffPhase phase, bool completed, CancellationToken cancellationToken)
+        public async ValueTask SendHandoffAsync(
+            string handoffId,
+            string text,
+            RealtimeHandoffPhase phase,
+            bool completed,
+            CancellationToken cancellationToken)
         {
             HandoffAcknowledged.TrySetResult(handoffId);
             if (!completed && text.Length > 0)
@@ -663,7 +921,11 @@ public sealed class RealtimeConversationTests
                 HandoffProgress.TrySetResult((handoffId, text));
             }
 
-            return default;
+            if (completed && BlockCompletedHandoff)
+            {
+                CompletedHandoffEntered.TrySetResult();
+                await ReleaseCompletedHandoff.Task.WaitAsync(cancellationToken);
+            }
         }
 
         public ValueTask SendBehaviorResultAsync(RealtimeBehaviorResult result, CancellationToken cancellationToken)
@@ -839,6 +1101,86 @@ public sealed class RealtimeConversationTests
                 ModelStopReason.Stop,
                 new ModelUsage(1, 1)));
         }
+    }
+
+    private sealed class StaleBridgeProvider : IModelProvider
+    {
+        private int _calls;
+
+        public ConcurrentQueue<ModelRequest> Requests { get; } = new();
+
+        public TaskCompletionSource SecondRequestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseSecondRequest { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            Requests.Enqueue(request);
+            if (Interlocked.Increment(ref _calls) == 2)
+            {
+                SecondRequestStarted.TrySetResult();
+                await ReleaseSecondRequest.Task.WaitAsync(cancellationToken);
+            }
+
+            yield return ModelStreamEvent.Terminal(new ModelResponse(
+                new AgentContent[] { new TextContent("done") },
+                ModelStopReason.Stop,
+                new ModelUsage(1, 1)));
+        }
+    }
+
+    private sealed class IsolatedBlockingProvider : IModelProvider
+    {
+        private readonly ConcurrentDictionary<string, TaskCompletionSource> _started = new();
+        private readonly ConcurrentDictionary<string, TaskCompletionSource> _released = new();
+
+        public Task Started(string id) => Signal(_started, id).Task;
+
+        public void Release(string id) => Signal(_released, id).TrySetResult();
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var id = ExtractId(request);
+            Signal(_started, id).TrySetResult();
+            await Signal(_released, id).Task.WaitAsync(cancellationToken);
+            yield return ModelStreamEvent.Terminal(new ModelResponse(
+                new AgentContent[] { new TextContent("done") },
+                ModelStopReason.Stop,
+                new ModelUsage(1, 1)));
+        }
+
+        private static string ExtractId(ModelRequest request)
+        {
+            foreach (var content in request.Messages
+                         .SelectMany(static message => message.Content)
+                         .OfType<JsonContent>())
+            {
+                using var document = JsonDocument.Parse(content.Json);
+                if (document.RootElement.TryGetProperty("ActorId", out var actorId)
+                    && actorId.GetString() is { } actor)
+                {
+                    return !string.Equals(request.SessionId, "session", StringComparison.Ordinal)
+                        ? "other-session"
+                        : string.Equals(actor, "actor", StringComparison.Ordinal)
+                            ? "bridge"
+                            : "other-actor";
+                }
+            }
+
+            throw new InvalidOperationException("The test request did not contain an ID.");
+        }
+
+        private static TaskCompletionSource Signal(
+            ConcurrentDictionary<string, TaskCompletionSource> signals,
+            string id) => signals.GetOrAdd(
+                id,
+                static _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
     }
 
     private sealed class CountingProvider : IModelProvider

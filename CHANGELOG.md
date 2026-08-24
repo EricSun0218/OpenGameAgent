@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bind realtime bridge steering and shutdown to the exact run ID and monotonic turn observed from its
+  own Agent events. Delayed handoffs, replaced channels, and stale disposal now fail closed or use the
+  normal bounded handoff queue instead of controlling a newer run for the same session and actor.
 - Expand optional NPC behavior learning with bounded structured reflection and ordered composite
   procedures over existing tools. Model or isolated-reviewer proposals require authoritative
   evidence validation, become immutable dynamic skills only under the selected activation policy,

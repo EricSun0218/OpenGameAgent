@@ -105,6 +105,8 @@ Audio capture uses a bounded drop-on-full queue. Text, handoff output, and contr
 
 By default, provider `handoff` requests are consumed by `GameRealtimeAgentBridge`. Set `ClientManagedHandoffs = true` when the host needs to inspect or route every request itself; the requests remain observable but the automatic bridge will not claim them. With `FlushTranscriptTailOnClose` enabled, accepted input transcript that was not handed off before shutdown is emitted once as an `IsTranscriptTail` handoff. The automatic bridge commits that tail to the agent without attempting to speak back through the already closing realtime session.
 
+The bridge records the exact run ID and monotonically advancing turn from the `AgentEvent` stream of the run it started. A later handoff can steer only those coordinates, and bridge disposal can abort only those coordinates. If the bridge has not observed its own first turn, its run has closed, or the runtime reports an idle, run-mismatch, turn-mismatch, or control-closed result, the bridge never falls back to actor-wide control. The handoff follows the normal bounded queue instead. This prevents a replaced or delayed realtime channel from controlling a newer run for the same session and actor; no host migration is required.
+
 ## Behavior versus authoritative action
 
 Realtime `behavior` requests are replaceable by channel. Typical channels are `gaze`, `gesture`, `expression`, and `locomotion`. The handler receives a cancellation token when a newer behavior supersedes an older one or the session closes.
