@@ -444,6 +444,29 @@ public delegate string GameActionOperationIdFactory(
     ToolExecutionContext execution);
 
 /// <summary>
+/// Projects a canonical durable action receipt into bounded JSON that may be sent to the model.
+/// The projector is host-controlled and must be deterministic for the same intent and receipt.
+/// </summary>
+public delegate string GameActionModelReceiptProjector(GameActionModelReceiptProjectionContext context);
+
+/// <summary>
+/// Stable inputs for a model-visible durable action receipt projection. Dispatch disposition and
+/// timing are deliberately excluded because they may change when the same operation is replayed.
+/// </summary>
+public sealed class GameActionModelReceiptProjectionContext
+{
+    internal GameActionModelReceiptProjectionContext(GameActionIntent intent, GameActionReceipt receipt)
+    {
+        Intent = intent ?? throw new ArgumentNullException(nameof(intent));
+        Receipt = receipt ?? throw new ArgumentNullException(nameof(receipt));
+    }
+
+    public GameActionIntent Intent { get; }
+
+    public GameActionReceipt Receipt { get; }
+}
+
+/// <summary>
 /// Creates stable, bounded operation identifiers for authoritative game actions.
 /// </summary>
 public static class GameActionOperationIds
@@ -1198,6 +1221,8 @@ public sealed class DurableGameActionDispatcher
 
 public static class GameActionTool
 {
+    public const int MaximumModelReceiptCharacters = 64_000;
+
     public static AgentTool Create(
         GameInput input,
         string action,
@@ -1208,7 +1233,64 @@ public static class GameActionTool
         Func<JsonElement, string?>? conflictKey = null,
         long? expectedRevision = null,
         GameActionOperationIdFactory? operationIdFactory = null,
+        string? generationId = null) =>
+        CreateCore(
+            input,
+            action,
+            description,
+            inputSchemaJson,
+            dispatcher,
+            risk,
+            conflictKey,
+            expectedRevision,
+            operationIdFactory,
+            generationId,
+            modelReceiptProjector: null);
+
+    public static AgentTool Create(
+        GameInput input,
+        string action,
+        string description,
+        string inputSchemaJson,
+        DurableGameActionDispatcher dispatcher,
+        GameActionModelReceiptProjector modelReceiptProjector,
+        ToolRisk risk = ToolRisk.NonIdempotentWrite,
+        Func<JsonElement, string?>? conflictKey = null,
+        long? expectedRevision = null,
+        GameActionOperationIdFactory? operationIdFactory = null,
         string? generationId = null)
+    {
+        if (modelReceiptProjector is null)
+        {
+            throw new ArgumentNullException(nameof(modelReceiptProjector));
+        }
+
+        return CreateCore(
+            input,
+            action,
+            description,
+            inputSchemaJson,
+            dispatcher,
+            risk,
+            conflictKey,
+            expectedRevision,
+            operationIdFactory,
+            generationId,
+            modelReceiptProjector);
+    }
+
+    private static AgentTool CreateCore(
+        GameInput input,
+        string action,
+        string description,
+        string inputSchemaJson,
+        DurableGameActionDispatcher dispatcher,
+        ToolRisk risk,
+        Func<JsonElement, string?>? conflictKey,
+        long? expectedRevision,
+        GameActionOperationIdFactory? operationIdFactory,
+        string? generationId,
+        GameActionModelReceiptProjector? modelReceiptProjector)
     {
         if (input is null)
         {
@@ -1246,19 +1328,22 @@ public static class GameActionTool
                 conflictKey: execution.ConflictKey);
             var dispatch = await dispatcher.ExecuteDetailedAsync(intent, cancellationToken).ConfigureAwait(false);
             var receipt = dispatch.Receipt;
-            var json = JsonSerializer.Serialize(new ReceiptPayload(dispatch), ReceiptJsonOptions);
+            var canonicalJson = JsonSerializer.Serialize(new ReceiptPayload(dispatch), ReceiptJsonOptions);
+            var projectionSucceeded = TryProjectModelReceipt(
+                intent,
+                receipt,
+                canonicalJson,
+                modelReceiptProjector,
+                out var modelJson);
             return new ToolResult(
-                new AgentContent[] { new JsonContent(json) },
-                isError: !receipt.Succeeded,
-                detailsJson: json,
+                new AgentContent[] { new JsonContent(modelJson) },
+                isError: !receipt.Succeeded || !projectionSucceeded,
+                detailsJson: canonicalJson,
+                terminate: !projectionSucceeded,
                 outcomeUncertain: receipt.Status == GameActionStatus.Uncertain,
-                failureCategory: receipt.Status switch
-                {
-                    GameActionStatus.Committed => ToolFailureCategory.None,
-                    GameActionStatus.Rejected => ToolFailureCategory.RuleRejected,
-                    GameActionStatus.Uncertain => ToolFailureCategory.Transient,
-                    _ => ToolFailureCategory.Unspecified,
-                });
+                failureCategory: !projectionSucceeded && receipt.Succeeded
+                    ? ToolFailureCategory.Internal
+                    : ReceiptFailureCategory(receipt.Status));
         }
 
         return new AgentTool(
@@ -1274,6 +1359,55 @@ public static class GameActionTool
     private static readonly JsonSerializerOptions ReceiptJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    private const string ProjectionFailureJson = "{\"status\":\"projection_failed\"}";
+
+    private static bool TryProjectModelReceipt(
+        GameActionIntent intent,
+        GameActionReceipt receipt,
+        string canonicalJson,
+        GameActionModelReceiptProjector? projector,
+        out string modelJson)
+    {
+        if (projector is null)
+        {
+            modelJson = canonicalJson;
+            return true;
+        }
+
+        try
+        {
+            var projected = projector(new GameActionModelReceiptProjectionContext(intent, receipt));
+            if (projected is null || projected.Length > MaximumModelReceiptCharacters)
+            {
+                modelJson = ProjectionFailureJson;
+                return false;
+            }
+
+            var valid = GameJson.RequireValid(projected, nameof(projector));
+            if (GameJson.ParseElement(valid).ValueKind != JsonValueKind.Object)
+            {
+                modelJson = ProjectionFailureJson;
+                return false;
+            }
+
+            modelJson = valid;
+            return true;
+        }
+        catch (Exception)
+        {
+            modelJson = ProjectionFailureJson;
+            return false;
+        }
+    }
+
+    private static ToolFailureCategory ReceiptFailureCategory(GameActionStatus status) => status switch
+    {
+        GameActionStatus.Committed => ToolFailureCategory.None,
+        GameActionStatus.Rejected => ToolFailureCategory.RuleRejected,
+        GameActionStatus.Uncertain => ToolFailureCategory.Transient,
+        _ => ToolFailureCategory.Unspecified,
     };
 
     private sealed class ReceiptPayload

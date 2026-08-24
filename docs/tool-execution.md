@@ -24,6 +24,46 @@ inside a parallel epoch. An uncertain keyed write blocks later writes with that 
 without a key blocks every later write in the batch. Cancellation never starts a later epoch after the
 current epoch settles.
 
+## Model-visible durable action receipts
+
+`GameActionTool` keeps one complete canonical receipt for the action journal, host events, recovery,
+conflict coordination, duplicate detection, and metrics. By default, the same receipt JSON is also sent
+to the model for compatibility. A host that does not want authority coordinates or observability data in
+model context can pass `modelReceiptProjector` when it creates the tool:
+
+```csharp
+var tool = GameActionTool.Create(
+    input,
+    "build",
+    "Build a registered structure.",
+    schemaJson,
+    dispatcher,
+    modelReceiptProjector: context =>
+    {
+        using var result = JsonDocument.Parse(context.Receipt.ResultJson);
+        return JsonSerializer.Serialize(new
+        {
+            action = context.Intent.Action,
+            status = context.Receipt.Status.ToString().ToLowerInvariant(),
+            label = result.RootElement.GetProperty("label").GetString(),
+            reward = result.RootElement.GetProperty("reward").Clone(),
+        });
+    });
+```
+
+Only the `JsonContent` returned to the model changes. `ToolResult.DetailsJson` and the durable
+`GameActionReceipt` remain canonical, so the host still receives operation identity, state revision,
+timeline, dispatch/replay/recovery state, and timing. The trusted host projector receives only the stable
+intent and receipt; replay-only disposition and timing are deliberately absent. Keep the projector
+deterministic for the same inputs.
+
+Custom projections must be an unambiguous JSON object no longer than
+`GameActionTool.MaximumModelReceiptCharacters`. If the projector throws or returns null, invalid,
+non-object, or oversized JSON, the tool returns a fixed, terminating `projection_failed` result. A batch
+closed by that result makes no further model request. It never falls back to the canonical receipt. The
+authoritative action may already have committed, so inspect the canonical receipt rather than retrying a
+world write from UI error handling.
+
 ## Exact-repeat loop protection
 
 The kernel fingerprints the tool name and deep-canonicalized prepared JSON arguments without exposing
