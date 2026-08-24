@@ -57,7 +57,15 @@ await using var bridge = new GameRealtimeAgentBridge(
         "realtime_handoff",
         JsonSerializer.Serialize(new { transcript = handoff.Transcript }),
         currentGameMoment(),
-        inputId: handoff.HandoffId)));
+        inputId: handoff.HandoffId)),
+    new GameRealtimeAgentBridgeOptions
+    {
+        AgentEventObserver = async (input, agentEvent, cancellationToken) =>
+        {
+            // Optional: bind host capability leases to the bridge-owned run/turn before tools dispatch.
+            await myHostObserver.ObserveAsync(input, agentEvent, cancellationToken);
+        },
+    });
 
 using var events = conversation.RegisterHandler((value, cancellationToken) =>
 {
@@ -106,6 +114,8 @@ Audio capture uses a bounded drop-on-full queue. Text, handoff output, and contr
 By default, provider `handoff` requests are consumed by `GameRealtimeAgentBridge`. Set `ClientManagedHandoffs = true` when the host needs to inspect or route every request itself; the requests remain observable but the automatic bridge will not claim them. With `FlushTranscriptTailOnClose` enabled, accepted input transcript that was not handed off before shutdown is emitted once as an `IsTranscriptTail` handoff. The automatic bridge commits that tail to the agent without attempting to speak back through the already closing realtime session.
 
 The bridge records the exact run ID and monotonically advancing turn from the `AgentEvent` stream of the run it started. A later handoff can steer only those coordinates, and bridge disposal can abort only those coordinates. If the bridge has not observed its own first turn, its run has closed, or the runtime reports an idle, run-mismatch, turn-mismatch, or control-closed result, the bridge never falls back to actor-wide control. The handoff follows the normal bounded queue instead. This prevents a replaced or delayed realtime channel from controlling a newer run for the same session and actor; no host migration is required.
+
+`GameRealtimeAgentBridgeOptions.AgentEventObserver` is an optional observation-only host hook. It receives the exact `GameInput` produced by the bridge input factory and the original `AgentEvent` sequence, including `RunStarted`, monotonically increasing `TurnStarted`, `ToolStarted`, and terminal `RunEnded`. Delivery is awaited, so a host can mint or revoke a run/turn-bound native capability before the corresponding tool is dispatched. The hook cannot return control commands, and its exceptions or cancellation failures are isolated from the Agent loop and from the bridge's own run tracking. Keep it bounded and avoid logging event bodies, tool arguments, transcript text, or reasoning. Existing hosts that omit it retain identical behavior.
 
 ## Behavior versus authoritative action
 

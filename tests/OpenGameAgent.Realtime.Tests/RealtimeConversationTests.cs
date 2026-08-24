@@ -778,6 +778,194 @@ public sealed class RealtimeConversationTests
     }
 
     [Fact]
+    public async Task BridgeHostObserverSeesOrderedRunCoordinatesBeforeToolDispatch()
+    {
+        var order = new ConcurrentQueue<string>();
+        var toolObserverEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseToolObserver = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var toolExecuted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new ToolThenTextProvider();
+        GameInput? createdInput = null;
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
+        {
+            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
+            {
+                new AgentTool(
+                    new ToolDefinition("inspect", "Inspect state.", "{\"type\":\"object\"}"),
+                    (_, _, _) =>
+                    {
+                        order.Enqueue("tool-executed");
+                        toolExecuted.TrySetResult();
+                        return new ValueTask<ToolResult>(new ToolResult(
+                            new AgentContent[] { new TextContent("ok") }));
+                    }),
+            }),
+        });
+        var session = new FakeTransportSession();
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        await using var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) =>
+            {
+                createdInput = new GameInput(
+                    "session",
+                    "actor",
+                    "realtime",
+                    "{}",
+                    new GameMoment("world", 10),
+                    handoff.HandoffId);
+                return new ValueTask<GameInput>(createdInput);
+            },
+            new GameRealtimeAgentBridgeOptions
+            {
+                AgentEventObserver = async (input, agentEvent, _) =>
+                {
+                    Assert.Same(createdInput, input);
+                    order.Enqueue($"{agentEvent.Kind}:{agentEvent.RunId}:{agentEvent.Turn}");
+                    if (agentEvent.Kind == AgentEventKind.ToolStarted)
+                    {
+                        toolObserverEntered.TrySetResult();
+                        await releaseToolObserver.Task;
+                    }
+                },
+            });
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("observed", "inspect")));
+        await toolObserverEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        Assert.False(toolExecuted.Task.IsCompleted);
+        releaseToolObserver.TrySetResult();
+        Assert.Equal(
+            "observed",
+            await session.HandoffAcknowledged.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken));
+
+        var events = order.ToArray();
+        var runStarted = Assert.Single(events, value => value.StartsWith("RunStarted:", StringComparison.Ordinal));
+        var runId = runStarted.Split(':')[1];
+        Assert.Equal(0, int.Parse(runStarted.Split(':')[2], System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Contains($"TurnStarted:{runId}:1", events);
+        Assert.Contains($"TurnStarted:{runId}:2", events);
+        Assert.Contains($"RunEnded:{runId}:2", events);
+        Assert.True(Array.IndexOf(events, $"ToolStarted:{runId}:1") < Array.IndexOf(events, "tool-executed"));
+    }
+
+    [Fact]
+    public async Task BridgeHostObserverFailureIsIsolatedFromTheAgentLoop()
+    {
+        var observed = new ConcurrentQueue<AgentEventKind>();
+        var provider = new CountingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
+        var session = new FakeTransportSession();
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        await using var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) => new ValueTask<GameInput>(new GameInput(
+                "session",
+                "actor",
+                "realtime",
+                "{}",
+                new GameMoment("world", 10),
+                handoff.HandoffId)),
+            new GameRealtimeAgentBridgeOptions
+            {
+                AgentEventObserver = (_, agentEvent, _) =>
+                {
+                    observed.Enqueue(agentEvent.Kind);
+                    if (agentEvent.Kind == AgentEventKind.RunStarted)
+                    {
+                        throw new InvalidOperationException("host observer failed");
+                    }
+
+                    return default;
+                },
+            });
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("failure-isolated", "hello")));
+        Assert.Equal(
+            "failure-isolated",
+            await session.HandoffAcknowledged.Task.WaitAsync(
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, provider.RequestCount);
+        Assert.Contains(AgentEventKind.RunStarted, observed);
+        Assert.Contains(AgentEventKind.TurnStarted, observed);
+        Assert.Contains(AgentEventKind.RunEnded, observed);
+    }
+
+    [Fact]
+    public async Task BridgeHostObserverReceivesCancellationDuringShutdown()
+    {
+        var observerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observerCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new CountingProvider();
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
+        var session = new FakeTransportSession();
+        await using var manager = new RealtimeConversationManager(new FakeTransport(session));
+        var bridge = new GameRealtimeAgentBridge(
+            runtime,
+            manager,
+            new GameSessionKey("session", "actor"),
+            (handoff, _) => new ValueTask<GameInput>(new GameInput(
+                "session",
+                "actor",
+                "realtime",
+                "{}",
+                new GameMoment("world", 10),
+                handoff.HandoffId)),
+            new GameRealtimeAgentBridgeOptions
+            {
+                AgentEventObserver = async (_, agentEvent, cancellationToken) =>
+                {
+                    if (agentEvent.Kind != AgentEventKind.RunStarted)
+                    {
+                        return;
+                    }
+
+                    observerEntered.TrySetResult();
+                    try
+                    {
+                        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        observerCancelled.TrySetResult();
+                        throw;
+                    }
+                },
+            });
+        await manager.StartAsync(new RealtimeConversationOptions(), TestContext.Current.CancellationToken);
+        session.Emit(new RealtimeConversationEvent(
+            RealtimeConversationEventKind.HandoffRequested,
+            handoff: new RealtimeHandoffRequest("cancel-observer", "hello")));
+        await observerEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        await bridge.DisposeAsync().AsTask().WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        await observerCancelled.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        Assert.False(bridge.HasActiveAgentRun);
+    }
+
+    [Fact]
     public async Task BridgeShutdownIsBoundedWhenTheInputFactoryIgnoresCancellation()
     {
         var provider = new CountingProvider();
@@ -1201,6 +1389,29 @@ public sealed class RealtimeConversationTests
                 ModelStopReason.Stop,
                 new ModelUsage(1, 1)));
             await Task.CompletedTask;
+        }
+    }
+
+    private sealed class ToolThenTextProvider : IModelProvider
+    {
+        private int _calls;
+
+        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
+            ModelRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            _ = request;
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.Yield();
+            yield return ModelStreamEvent.Terminal(Interlocked.Increment(ref _calls) == 1
+                ? new ModelResponse(
+                    new AgentContent[] { new ToolCallContent("call-1", "inspect", "{}") },
+                    ModelStopReason.ToolUse,
+                    new ModelUsage(1, 1))
+                : new ModelResponse(
+                    new AgentContent[] { new TextContent("done") },
+                    ModelStopReason.Stop,
+                    new ModelUsage(1, 1)));
         }
     }
 

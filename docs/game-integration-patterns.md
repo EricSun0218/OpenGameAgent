@@ -8,6 +8,22 @@ Input includes the player's utterance plus non-language interaction state. Conte
 
 Route ambient conversation to `QuickResponse`. Route a conversation with available actions to `Agent`. Store only durable facts or relationship changes as long-term memories; a full transcript is not automatically good memory.
 
+Canonical engine identifiers do not have to enter the model prompt. By default, the input envelope still exposes `ActorId`, `TimelineId`, `Tick`, and `Calendar` for compatibility. A host that treats those coordinates as private can suppress them or replace them with stable model-only aliases:
+
+```csharp
+var options = new GameAgentRuntimeOptions(provider, model)
+{
+    InputModelProjection = input => new GameInputModelProjection(
+        actorId: opaqueAliasFor(input.ActorId),
+        moment: null), // omit timeline, tick, and calendar
+};
+
+// To omit both actor and moment coordinates:
+options.InputModelProjection = _ => GameInputModelProjection.SuppressCoordinates;
+```
+
+This projection changes only the model-visible JSON envelope and its `game.actor_id`, `game.timeline_id`, and `game.tick` message metadata. `GameSessionKey`, scheduler ownership, extension state, memory scope, tool-provider input, durable action intents, receipts, and `LastMoment` continue to use the canonical `GameInput`. Do not use a display name as an authority key. Keep the selector deterministic for a retried input: a durable tool-turn checkpoint fails closed if the resubmitted model-visible message does not match. Enabling projection affects new input messages; start a new session or explicitly migrate old transcript data if historical canonical envelopes must no longer be retained.
+
 ## Autonomous companion
 
 The game emits an observation when goals, threats, resources, or player orders change. Tools expose high-level capabilities such as navigate, gather, defend, revive, or build. Low-level movement and combat remain deterministic game AI or learned control code.

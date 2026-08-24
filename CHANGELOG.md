@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add a model-only game-input coordinate projection so hosts can retain canonical session/actor/time
+  authority while exposing stable opaque aliases or omitting actor, timeline, tick, and calendar from
+  new model messages. The default envelope remains compatible.
+- Add an optional fail-isolated realtime bridge host observer that receives the input factory's exact
+  `GameInput` and ordered kernel events before related tool dispatch, enabling run/turn-bound native
+  capability leases without granting control over the Agent loop.
 - Bind realtime bridge steering and shutdown to the exact run ID and monotonic turn observed from its
   own Agent events. Delayed handoffs, replaced channels, and stale disposal now fail closed or use the
   normal bounded handoff queue instead of controlling a newer run for the same session and actor.

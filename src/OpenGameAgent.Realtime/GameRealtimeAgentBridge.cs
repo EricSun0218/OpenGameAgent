@@ -19,6 +19,13 @@ public sealed class GameRealtimeAgentBridgeOptions
 
     public bool SteerActiveRun { get; set; } = true;
 
+    /// <summary>
+    /// Optional observation-only hook for the exact agent run owned by this bridge. Events are
+    /// delivered in kernel order and awaited before related tool dispatch. Observer failures are
+    /// isolated and cannot control or unsubscribe the bridge from the agent loop.
+    /// </summary>
+    public GameAgentEventHandler? AgentEventObserver { get; set; }
+
     internal GameRealtimeAgentBridgeOptions Snapshot()
     {
         if (HandoffQueueCapacity is < 1 or > 1_024)
@@ -220,6 +227,7 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
                     input,
                     (currentInput, agentEvent, token) => ObserveAgentEventAsync(
                         active,
+                        input,
                         currentInput,
                         agentEvent,
                         token),
@@ -272,28 +280,41 @@ public sealed class GameRealtimeAgentBridge : IAsyncDisposable
         }
     }
 
-    private ValueTask ObserveAgentEventAsync(
+    private async ValueTask ObserveAgentEventAsync(
         ActiveRun active,
-        GameInput input,
+        GameInput originalInput,
+        GameInput runtimeInput,
         AgentEvent agentEvent,
         CancellationToken cancellationToken)
     {
-        if (!string.Equals(input.SessionId, _key.SessionId, StringComparison.Ordinal)
-            || !string.Equals(input.ActorId, _key.ActorId, StringComparison.Ordinal))
+        if (!string.Equals(runtimeInput.SessionId, _key.SessionId, StringComparison.Ordinal)
+            || !string.Equals(runtimeInput.ActorId, _key.ActorId, StringComparison.Ordinal))
         {
-            return default;
+            return;
         }
 
         active.Observe(agentEvent);
+        if (_options.AgentEventObserver is { } observer)
+        {
+            try
+            {
+                await observer(originalInput, agentEvent, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Host observation is fail-isolated. Do not expose event bodies, reasoning, or
+                // exception details through this control path, and keep bridge tracking active.
+            }
+        }
+
         if (agentEvent.Kind != AgentEventKind.MessageUpdated
             || agentEvent.ModelEvent?.Kind != ModelStreamEventKind.TextDelta
             || string.IsNullOrEmpty(agentEvent.ModelEvent.Delta))
         {
-            return default;
+            return;
         }
 
         active.Append(agentEvent.ModelEvent.Delta!);
-        return default;
     }
 
     public async ValueTask DisposeAsync()

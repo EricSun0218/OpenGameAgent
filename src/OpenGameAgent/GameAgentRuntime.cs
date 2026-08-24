@@ -92,6 +92,41 @@ public delegate ValueTask GameAgentEventHandler(
     AgentEvent agentEvent,
     CancellationToken cancellationToken);
 
+/// <summary>
+/// Selects the game coordinates exposed in the model-visible input envelope. This projection never
+/// changes the canonical session, actor, moment, tool authority, or persisted game state.
+/// </summary>
+public delegate GameInputModelProjection GameInputModelProjectionSelector(GameInput input);
+
+/// <summary>
+/// A model-only view of an input's actor and game moment. Null values omit the corresponding
+/// coordinates; non-null values may be stable opaque aliases supplied by the host.
+/// </summary>
+public sealed class GameInputModelProjection
+{
+    public GameInputModelProjection(string? actorId = null, GameMoment? moment = null)
+    {
+        ActorId = actorId is null ? null : GameJson.RequireId(actorId, nameof(actorId));
+        Moment = moment?.EnsureValid(nameof(moment));
+    }
+
+    public string? ActorId { get; }
+
+    public GameMoment? Moment { get; }
+
+    public static GameInputModelProjection SuppressCoordinates { get; } = new();
+
+    public static GameInputModelProjection Canonical(GameInput input)
+    {
+        if (input is null)
+        {
+            throw new ArgumentNullException(nameof(input));
+        }
+
+        return new GameInputModelProjection(input.ActorId, input.Moment);
+    }
+}
+
 public enum GameAgentRunStatus
 {
     Completed,
@@ -300,6 +335,15 @@ public sealed class GameAgentRuntimeOptions
 
     public GameModelSelector? ModelSelector { get; set; }
 
+    /// <summary>
+    /// Controls only the actor and moment written into model-visible input messages. The default
+    /// preserves the canonical envelope for compatibility. Use an opaque alias or
+    /// <see cref="GameInputModelProjection.SuppressCoordinates"/> when model prompts must not expose
+    /// internal game identifiers; runtime authority always remains canonical.
+    /// </summary>
+    public GameInputModelProjectionSelector InputModelProjection { get; set; } =
+        static input => GameInputModelProjection.Canonical(input);
+
     public IList<IGameWorkflow> Workflows { get; } = new List<IGameWorkflow>();
 
     /// <summary>
@@ -375,6 +419,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly GamePendingWorkProvider? _pendingWorkProvider;
     private readonly GameExecutionScopeProvider _executionScopeProvider;
     private readonly GameModelSelector? _modelSelector;
+    private readonly GameInputModelProjectionSelector _inputModelProjection;
     private readonly IReadOnlyDictionary<string, IGameWorkflow> _workflows;
     private readonly GameRuntimeLimits _limits;
     private readonly AgentLimits _agentLimits;
@@ -425,6 +470,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         _executionScopeProvider = options.ExecutionScopeProvider
             ?? throw new ArgumentException("An execution-scope provider is required.", nameof(options));
         _modelSelector = options.ModelSelector;
+        _inputModelProjection = options.InputModelProjection
+            ?? throw new ArgumentException("An input model projection is required.", nameof(options));
         _limits = options.Limits?.CopyAndValidate()
             ?? throw new ArgumentException("Runtime limits are required.", nameof(options));
         _agentLimits = CopyAgentLimits(options.AgentLimits
@@ -946,9 +993,10 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             }
 
             var resumingCheckpoint = loaded.PendingInputId is not null;
+            var inputMessage = CreateInputMessage(input);
             if (resumingCheckpoint)
             {
-                ValidatePendingInput(loaded, input);
+                ValidatePendingInput(loaded, input.InputId, inputMessage);
             }
 
             var agentLimits = CopyAgentLimits(_agentLimits);
@@ -1061,6 +1109,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             {
                 var workflowRun = await RunWorkflowAsync(
                     input,
+                    inputMessage,
                     loaded,
                     context,
                     tools,
@@ -1120,7 +1169,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 : checked(agentLimits.MaxToolCallsPerTurn + (resumingCheckpoint ? 2 : 3));
             var additionalMessages = resumingCheckpoint
                 ? Array.Empty<AgentMessage>()
-                : new[] { CreateInputMessage(input) };
+                : new[] { inputMessage };
             try
             {
                 initialMessages = await FitTranscriptAsync(
@@ -1176,7 +1225,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
             if (resumingCheckpoint)
             {
-                ValidatePendingInput(loaded, input, initialMessages);
+                ValidatePendingInput(loaded, input.InputId, inputMessage, initialMessages);
             }
 
             if (initialMessages.Count + minimumMessageReserve > agentLimits.MaxMessages)
@@ -1342,7 +1391,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             {
                 run = resumingCheckpoint
                     ? await agent.ContinueAsync(cancellationToken).ConfigureAwait(false)
-                    : await agent.RunAsync(CreateInputMessage(input), cancellationToken).ConfigureAwait(false);
+                    : await agent.RunAsync(inputMessage, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -1486,6 +1535,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
     private async ValueTask<GameAgentRunResult> RunWorkflowAsync(
         GameInput input,
+        AgentMessage inputMessage,
         GameSessionSnapshot loaded,
         IReadOnlyList<GameContextSlice> context,
         IReadOnlyList<AgentTool> tools,
@@ -1519,7 +1569,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         void ValidateWorkflowOutput(IReadOnlyList<AgentMessage> output)
         {
             var candidate = loaded.Messages
-                .Concat(new[] { CreateInputMessage(input) })
+                .Concat(new[] { inputMessage })
                 .Concat(output ?? throw new ArgumentNullException(nameof(output)))
                 .ToArray();
             AgentValidation.ValidateTranscript(candidate, _agentLimits);
@@ -1537,7 +1587,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             ?? throw new InvalidOperationException($"Workflow '{workflow.Name}' returned null.");
         workflowContext.ValidateOutput(result.Messages);
         usageAccounting.RecordWorkflowMessages(result.Messages);
-        var messages = loaded.Messages.Concat(new[] { CreateInputMessage(input) }).Concat(result.Messages).ToArray();
+        var messages = loaded.Messages.Concat(new[] { inputMessage }).Concat(result.Messages).ToArray();
         var usageRecords = usageAccounting.RecordsBetween(0, usageAccounting.Count);
         var attemptedUsageLedger = loaded.UsageLedger.Append(usageRecords);
         GameSessionSaveResult save;
@@ -1810,17 +1860,46 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                     .Select(slice => new ContextPayload(slice)));
     }
 
-    private static AgentMessage CreateInputMessage(GameInput input)
+    private AgentMessage CreateInputMessage(GameInput input)
     {
-        var payload = JsonSerializer.Serialize(new InputPayload(input));
-        var metadata = new Dictionary<string, string>(input.Metadata, StringComparer.Ordinal)
+        var projection = _inputModelProjection(input)
+            ?? throw new InvalidOperationException("The input model projection returned null.");
+        if ((projection.ActorId?.Length ?? 0) > _limits.MaxIdentifierCharacters
+            || (projection.Moment?.TimelineId.Length ?? 0) > _limits.MaxIdentifierCharacters
+            || (projection.Moment?.CalendarJson?.Length ?? 0) > _limits.MaxCalendarJsonCharacters)
         {
-            ["game.input_id"] = input.InputId,
-            ["game.input_type"] = input.Type,
-            ["game.actor_id"] = input.ActorId,
-            ["game.timeline_id"] = input.Moment.TimelineId,
-            ["game.tick"] = input.Moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            throw new GameRuntimeLimitException(
+                nameof(GameAgentRuntimeOptions.InputModelProjection),
+                "The input model projection exceeds the configured runtime limits.");
+        }
+
+        var payload = projection switch
+        {
+            { ActorId: { } fullActorId, Moment: { } fullMoment } =>
+                JsonSerializer.Serialize(new InputPayload(input, fullActorId, fullMoment)),
+            { ActorId: { } actorOnlyId } =>
+                JsonSerializer.Serialize(new ActorInputPayload(input, actorOnlyId)),
+            { Moment: { } momentOnly } =>
+                JsonSerializer.Serialize(new MomentInputPayload(input, momentOnly)),
+            _ => JsonSerializer.Serialize(new MinimalInputPayload(input)),
         };
+        var metadata = new Dictionary<string, string>(input.Metadata, StringComparer.Ordinal);
+        metadata.Remove("game.actor_id");
+        metadata.Remove("game.timeline_id");
+        metadata.Remove("game.tick");
+        metadata["game.input_id"] = input.InputId;
+        metadata["game.input_type"] = input.Type;
+        if (projection.ActorId is { } actorId)
+        {
+            metadata["game.actor_id"] = actorId;
+        }
+
+        if (projection.Moment is { } moment)
+        {
+            metadata["game.timeline_id"] = moment.TimelineId;
+            metadata["game.tick"] = moment.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         var content = new List<AgentContent>(input.Content.Count + 1)
         {
             new JsonContent(payload),
@@ -1831,21 +1910,21 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
     private static void ValidatePendingInput(
         GameSessionSnapshot loaded,
-        GameInput input,
+        string inputId,
+        AgentMessage expected,
         IReadOnlyList<AgentMessage>? transcript = null)
     {
         var messages = transcript ?? loaded.Messages;
         var matches = messages.Where(message =>
                 message.Role == AgentRole.User
                 && message.Metadata.TryGetValue("game.input_id", out var value)
-                && string.Equals(value, input.InputId, StringComparison.Ordinal))
+                && string.Equals(value, inputId, StringComparison.Ordinal))
             .ToArray();
         if (matches.Length != 1)
         {
             throw new InvalidOperationException("The pending input checkpoint does not contain exactly one matching input message.");
         }
 
-        var expected = CreateInputMessage(input);
         if (!InputMessageEquals(matches[0], expected))
         {
             throw new InvalidOperationException("The resubmitted input does not match its durable checkpoint.");
@@ -3245,16 +3324,16 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
     private sealed class InputPayload
     {
-        public InputPayload(GameInput input)
+        public InputPayload(GameInput input, string actorId, GameMoment moment)
         {
             InputId = input.InputId;
             Type = input.Type;
-            ActorId = input.ActorId;
-            TimelineId = input.Moment.TimelineId;
-            Tick = input.Moment.Tick;
-            Calendar = input.Moment.CalendarJson is null
+            ActorId = actorId;
+            TimelineId = moment.TimelineId;
+            Tick = moment.Tick;
+            Calendar = moment.CalendarJson is null
                 ? (JsonElement?)null
-                : GameJson.ParseElement(input.Moment.CalendarJson);
+                : GameJson.ParseElement(moment.CalendarJson);
             Payload = GameJson.ParseElement(input.PayloadJson);
         }
 
@@ -3269,6 +3348,68 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         public long Tick { get; }
 
         public JsonElement? Calendar { get; }
+
+        public JsonElement Payload { get; }
+    }
+
+    private sealed class ActorInputPayload
+    {
+        public ActorInputPayload(GameInput input, string actorId)
+        {
+            InputId = input.InputId;
+            Type = input.Type;
+            ActorId = actorId;
+            Payload = GameJson.ParseElement(input.PayloadJson);
+        }
+
+        public string InputId { get; }
+
+        public string Type { get; }
+
+        public string ActorId { get; }
+
+        public JsonElement Payload { get; }
+    }
+
+    private sealed class MomentInputPayload
+    {
+        public MomentInputPayload(GameInput input, GameMoment moment)
+        {
+            InputId = input.InputId;
+            Type = input.Type;
+            TimelineId = moment.TimelineId;
+            Tick = moment.Tick;
+            Calendar = moment.CalendarJson is null
+                ? (JsonElement?)null
+                : GameJson.ParseElement(moment.CalendarJson);
+            Payload = GameJson.ParseElement(input.PayloadJson);
+        }
+
+        public string InputId { get; }
+
+        public string Type { get; }
+
+        public string TimelineId { get; }
+
+        public long Tick { get; }
+
+        public JsonElement? Calendar { get; }
+
+        public JsonElement Payload { get; }
+    }
+
+    private sealed class MinimalInputPayload
+    {
+        public MinimalInputPayload(GameInput input)
+        {
+            InputId = input.InputId;
+            Type = input.Type;
+            Payload = GameJson.ParseElement(input.PayloadJson);
+        }
+
+        public string InputId { get; }
+
+        public string Type { get; }
 
         public JsonElement Payload { get; }
     }
