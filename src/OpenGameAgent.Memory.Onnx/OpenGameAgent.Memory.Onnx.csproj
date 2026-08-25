@@ -4,8 +4,8 @@
     <Description>Optional in-process ONNX text embeddings for OpenGameAgent vector memory.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Bcl.Memory" Version="10.0.10" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.1" />
+    <PackageReference Include="Microsoft.Bcl.Memory" Version="10.0.11" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
     <PackageReference Include="System.Text.Json" Version="9.0.19" />
   </ItemGroup>

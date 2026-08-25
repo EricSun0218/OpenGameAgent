@@ -5,8 +5,8 @@
     <Description>Private content-addressed local image attachment storage for OpenGameAgent.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="SkiaSharp" Version="4.150.1" />
-    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.150.1" />
+    <PackageReference Include="SkiaSharp" Version="4.151.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.151.1" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Attachments\OpenGameAgent.Attachments.csproj" />
