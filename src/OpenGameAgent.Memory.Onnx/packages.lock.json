@@ -4,9 +4,9 @@
     ".NETStandard,Version=v2.1": {
       "Microsoft.Bcl.Memory": {
         "type": "Direct",
-        "requested": "[10.0.10, )",
-        "resolved": "10.0.10",
-        "contentHash": "/PxGfVdy8P15x9TUyAyWfzR92DcRVRCMs4nMnVS6bldRaDTJJPG9ECJPlF0lbkeZdqwM5eSkOQ214YwvcimAWQ==",
+        "requested": "[10.0.11, )",
+        "resolved": "10.0.11",
+        "contentHash": "gOK5j94niQhCvUXA5sXn/h4khL0ZHPlKZx//SJ9pwuydpWSDIPBpduLWty5MYMEJkWs/ewYbG1LAqfPLOprDgg==",
         "dependencies": {
           "System.Runtime.CompilerServices.Unsafe": "6.1.2"
         }
