@@ -93,10 +93,6 @@ public sealed class RunOperationTests
         var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "model")
         {
             RunOperationJournal = journal,
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["command"] = GameRouteDecision.Agent("test"),
-            }),
             ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
             {
                 new AgentTool(

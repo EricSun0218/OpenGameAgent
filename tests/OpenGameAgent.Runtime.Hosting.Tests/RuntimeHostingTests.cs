@@ -103,12 +103,7 @@ public sealed class RuntimeTests
         await using var agentRuntime = new GameAgentRuntime(new GameAgentRuntimeOptions(
             new SingleResponseProvider(),
             "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["agent"] = GameRouteDecision.Agent("test"),
-            }),
-        });
+        { });
         var runtimeHost = new InProcessGameAgentRuntimeHost(agentRuntime);
         var input = new GameInput(
             "session",

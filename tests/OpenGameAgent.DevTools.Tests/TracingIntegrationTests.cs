@@ -49,59 +49,6 @@ public sealed class TracingIntegrationTests
         Assert.Equal(5, metrics.TotalTokens);
     }
 
-    [Fact]
-    public async Task RouteTraceAndPerformancePreserveClassifierFailureAndFallbackReason()
-    {
-        var sink = new InMemoryGameAgentTraceSink();
-        var classifier = new ModelGameRouteClassifier(new InvalidRouteProvider(), "router");
-        await using var runtime = new GameAgentBuilder(new OneResponseProvider(), "model")
-            .Configure(options =>
-            {
-                options.RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync);
-                options.ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
-                {
-                    new AgentTool(
-                        new ToolDefinition("inspect", "Read game state", "{\"type\":\"object\"}"),
-                        (_, _, _) => new ValueTask<ToolResult>(new ToolResult(new AgentContent[] { new TextContent("ok") }))),
-                });
-                options.Extensions.Add(new GameAgentTracingExtension(sink));
-            })
-            .Build();
-
-        var result = await runtime.RunAsync(
-            new GameInput("session", "actor", "chat", "{}", new GameMoment("world", 1), "route-fallback"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
-        var route = Assert.Single(sink.Snapshot(), value => value.Kind == "route.selected");
-        Assert.DoesNotContain("private", route.DetailsJson, StringComparison.Ordinal);
-        using (var details = JsonDocument.Parse(route.DetailsJson))
-        {
-            Assert.Equal("fallback", details.RootElement.GetProperty("classificationStatus").GetString());
-            Assert.Equal("invalid-json", details.RootElement.GetProperty("classificationFailure").GetString());
-            Assert.Equal("tools-available", details.RootElement.GetProperty("classificationFallbackReason").GetString());
-            Assert.Equal("classifier-invalid-json-fallback-tools-available", details.RootElement.GetProperty("reason").GetString());
-            Assert.Equal(
-                new[] { "text", "reasoning" },
-                details.RootElement.GetProperty("classificationContentKinds").EnumerateArray().Select(value => value.GetString()));
-            Assert.Equal(8, details.RootElement.GetProperty("classificationVisibleContentCharacters").GetInt64());
-            Assert.Equal(7, details.RootElement.GetProperty("classificationReasoningCharacters").GetInt64());
-        }
-
-        var performance = GameAgentPerformanceSummary.Create(new GameAgentTraceRecording(sink.Snapshot()));
-        var run = Assert.Single(performance.Runs);
-        Assert.Equal("invalid-json", run.RouteClassificationFailure);
-        Assert.Equal("tools-available", run.RouteFallbackReason);
-        Assert.Equal(new[] { "text", "reasoning" }, run.RouteClassificationContentKinds);
-        Assert.Equal(8, run.RouteClassificationVisibleContentCharacters);
-        Assert.Equal(7, run.RouteClassificationReasoningCharacters);
-        Assert.Equal(1, performance.RouteClassificationFailures);
-        Assert.Equal(1, performance.RouteFallbacks);
-        Assert.True(run.Latency.RoutingModelMilliseconds >= 0);
-        Assert.Equal(8, performance.TotalTokens);
-    }
-
     private sealed class EmptyContextProvider : IGameContextProvider
     {
         public ValueTask<IReadOnlyList<GameContextSlice>> GetContextAsync(
@@ -127,21 +74,4 @@ public sealed class TracingIntegrationTests
         }
     }
 
-    private sealed class InvalidRouteProvider : IModelProvider
-    {
-        public async IAsyncEnumerable<ModelStreamEvent> StreamAsync(
-            ModelRequest request,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
-        {
-            _ = request;
-            cancellationToken.ThrowIfCancellationRequested();
-            yield return ModelStreamEvent.Terminal(new ModelResponse(
-                new AgentContent[] { new ReasoningContent("private"), new TextContent("not-json") },
-                ModelStopReason.Stop,
-                new ModelUsage(2, 1),
-                provider: "fake-router",
-                responseModel: "fake-router-model"));
-            await Task.CompletedTask;
-        }
-    }
 }

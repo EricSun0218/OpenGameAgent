@@ -152,7 +152,7 @@ media.Register(LocalAiMediaProvider.CreateRegistration(
     }));
 ```
 
-The adapter uses LocalAI's image generation, video, and speech endpoints. Outputs are decoded, size-bounded, signature-checked, and returned as ordinary `ResourceContent` for the existing generated-asset pipeline. The package does not guess installation-specific image-edit semantics; use the workflow adapter when source images must enter a graph.
+The adapter uses LocalAI's image generation, video, and speech endpoints. Outputs are decoded, size-bounded, signature-checked, and returned as ordinary `ResourceContent` for the existing generated-asset pipeline. The package does not guess installation-specific image-edit semantics; use the trusted ComfyUI adapter when source images must enter a graph.
 
 ## ComfyUI workflows
 

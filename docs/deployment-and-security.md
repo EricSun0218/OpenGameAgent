@@ -108,7 +108,7 @@ The response contains lifetime totals, totals grouped by cause, and a bounded re
 
 `BuiltInGameModelRuntime` preserves provider-reported itemized cost. When a provider reports usage without cost, it estimates cost from the resolved model directory entry, including tiered rates and one-hour cache writes. A directory entry with unavailable pricing remains unknown instead of silently becoming free.
 
-The included file stores coordinate local writers through cross-process leases when they use the same data directory. They are not distributed storage. Multi-host services must replace the interfaces with transactional shared storage and coordinate actor ownership. Custom session, workflow, action, artifact, delegation, and ranking implementations are checked at their trust boundaries; inconsistent saved state and cross-session data are rejected.
+The included file stores coordinate local writers through cross-process leases when they use the same data directory. They are not distributed storage. Multi-host services must replace the interfaces with transactional shared storage and coordinate actor ownership. Custom session, action, artifact, delegation, and ranking implementations are checked at their trust boundaries; inconsistent saved state and cross-session data are rejected.
 
 ## Remote game actions
 
@@ -203,6 +203,6 @@ Use provider endpoints without URI-embedded credentials. If an `HttpClient` foll
 
 Keep runtime limits below the maximum values accepted by the framework. Set tighter limits for user-authored content, including provider response characters and tool calls per response. A canceled or timed-out write may have committed: reconcile by operation ID. Read-only work may be retried; non-idempotent writes must not be retried blindly.
 
-Use a new session/save namespace when a forked save can coexist with its source. A new `TimelineId` separates game-time ordering, but transcripts and extension state are keyed by session and actor. Workflow checkpoints are not automatically atomic with game-state commits; side-effecting nodes should dispatch through stable operation IDs.
+Use a new session/save namespace when a forked save can coexist with its source. A new `TimelineId` separates game-time ordering, but transcripts and extension state are keyed by session and actor. Persistent plan state is not automatically atomic with game-state commits; side effects must dispatch through stable operation IDs.
 
 See [SECURITY.md](../SECURITY.md) for vulnerability reporting.

@@ -369,19 +369,6 @@ public sealed class PersistenceTests
                 await journal.FindAsync(intent.OperationId, TestContext.Current.CancellationToken));
         }
 
-        using (var workflowDirectory = new TemporaryDirectory())
-        {
-            var store = new FileGameWorkflowCheckpointStore(workflowDirectory.Path);
-            await store.SaveAsync(
-                new GameWorkflowCheckpoint("instance", "workflow", 1, 0, "{}"),
-                0,
-                TestContext.Current.CancellationToken);
-            var path = Assert.Single(Directory.GetFiles(workflowDirectory.Path, "*.workflow.json"));
-            await SetFormatVersionAsync(path, 1);
-
-            await Assert.ThrowsAsync<PersistenceException>(async () =>
-                await store.LoadAsync("instance", TestContext.Current.CancellationToken));
-        }
     }
 
     [Fact]
@@ -747,58 +734,6 @@ public sealed class PersistenceTests
 
         await Assert.ThrowsAsync<PersistenceException>(async () =>
             await store.LoadAsync(key, TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task WorkflowCheckpointSurvivesRestart()
-    {
-        using var directory = new TemporaryDirectory();
-        var store = new FileGameWorkflowCheckpointStore(directory.Path);
-        var invocation = new GameWorkflowInvocationResult(
-            "input",
-            new[]
-            {
-                new AgentMessage(
-                    AgentRole.Assistant,
-                    new AgentContent[] { new TextContent("durable output") },
-                    DateTimeOffset.UnixEpoch,
-                    model: "model",
-                    stopReason: ModelStopReason.Stop),
-            },
-            complete: true,
-            succeeded: true);
-        await store.SaveAsync(
-            new GameWorkflowCheckpoint("instance", "evolve", 1, 2, "{\"month\":4}", invocation: invocation),
-            0,
-            TestContext.Current.CancellationToken);
-
-        var restarted = new FileGameWorkflowCheckpointStore(directory.Path);
-        var checkpoint = await restarted.LoadAsync("instance", TestContext.Current.CancellationToken);
-
-        Assert.NotNull(checkpoint);
-        Assert.Equal(2, checkpoint.NextStep);
-        Assert.Contains("\"month\":4", checkpoint.StateJson, StringComparison.Ordinal);
-        Assert.Equal("input", checkpoint.Invocation!.InputId);
-        Assert.Equal(
-            "durable output",
-            Assert.IsType<TextContent>(Assert.Single(Assert.Single(checkpoint.Invocation.Messages).Content)).Text);
-    }
-
-    [Fact]
-    public async Task CompletedFileWorkflowCheckpointIsImmutable()
-    {
-        using var directory = new TemporaryDirectory();
-        var store = new FileGameWorkflowCheckpointStore(directory.Path);
-        await store.SaveAsync(
-            new GameWorkflowCheckpoint("instance", "evolve", 1, 2, "{}", completed: true),
-            0,
-            TestContext.Current.CancellationToken);
-
-        await Assert.ThrowsAsync<PersistenceException>(async () =>
-            await store.SaveAsync(
-                new GameWorkflowCheckpoint("instance", "evolve", 2, 0, "{}"),
-                1,
-                TestContext.Current.CancellationToken));
     }
 
     [Fact]

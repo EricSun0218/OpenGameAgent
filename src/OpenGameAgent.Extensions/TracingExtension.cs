@@ -251,33 +251,6 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                     durationMilliseconds = value.Duration?.TotalMilliseconds,
                 },
                 token));
-        api.On(GameAgentExtensionEvents.RouteSelected, (value, context, token) =>
-            WriteAsync(
-                "route.selected",
-                context,
-                new
-                {
-                    route = value.Decision.Route.ToString(),
-                    value.Decision.Reason,
-                    value.Decision.Workflow,
-                    classificationStatus = value.Decision.Classification is null
-                        ? null
-                        : value.Decision.Classification.UsedFallback ? "fallback" : "selected",
-                    classificationFailure = value.Decision.Classification?.FailureCode,
-                    classificationFallbackReason = value.Decision.Classification?.FallbackReason,
-                    classificationContentKinds = value.Decision.Classification?.ResponseContentKinds
-                        .Select(RouteContentKindName)
-                        .ToArray(),
-                    classificationVisibleContentCharacters = value.Decision.Classification?.VisibleContentCharacters,
-                    classificationReasoningCharacters = value.Decision.Classification?.ReasoningCharacters,
-                    classificationProviderStatusCode = value.Decision.Classification?.ProviderStatusCode,
-                    classificationProviderFailureCategory = value.Decision.Classification?.ProviderFailureCategory,
-                    classificationProviderRequestFields = value.Decision.Classification?.ProviderRequestFields,
-                    classificationProviderRequestId = value.Decision.Classification?.ProviderRequestId,
-                    durationMilliseconds = value.Duration?.TotalMilliseconds,
-                    modelDurationMilliseconds = value.ModelDuration?.TotalMilliseconds,
-                },
-                token));
         api.On(GameAgentExtensionEvents.SkillsSelected, (value, context, token) =>
             WriteAsync(
                 "skills.selected",
@@ -326,7 +299,6 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
                 new
                 {
                     status = value.Result.Status.ToString(),
-                    route = value.Result.Route.Route.ToString(),
                     revision = value.Result.SessionRevision,
                     succeeded = value.Result.Succeeded,
                     turns = value.Result.AgentResult?.Turns,
@@ -679,15 +651,4 @@ public sealed class GameAgentTracingExtension : IGameAgentExtension
         return document.RootElement.Clone();
     }
 
-    private static string RouteContentKindName(AgentContentKind kind) => kind switch
-    {
-        AgentContentKind.Text => "text",
-        AgentContentKind.Json => "json",
-        AgentContentKind.Resource => "resource",
-        AgentContentKind.ImageAttachment => "image-attachment",
-        AgentContentKind.Binary => "binary",
-        AgentContentKind.Reasoning => "reasoning",
-        AgentContentKind.ToolCall => "tool-call",
-        _ => "unknown",
-    };
 }

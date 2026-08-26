@@ -35,7 +35,7 @@ The Unity package provides `OpenGameAgentBehaviour` plus shared runtime/client a
 
 ### Designed for authoritative games
 
-Models propose typed intents. Your game validates rules, resources, revisions, permissions, physics, pathfinding, and final state changes. Optional OpenGameAgent packages add durable actions, memory, scheduling, workflows, media providers, MCP, and other capabilities.
+Models propose typed intents. Your game validates rules, resources, revisions, permissions, physics, pathfinding, and final state changes. Optional OpenGameAgent packages add durable actions, memory, scheduling, persistent planning, media providers, MCP, and other capabilities.
 
 ### Providers, keys, and privacy
 

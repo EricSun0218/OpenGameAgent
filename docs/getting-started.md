@@ -21,7 +21,7 @@ $env:OGA_API_KEY = 'your-key'
 dotnet run --project examples/OpenGameAgent.Example
 ```
 
-Use `chat` as the first argument for a quick response or `command` to expose a world-changing movement tool:
+Use `chat` as the first argument for conversation without mutation tools or `command` to expose a world-changing movement tool:
 
 ```powershell
 dotnet run --project examples/OpenGameAgent.Example -- chat "What is near you?"
@@ -62,7 +62,7 @@ var runtime = new GameAgentRuntime(options);
 
 `GameAgentRuntimeOptions` is snapshotted by the constructor. Build a new runtime to deploy a different model, prompt, tool set, or limit policy.
 
-The snippet above is the explicit low-level path for an endpoint whose wire contract the host controls. `OpenAICompatibleProvider` cannot safely infer compatibility from an arbitrary model name or URL. For a known hosted provider such as DeepSeek, prefer the bundled model directory shown under **Choose models and credentials**; it applies the model's token field, thinking format, tool constraints, and other compatibility flags to both routing and main requests.
+The snippet above is the explicit low-level path for an endpoint whose wire contract the host controls. `OpenAICompatibleProvider` cannot safely infer compatibility from an arbitrary model name or URL. For a known hosted provider such as DeepSeek, prefer the bundled model directory shown under **Choose models and credentials**; it applies the model's token field, thinking format, tool constraints, and other compatibility flags to every request.
 
 For a composition that third-party packages can extend, use the one-shot builder:
 
@@ -80,7 +80,7 @@ var runtime = new GameAgentBuilder(provider, modelName)
     .Build();
 ```
 
-The builder can only build once. Extensions can contribute prompt fragments, context, tools, skills, routes, workflows, hooks, providers, services, and typed lifecycle handlers without changing the kernel. Register optional features this way rather than adding them to every run.
+The builder can only build once. Extensions can contribute prompt fragments, context, tools, skills, hooks, providers, services, and typed lifecycle handlers without changing the kernel. Register optional features this way rather than adding them to every run.
 
 Tool visibility and tool execution authorization are separate boundaries. A visibility policy runs
 after static and dynamic tools are collected but before each model request, so a disabled tool is not
@@ -203,30 +203,13 @@ must validate `GenerationId` against the currently loaded save/world generation 
 game knows which generation is active. Pending durable journal entries are recovered through the
 same pump after restart.
 
-## Select routes
+## Use the unified Agent loop
 
-The default route is intentionally simple:
+Every input enters the same bounded message-or-tool loop. The model sees only the tools collected and authorized for that input. A direct assistant message ends the run after one provider request; a tool call executes, appends its result, refreshes context, and continues. There is no preliminary task-complexity classifier and no separate Quick, Agent, Plan, or Workflow execution mode.
 
-- explicit `agent.route` metadata wins;
-- a configured input-type route wins next;
-- pending work chooses `Agent` without a classifier call;
-- an optional model classifier can still select `QuickResponse` for ordinary input when tools are available;
-- without a classifier, available tools conservatively choose `Agent`;
-- otherwise choose `QuickResponse`.
+Use `GameInput.Type`, context providers, and input-aware tool visibility to keep each request focused. Fixed monthly simulation or other deterministic business processes remain game code and may submit selected decisions to an agent only when semantic judgment is needed. See [Agent loop and performance](agent-loop-and-performance.md).
 
-Supported explicit values are `auto`, `quick`, `agent`, `direct`, `plan`, and `workflow:<name>`. `direct` selects the short-task Agent loop while hiding official persistent-plan tools; `plan` keeps that loop and adds persistent-plan guidance. Quick response still calls the answer model but stops after one turn and exposes no tools. Use type routes for predictable latency:
-
-```csharp
-options.RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-{
-    ["ambient_chat"] = GameRouteDecision.Quick("ambient-chat"),
-    ["monthly_simulation"] = GameRouteDecision.ToWorkflow("monthly", "fixed-simulation")
-});
-```
-
-If you configure `ModelGameRouteClassifier`, its provider call is recorded under `GameSessionUsageCause.Routing` and shares the same per-input model-token budget as the selected route. The runtime never runs a speculative Quick answer and then replays it as Agent work. See [Execution routing and performance](execution-routing-and-performance.md).
-
-Route and durable-planning permission are separate. To let an ordinary actor keep `auto` classification and short tools without ever seeing or waking GoalLoop/TaskPlan, derive a trusted scope in runtime configuration:
+Persistent planning is an optional capability. To let only selected actors collect `GoalLoopExtension` and `TaskPlanExtension` tools and guidance, derive a trusted scope in runtime configuration:
 
 ```csharp
 builder.UseExecutionScope((input, token) =>
@@ -236,10 +219,10 @@ builder.UseExecutionScope((input, token) =>
             {
                 GameExecutionCapabilities.PersistentPlanning,
             })
-            : GameExecutionScope.ShortTaskOnly));
+            : GameExecutionScope.NoOptionalCapabilities));
 ```
 
-Do not derive the grant directly from client-supplied metadata. A restricted explicit `agent.route=plan` request fails before the answer provider is called.
+Do not derive the grant directly from client-supplied metadata. A restricted actor still has the ordinary Agent loop and any separately authorized game tools, but cannot see, create, or resume persistent goals and task plans.
 
 ## Add memory and skills
 
@@ -320,11 +303,10 @@ options.ProviderConfigurations["deepseek"] = new GameModelProviderTransportConfi
 
 var models = new BuiltInGameModelRuntime(options);
 var provider = models.CreateProvider("deepseek");
-var classifier = new ModelGameRouteClassifier(provider, "deepseek-v4-pro");
 var runtimeOptions = new GameAgentRuntimeOptions(provider, "deepseek-v4-pro");
 ```
 
-Use the same directory-backed provider and model for the classifier and runtime. Credentials stay inside the authentication boundary and are not placed in prompts, transcripts, traces, or provider diagnostics.
+Credentials stay inside the authentication boundary and are not placed in prompts, transcripts, traces, or provider diagnostics.
 
 Availability checks use the configured authentication chain, so a provider with no usable credentials is not presented as ready. A game may select by required input/output capability and reasoning level rather than taking the first result. Direct provider packages remain appropriate when a title intentionally supports only one endpoint.
 
@@ -346,6 +328,6 @@ runtime.TryAbort(key); // best-effort cancellation if the actor is still active
 
 ## Inspect output
 
-Subscribe to runtime events for UI streaming, tool progress, and traces. Final transcript messages are stored in the session store. `GameAgentRunResult` reports route, status, session revision, kernel result, usage, and error.
+Subscribe to runtime events for UI streaming, tool progress, and traces. Final transcript messages are stored in the session store. `GameAgentRunResult` reports status, session revision, kernel result, usage, and error.
 
 Do not mutate engine objects from model-provider continuation threads. The Godot and Unity adapters marshal their public callbacks onto the engine thread; custom action handlers must do the same before touching engine APIs.

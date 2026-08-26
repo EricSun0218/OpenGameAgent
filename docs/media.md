@@ -36,7 +36,7 @@ agent requests media
 
 Do not treat a URL returned by a model or generation endpoint as a safe game asset. Avoid loading remote bytes directly into a renderer, audio decoder, or video decoder without bounds and validation.
 
-The generic HTTP adapter keeps polling while one call is alive and sends the stable request ID on submission. A media service should make that ID idempotent so retrying the same game request resumes or returns the same job instead of charging twice. The generic contract does not expose a portable mid-job handle. If a product must survive a process restart while a long video or batch job is pending, use a service-specific `IGameMediaGenerator` or workflow step that persists the provider job ID in game-owned state.
+The generic HTTP adapter keeps polling while one call is alive and sends the stable request ID on submission. A media service should make that ID idempotent so retrying the same game request resumes or returns the same job instead of charging twice. The generic contract does not expose a portable mid-job handle. If a product must survive a process restart while a long video or batch job is pending, use a service-specific `IGameMediaGenerator` that persists the provider job ID in game-owned state.
 
 ## HTTP shape
 

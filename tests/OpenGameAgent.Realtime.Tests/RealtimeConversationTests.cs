@@ -444,12 +444,7 @@ public sealed class RealtimeConversationTests
     {
         var provider = new BlockingProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
-        });
+        { });
         var session = new FakeTransportSession();
         await using var manager = new RealtimeConversationManager(new FakeTransport(session));
         await using var bridge = new GameRealtimeAgentBridge(
@@ -498,12 +493,7 @@ public sealed class RealtimeConversationTests
     {
         var provider = new StaleBridgeProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
-        });
+        { });
         var session = new FakeTransportSession { BlockCompletedHandoff = true };
         await using var manager = new RealtimeConversationManager(new FakeTransport(session));
         var bridge = new GameRealtimeAgentBridge(
@@ -550,12 +540,7 @@ public sealed class RealtimeConversationTests
     {
         var provider = new BlockingProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
-        });
+        { });
         var session = new FakeTransportSession();
         await using var manager = new RealtimeConversationManager(new FakeTransport(session));
         long bridgeSequence = 10;
@@ -616,12 +601,7 @@ public sealed class RealtimeConversationTests
     {
         var provider = new StaleBridgeProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
-        });
+        { });
         var session = new FakeTransportSession { BlockCompletedHandoff = true };
         await using var manager = new RealtimeConversationManager(new FakeTransport(session));
         await using var bridge = new GameRealtimeAgentBridge(
@@ -684,12 +664,7 @@ public sealed class RealtimeConversationTests
     {
         var provider = new IsolatedBlockingProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
-        });
+        { });
         var session = new FakeTransportSession();
         await using var manager = new RealtimeConversationManager(new FakeTransport(session));
         var bridge = new GameRealtimeAgentBridge(
@@ -743,12 +718,7 @@ public sealed class RealtimeConversationTests
     {
         var provider = new StreamingBlockingProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
-        });
+        { });
         var session = new FakeTransportSession();
         await using var manager = new RealtimeConversationManager(new FakeTransport(session));
         await using var bridge = new GameRealtimeAgentBridge(

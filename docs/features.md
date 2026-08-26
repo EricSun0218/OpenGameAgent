@@ -30,7 +30,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Need | API |
 | --- | --- |
 | Build an immutable runtime composition | `GameAgentBuilder` |
-| Add context, tools, skills, routes, workflows, hooks, prompts, or providers | `IGameAgentExtension`, `GameAgentExtensionApi` |
+| Add context, tools, skills, hooks, prompts, or providers | `IGameAgentExtension`, `GameAgentExtensionApi` |
 | Observe lifecycle without coupling extensions | `GameAgentExtensionEvents` |
 | Exchange typed extension messages | `GameAgentExtensionChannel<T>` |
 | Keep per-session extension state | `GameAgentExtensionState` |
@@ -62,9 +62,9 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Persist and resolve immutable image input | `IGameImageAttachmentStore`, `FileGameImageAttachmentStore` |
 | Express game time or save forks | `GameMoment` |
 | Supply current world state | `IGameContextProvider`, `GameContextSlice` |
-| Keep obvious dialogue fast | `AutomaticGameRoutePolicy`, `ModelGameRouteClassifier` |
-| Force or automatically select a known path | `agent.route=auto|quick|agent|direct|plan|workflow:<name>` |
-| Keep auto/Quick/short Agent while denying durable plans per actor | `GameExecutionScopeProvider`, `GameExecutionScope.ShortTaskOnly` |
+| Keep obvious dialogue fast | expose only relevant context and tools; a direct assistant message ends after one provider request |
+| Continue from a tool call | built into the unified message-or-tool Agent loop |
+| Deny optional persistent planning per actor | `GameExecutionScopeProvider`, `GameExecutionScope.NoOptionalCapabilities` |
 | Keep one NPC ordered | built into `GameAgentRuntime` |
 | Run many NPCs concurrently | `GameRuntimeLimits.MaxConcurrentActors`, `MultiActorScheduler` |
 | Correct or cancel an active NPC run | `GameAgentRuntime.TrySteer`, `GameAgentRuntime.TryAbort` |
@@ -95,9 +95,9 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Send work between persistent actors | `IGameMailbox` |
 | Keep a semantic action alive across game-time ticks | `TaskPlanExtension`, `GoalLoopExtension`, `GameTimeScheduler`, `IGameMailbox` |
 | Narrate long-running action progress without replaying its mutation | durable action receipt plus later structured `GameInput` observations |
-| Resume fixed multi-stage logic | `DurableGameWorkflow` |
-| Run durable dependency graphs with bounded parallel branches | `DurableGameWorkflowGraph` |
-| Compose review, draft, validation, repair, and publication stages | `DurableGameWorkflowGraph`, game-owned validators and commit tools |
+| Run fixed multi-stage game logic | game-owned state machine plus registered Agent inputs/tools where semantic judgment is needed |
+| Run durable dependency graphs | game-owned scheduler; use OGA durable actions for every world write |
+| Compose review, draft, validation, repair, and publication stages | game-owned orchestration, validators, and commit tools |
 | Generate a planner graph or behavior asset | structured model output, game-owned compiler/validator, durable publication tool |
 | Generate images/audio/video | `IGameMediaGenerator`, `GameMediaGenerationTool` |
 | Route generation by provider/model and media capability | `GameMediaModelRegistry` |
@@ -122,7 +122,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Persist player-supplied credentials for the current Windows user | `WindowsDpapiGameCredentialStore` in `OpenGameAgent.Models.Credentials.Windows` |
 | Load the bundled model directory as executable providers | `BuiltInGameModelRuntime` |
 | Read durable per-session usage and explicit known/unknown cost | `GameAgentRuntime.ReadUsageAsync`, `GameSessionUsageLedger` |
-| Read usage caused by one input, including routing and workflow work | `GameAgentRunResult.RunUsage` |
+| Read usage caused by one input | `GameAgentRunResult.RunUsage` |
 | Register supported browser/device authorization flows | `BuiltInGameOAuthRegistration` |
 | Observe bounded provider response metadata | `ProviderResponseObserver` |
 | Fetch short-lived developer-hosted credentials | `DeveloperGatewayProvider`, `HttpDeveloperGatewayCredentialSource` |
@@ -140,7 +140,6 @@ In-memory implementations are useful for tests and short-lived sessions. The `Op
 - append-only session histories with branches, lanes, records, and usage statistics;
 - action journals;
 - ordinary-tool run-operation journals with explicit replay/recovery policy;
-- workflow checkpoints;
 - memories;
 - mailboxes;
 - agent artifacts;
@@ -150,7 +149,7 @@ In-memory implementations are useful for tests and short-lived sessions. The `Op
 - content-addressed local image attachments (`OpenGameAgent.Attachments.Local`).
 - generated-asset jobs and content-addressed generated resources (`OpenGameAgent.Persistence`).
 
-File stores coordinate writers that use the same directory through cross-process leases, but they are not a distributed database. A multiplayer or multi-host service should implement the same interfaces using transactional shared storage and explicit actor ownership. Completed action, workflow, mailbox, and deduplication records are intentionally retained to preserve replay safety; long-running products should implement retention or archival in their game-owned stores rather than deleting evidence blindly.
+File stores coordinate writers that use the same directory through cross-process leases, but they are not a distributed database. A multiplayer or multi-host service should implement the same interfaces using transactional shared storage and explicit actor ownership. Completed action, mailbox, and deduplication records are intentionally retained to preserve replay safety; long-running products should implement retention or archival in their game-owned stores rather than deleting evidence blindly.
 
 ## Deliberately game-owned
 
@@ -164,4 +163,4 @@ OpenGameAgent does not prescribe:
 - model vendor, prompt catalog, or monetization;
 - visual UI, world editor, or downloadable world-package format.
 
-Expose these capabilities as context, tools, workflows, stores, or scheduling policy. For example, a construction agent does not require a special construction subsystem in the runtime: the game exposes bounded tools such as `inspect_area`, `estimate_materials`, and `place_blueprint`, then executes the resulting plan with its normal building code.
+Expose these capabilities as context, tools, stores, or scheduling policy. For example, a construction agent does not require a special construction subsystem in the runtime: the game exposes bounded tools such as `inspect_area`, `estimate_materials`, and `place_blueprint`, then executes the resulting plan with its normal building code.

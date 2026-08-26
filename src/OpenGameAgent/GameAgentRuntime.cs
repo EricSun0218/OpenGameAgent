@@ -22,10 +22,6 @@ public delegate ValueTask<IReadOnlyList<AgentTool>> GameToolProvider(
     GameInput input,
     CancellationToken cancellationToken);
 
-public delegate ValueTask<bool> GamePendingWorkProvider(
-    GameInput input,
-    CancellationToken cancellationToken);
-
 public delegate GameImageProjectionBudget GameImageProjectionBudgetSelector(string model);
 
 public sealed class GameModelSelection
@@ -133,14 +129,12 @@ public enum GameAgentRunStatus
     Failed,
     Duplicate,
     SessionConflict,
-    WorkflowNotFound,
 }
 
 public sealed class GameAgentRunResult
 {
     public GameAgentRunResult(
         GameAgentRunStatus status,
-        GameRouteDecision route,
         long sessionRevision,
         AgentRunResult? agentResult = null,
         string? error = null,
@@ -157,7 +151,6 @@ public sealed class GameAgentRunResult
         }
 
         Status = status;
-        Route = route ?? throw new ArgumentNullException(nameof(route));
         SessionRevision = sessionRevision;
         AgentResult = agentResult;
         Error = error;
@@ -166,119 +159,16 @@ public sealed class GameAgentRunResult
 
     public GameAgentRunStatus Status { get; }
 
-    public GameRouteDecision Route { get; }
-
     public long SessionRevision { get; }
 
     public AgentRunResult? AgentResult { get; }
 
     public string? Error { get; }
 
-    /// <summary>Usage attributable only to this input, including routing, compaction, workflow, assistant, and tool causes.</summary>
+    /// <summary>Usage attributable only to this input, including compaction, assistant, and tool causes.</summary>
     public GameSessionUsageLedger RunUsage { get; }
 
     public bool Succeeded => Status == GameAgentRunStatus.Completed;
-}
-
-public sealed class GameWorkflowContext
-{
-    private readonly Action<IReadOnlyList<AgentMessage>> _validateOutput;
-
-    public GameWorkflowContext(
-        GameInput input,
-        IReadOnlyList<GameContextSlice> context,
-        IReadOnlyList<AgentTool> tools,
-        GameSessionSnapshot session)
-        : this(input, context, tools, session, ValidateNonNullOutput)
-    {
-    }
-
-    internal GameWorkflowContext(
-        GameInput input,
-        IReadOnlyList<GameContextSlice> context,
-        IReadOnlyList<AgentTool> tools,
-        GameSessionSnapshot session,
-        Action<IReadOnlyList<AgentMessage>> validateOutput)
-    {
-        Input = input ?? throw new ArgumentNullException(nameof(input));
-        var copiedContext = (context ?? throw new ArgumentNullException(nameof(context))).ToArray();
-        var copiedTools = (tools ?? throw new ArgumentNullException(nameof(tools))).ToArray();
-        if (copiedContext.Any(slice => slice is null) || copiedTools.Any(tool => tool is null))
-        {
-            throw new ArgumentException("Workflow context collections cannot contain null values.");
-        }
-
-        Context = Array.AsReadOnly(copiedContext);
-        Tools = Array.AsReadOnly(copiedTools);
-        Session = session ?? throw new ArgumentNullException(nameof(session));
-        _validateOutput = validateOutput ?? throw new ArgumentNullException(nameof(validateOutput));
-    }
-
-    public GameInput Input { get; }
-
-    public IReadOnlyList<GameContextSlice> Context { get; }
-
-    public IReadOnlyList<AgentTool> Tools { get; }
-
-    public GameSessionSnapshot Session { get; }
-
-    /// <summary>
-    /// Validates cumulative workflow output against the active runtime transcript limits.
-    /// Long-running workflows should call this before committing a node or step checkpoint.
-    /// </summary>
-    public void ValidateOutput(IReadOnlyList<AgentMessage> messages) =>
-        _validateOutput(messages ?? throw new ArgumentNullException(nameof(messages)));
-
-    private static void ValidateNonNullOutput(IReadOnlyList<AgentMessage> messages)
-    {
-        if (messages is null || messages.Any(message => message is null))
-        {
-            throw new ArgumentException("Workflow output cannot contain null messages.", nameof(messages));
-        }
-    }
-}
-
-public sealed class GameWorkflowResult
-{
-    public GameWorkflowResult(IReadOnlyList<AgentMessage> messages, bool succeeded, string? error = null)
-    {
-        if (messages is null)
-        {
-            throw new ArgumentNullException(nameof(messages));
-        }
-
-        if (messages.Any(message => message is null))
-        {
-            throw new ArgumentException("Workflow output cannot contain null messages.", nameof(messages));
-        }
-
-        if (succeeded && error is not null)
-        {
-            throw new ArgumentException("A successful workflow result cannot carry an error.", nameof(error));
-        }
-
-        if (!succeeded && string.IsNullOrWhiteSpace(error))
-        {
-            throw new ArgumentException("A failed workflow result requires an error.", nameof(error));
-        }
-
-        Messages = Array.AsReadOnly(messages.ToArray());
-        Succeeded = succeeded;
-        Error = error;
-    }
-
-    public IReadOnlyList<AgentMessage> Messages { get; }
-
-    public bool Succeeded { get; }
-
-    public string? Error { get; }
-}
-
-public interface IGameWorkflow
-{
-    string Name { get; }
-
-    ValueTask<GameWorkflowResult> RunAsync(GameWorkflowContext context, CancellationToken cancellationToken);
 }
 
 public sealed class GameAgentRuntimeOptions
@@ -294,8 +184,6 @@ public sealed class GameAgentRuntimeOptions
     public string Model { get; set; }
 
     public string Instructions { get; set; } = string.Empty;
-
-    public IGameRoutePolicy RoutePolicy { get; set; } = new AutomaticGameRoutePolicy();
 
     public IGameSessionStore SessionStore { get; set; } = new InMemoryGameSessionStore();
 
@@ -323,12 +211,10 @@ public sealed class GameAgentRuntimeOptions
 
     public GameToolProvider? ToolProvider { get; set; }
 
-    public GamePendingWorkProvider? PendingWorkProvider { get; set; }
-
     /// <summary>
-    /// Host-authoritative per-input capability resolution. The default preserves the unrestricted
-    /// behavior. Use <see cref="GameExecutionScope.ShortTaskOnly"/> for actors that may use automatic
-    /// QuickResponse and bounded short-agent tools but may not create or resume persistent plans.
+    /// Host-authoritative per-input capability resolution. The default preserves unrestricted
+    /// behavior. Use <see cref="GameExecutionScope.NoOptionalCapabilities"/> for actors that may use ordinary
+    /// bounded agent tools but may not create or resume persistent plans.
     /// </summary>
     public GameExecutionScopeProvider ExecutionScopeProvider { get; set; } =
         static (_, _) => new ValueTask<GameExecutionScope>(GameExecutionScope.Unrestricted);
@@ -337,14 +223,12 @@ public sealed class GameAgentRuntimeOptions
 
     /// <summary>
     /// Controls only the actor and moment written into model-visible input messages. The default
-    /// preserves the canonical envelope for compatibility. Use an opaque alias or
+    /// uses the canonical envelope. Use an opaque alias or
     /// <see cref="GameInputModelProjection.SuppressCoordinates"/> when model prompts must not expose
     /// internal game identifiers; runtime authority always remains canonical.
     /// </summary>
     public GameInputModelProjectionSelector InputModelProjection { get; set; } =
         static input => GameInputModelProjection.Canonical(input);
-
-    public IList<IGameWorkflow> Workflows { get; } = new List<IGameWorkflow>();
 
     /// <summary>
     /// Runtime extensions. Extensions are configured in list order and all features register
@@ -407,7 +291,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly IModelProvider _provider;
     private readonly string _model;
     private readonly string _instructions;
-    private readonly IGameRoutePolicy _routePolicy;
     private readonly IGameSessionStore _sessionStore;
     private readonly IGameRunOperationJournal? _runOperationJournal;
     private readonly IGameImageAttachmentStore? _imageAttachments;
@@ -416,11 +299,9 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     private readonly IGameContextProvider? _contextProvider;
     private readonly IGameSkillSource? _skillSource;
     private readonly GameToolProvider? _toolProvider;
-    private readonly GamePendingWorkProvider? _pendingWorkProvider;
     private readonly GameExecutionScopeProvider _executionScopeProvider;
     private readonly GameModelSelector? _modelSelector;
     private readonly GameInputModelProjectionSelector _inputModelProjection;
-    private readonly IReadOnlyDictionary<string, IGameWorkflow> _workflows;
     private readonly GameRuntimeLimits _limits;
     private readonly AgentLimits _agentLimits;
     private readonly ModelParameters _modelParameters;
@@ -450,8 +331,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         _model = GameJson.RequireId(options.Model, nameof(options.Model));
         _instructions = options.Instructions
             ?? throw new ArgumentException("Runtime instructions are required.", nameof(options));
-        _routePolicy = options.RoutePolicy
-            ?? throw new ArgumentException("A route policy is required.", nameof(options));
         _sessionStore = options.SessionStore
             ?? throw new ArgumentException("A session store is required.", nameof(options));
         _runOperationJournal = options.RunOperationJournal;
@@ -466,7 +345,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         _contextProvider = options.ContextProvider;
         _skillSource = options.SkillSource;
         _toolProvider = options.ToolProvider;
-        _pendingWorkProvider = options.PendingWorkProvider;
         _executionScopeProvider = options.ExecutionScopeProvider
             ?? throw new ArgumentException("An execution-scope provider is required.", nameof(options));
         _modelSelector = options.ModelSelector;
@@ -534,19 +412,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         var extensions = new GameAgentExtensionHost(options.Extensions, _limits);
         try
         {
-            var workflows = options.Workflows.Concat(extensions.GetWorkflows()).ToArray();
-            if (workflows.Any(workflow => workflow is null || string.IsNullOrWhiteSpace(workflow.Name)))
-            {
-                throw new ArgumentException("Every workflow must have a name.", nameof(options));
-            }
-
-            var duplicate = workflows.GroupBy(workflow => workflow.Name, StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
-            if (duplicate is not null)
-            {
-                throw new ArgumentException($"Duplicate workflow name '{duplicate.Key}'.", nameof(options));
-            }
-
-            _workflows = workflows.ToDictionary(workflow => workflow.Name, StringComparer.Ordinal);
             _actors = new MultiActorScheduler(
                 _limits.MaxConcurrentActors,
                 maximumActors: _limits.MaxScheduledActors,
@@ -930,7 +795,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var inputPreparationStartedAt = Stopwatch.GetTimestamp();
             var executionScope = await _executionScopeProvider(input, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The execution-scope provider returned null.");
-            EnsureExplicitRouteAllowed(input, executionScope);
             input = await PersistInputImagesAsync(input, cancellationToken).ConfigureAwait(false);
             var inputPreparationDuration = Elapsed(inputPreparationStartedAt);
             var key = new GameSessionKey(input.SessionId, input.ActorId);
@@ -974,7 +838,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             {
                 var duplicate = new GameAgentRunResult(
                     GameAgentRunStatus.Duplicate,
-                    GameRouteDecision.Quick("duplicate-input"),
                     loaded.Revision);
                 await PublishCompletedAsync(duplicate, extensionContext, cancellationToken).ConfigureAwait(false);
                 return duplicate;
@@ -985,7 +848,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             {
                 var pending = new GameAgentRunResult(
                     GameAgentRunStatus.SessionConflict,
-                    GameRouteDecision.Quick("pending-input"),
                     loaded.Revision,
                     error: $"Input '{loaded.PendingInputId}' has a durable tool-turn checkpoint and must be resumed before another input can run.");
                 await PublishCompletedAsync(pending, extensionContext, cancellationToken).ConfigureAwait(false);
@@ -1055,48 +917,9 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 extensionContext,
                 cancellationToken).ConfigureAwait(false);
 
-            var routingStartedAt = Stopwatch.GetTimestamp();
-            var basePendingWork = _pendingWorkProvider is not null
-                && await _pendingWorkProvider(input, cancellationToken).ConfigureAwait(false);
-            var hasPendingWork = await _extensions.HasPendingWorkAsync(
-                extensionContext,
-                basePendingWork,
-                cancellationToken).ConfigureAwait(false);
-            var route = resumingCheckpoint
-                ? GameRouteDecision.Agent("durable-tool-checkpoint")
-                : await _extensions.SelectRouteAsync(
-                        extensionContext,
-                        tools.Count,
-                        hasPendingWork,
-                        cancellationToken).ConfigureAwait(false)
-                    ?? await _routePolicy.RouteAsync(
-                        new GameRouteContext(
-                            input,
-                            tools.Count,
-                            hasPendingWork,
-                            () => usageAccounting.RemainingTokens,
-                            usageAccounting.Record),
-                        cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("The game route policy returned null.");
-            var routeEvent = new GameAgentRouteEvent(
-                route,
-                Elapsed(routingStartedAt),
-                usageAccounting.RoutingModelDuration);
-            await _extensions.PublishAsync(
-                GameAgentExtensionEvents.RouteSelected,
-                routeEvent,
-                extensionContext,
-                cancellationToken).ConfigureAwait(false);
-            route = routeEvent.Decision ?? throw new InvalidOperationException("An extension cleared the route decision.");
-            if (resumingCheckpoint && route.Route != GameRouteKind.Agent)
-            {
-                throw new InvalidOperationException("A durable tool-turn checkpoint must resume through the agent route.");
-            }
-
             if (usageAccounting.Exceeded || usageAccounting.RemainingTokens == 0)
             {
                 var failed = await CreateUsageLimitFailureAsync(
-                    route,
                     loaded,
                     usageAccounting,
                     baseUsageLedger,
@@ -1105,27 +928,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 return failed;
             }
 
-            if (route.Route == GameRouteKind.Workflow)
-            {
-                var workflowRun = await RunWorkflowAsync(
-                    input,
-                    inputMessage,
-                    loaded,
-                    context,
-                    tools,
-                    route,
-                    extensionState,
-                    extensionContext,
-                    usageAccounting,
-                    cancellationToken).ConfigureAwait(false);
-                await PublishCompletedAsync(workflowRun, extensionContext, CancellationToken.None).ConfigureAwait(false);
-                return workflowRun;
-            }
-
             var skillsStartedAt = Stopwatch.GetTimestamp();
-            var activeTools = route.Route == GameRouteKind.QuickResponse
-                ? (IReadOnlyList<AgentTool>)Array.Empty<AgentTool>()
-                : tools;
+            var activeTools = tools;
             var baseSkills = _skillSource is null
                 ? Array.Empty<GameSkill>()
                 : (await _skillSource.SelectAsync(
@@ -1201,7 +1005,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
                 var failed = new GameAgentRunResult(
                     GameAgentRunStatus.Failed,
-                    route,
                     settled.Revision,
                     error: exception.Message,
                     runUsage: usageAccounting.Snapshot());
@@ -1212,7 +1015,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             if (usageAccounting.Exceeded || usageAccounting.RemainingTokens == 0)
             {
                 var failed = await CreateUsageLimitFailureAsync(
-                    route,
                     loaded,
                     usageAccounting,
                     baseUsageLedger,
@@ -1232,7 +1034,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             {
                 var exhausted = new GameAgentRunResult(
                     GameAgentRunStatus.Failed,
-                    route,
                     loaded.Revision,
                     error: "The session transcript cannot reserve space for the next input and model response.",
                     runUsage: usageAccounting.Snapshot());
@@ -1278,7 +1079,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             provider = wrapProvider(provider);
 
             var runHooks = CreateRunHooks(
-                route.Route,
                 input,
                 extensionContext,
                 model,
@@ -1300,7 +1100,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 return update;
             };
 
-            if (_persistToolTurnCheckpoints && route.Route == GameRouteKind.Agent)
+            if (_persistToolTurnCheckpoints)
             {
                 var configured = runHooks.PrepareNextTurnAsync;
                 runHooks.PrepareNextTurnAsync = async (turnContext, token) =>
@@ -1414,7 +1214,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
                 var conflict = new GameAgentRunResult(
                     GameAgentRunStatus.SessionConflict,
-                    route,
                     settledConflict.Revision,
                     run,
                     "The session changed while this input was running. Committed game actions must be reconciled before retrying.",
@@ -1454,7 +1253,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             {
                 var conflict = new GameAgentRunResult(
                     GameAgentRunStatus.SessionConflict,
-                    route,
                     settledSaveConflict!.Revision,
                     run,
                     "The session changed while this input was running. Committed game actions must be reconciled before retrying.",
@@ -1466,11 +1264,10 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             var usageExceeded = usageAccounting.Exceeded;
             var completed = new GameAgentRunResult(
                 run.Succeeded && !usageExceeded ? GameAgentRunStatus.Completed : GameAgentRunStatus.Failed,
-                route,
                 save.Current.Revision,
                 run,
                 usageExceeded
-                    ? $"The run exceeded the maximum of {totalTokenBudget} total tokens, including transcript compaction and routing."
+                    ? $"The run exceeded the maximum of {totalTokenBudget} total tokens, including transcript compaction."
                     : run.Error,
                 usageAccounting.Snapshot());
             await PublishCompletedAsync(completed, extensionContext, CancellationToken.None).ConfigureAwait(false);
@@ -1499,16 +1296,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
     }
 
-    private static void EnsureExplicitRouteAllowed(GameInput input, GameExecutionScope scope)
-    {
-        if (!scope.Allows(GameExecutionCapabilities.PersistentPlanning)
-            && input.Metadata.TryGetValue("agent.route", out var requestedRoute)
-            && string.Equals(requestedRoute, "plan", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new GameExecutionCapabilityDeniedException(GameExecutionCapabilities.PersistentPlanning);
-        }
-    }
-
     private void RegisterActiveAgent(GameSessionKey key, Agent agent)
     {
         lock (_activeAgentsGate)
@@ -1533,105 +1320,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         }
     }
 
-    private async ValueTask<GameAgentRunResult> RunWorkflowAsync(
-        GameInput input,
-        AgentMessage inputMessage,
-        GameSessionSnapshot loaded,
-        IReadOnlyList<GameContextSlice> context,
-        IReadOnlyList<AgentTool> tools,
-        GameRouteDecision route,
-        GameAgentSessionState extensionState,
-        GameAgentExtensionRunContext extensionContext,
-        RunUsageAccounting usageAccounting,
-        CancellationToken cancellationToken)
-    {
-        if (route.Workflow is null || !_workflows.TryGetValue(route.Workflow, out var workflow))
-        {
-            var missingWorkflowUsageRecords = usageAccounting.RecordsBetween(0, usageAccounting.Count);
-            GameSessionSnapshot settled;
-            using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
-            {
-                settled = await SaveUsageOnlyAsync(
-                    loaded,
-                    missingWorkflowUsageRecords,
-                    loaded.UsageLedger.Append(missingWorkflowUsageRecords),
-                    settlementCancellation.Token).ConfigureAwait(false);
-            }
-
-            return new GameAgentRunResult(
-                GameAgentRunStatus.WorkflowNotFound,
-                route,
-                settled.Revision,
-                error: $"Workflow '{route.Workflow}' is not registered.",
-                runUsage: usageAccounting.Snapshot());
-        }
-
-        void ValidateWorkflowOutput(IReadOnlyList<AgentMessage> output)
-        {
-            var candidate = loaded.Messages
-                .Concat(new[] { inputMessage })
-                .Concat(output ?? throw new ArgumentNullException(nameof(output)))
-                .ToArray();
-            AgentValidation.ValidateTranscript(candidate, _agentLimits);
-        }
-
-        var workflowContext = new GameWorkflowContext(
-            input,
-            context,
-            tools,
-            loaded,
-            ValidateWorkflowOutput);
-        var result = await workflow.RunAsync(
-            workflowContext,
-            cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"Workflow '{workflow.Name}' returned null.");
-        workflowContext.ValidateOutput(result.Messages);
-        usageAccounting.RecordWorkflowMessages(result.Messages);
-        var messages = loaded.Messages.Concat(new[] { inputMessage }).Concat(result.Messages).ToArray();
-        var usageRecords = usageAccounting.RecordsBetween(0, usageAccounting.Count);
-        var attemptedUsageLedger = loaded.UsageLedger.Append(usageRecords);
-        GameSessionSaveResult save;
-        GameSessionSnapshot? settledSaveConflict = null;
-        using (var settlementCancellation = new CancellationTokenSource(_sessionCommitTimeoutMilliseconds))
-        {
-            save = await SaveAsync(
-                input,
-                loaded,
-                messages,
-                extensionState,
-                extensionContext,
-                attemptedUsageLedger,
-                settlementCancellation.Token).ConfigureAwait(false);
-            if (!save.Saved)
-            {
-                settledSaveConflict = await SettleUsageAfterConflictAsync(
-                    save.Current,
-                    usageRecords,
-                    attemptedUsageLedger,
-                    settlementCancellation.Token).ConfigureAwait(false);
-            }
-        }
-        return !save.Saved
-            ? new GameAgentRunResult(
-                GameAgentRunStatus.SessionConflict,
-                route,
-                settledSaveConflict!.Revision,
-                error: "The session changed while the workflow was running.",
-                runUsage: usageAccounting.Snapshot())
-            : new GameAgentRunResult(
-                result.Succeeded && !usageAccounting.Exceeded
-                    ? GameAgentRunStatus.Completed
-                    : GameAgentRunStatus.Failed,
-                route,
-                save.Current.Revision,
-                error: usageAccounting.Exceeded
-                    ? "The run exceeded its total model-token budget, including routing and workflow output."
-                    : result.Error,
-                runUsage: usageAccounting.Snapshot());
-    }
-
     private async ValueTask<GameAgentRunResult> CreateUsageLimitFailureAsync(
-        GameRouteDecision route,
         GameSessionSnapshot loaded,
         RunUsageAccounting usageAccounting,
         GameSessionUsageLedger baseUsageLedger,
@@ -1650,9 +1339,8 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
 
         return new GameAgentRunResult(
             GameAgentRunStatus.Failed,
-            route,
             settled.Revision,
-            error: $"The run exhausted its maximum of {totalTokenBudget} model tokens during routing or context preparation.",
+            error: $"The run exhausted its maximum of {totalTokenBudget} model tokens during context preparation.",
             runUsage: usageAccounting.Snapshot());
     }
 
@@ -2383,7 +2071,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
     };
 
     private AgentHooks CreateRunHooks(
-        GameRouteKind route,
         GameInput input,
         GameAgentExtensionRunContext extensionContext,
         string model,
@@ -2393,24 +2080,10 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         RunUsageAccounting usageAccounting)
     {
         var hooks = CopyHooks(_agentHooks);
-        if (route == GameRouteKind.QuickResponse)
-        {
-            var configured = hooks.ShouldStopAfterTurnAsync;
-            hooks.ShouldStopAfterTurnAsync = async (context, cancellationToken) =>
-            {
-                if (configured is not null)
-                {
-                    _ = await configured(context, cancellationToken).ConfigureAwait(false);
-                }
-
-                return true;
-            };
-        }
-
         hooks = _extensions.ComposeHooks(extensionContext, hooks);
 
         var runToolOperations = new ConcurrentDictionary<string, (string OperationId, ToolRisk Risk)>(StringComparer.Ordinal);
-        if (_runOperationJournal is not null && route == GameRouteKind.Agent)
+        if (_runOperationJournal is not null)
         {
             var configuredBeforeToolExecution = hooks.BeforeToolExecutionAsync;
             hooks.BeforeToolExecutionAsync = async (context, cancellationToken) =>
@@ -2515,7 +2188,7 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
             return persisted;
         };
 
-        if (route == GameRouteKind.Agent && _refreshContextAfterToolTurns)
+        if (_refreshContextAfterToolTurns)
         {
             var configured = hooks.PrepareNextTurnAsync;
             hooks.PrepareNextTurnAsync = async (context, cancellationToken) =>
@@ -2994,7 +2667,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
         private readonly List<GameSessionUsageRecord> _records = new();
         private readonly HashSet<string> _suppressedAssistantRuns = new(StringComparer.Ordinal);
         private long _totalTokens;
-        private TimeSpan _routingModelDuration;
         private int _sequence;
 
         public RunUsageAccounting(string inputId, long maximumTokens)
@@ -3067,68 +2739,6 @@ public sealed class GameAgentRuntime : IDisposable, IAsyncDisposable
                 exception.Usage,
                 _attemptId,
                 JsonSerializer.Serialize(exception.Details));
-        }
-
-        public void Record(GameRouteModelUsage usage)
-        {
-            if (usage is null)
-            {
-                throw new ArgumentNullException(nameof(usage));
-            }
-
-            lock (_gate)
-            {
-                if (usage.Duration is { } duration)
-                {
-                    _routingModelDuration += duration;
-                }
-
-                AddLocked(
-                    GameSessionUsageCause.Routing,
-                    usage.Usage,
-                    usage.RunId ?? _attemptId,
-                    usage.DetailsJson);
-            }
-        }
-
-        public TimeSpan RoutingModelDuration
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _routingModelDuration;
-                }
-            }
-        }
-
-        public void RecordWorkflowMessages(IReadOnlyList<AgentMessage> messages)
-        {
-            if (messages is null)
-            {
-                throw new ArgumentNullException(nameof(messages));
-            }
-
-            foreach (var message in messages)
-            {
-                if (message?.Usage is null)
-                {
-                    continue;
-                }
-
-                Add(
-                    GameSessionUsageCause.Workflow,
-                    message.Usage,
-                    _attemptId,
-                    JsonSerializer.Serialize(new
-                    {
-                        category = "workflow-output",
-                        role = message.Role.ToString(),
-                        provider = message.Provider,
-                        model = message.ResponseModel ?? message.Model,
-                        responseId = message.ResponseId,
-                    }));
-            }
         }
 
         public void Record(AgentEvent agentEvent)

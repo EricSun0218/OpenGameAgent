@@ -57,7 +57,7 @@ await using var runtime = new GameAgentBuilder(provider, model)
                 GameExecutionCapabilities.BehaviorLearning,
                 GameExecutionCapabilities.PersistentPlanning,
             })
-            : GameExecutionScope.ShortTaskOnly))
+            : GameExecutionScope.NoOptionalCapabilities))
     .UseExtension(learning)
     .Build();
 ```

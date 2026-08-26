@@ -38,44 +38,6 @@ public sealed class RuntimeTests
     }
 
     [Fact]
-    public void PublicWorkflowAndRouteContractsRejectAmbiguousOrNullState()
-    {
-        Assert.Throws<ArgumentException>(() =>
-            new GameRouteDecision(GameRouteKind.Agent, "reason", "unexpected"));
-        Assert.Throws<ArgumentException>(() =>
-            new GameWorkflowStepResult(GameWorkflowStepStatus.Complete, "{}", new AgentMessage[] { null! }));
-        Assert.Throws<ArgumentException>(() =>
-            new GameWorkflowResult(new AgentMessage[] { null! }, true));
-        Assert.Throws<ArgumentException>(() =>
-            new GameWorkflowStepResult(GameWorkflowStepStatus.Complete, "{}", error: "unexpected"));
-        Assert.Throws<ArgumentException>(() =>
-            new GameWorkflowResult(Array.Empty<AgentMessage>(), false));
-        Assert.Throws<ArgumentException>(() =>
-            new GameWorkflowCheckpoint("instance", "workflow", 0, 0, "{}", completed: false, error: "unexpected"));
-    }
-
-    [Fact]
-    public async Task CompletedWorkflowCheckpointCannotBeReopenedOrReassigned()
-    {
-        var store = new InMemoryGameWorkflowCheckpointStore();
-        await store.SaveAsync(
-            new GameWorkflowCheckpoint("instance", "one", 1, 1, "{}", completed: true),
-            0,
-            TestContext.Current.CancellationToken);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await store.SaveAsync(
-                new GameWorkflowCheckpoint("instance", "one", 2, 0, "{}"),
-                1,
-                TestContext.Current.CancellationToken));
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await store.SaveAsync(
-                new GameWorkflowCheckpoint("instance", "two", 2, 0, "{}"),
-                1,
-                TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
     public async Task StructuredInputRetainsNumbersBooleansAndArrays()
     {
         var provider = new RecordingProvider(_ => Text("ok"));
@@ -122,30 +84,25 @@ public sealed class RuntimeTests
     }
 
     [Fact]
-    public async Task QuickRouteUsesOneModelTurnAndNoTools()
+    public async Task DirectAssistantResponseEndsTheLoopWithoutExecutingAvailableTools()
     {
-        var provider = new RecordingProvider(_ => Tools(new ToolCallContent("1", "should_not_run", "{}")));
+        var provider = new RecordingProvider(_ => Text("hello"));
         var options = new GameAgentRuntimeOptions(provider, "test")
         {
             ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(
                 new[] { ReadTool("should_not_run") }),
-            RoutePolicy = new AutomaticGameRoutePolicy(
-                new Dictionary<string, GameRouteDecision>
-                {
-                    ["chat"] = GameRouteDecision.Quick("typed"),
-                }),
         };
         var runtime = new GameAgentRuntime(options);
 
         var result = await runtime.RunAsync(Input("chat", "{\"text\":\"hello\"}"), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
+        Assert.True(result.Succeeded);
         Assert.Equal(1, provider.CallCount);
-        Assert.Empty(Assert.Single(provider.Requests).Tools);
+        Assert.Contains(Assert.Single(provider.Requests).Tools, tool => tool.Name == "should_not_run");
     }
 
     [Fact]
-    public async Task AgentRouteCommitsDurableActionOnceAndDeduplicatesInput()
+    public async Task ToolCallContinuesTheUnifiedLoopAndCommitsDurableActionOnce()
     {
         var provider = new RecordingProvider(call => call == 1
             ? Tools(new ToolCallContent("place-1", "place_block", "{\"x\":1,\"y\":2.5}"))
@@ -245,10 +202,6 @@ public sealed class RuntimeTests
             SessionStore = store,
             ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(
                 new[] { ReadTool("inspect") }),
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["inspect"] = GameRouteDecision.Agent("typed"),
-            }),
         });
 
         var result = await runtime.RunAsync(
@@ -323,15 +276,11 @@ public sealed class RuntimeTests
                 SessionStore = sessionStore,
                 ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(
                     new[] { ReadTool("inspect") }),
-                RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-                {
-                    ["inspect"] = GameRouteDecision.Agent("typed"),
-                }),
             });
     }
 
     [Fact]
-    public async Task AgentRouteRefreshesWorldContextAfterAToolTurn()
+    public async Task UnifiedLoopRefreshesWorldContextAfterAToolTurn()
     {
         var provider = new RecordingProvider(call => call == 1
             ? Tools(new ToolCallContent("change", "change_world", "{}"))
@@ -409,13 +358,7 @@ public sealed class RuntimeTests
     public async Task ActiveActorCanBeSteeredWithoutAffectingAnotherActor()
     {
         var provider = new BlockingFirstResponseProvider();
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
-        });
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
         var input = Input("autonomous", "{}", "steer-input");
 
         var run = runtime.RunAsync(input, TestContext.Current.CancellationToken);
@@ -443,13 +386,7 @@ public sealed class RuntimeTests
     public async Task ActiveActorCanBeAbortedBySessionAndActorKey()
     {
         var provider = new BlockingFirstResponseProvider();
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
-        });
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
 
         var run = runtime.RunAsync(
             Input("autonomous", "{}", "abort-input"),
@@ -472,10 +409,6 @@ public sealed class RuntimeTests
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
         {
             SessionStore = store,
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
         });
         using var cancellation = new CancellationTokenSource();
 
@@ -495,40 +428,6 @@ public sealed class RuntimeTests
         Assert.Contains("cancel-input", saved.ProcessedInputIds);
         var terminal = Assert.IsType<AgentMessage>(saved.Messages.Last());
         Assert.Equal(ModelStopReason.Aborted, terminal.StopReason);
-    }
-
-    [Fact]
-    public async Task CompletedWorkflowCommitsWithABoundedSettlementAfterCallerCancellation()
-    {
-        using var cancellation = new CancellationTokenSource();
-        var store = new InMemoryGameSessionStore();
-        var options = new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("unused")), "test")
-        {
-            SessionStore = store,
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["month"] = GameRouteDecision.ToWorkflow("evolve", "typed"),
-            }),
-        };
-        options.Workflows.Add(new DelegateWorkflow("evolve", (_, _) =>
-        {
-            cancellation.Cancel();
-            return new ValueTask<GameWorkflowResult>(new GameWorkflowResult(
-                new[] { Assistant("advanced") },
-                succeeded: true));
-        }));
-        await using var runtime = new GameAgentRuntime(options);
-
-        var result = await runtime.RunAsync(
-            Input("month", "{}", "month-input"),
-            cancellation.Token).WaitAsync(TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        var saved = await store.LoadAsync(
-            new GameSessionKey("session", "actor"),
-            TestContext.Current.CancellationToken);
-        Assert.Equal(1, saved!.Revision);
-        Assert.Contains("month-input", saved.ProcessedInputIds);
     }
 
     [Fact]
@@ -573,28 +472,6 @@ public sealed class RuntimeTests
                 "place_block",
                 input.Moment),
             TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task PendingWorkCanPromoteAnOtherwiseQuickInputToAgentRoute()
-    {
-        var routingProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new JsonContent("{\"route\":\"quick\"}") },
-            ModelStopReason.Stop,
-            new ModelUsage(1, 1)));
-        var provider = new RecordingProvider(_ => Text("ok"));
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            PendingWorkProvider = (_, _) => new ValueTask<bool>(true),
-            RoutePolicy = new AutomaticGameRoutePolicy(
-                classifier: new ModelGameRouteClassifier(routingProvider, "router-model").ClassifyAsync),
-        });
-
-        var result = await runtime.RunAsync(Input("tick", "{}"), TestContext.Current.CancellationToken);
-
-        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
-        Assert.Equal("pending-work", result.Route.Reason);
-        Assert.Equal(0, routingProvider.CallCount);
     }
 
     [Fact]
@@ -1447,367 +1324,6 @@ public sealed class RuntimeTests
         Assert.Equal(1, second.CallCount);
         Assert.Equal(1, second.DisposeCount);
         Assert.True(events.Last().IsTerminal);
-    }
-
-    [Fact]
-    public async Task ModelRouteClassifierAcceptsOnlyKnownStructuredRoutes()
-    {
-        var valid = new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("{\"route\":\"workflow\",\"workflow\":\"month\",\"reason\":\"scheduled\"}")),
-            "model",
-            new[] { "month" });
-        var invalid = new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("{\"route\":\"workflow\",\"workflow\":\"unknown\"}")),
-            "model",
-            new[] { "month" });
-        var context = new GameRouteContext(Input("tick", "{}"), 0);
-
-        var accepted = await valid.ClassifyAsync(context, TestContext.Current.CancellationToken);
-        var rejected = await invalid.ClassifyAsync(context, TestContext.Current.CancellationToken);
-
-        Assert.Equal(GameRouteKind.Workflow, accepted!.Route);
-        Assert.Equal("month", accepted.Workflow);
-        Assert.Null(rejected);
-    }
-
-    [Fact]
-    public async Task ModelRouteClassifierRejectsAmbiguousTextJson()
-    {
-        var classifier = new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("{\"route\":\"quick\",\"route\":\"agent\"}")),
-            "model");
-
-        var decision = await classifier.ClassifyAsync(
-            new GameRouteContext(Input("chat", "{}"), 0),
-            TestContext.Current.CancellationToken);
-
-        Assert.Null(decision);
-    }
-
-    [Theory]
-    [InlineData("Route: {\"route\":\"quick\"}")]
-    [InlineData("```json\n{\"route\":\"quick\"}\n```\n```json\n{\"route\":\"agent\"}\n```")]
-    [InlineData("```yaml\nroute: quick\n```")]
-    [InlineData("{\"route\":\"quick\",\"confidence\":1}")]
-    public async Task ModelRouteClassifierRejectsProseMultipleFencesAndUnknownFields(string output)
-    {
-        var classifier = new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text(output)),
-            "model");
-
-        var decision = await classifier.ClassifyAsync(
-            new GameRouteContext(Input("chat", "{}"), 1),
-            TestContext.Current.CancellationToken);
-
-        Assert.Null(decision);
-    }
-
-    [Fact]
-    public async Task ModelRouteClassifierAcceptsASingleJsonFenceFromOpenAiCompatibleProviders()
-    {
-        var classifier = new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("```json\n{\"route\":\"quick\",\"reason\":\"read-only-question\"}\n```")),
-            "model");
-
-        var decision = await classifier.ClassifyAsync(
-            new GameRouteContext(Input("chat", "{}"), availableToolCount: 3),
-            TestContext.Current.CancellationToken);
-
-        Assert.NotNull(decision);
-        Assert.Equal(GameRouteKind.QuickResponse, decision.Route);
-        Assert.Equal("read-only-question", decision.Reason);
-    }
-
-    [Fact]
-    public async Task ExplicitAutoRouteDefersToTheConfiguredAutomaticPolicy()
-    {
-        var provider = new RecordingProvider(_ => Text("done"));
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["command"] = GameRouteDecision.Agent("typed-command"),
-            }),
-        });
-        var input = new GameInput(
-            "session",
-            "actor",
-            "command",
-            "{}",
-            new GameMoment("world", 10),
-            "explicit-auto",
-            new Dictionary<string, string> { ["agent.route"] = "auto" });
-
-        var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
-        Assert.Equal("typed-command", result.Route.Reason);
-    }
-
-    [Fact]
-    public async Task AutomaticRouteCanClassifyOrdinaryConversationAsQuickWhenToolsAreAvailable()
-    {
-        var routingProvider = new RecordingProvider(_ => Text("```json\n{\"route\":\"quick\"}\n```"));
-        var answerProvider = new RecordingProvider(_ => Text("done"));
-        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(answerProvider, "answer-model")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
-            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("command", "{}", "structural-route"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
-        Assert.Equal("model-classifier", result.Route.Reason);
-        Assert.Equal(1, routingProvider.CallCount);
-        Assert.Equal(1, answerProvider.CallCount);
-        Assert.Empty(Assert.Single(routingProvider.Requests).Tools);
-        Assert.Empty(Assert.Single(answerProvider.Requests).Tools);
-    }
-
-    [Fact]
-    public async Task ModelRouteUsageSharesTheInputBudgetAndPersistsByCause()
-    {
-        var routingProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new JsonContent("{\"route\":\"quick\",\"reason\":\"simple\"}") },
-            ModelStopReason.Stop,
-            new ModelUsage(3, 2),
-            provider: "router-provider",
-            responseModel: "router-model",
-            responseId: "router-response"));
-        var responseProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new TextContent("hello") },
-            ModelStopReason.Stop,
-            new ModelUsage(2, 1),
-            provider: "answer-provider",
-            responseModel: "answer-model"));
-        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("chat", "{}", "routed-usage"),
-            TestContext.Current.CancellationToken);
-        var usage = await runtime.ReadUsageAsync(
-            new GameSessionKey("session", "actor"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
-        Assert.NotNull(usage);
-        Assert.Equal(5, usage!.Ledger.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
-        Assert.Equal(3, usage.Ledger.TotalsByCause[GameSessionUsageCause.Assistant].TotalTokens);
-        Assert.Equal(5, result.RunUsage.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
-        Assert.Equal(3, result.RunUsage.TotalsByCause[GameSessionUsageCause.Assistant].TotalTokens);
-        var routing = Assert.Single(usage.Ledger.Records, record => record.Cause == GameSessionUsageCause.Routing);
-        Assert.Contains("route-classification", routing.DetailsJson, StringComparison.Ordinal);
-        Assert.Contains("router-response", routing.DetailsJson, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task InvalidRouteClassificationStillAccountsUsageBeforeConservativeFallback()
-    {
-        var routingProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new TextContent("not-json") },
-            ModelStopReason.Stop,
-            new ModelUsage(4, 1)));
-        var responseProvider = new RecordingProvider(_ => Text("fallback"));
-        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("chat", "{}", "invalid-routing"),
-            TestContext.Current.CancellationToken);
-        var usage = await runtime.ReadUsageAsync(
-            new GameSessionKey("session", "actor"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
-        Assert.Equal("classifier-invalid-json-fallback-no-tools-needed", result.Route.Reason);
-        Assert.Equal(GameRouteClassificationFailure.InvalidJson, result.Route.Classification!.Failure);
-        Assert.True(result.Route.Classification.UsedFallback);
-        Assert.Equal("no-tools-needed", result.Route.Classification.FallbackReason);
-        Assert.Equal(5, usage!.Ledger.TotalsByCause[GameSessionUsageCause.Routing].TotalTokens);
-        Assert.Contains("invalid-json", Assert.Single(
-            usage.Ledger.Records,
-            record => record.Cause == GameSessionUsageCause.Routing).DetailsJson, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task InvalidRouteClassificationFallsBackToAgentWithToolsWithoutGivingTheRouterToolAuthority()
-    {
-        var routingProvider = new RecordingProvider(_ => Text("```json\n{\"route\":\"unknown\"}\n```"));
-        var responseProvider = new RecordingProvider(_ => Text("safe fallback"));
-        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
-            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("chat", "{}", "invalid-route-with-tools"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
-        Assert.Equal("classifier-invalid-route-fallback-tools-available", result.Route.Reason);
-        Assert.Equal(GameRouteClassificationFailure.InvalidRoute, result.Route.Classification!.Failure);
-        Assert.True(result.Route.Classification.UsedFallback);
-        Assert.Equal("tools-available", result.Route.Classification.FallbackReason);
-        Assert.Empty(Assert.Single(routingProvider.Requests).Tools);
-        Assert.Single(Assert.Single(responseProvider.Requests).Tools);
-    }
-
-    [Fact]
-    public async Task ProviderFailureAndTimeoutHaveDistinctSafeRouteFallbacks()
-    {
-        var providerFailure = new RecordingProvider(_ => new ModelResponse(
-            Array.Empty<AgentContent>(),
-            ModelStopReason.Error,
-            new ModelUsage(2, 0),
-            errorMessage: "provider unavailable"));
-        var failedRuntime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(
-                classifier: new ModelGameRouteClassifier(providerFailure, "router").ClassifyAsync),
-            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
-        });
-
-        var failed = await failedRuntime.RunAsync(
-            Input("chat", "{}", "provider-route-failure"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(failed.Succeeded);
-        Assert.Equal(GameRouteClassificationFailure.Provider, failed.Route.Classification!.Failure);
-        Assert.Equal("classifier-provider-fallback-tools-available", failed.Route.Reason);
-
-        var timeoutProvider = new NeverCompletingProvider();
-        var timeoutRuntime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(
-                classifier: new ModelGameRouteClassifier(
-                    timeoutProvider,
-                    "router",
-                    options: new ModelGameRouteClassifierOptions { TimeoutMilliseconds = 25 }).ClassifyAsync),
-            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
-        });
-
-        var timedOut = await timeoutRuntime.RunAsync(
-            Input("chat", "{}", "provider-route-timeout"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(timedOut.Succeeded);
-        Assert.Equal(GameRouteClassificationFailure.Timeout, timedOut.Route.Classification!.Failure);
-        Assert.Equal("classifier-timeout-fallback-tools-available", timedOut.Route.Reason);
-    }
-
-    [Fact]
-    public async Task EmptyRouteClassificationHasAnExplicitFallbackCategory()
-    {
-        var emptyProvider = new RecordingProvider(_ => new ModelResponse(
-            Array.Empty<AgentContent>(),
-            ModelStopReason.Stop,
-            new ModelUsage(2, 0)));
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(
-                classifier: new ModelGameRouteClassifier(emptyProvider, "router").ClassifyAsync),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("chat", "{}", "empty-route-classification"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
-        Assert.Equal(GameRouteClassificationFailure.Empty, result.Route.Classification!.Failure);
-        Assert.Equal("classifier-empty-fallback-no-tools-needed", result.Route.Reason);
-    }
-
-    [Fact]
-    public async Task ModelRouteClassifierDisablesReasoningAndDoesNotMisreportReasoningOnlyAsEmpty()
-    {
-        var routingProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new ReasoningContent("private classification reasoning") },
-            ModelStopReason.Stop,
-            new ModelUsage(4, 8, reasoningTokens: 8)));
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("fallback")), "answer")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(
-                classifier: new ModelGameRouteClassifier(routingProvider, "router").ClassifyAsync),
-            ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[] { ReadTool("inspect") }),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("chat", "{}", "reasoning-only-route"),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal("off", Assert.Single(routingProvider.Requests).Parameters.ReasoningLevel);
-        Assert.Equal("reasoning-only", result.Route.Classification!.FailureCode);
-        Assert.Equal(new[] { AgentContentKind.Reasoning }, result.Route.Classification.ResponseContentKinds);
-        Assert.Equal(0, result.Route.Classification.VisibleContentCharacters);
-        Assert.Equal(32, result.Route.Classification.ReasoningCharacters);
-        Assert.Equal(GameRouteKind.Agent, result.Route.Route);
-    }
-
-    [Fact]
-    public async Task RoutingCannotConsumeTheAnswerBudgetAndThenStartAnotherModelCall()
-    {
-        var routingProvider = new RecordingProvider(_ => new ModelResponse(
-            new AgentContent[] { new JsonContent("{\"route\":\"quick\"}") },
-            ModelStopReason.Stop,
-            new ModelUsage(6, 5)));
-        var responseProvider = new RecordingProvider(_ => Text("must not run"));
-        var classifier = new ModelGameRouteClassifier(routingProvider, "router-model");
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(responseProvider, "answer-model")
-        {
-            AgentLimits = new AgentLimits { MaxTotalTokens = 10 },
-            RoutePolicy = new AutomaticGameRoutePolicy(classifier: classifier.ClassifyAsync),
-        });
-
-        var result = await runtime.RunAsync(
-            Input("chat", "{}", "routing-budget"),
-            TestContext.Current.CancellationToken);
-        var usage = await runtime.ReadUsageAsync(
-            new GameSessionKey("session", "actor"),
-            TestContext.Current.CancellationToken);
-
-        Assert.Equal(GameAgentRunStatus.Failed, result.Status);
-        Assert.Equal(0, responseProvider.CallCount);
-        Assert.Equal(11, usage!.Ledger.Stats.TotalTokens);
-        Assert.Equal(GameSessionUsageCause.Routing, Assert.Single(usage.Ledger.Records).Cause);
-    }
-
-    [Fact]
-    public void RouteConfigurationRejectsNullDecisionsAndInvalidWorkflowNames()
-    {
-        Assert.Throws<ArgumentException>(() => new AutomaticGameRoutePolicy(
-            new Dictionary<string, GameRouteDecision> { ["chat"] = null! }));
-        Assert.Throws<ArgumentException>(() => new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("{}")),
-            "model",
-            new[] { " " }));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("{}")),
-            "model",
-            options: new ModelGameRouteClassifierOptions { TimeoutMilliseconds = 0 }));
-        Assert.Throws<ArgumentException>(() => new ModelGameRouteClassifier(
-            new RecordingProvider(_ => Text("{}")),
-            "model",
-            options: new ModelGameRouteClassifierOptions { ReasoningLevel = " " }));
     }
 
     [Fact]
@@ -3171,233 +2687,6 @@ public sealed class RuntimeTests
     }
 
     [Fact]
-    public async Task DurableWorkflowWaitsAndResumesFromCheckpoint()
-    {
-        var checkpoints = new InMemoryGameWorkflowCheckpointStore();
-        var workflow = new DurableGameWorkflow(
-            "evolve",
-            new[]
-            {
-                new GameWorkflowStep("wait_for_world", (context, _) =>
-                    new ValueTask<GameWorkflowStepResult>(
-                        context.StateJson.Contains("ready", StringComparison.Ordinal)
-                            ? GameWorkflowStepResult.Next("{\"advanced\":true}", Assistant("advanced"))
-                            : GameWorkflowStepResult.Wait("{\"ready\":true}", Assistant("waiting")))),
-                new GameWorkflowStep("finish", (_, _) =>
-                    new ValueTask<GameWorkflowStepResult>(GameWorkflowStepResult.Complete("{\"done\":true}", Assistant("done")))),
-            },
-            checkpoints);
-        var metadata = new Dictionary<string, string> { ["agent.workflow_instance"] = "month-12" };
-        var session = new GameSessionSnapshot(new GameSessionKey("session", "actor"), 0);
-        var firstInput = new GameInput("session", "actor", "month", "{}", new GameMoment("world", 12), "first", metadata);
-        var secondInput = new GameInput("session", "actor", "month", "{}", new GameMoment("world", 13), "second", metadata);
-
-        var first = await workflow.RunAsync(
-            new GameWorkflowContext(firstInput, Array.Empty<GameContextSlice>(), Array.Empty<AgentTool>(), session),
-            TestContext.Current.CancellationToken);
-        var committedSession = new GameSessionSnapshot(
-            session.Key,
-            1,
-            processedInputIds: new[] { firstInput.InputId });
-        var second = await workflow.RunAsync(
-            new GameWorkflowContext(secondInput, Array.Empty<GameContextSlice>(), Array.Empty<AgentTool>(), committedSession),
-            TestContext.Current.CancellationToken);
-
-        Assert.True(first.Succeeded);
-        Assert.Equal("waiting", Assert.IsType<TextContent>(Assert.Single(Assert.Single(first.Messages).Content)).Text);
-        Assert.True(second.Succeeded);
-        Assert.Equal(new[] { "advanced", "done" }, second.Messages.Select(message => Assert.IsType<TextContent>(Assert.Single(message.Content)).Text));
-    }
-
-    [Fact]
-    public async Task DurableWorkflowReplaysCompletedInvocationUntilItsInputIsCommitted()
-    {
-        var executions = 0;
-        var workflow = new DurableGameWorkflow(
-            "evolve",
-            new[]
-            {
-                new GameWorkflowStep("finish", (_, _) =>
-                {
-                    Interlocked.Increment(ref executions);
-                    return new ValueTask<GameWorkflowStepResult>(
-                        GameWorkflowStepResult.Complete("{\"done\":true}", Assistant("replay me")));
-                }),
-            },
-            new InMemoryGameWorkflowCheckpointStore());
-        var input = Input("month", "{}", "workflow-replay");
-        var session = new GameSessionSnapshot(new GameSessionKey(input.SessionId, input.ActorId), 0);
-        var context = new GameWorkflowContext(
-            input,
-            Array.Empty<GameContextSlice>(),
-            Array.Empty<AgentTool>(),
-            session);
-
-        var first = await workflow.RunAsync(context, TestContext.Current.CancellationToken);
-        var replay = await workflow.RunAsync(context, TestContext.Current.CancellationToken);
-
-        Assert.Equal(1, executions);
-        Assert.Equal(
-            Assert.IsType<TextContent>(Assert.Single(Assert.Single(first.Messages).Content)).Text,
-            Assert.IsType<TextContent>(Assert.Single(Assert.Single(replay.Messages).Content)).Text);
-    }
-
-    [Fact]
-    public async Task DurableWorkflowAcceptsEquivalentValuesRehydratedByACustomStore()
-    {
-        var workflow = new DurableGameWorkflow(
-            "evolve",
-            new[]
-            {
-                new GameWorkflowStep("finish", (_, _) =>
-                    new ValueTask<GameWorkflowStepResult>(
-                        GameWorkflowStepResult.Complete("{\"done\":true}", Assistant("persisted")))),
-            },
-            new RehydratingCheckpointStore());
-        var input = Input("month", "{}", "workflow-rehydrated");
-        var context = new GameWorkflowContext(
-            input,
-            Array.Empty<GameContextSlice>(),
-            Array.Empty<AgentTool>(),
-            new GameSessionSnapshot(new GameSessionKey(input.SessionId, input.ActorId), 0));
-
-        var result = await workflow.RunAsync(context, TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.Equal("persisted", Assert.IsType<TextContent>(Assert.Single(Assert.Single(result.Messages).Content)).Text);
-    }
-
-    [Fact]
-    public async Task DurableWorkflowInstanceKeysCannotCollideThroughIdentifierDelimiters()
-    {
-        var checkpoints = new InMemoryGameWorkflowCheckpointStore();
-        var executions = 0;
-        var workflow = new DurableGameWorkflow(
-            "flow",
-            new[]
-            {
-                new GameWorkflowStep("finish", (_, _) =>
-                {
-                    Interlocked.Increment(ref executions);
-                    return new ValueTask<GameWorkflowStepResult>(GameWorkflowStepResult.Complete("{}"));
-                }),
-            },
-            checkpoints);
-        var metadata = new Dictionary<string, string> { ["agent.workflow_instance"] = "instance" };
-        var firstInput = new GameInput("a:b", "c", "event", "{}", new GameMoment("world", 1), "one", metadata);
-        var secondInput = new GameInput("a", "b:c", "event", "{}", new GameMoment("world", 1), "two", metadata);
-
-        await workflow.RunAsync(
-            new GameWorkflowContext(
-                firstInput,
-                Array.Empty<GameContextSlice>(),
-                Array.Empty<AgentTool>(),
-                new GameSessionSnapshot(new GameSessionKey(firstInput.SessionId, firstInput.ActorId), 0)),
-            TestContext.Current.CancellationToken);
-        await workflow.RunAsync(
-            new GameWorkflowContext(
-                secondInput,
-                Array.Empty<GameContextSlice>(),
-                Array.Empty<AgentTool>(),
-                new GameSessionSnapshot(new GameSessionKey(secondInput.SessionId, secondInput.ActorId), 0)),
-            TestContext.Current.CancellationToken);
-
-        Assert.Equal(2, executions);
-    }
-
-    [Fact]
-    public async Task DurableWorkflowRejectsCheckpointStoreThatClaimsToSaveDifferentState()
-    {
-        var workflow = new DurableGameWorkflow(
-            "flow",
-            new[]
-            {
-                new GameWorkflowStep("finish", (_, _) =>
-                    new ValueTask<GameWorkflowStepResult>(GameWorkflowStepResult.Complete("{\"done\":true}"))),
-            },
-            new CorruptingCheckpointStore());
-        var input = Input("event", "{}", "checkpoint-corruption");
-        var context = new GameWorkflowContext(
-            input,
-            Array.Empty<GameContextSlice>(),
-            Array.Empty<AgentTool>(),
-            new GameSessionSnapshot(new GameSessionKey(input.SessionId, input.ActorId), 0));
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await workflow.RunAsync(context, TestContext.Current.CancellationToken));
-
-        Assert.Contains("different saved checkpoint", exception.Message, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task DurableWorkflowRejectsCheckpointLoadedForWrongIdentityOrPosition(bool wrongIdentity)
-    {
-        var workflow = new DurableGameWorkflow(
-            "flow",
-            new[]
-            {
-                new GameWorkflowStep("finish", (_, _) =>
-                    new ValueTask<GameWorkflowStepResult>(GameWorkflowStepResult.Complete("{}"))),
-            },
-            new LoadingCheckpointStore((instanceId) => new GameWorkflowCheckpoint(
-                wrongIdentity ? instanceId + "-other" : instanceId,
-                "flow",
-                1,
-                wrongIdentity ? 0 : 2,
-                "{}")));
-        var input = Input("event", "{}", "invalid-loaded-checkpoint");
-        var context = new GameWorkflowContext(
-            input,
-            Array.Empty<GameContextSlice>(),
-            Array.Empty<AgentTool>(),
-            new GameSessionSnapshot(new GameSessionKey(input.SessionId, input.ActorId), 0));
-
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await workflow.RunAsync(context, TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task DurableWorkflowDoesNotAdvanceCheckpointWhenOutputIsRejected()
-    {
-        var checkpoints = new InMemoryGameWorkflowCheckpointStore();
-        var workflow = new DurableGameWorkflow(
-            "evolve",
-            new[]
-            {
-                new GameWorkflowStep("oversized", (_, _) =>
-                    new ValueTask<GameWorkflowStepResult>(
-                        GameWorkflowStepResult.Complete("{}", Assistant(new string('x', 32))))),
-            },
-            checkpoints);
-        var options = new GameAgentRuntimeOptions(new RecordingProvider(_ => Text("unused")), "model")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["month"] = GameRouteDecision.ToWorkflow("evolve", "fixed"),
-            }),
-            AgentLimits = new AgentLimits { MaxTextCharactersPerPart = 8 },
-        };
-        options.Workflows.Add(workflow);
-        var runtime = new GameAgentRuntime(options);
-        var input = new GameInput(
-            "session",
-            "actor",
-            "month",
-            "{}",
-            new GameMoment("world", 12),
-            "invalid");
-
-        await Assert.ThrowsAsync<AgentLimitException>(async () =>
-            await runtime.RunAsync(input, TestContext.Current.CancellationToken));
-
-        Assert.Null(await checkpoints.LoadAsync(
-            "session:actor:evolve:invalid",
-            TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
     public async Task MailboxUsesOperationalLeaseButRetainsGameMoment()
     {
         var mailbox = new InMemoryGameMailbox();
@@ -3862,25 +3151,6 @@ public sealed class RuntimeTests
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             yield break;
         }
-    }
-
-    private sealed class DelegateWorkflow : IGameWorkflow
-    {
-        private readonly Func<GameWorkflowContext, CancellationToken, ValueTask<GameWorkflowResult>> _run;
-
-        public DelegateWorkflow(
-            string name,
-            Func<GameWorkflowContext, CancellationToken, ValueTask<GameWorkflowResult>> run)
-        {
-            Name = name;
-            _run = run;
-        }
-
-        public string Name { get; }
-
-        public ValueTask<GameWorkflowResult> RunAsync(
-            GameWorkflowContext context,
-            CancellationToken cancellationToken) => _run(context, cancellationToken);
     }
 
     private sealed class BlockingFirstResponseProvider : IModelProvider
@@ -4596,120 +3866,6 @@ public sealed class RuntimeTests
             int limit,
             CancellationToken cancellationToken) =>
             _inner.ListPendingAsync(limit, cancellationToken);
-    }
-
-    private sealed class CorruptingCheckpointStore : IGameWorkflowCheckpointStore
-    {
-        public ValueTask<GameWorkflowCheckpoint?> LoadAsync(
-            string instanceId,
-            CancellationToken cancellationToken)
-        {
-            _ = instanceId;
-            cancellationToken.ThrowIfCancellationRequested();
-            return new ValueTask<GameWorkflowCheckpoint?>((GameWorkflowCheckpoint?)null);
-        }
-
-        public ValueTask<GameWorkflowCheckpointSaveResult> SaveAsync(
-            GameWorkflowCheckpoint checkpoint,
-            long expectedRevision,
-            CancellationToken cancellationToken)
-        {
-            _ = expectedRevision;
-            cancellationToken.ThrowIfCancellationRequested();
-            return new ValueTask<GameWorkflowCheckpointSaveResult>(new GameWorkflowCheckpointSaveResult(
-                true,
-                new GameWorkflowCheckpoint(
-                    checkpoint.InstanceId,
-                    checkpoint.Workflow,
-                    checkpoint.Revision,
-                    checkpoint.NextStep,
-                    "{}",
-                    checkpoint.Completed,
-                    checkpoint.Error)));
-        }
-    }
-
-    private sealed class RehydratingCheckpointStore : IGameWorkflowCheckpointStore
-    {
-        private readonly InMemoryGameWorkflowCheckpointStore _inner = new();
-
-        public async ValueTask<GameWorkflowCheckpoint?> LoadAsync(
-            string instanceId,
-            CancellationToken cancellationToken)
-        {
-            var loaded = await _inner.LoadAsync(instanceId, cancellationToken);
-            return loaded is null ? null : Rehydrate(loaded);
-        }
-
-        public async ValueTask<GameWorkflowCheckpointSaveResult> SaveAsync(
-            GameWorkflowCheckpoint checkpoint,
-            long expectedRevision,
-            CancellationToken cancellationToken)
-        {
-            var saved = await _inner.SaveAsync(checkpoint, expectedRevision, cancellationToken);
-            return new GameWorkflowCheckpointSaveResult(saved.Saved, Rehydrate(saved.Current));
-        }
-
-        private static GameWorkflowCheckpoint Rehydrate(GameWorkflowCheckpoint checkpoint)
-        {
-            var invocation = checkpoint.Invocation is null
-                ? null
-                : new GameWorkflowInvocationResult(
-                    checkpoint.Invocation.InputId,
-                    checkpoint.Invocation.Messages.Select(Rehydrate).ToArray(),
-                    checkpoint.Invocation.Complete,
-                    checkpoint.Invocation.Succeeded,
-                    checkpoint.Invocation.Error);
-            return new GameWorkflowCheckpoint(
-                checkpoint.InstanceId,
-                checkpoint.Workflow,
-                checkpoint.Revision,
-                checkpoint.NextStep,
-                checkpoint.StateJson,
-                checkpoint.Completed,
-                checkpoint.Error,
-                invocation);
-        }
-
-        private static AgentMessage Rehydrate(AgentMessage message) =>
-            new(
-                message.Role,
-                message.Content,
-                message.Timestamp,
-                message.CustomRole,
-                message.ToolCallId,
-                message.ToolName,
-                message.IsError,
-                message.DetailsJson,
-                message.Metadata,
-                message.Model,
-                message.StopReason,
-                message.Usage,
-                message.ErrorMessage);
-    }
-
-    private sealed class LoadingCheckpointStore : IGameWorkflowCheckpointStore
-    {
-        private readonly Func<string, GameWorkflowCheckpoint> _load;
-
-        public LoadingCheckpointStore(Func<string, GameWorkflowCheckpoint> load)
-        {
-            _load = load;
-        }
-
-        public ValueTask<GameWorkflowCheckpoint?> LoadAsync(
-            string instanceId,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return new ValueTask<GameWorkflowCheckpoint?>(_load(instanceId));
-        }
-
-        public ValueTask<GameWorkflowCheckpointSaveResult> SaveAsync(
-            GameWorkflowCheckpoint checkpoint,
-            long expectedRevision,
-            CancellationToken cancellationToken) =>
-            throw new InvalidOperationException("An invalid checkpoint must not be saved.");
     }
 
     private sealed class NullTranscriptCompactor : IGameTranscriptCompactor

@@ -2,7 +2,7 @@
 
 OpenGameAgent keeps the stateful model/tool loop compact and moves optional capabilities into extensions. First-party and third-party extensions use the same `IGameAgentExtension` and `GameAgentExtensionApi` contracts.
 
-Extensions can contribute context, tools, input-aware tool visibility, skills, route rules, pending-work signals, workflows, hooks, prompt fragments, model providers, typed services, lifecycle handlers, and typed cross-extension channels. Each registration retains its owner, priority, order, and disposable lifetime. Namespaced extension state persists with the game session but is not shown to the model unless the extension explicitly contributes it.
+Extensions can contribute context, tools, input-aware tool visibility, skills, hooks, prompt fragments, model providers, typed services, lifecycle handlers, and typed cross-extension channels. Each registration retains its owner, priority, order, and disposable lifetime. Namespaced extension state persists with the game session but is not shown to the model unless the extension explicitly contributes it.
 
 ## Create a project
 

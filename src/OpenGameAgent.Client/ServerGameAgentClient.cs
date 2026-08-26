@@ -28,7 +28,7 @@ public sealed class RemoteGameAgentEvent
 
 public sealed class RemoteGameAgentResult
 {
-    public RemoteGameAgentResult(string status, string route, long sessionRevision, string json, string? error = null)
+    public RemoteGameAgentResult(string status, long sessionRevision, string json, string? error = null)
     {
         if (sessionRevision < 0)
         {
@@ -36,15 +36,12 @@ public sealed class RemoteGameAgentResult
         }
 
         Status = RequireValue(status, nameof(status));
-        Route = RequireValue(route, nameof(route));
         SessionRevision = sessionRevision;
         Json = RemoteJson.RequireValid(json, nameof(json));
         Error = error;
     }
 
     public string Status { get; }
-
-    public string Route { get; }
 
     public long SessionRevision { get; }
 
@@ -888,8 +885,6 @@ public sealed partial class ServerGameAgentClient
         if (root.ValueKind != JsonValueKind.Object
             || !root.TryGetProperty("status", out var status)
             || status.ValueKind != JsonValueKind.String
-            || !root.TryGetProperty("route", out var route)
-            || route.ValueKind != JsonValueKind.String
             || !root.TryGetProperty("sessionRevision", out var revision)
             || !revision.TryGetInt64(out var revisionValue))
         {
@@ -909,7 +904,6 @@ public sealed partial class ServerGameAgentClient
 
         return new RemoteGameAgentResult(
             status.GetString()!,
-            route.GetString()!,
             revisionValue,
             json,
             errorValue);

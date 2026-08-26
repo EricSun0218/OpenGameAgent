@@ -6,7 +6,7 @@ The framework stays generic by standardizing agent execution, not gameplay. This
 
 Input includes the player's utterance plus non-language interaction state. Context includes identity, visible scene, relationships, recent events, and recalled memory. Read-only tools can inspect additional detail; mutation tools can accept gifts, start quests, or alter disposition through game rules.
 
-Route ambient conversation to `QuickResponse`. Route a conversation with available actions to `Agent`. Store only durable facts or relationship changes as long-term memories; a full transcript is not automatically good memory.
+Expose only the context and tools relevant to the current interaction. A direct assistant message ends after one provider request; when the model calls an available tool, the same loop executes it and continues. Store only durable facts or relationship changes as long-term memories; a full transcript is not automatically good memory.
 
 Canonical engine identifiers do not have to enter the model prompt. By default, the input envelope still exposes `ActorId`, `TimelineId`, `Tick`, and `Calendar` for compatibility. A host that treats those coordinates as private can suppress them or replace them with stable model-only aliases:
 
@@ -154,7 +154,7 @@ Existing task-plan documents remain valid without migration. `Paused` was append
 
 ## Monthly or turn-based evolution
 
-Represent the calendar in `GameMoment.CalendarJson` while using `Tick` for ordering. A monthly advance can be a named `DurableGameWorkflow`:
+Represent the calendar in `GameMoment.CalendarJson` while using `Tick` for ordering. Keep the monthly advance as a game-owned state machine:
 
 1. calculate deterministic production and upkeep;
 2. identify exceptional factions or NPCs;
@@ -162,9 +162,7 @@ Represent the calendar in `GameMoment.CalendarJson` while using `Tick` for order
 4. commit validated decisions through action handlers;
 5. write memories and schedule the next occurrence.
 
-Workflow checkpoints allow a wait between steps without losing progress. Use `agent.workflow_instance` metadata to resume the same instance intentionally.
-
-When independent monthly branches may run together, use `DurableGameWorkflowGraph`. Dependencies are explicit, ready nodes run with bounded concurrency, joined outputs are presented in declaration order, and completed nodes are not rerun after a wait. A node that changes the world should use the durable action dispatcher with a stable operation ID because workflow and game-state storage are not automatically one transaction.
+Persist the simulation checkpoint in the game save before waiting between steps. Independent monthly branches may run under a game-owned dependency graph with bounded concurrency and deterministic joins. Any branch that changes the world should use the durable action dispatcher with a stable operation ID because orchestration state and game-state storage are not automatically one transaction.
 
 ## Long-running world actions and narrated progress
 
@@ -179,13 +177,13 @@ Do not keep one model call or tool invocation open for an action that lasts seve
 
 Use stable action, schedule, mailbox, and input IDs. A progress observation is not another receipt for the original action and must not reuse its operation ID. If a progress update changes the world, expose that change as its own durable action with its own authority check and receipt.
 
-This pattern supports journeys, construction, research, employment, trade routes, rescues, faction campaigns, and other multi-tick activities. The game owns simulation and completion conditions; the model handles semantic planning, explanation, negotiation, and adaptation. A save should persist the game action record together with the relevant workflow/plan checkpoint, scheduler state, and mailbox state, or reconcile them before admitting new work.
+This pattern supports journeys, construction, research, employment, trade routes, rescues, faction campaigns, and other multi-tick activities. The game owns simulation and completion conditions; the model handles semantic planning, explanation, negotiation, and adaptation. A save should persist the game action record together with the relevant plan, scheduler state, and mailbox state, or reconcile them before admitting new work.
 
 ## Multi-stage dialogue and generated content
 
-Use ordinary agent turns for open conversation and a fixed workflow when the product requires explicit stages such as inspect context, draft, validate references, calculate game values, repair invalid output, localize, and publish. Each stage receives bounded structured data. Only the final game-owned commit tool may create quests, items, rules, policies, rumors, histories, or ending records.
+Use ordinary agent turns for open conversation and a game-owned state machine when the product requires explicit stages such as inspect context, draft, validate references, calculate game values, repair invalid output, localize, and publish. Each stage receives bounded structured data. Only the final game-owned commit tool may create quests, items, rules, policies, rumors, histories, or ending records.
 
-Different dialogue modes—negotiation, argument, friendship, recruitment, voting, trade, surrender, or advice—are route, prompt, context, tool, and policy compositions rather than separate runtime subsystems. Keep the actor identity, visible facts, allowed tools, and audience policy authoritative at every stage. A workflow may return structured interaction choices for the UI, but those choices do not gain permission merely because the model generated them.
+Different dialogue modes—negotiation, argument, friendship, recruitment, voting, trade, surrender, or advice—are prompt, context, tool, and policy compositions rather than separate runtime subsystems. Keep the actor identity, visible facts, allowed tools, and audience policy authoritative at every stage. The agent may return structured interaction choices for the UI, but those choices do not gain permission merely because the model generated them.
 
 ## Generated plans and behavior assets
 
@@ -198,7 +196,7 @@ An agent may draft a goal graph, utility plan, behavior tree, schedule, quest gr
 5. publish the accepted asset through a durable game action;
 6. let the authoritative simulation execute it and feed observations back to later agent turns.
 
-The generated asset can persist and run without another model call. Model output never becomes a new tool or permission by itself, and a generated node can invoke only actions that the game already registered and authorized. Use a fixed workflow when draft/validate/repair stages must be reproducible, and store the published asset as an artifact or game save record according to the game's ownership model.
+The generated asset can persist and run without another model call. Model output never becomes a new tool or permission by itself, and a generated node can invoke only actions that the game already registered and authorized. Use a game-owned state machine when draft/validate/repair stages must be reproducible, and store the published asset as an artifact or game save record according to the game's ownership model.
 
 ## Social deduction and group scenes
 
@@ -213,7 +211,7 @@ Building is a normal tool-planning problem. Expose tools at the safest useful le
 - `place_blueprint` submits a declarative plan;
 - `query_operation` reconciles an interrupted build.
 
-The game converts the blueprint into blocks, tiles, entities, navmesh updates, animations, and save data. Large builds should be a durable workflow with bounded batches and progress events, not thousands of unconstrained tool calls.
+The game converts the blueprint into blocks, tiles, entities, navmesh updates, animations, and save data. Large builds should be a durable game-owned job with bounded batches and progress events, not thousands of unconstrained tool calls.
 
 This supports both declarative blueprint construction and stepwise plans. The model chooses intent and parameters; ordinary game code performs collision checks, resource accounting, placement, pathfinding, animations, and rollback. No special embodied-agent subsystem is required.
 
@@ -221,7 +219,7 @@ This supports both declarative blueprint construction and stepwise plans. The mo
 
 Separate semantic generation from executable mechanics. Let the model choose from or compose game-owned primitive IDs, validate the resulting JSON, and compile it into normal game data. Never execute model-authored source code.
 
-A deterministic workflow is usually better for multi-stage generation: draft, validate references, calculate balance, request repair if needed, import assets, then commit. `IGameMediaGenerator` can create optional visual or audio resources while the game validates type, size, storage path, ownership, and content policy.
+A deterministic game-owned pipeline is usually better for multi-stage generation: draft, validate references, calculate balance, request repair if needed, import assets, then commit. `IGameMediaGenerator` can create optional visual or audio resources while the game validates type, size, storage path, ownership, and content policy.
 
 When generated bytes must become a persistent game asset, use `GameGeneratedAssetPipeline` rather than treating a provider URL as a finished asset. The pipeline binds a stable operation to the session, actor, game moment, model, generator, importer, and request fingerprint; materializes bounded outputs into content-addressed storage; persists the manifest before import; and records the engine's authoritative receipt. `GameGeneratedAssetActionImporter` can route the final import through `DurableGameActionDispatcher`, so an interrupted import is recovered by operation ID instead of repeated blindly. The game still owns the asset schema, moderation, licensing, quotas, engine-thread scheduling, and final save mutation. See [Generated assets](generated-assets.md).
 

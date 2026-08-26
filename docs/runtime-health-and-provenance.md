@@ -51,7 +51,7 @@ var runtime = new GameAgentBuilder(provider, model)
 For every model turn, the extension records stable request and response entries containing:
 
 - session, actor, input, run, and turn coordinates;
-- selected route and workflow;
+- run and turn coordinates;
 - provider/model request parameters;
 - ordered message/content hashes and sizes;
 - context source, version, priority, and payload hash;

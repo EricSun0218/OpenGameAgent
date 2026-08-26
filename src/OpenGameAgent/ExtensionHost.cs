@@ -443,9 +443,6 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
             ? service
             : throw new KeyNotFoundException($"Service '{name}' for '{typeof(T).FullName}' is not registered.");
 
-    public IReadOnlyList<IGameWorkflow> GetWorkflows() =>
-        GetValues<IGameWorkflow>(GameAgentExtensionResourceKind.Workflow);
-
     public string ComposePrompt(string instructions)
     {
         var fragments = GetValues<string>(GameAgentExtensionResourceKind.PromptFragment)
@@ -641,51 +638,6 @@ internal sealed class GameAgentExtensionHost : IGameAgentServiceProvider, IAsync
         }
 
         return Array.AsReadOnly(values.ToArray());
-    }
-
-    public async ValueTask<bool> HasPendingWorkAsync(
-        GameAgentExtensionRunContext baseContext,
-        bool initial,
-        CancellationToken cancellationToken)
-    {
-        if (initial)
-        {
-            return true;
-        }
-
-        foreach (var entry in GetEntries(GameAgentExtensionResourceKind.PendingWorkProvider))
-        {
-            if (await ((GameExtensionPendingWorkProvider)entry.Value)(
-                    ForOwner(baseContext, entry.Resource.ExtensionId),
-                    cancellationToken).ConfigureAwait(false))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    public async ValueTask<GameRouteDecision?> SelectRouteAsync(
-        GameAgentExtensionRunContext baseContext,
-        int availableToolCount,
-        bool hasPendingWork,
-        CancellationToken cancellationToken)
-    {
-        foreach (var entry in GetEntries(GameAgentExtensionResourceKind.RouteRule))
-        {
-            var decision = await ((GameExtensionRouteRule)entry.Value)(
-                ForOwner(baseContext, entry.Resource.ExtensionId),
-                availableToolCount,
-                hasPendingWork,
-                cancellationToken).ConfigureAwait(false);
-            if (decision is not null)
-            {
-                return decision;
-            }
-        }
-
-        return null;
     }
 
     public AgentHooks ComposeHooks(GameAgentExtensionRunContext baseContext, AgentHooks baseline)

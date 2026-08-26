@@ -75,9 +75,6 @@ public enum GameAgentExtensionResourceKind
     ToolProvider,
     ToolVisibilityPolicy,
     SkillProvider,
-    RouteRule,
-    PendingWorkProvider,
-    Workflow,
     AgentHooks,
     PromptFragment,
     ModelProvider,
@@ -198,8 +195,6 @@ public static class GameAgentExtensionEvents
     public static GameAgentExtensionEvent<GameAgentContextProviderEvent> ContextProviderCompleted { get; } = new("context.provider.completed");
 
     public static GameAgentExtensionEvent<GameAgentToolsEvent> ToolsCollected { get; } = new("tools.collected");
-
-    public static GameAgentExtensionEvent<GameAgentRouteEvent> RouteSelected { get; } = new("route.selected");
 
     public static GameAgentExtensionEvent<GameAgentSkillsEvent> SkillsSelected { get; } = new("skills.selected");
 
@@ -337,36 +332,6 @@ public sealed class GameAgentToolsEvent
         value is { } duration && (duration < TimeSpan.Zero || duration > TimeSpan.FromDays(1))
             ? throw new ArgumentOutOfRangeException(name)
             : value;
-}
-
-public sealed class GameAgentRouteEvent
-{
-    public GameAgentRouteEvent(
-        GameRouteDecision decision,
-        TimeSpan? duration = null,
-        TimeSpan? modelDuration = null)
-    {
-        Decision = decision ?? throw new ArgumentNullException(nameof(decision));
-        if (duration is { } value && (value < TimeSpan.Zero || value > TimeSpan.FromDays(1)))
-        {
-            throw new ArgumentOutOfRangeException(nameof(duration));
-        }
-
-        Duration = duration;
-        if (modelDuration is { } modelValue
-            && (modelValue < TimeSpan.Zero || modelValue > TimeSpan.FromDays(1)))
-        {
-            throw new ArgumentOutOfRangeException(nameof(modelDuration));
-        }
-
-        ModelDuration = modelDuration;
-    }
-
-    public GameRouteDecision Decision { get; set; }
-
-    public TimeSpan? Duration { get; }
-
-    public TimeSpan? ModelDuration { get; }
 }
 
 public sealed class GameAgentSkillsEvent
@@ -679,16 +644,6 @@ public delegate ValueTask<IReadOnlyList<GameSkill>> GameExtensionSkillProvider(
     int maximumCharacters,
     CancellationToken cancellationToken);
 
-public delegate ValueTask<GameRouteDecision?> GameExtensionRouteRule(
-    GameAgentExtensionRunContext context,
-    int availableToolCount,
-    bool hasPendingWork,
-    CancellationToken cancellationToken);
-
-public delegate ValueTask<bool> GameExtensionPendingWorkProvider(
-    GameAgentExtensionRunContext context,
-    CancellationToken cancellationToken);
-
 public delegate AgentHooks GameExtensionHookFactory(GameAgentExtensionRunContext context);
 
 public delegate ValueTask GameAgentExtensionEventHandler<TEvent>(
@@ -767,34 +722,6 @@ public sealed class GameAgentExtensionApi
         GameExtensionSkillProvider provider,
         int priority = 0) =>
         _host.Register(_extensionId, name, GameAgentExtensionResourceKind.SkillProvider, provider, priority, unique: true);
-
-    public IGameAgentExtensionRegistration RegisterRouteRule(
-        string name,
-        GameExtensionRouteRule rule,
-        int priority = 0) =>
-        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.RouteRule, rule, priority, unique: true);
-
-    public IGameAgentExtensionRegistration RegisterPendingWorkProvider(
-        string name,
-        GameExtensionPendingWorkProvider provider,
-        int priority = 0) =>
-        _host.Register(_extensionId, name, GameAgentExtensionResourceKind.PendingWorkProvider, provider, priority, unique: true);
-
-    public IGameAgentExtensionRegistration RegisterWorkflow(IGameWorkflow workflow, int priority = 0)
-    {
-        if (workflow is null)
-        {
-            throw new ArgumentNullException(nameof(workflow));
-        }
-
-        return _host.Register(
-            _extensionId,
-            workflow.Name,
-            GameAgentExtensionResourceKind.Workflow,
-            workflow,
-            priority,
-            unique: true);
-    }
 
     public IGameAgentExtensionRegistration RegisterAgentHooks(
         string name,

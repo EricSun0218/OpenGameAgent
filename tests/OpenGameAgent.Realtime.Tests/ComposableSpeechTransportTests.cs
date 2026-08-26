@@ -159,12 +159,7 @@ public sealed class ComposableSpeechTransportTests
     {
         var provider = new CapturingProvider();
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "agent-model")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["voice"] = GameRouteDecision.Agent("voice"),
-            }),
-        });
+        { });
         var transport = Transport(new RecordingRecognizer("look around"), new EchoSynthesizer());
         await using var manager = new RealtimeConversationManager(transport);
         await using var bridge = new GameRealtimeAgentBridge(

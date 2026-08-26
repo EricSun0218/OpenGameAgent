@@ -71,12 +71,11 @@ public sealed class ExtensionRuntimeTests
     {
         var probe = new ConstructionProbeExtension(throwOnDispose: true);
         var builder = new GameAgentBuilder(new CaptureProvider(), "model")
-            .Configure(options => options.Workflows.Add(new ProbeWorkflow("duplicate")))
             .UseExtension(probe);
 
         var error = Assert.Throws<ArgumentException>(() => builder.Build());
 
-        Assert.Contains("Duplicate workflow", error.Message, StringComparison.Ordinal);
+        Assert.Contains("configuration failed", error.Message, StringComparison.Ordinal);
         Assert.True(probe.Disposed);
     }
 
@@ -365,33 +364,6 @@ public sealed class ExtensionRuntimeTests
     }
 
     [Fact]
-    public async Task HigherPriorityRouteRuleWinsDeterministically()
-    {
-        var provider = new CaptureProvider();
-        await using var runtime = new GameAgentBuilder(provider, "model")
-            .UseExtension(
-                "routes",
-                "1",
-                api =>
-                {
-                    api.RegisterRouteRule(
-                        "low",
-                        (_, _, _, _) => new ValueTask<GameRouteDecision?>(GameRouteDecision.Agent("low")),
-                        priority: 0);
-                    api.RegisterRouteRule(
-                        "high",
-                        (_, _, _, _) => new ValueTask<GameRouteDecision?>(GameRouteDecision.Quick("high")),
-                        priority: 10);
-                })
-            .Build();
-
-        var result = await runtime.RunAsync(Input("event", "route"), TestContext.Current.CancellationToken);
-
-        Assert.Equal(GameRouteKind.QuickResponse, result.Route.Route);
-        Assert.Equal("high", result.Route.Reason);
-    }
-
-    [Fact]
     public async Task EventHandlerFailureIsIsolatedAndDiagnosed()
     {
         var provider = new CaptureProvider();
@@ -536,35 +508,6 @@ public sealed class ExtensionRuntimeTests
         }
     }
 
-    private sealed class ProbeWorkflow : IGameWorkflow
-    {
-        public ProbeWorkflow(string name)
-        {
-            Name = name;
-        }
-
-        public string Name { get; }
-
-        public ValueTask<GameWorkflowResult> RunAsync(
-            GameWorkflowContext context,
-            CancellationToken cancellationToken)
-        {
-            _ = context;
-            cancellationToken.ThrowIfCancellationRequested();
-            return new ValueTask<GameWorkflowResult>(new GameWorkflowResult(
-                new[]
-                {
-                    new AgentMessage(
-                        AgentRole.Assistant,
-                        new AgentContent[] { new TextContent("ok") },
-                        DateTimeOffset.UnixEpoch,
-                        model: "workflow",
-                        stopReason: ModelStopReason.Stop),
-                },
-                succeeded: true));
-        }
-    }
-
     private sealed class ConstructionProbeExtension : IGameAgentExtension, IDisposable
     {
         private readonly bool _throwOnDispose;
@@ -578,8 +521,11 @@ public sealed class ExtensionRuntimeTests
 
         public bool Disposed { get; private set; }
 
-        public void Configure(GameAgentExtensionApi api) =>
-            api.RegisterWorkflow(new ProbeWorkflow("duplicate"));
+        public void Configure(GameAgentExtensionApi api)
+        {
+            _ = api;
+            throw new ArgumentException("configuration failed");
+        }
 
         public void Dispose()
         {

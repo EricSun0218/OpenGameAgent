@@ -157,9 +157,6 @@ public static class GameAgentWire
         return JsonSerializer.Serialize(new
         {
             status = result.Status.ToString(),
-            route = result.Route.Route.ToString(),
-            routeReason = result.Route.Reason,
-            workflow = result.Route.Workflow,
             sessionRevision = result.SessionRevision,
             agent = result.AgentResult is null ? null : new
             {

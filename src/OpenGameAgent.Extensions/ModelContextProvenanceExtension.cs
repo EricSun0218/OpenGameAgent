@@ -246,11 +246,6 @@ public sealed class GameModelContextProvenanceExtension : IGameAgentExtension
             State(context).Tools = value.Tools.Select(tool => tool.Definition).ToArray();
             return default;
         });
-        api.On(GameAgentExtensionEvents.RouteSelected, (value, context, _) =>
-        {
-            State(context).Route = value.Decision;
-            return default;
-        });
         api.On(GameAgentExtensionEvents.SkillsSelected, (value, context, _) =>
         {
             State(context).Skills = value.Skills.ToArray();
@@ -319,12 +314,6 @@ public sealed class GameModelContextProvenanceExtension : IGameAgentExtension
         var details = new
         {
             schemaVersion = 1,
-            route = state.Route is null ? null : new
-            {
-                kind = state.Route.Route.ToString(),
-                state.Route.Reason,
-                state.Route.Workflow,
-            },
             request = new
             {
                 request.Model,
@@ -522,8 +511,6 @@ public sealed class GameModelContextProvenanceExtension : IGameAgentExtension
         public IReadOnlyList<ToolDefinition> Tools { get; set; } = Array.Empty<ToolDefinition>();
 
         public IReadOnlyList<GameSkill> Skills { get; set; } = Array.Empty<GameSkill>();
-
-        public GameRouteDecision? Route { get; set; }
 
         public ConcurrentDictionary<int, ModelRequest> PendingRequests { get; } = new();
 

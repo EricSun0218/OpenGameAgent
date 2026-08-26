@@ -39,13 +39,6 @@ public sealed class GameAgentBuilder
         return this;
     }
 
-    public GameAgentBuilder UseRouting(IGameRoutePolicy routePolicy)
-    {
-        EnsureMutable();
-        _options.RoutePolicy = routePolicy ?? throw new ArgumentNullException(nameof(routePolicy));
-        return this;
-    }
-
     public GameAgentBuilder UseModelSelector(GameModelSelector selector)
     {
         EnsureMutable();

@@ -13,9 +13,7 @@ public sealed class GameInputModelProjectionTests
     {
         var provider = new RecordingProvider(_ => Text("ok"));
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = QuickChatPolicy(),
-        });
+        { });
         var input = Input();
 
         var result = await runtime.RunAsync(input, TestContext.Current.CancellationToken);
@@ -42,7 +40,6 @@ public sealed class GameInputModelProjectionTests
         var provider = new RecordingProvider(_ => Text("ok"));
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
         {
-            RoutePolicy = QuickChatPolicy(),
             InputModelProjection = static _ => GameInputModelProjection.SuppressCoordinates,
         });
         var input = new GameInput(
@@ -132,12 +129,6 @@ public sealed class GameInputModelProjectionTests
         "{\"question\":\"hello\"}",
         new GameMoment("canonical-timeline", 42, "{\"day\":7}"),
         "input-1");
-
-    private static AutomaticGameRoutePolicy QuickChatPolicy() => new(
-        new Dictionary<string, GameRouteDecision>
-        {
-            ["chat"] = GameRouteDecision.Quick("typed"),
-        });
 
     private static ModelResponse Text(string text) => new(
         new AgentContent[] { new TextContent(text) },

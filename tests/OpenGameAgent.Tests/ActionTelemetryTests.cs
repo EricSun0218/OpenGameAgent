@@ -43,8 +43,7 @@ public sealed class ActionTelemetryTests
             "command",
             "{}",
             new GameMoment("world", 1),
-            inputId: "input",
-            metadata: new Dictionary<string, string> { ["agent.route"] = "agent" });
+            inputId: "input");
         var dispatcher = new DurableGameActionDispatcher(
             new InMemoryGameActionJournal(),
             new RejectingHandler());
@@ -89,8 +88,7 @@ public sealed class ActionTelemetryTests
             "command",
             "{}",
             new GameMoment("private-timeline", 42),
-            inputId: "input",
-            metadata: new Dictionary<string, string> { ["agent.route"] = "agent" });
+            inputId: "input");
         var journal = new InMemoryGameActionJournal();
         var handler = new SemanticResultHandler();
         var dispatcher = new DurableGameActionDispatcher(journal, handler);
@@ -426,8 +424,7 @@ public sealed class ActionTelemetryTests
         "command",
         "{}",
         new GameMoment("private-timeline", 42),
-        inputId: "input",
-        metadata: new Dictionary<string, string> { ["agent.route"] = "agent" });
+        inputId: "input");
 
     private static async Task<(string ModelJson, string CanonicalJson)> RunProjectedActionAsync(
         GameInput input,

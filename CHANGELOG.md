@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Replace the separate Quick/Agent/Plan/Workflow execution routes with one message-or-tool Agent
+  loop. A direct assistant message ends the turn, while a tool call executes and continues the same
+  loop with refreshed context. Persistent goals and task plans remain optional extension tools gated
+  by host-derived execution scope; fixed business processes stay in game code.
 - Add a model-only game-input coordinate projection so hosts can retain canonical session/actor/time
   authority while exposing stable opaque aliases or omitting actor, timeline, tick, and calendar from
   new model messages. The default envelope remains compatible.

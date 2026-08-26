@@ -8,9 +8,9 @@ using System.Threading.Tasks;
 namespace OpenGameAgent;
 
 /// <summary>
-/// Stable capability names that a host may grant to one input. Core QuickResponse and bounded
-/// short-agent execution remain available in every scope; optional durable capabilities require
-/// an explicit grant when the scope is restricted.
+/// Stable capability names that a host may grant to one input. The core Agent loop and ordinary
+/// host tools remain available in every scope; optional capabilities require an explicit grant
+/// when the scope is restricted.
 /// </summary>
 public static class GameExecutionCapabilities
 {
@@ -53,9 +53,9 @@ public sealed class GameExecutionScope
     public static GameExecutionScope Unrestricted { get; } = new(true, Array.Empty<string>());
 
     /// <summary>
-    /// Allows automatic QuickResponse/short-agent routing while withholding every optional grant.
+    /// Runs the core Agent loop while withholding every optional capability grant.
     /// </summary>
-    public static GameExecutionScope ShortTaskOnly { get; } = new(false, Array.Empty<string>());
+    public static GameExecutionScope NoOptionalCapabilities { get; } = new(false, Array.Empty<string>());
 
     public bool IsUnrestricted { get; }
 
@@ -85,26 +85,9 @@ public sealed class GameExecutionScope
 }
 
 /// <summary>
-/// Resolves a trusted execution scope before any extension contributes context, tools, or pending
-/// work. Server hosts should derive the result from their authenticated principal and policy.
+/// Resolves a trusted execution scope before any extension contributes context or tools. Server
+/// hosts should derive the result from their authenticated principal and policy.
 /// </summary>
 public delegate ValueTask<GameExecutionScope> GameExecutionScopeProvider(
     GameInput input,
     CancellationToken cancellationToken);
-
-public sealed class GameExecutionCapabilityDeniedException : InvalidOperationException
-{
-    public GameExecutionCapabilityDeniedException(string capability)
-        : base(CreateMessage(capability))
-    {
-        Capability = capability;
-    }
-
-    public string Capability { get; }
-
-    private static string CreateMessage(string capability)
-    {
-        var validated = GameExecutionScope.RequireCapability(capability, nameof(capability));
-        return $"The host did not grant execution capability '{validated}'.";
-    }
-}

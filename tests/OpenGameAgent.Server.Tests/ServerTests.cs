@@ -78,7 +78,7 @@ public sealed class ServerTests
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(json);
         Assert.Equal("Completed", document.RootElement.GetProperty("status").GetString());
-        Assert.Equal("QuickResponse", document.RootElement.GetProperty("route").GetString());
+        Assert.False(document.RootElement.TryGetProperty("route", out _));
         Assert.Equal(1, document.RootElement.GetProperty("sessionRevision").GetInt64());
         var messages = document.RootElement.GetProperty("agent").GetProperty("newMessages");
         Assert.Equal(2, messages.GetArrayLength());
@@ -548,13 +548,7 @@ public sealed class ServerTests
     public async Task EngineClientCanSteerAnActiveServerActor()
     {
         var provider = new BlockingServerProvider();
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
-        });
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
         await using var app = await CreateAppAsync(runtime);
         using var httpClient = app.GetTestClient();
         var client = new ServerGameAgentClient(new ServerGameAgentClientOptions(
@@ -589,13 +583,7 @@ public sealed class ServerTests
     public async Task EngineClientCanAbortAnActiveServerActor()
     {
         var provider = new BlockingServerProvider();
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
-        });
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
         await using var app = await CreateAppAsync(runtime);
         using var httpClient = app.GetTestClient();
         var client = new ServerGameAgentClient(new ServerGameAgentClientOptions(
@@ -968,13 +956,7 @@ public sealed class ServerTests
     public async Task OwnerAuthorizationCoversSteerAndAbortWithoutLettingPayloadSelectAnotherOwner()
     {
         var provider = new BlockingServerProvider();
-        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
-        });
+        var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
         var key = new GameSessionKey("owned-session", "owned-actor");
         var authorizer = new TestOwnerAuthorizer((subject, resource, _) =>
             subject == "owner-a" && resource == key);
@@ -1090,7 +1072,7 @@ public sealed class ServerTests
     [Fact]
     public async Task EngineClientRejectsAmbiguousServerResults()
     {
-        const string response = "{\"status\":\"Completed\",\"status\":\"Failed\",\"route\":\"QuickResponse\",\"sessionRevision\":1}";
+        const string response = "{\"status\":\"Completed\",\"status\":\"Failed\",\"sessionRevision\":1}";
         using var httpClient = new HttpClient(new StaticResponseHandler(response));
         var client = new ServerGameAgentClient(new ServerGameAgentClientOptions(
             httpClient,
@@ -1105,8 +1087,8 @@ public sealed class ServerTests
 
     [Theory]
     [InlineData("[]")]
-    [InlineData("{\"status\":1,\"route\":\"QuickResponse\",\"sessionRevision\":1}")]
-    [InlineData("{\"status\":\"Completed\",\"route\":\"QuickResponse\",\"sessionRevision\":1.5}")]
+    [InlineData("{\"status\":1,\"sessionRevision\":1}")]
+    [InlineData("{\"status\":\"Completed\",\"sessionRevision\":1.5}")]
     public async Task EngineClientRejectsMalformedServerResultShapes(string response)
     {
         using var httpClient = new HttpClient(new StaticResponseHandler(response));
@@ -1126,7 +1108,7 @@ public sealed class ServerTests
     {
         const string response = """
             event: result
-            data: {"status":"Completed","route":"QuickResponse","sessionRevision":1}
+            data: {"status":"Completed","sessionRevision":1}
 
             event: agent
             data: {"kind":"late"}
@@ -1180,9 +1162,9 @@ public sealed class ServerTests
     [Fact]
     public void RemoteResultRejectsInvalidContractValues()
     {
-        Assert.Throws<ArgumentException>(() => new RemoteGameAgentResult("", "QuickResponse", 0, "{}"));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new RemoteGameAgentResult("Completed", "QuickResponse", -1, "{}"));
-        Assert.Throws<ArgumentException>(() => new RemoteGameAgentResult("Completed", "QuickResponse", 0, "{broken"));
+        Assert.Throws<ArgumentException>(() => new RemoteGameAgentResult("", 0, "{}"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new RemoteGameAgentResult("Completed", -1, "{}"));
+        Assert.Throws<ArgumentException>(() => new RemoteGameAgentResult("Completed", 0, "{broken"));
     }
 
     [Fact]
@@ -1614,13 +1596,7 @@ public sealed class ServerTests
     public async Task RuntimeExactInterruptRejectsStaleCoordinatesAndSettlesTheRun()
     {
         var provider = new BlockingServerProvider();
-        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
-        {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("typed"),
-            }),
-        });
+        await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test"));
         await using var app = await CreateAppAsync(runtime);
         using var http = app.GetTestClient();
         var client = new GameRuntimeServerClient(new GameRuntimeServerClientOptions(
@@ -1953,10 +1929,6 @@ public sealed class ServerTests
     private static GameAgentRuntime CreateAudienceRuntime() =>
         new(new GameAgentRuntimeOptions(new AudienceProvider(), "test")
         {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["autonomous"] = GameRouteDecision.Agent("audience-test"),
-            }),
             ToolProvider = (_, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
             {
                 new AgentTool(

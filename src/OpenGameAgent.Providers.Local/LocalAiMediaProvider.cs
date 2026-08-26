@@ -178,7 +178,7 @@ public static class LocalAiMediaProvider
             if (request.Sources.Count != 0)
             {
                 throw new InvalidDataException(
-                    "LocalAI image generation does not define unlabelled reference-image semantics; use a workflow adapter for editing or inpainting.");
+                    "LocalAI image generation does not define unlabelled reference-image semantics; use a trusted ComfyUI adapter for editing or inpainting.");
             }
 
             var prompt = RequirePrompt(request.Prompt);

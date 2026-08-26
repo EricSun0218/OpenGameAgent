@@ -35,7 +35,7 @@ The Godot 4.7 .NET add-on provides an `OpenGameAgentNode` that runs either in pr
 
 ### Game authority
 
-Models propose typed intents. Your game still validates rules, resources, revisions, permissions, physics, pathfinding, and final state changes. Optional OpenGameAgent packages add durable actions, memory, scheduling, workflows, media providers, MCP, and other capabilities.
+Models propose typed intents. Your game still validates rules, resources, revisions, permissions, physics, pathfinding, and final state changes. Optional OpenGameAgent packages add durable actions, memory, scheduling, persistent planning, media providers, MCP, and other capabilities.
 
 ### Providers and privacy
 

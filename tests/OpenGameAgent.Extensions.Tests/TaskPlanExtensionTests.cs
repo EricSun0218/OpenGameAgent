@@ -254,31 +254,6 @@ public sealed class TaskPlanExtensionTests
         var listJson = Assert.IsType<JsonContent>(Assert.Single(listMessage.Content)).Json;
         Assert.Contains("\"Paused\"", listJson, StringComparison.Ordinal);
 
-        var pending = new ConcurrentQueue<bool>();
-        await using (var pendingRuntime = new GameAgentBuilder(
-                new ScriptedProvider(new[] { TextResponse("observed") }),
-                "model")
-            .UseSessionStore(store)
-            .UseExtension(extension)
-            .UseExtension(
-                "paused.pending-work.observer",
-                "1",
-                api => api.RegisterRouteRule(
-                    "capture",
-                    (_, _, hasPendingWork, _) =>
-                    {
-                        pending.Enqueue(hasPendingWork);
-                        return new ValueTask<GameRouteDecision?>(GameRouteDecision.Agent("captured"));
-                    },
-                    priority: 1_000))
-            .Build())
-        {
-            var result = await pendingRuntime.RunAsync(Input("paused-pending"), TestContext.Current.CancellationToken);
-            Assert.True(result.Succeeded, result.Error ?? result.AgentResult?.Error);
-        }
-
-        Assert.False(Assert.Single(pending));
-
         await RunAsync(
             store,
             extension,
@@ -560,40 +535,6 @@ public sealed class TaskPlanExtensionTests
             cancellationToken: TestContext.Current.CancellationToken)).Plans);
         Assert.Equal("first", plan.Id);
         Assert.Equal(GameTaskPlanStatus.Paused, plan.Status);
-    }
-
-    [Fact]
-    public async Task ActivePlanIsExposedAsPendingWorkOnLaterInputs()
-    {
-        var store = new InMemoryGameSessionStore();
-        var pending = new ConcurrentQueue<bool>();
-        await RunAsync(
-            store,
-            new TaskPlanExtension((_, _) => new ValueTask<bool>(true)),
-            Input("create"),
-            ToolCall("create", "{\"action\":\"create\",\"planId\":\"pending\",\"objective\":\"continue later\",\"steps\":[\"one\",\"two\"]}"),
-            TextResponse("created"));
-
-        await using var runtime = new GameAgentBuilder(new ScriptedProvider(new[] { TextResponse("observed") }), "model")
-            .UseSessionStore(store)
-            .UseExtension(new TaskPlanExtension((_, _) => new ValueTask<bool>(true)))
-            .UseExtension(
-                "pending-work.observer",
-                "1",
-                api => api.RegisterRouteRule(
-                    "capture",
-                    (_, _, hasPendingWork, _) =>
-                    {
-                        pending.Enqueue(hasPendingWork);
-                        return new ValueTask<GameRouteDecision?>(GameRouteDecision.Agent("captured"));
-                    },
-                    priority: 1_000))
-            .Build();
-
-        var result = await runtime.RunAsync(Input("later"), TestContext.Current.CancellationToken);
-
-        Assert.True(result.Succeeded);
-        Assert.True(Assert.Single(pending));
     }
 
     [Fact]

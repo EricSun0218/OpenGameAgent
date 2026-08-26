@@ -11,9 +11,6 @@ public static class GameExtensionPermissions
     public const string ToolsRegister = "tools.register";
     public const string ToolsFilter = "tools.filter";
     public const string SkillsRegister = "skills.register";
-    public const string RoutesRegister = "routes.register";
-    public const string PendingWorkRegister = "pending-work.register";
-    public const string WorkflowsRegister = "workflows.register";
     public const string HooksRegister = "hooks.register";
     public const string PromptContribute = "prompt.contribute";
     public const string ModelsRegister = "models.register";
@@ -26,9 +23,6 @@ public static class GameExtensionPermissions
         ToolsRegister,
         ToolsFilter,
         SkillsRegister,
-        RoutesRegister,
-        PendingWorkRegister,
-        WorkflowsRegister,
         HooksRegister,
         PromptContribute,
         ModelsRegister,
@@ -371,10 +365,6 @@ public static class GameExtensionConformance
         {
             runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "extension-conformance")
             {
-                RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-                {
-                    ["extension.conformance"] = GameRouteDecision.Agent("conformance"),
-                }),
                 Extensions = { extension },
             });
         }
@@ -507,9 +497,6 @@ public static class GameExtensionConformance
         GameAgentExtensionResourceKind.ToolProvider => GameExtensionPermissions.ToolsRegister,
         GameAgentExtensionResourceKind.ToolVisibilityPolicy => GameExtensionPermissions.ToolsFilter,
         GameAgentExtensionResourceKind.SkillProvider => GameExtensionPermissions.SkillsRegister,
-        GameAgentExtensionResourceKind.RouteRule => GameExtensionPermissions.RoutesRegister,
-        GameAgentExtensionResourceKind.PendingWorkProvider => GameExtensionPermissions.PendingWorkRegister,
-        GameAgentExtensionResourceKind.Workflow => GameExtensionPermissions.WorkflowsRegister,
         GameAgentExtensionResourceKind.AgentHooks => GameExtensionPermissions.HooksRegister,
         GameAgentExtensionResourceKind.PromptFragment => GameExtensionPermissions.PromptContribute,
         GameAgentExtensionResourceKind.ModelProvider => GameExtensionPermissions.ModelsRegister,

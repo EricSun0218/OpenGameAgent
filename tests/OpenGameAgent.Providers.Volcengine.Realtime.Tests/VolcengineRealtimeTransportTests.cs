@@ -307,10 +307,6 @@ public sealed class VolcengineRealtimeTransportTests
         var dispatcher = new DurableGameActionDispatcher(journal, handler);
         await using var runtime = new GameAgentRuntime(new GameAgentRuntimeOptions(provider, "test")
         {
-            RoutePolicy = new AutomaticGameRoutePolicy(new Dictionary<string, GameRouteDecision>
-            {
-                ["realtime"] = GameRouteDecision.Agent("realtime"),
-            }),
             ToolProvider = (input, _) => new ValueTask<IReadOnlyList<AgentTool>>(new[]
             {
                 GameActionTool.Create(

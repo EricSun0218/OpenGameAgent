@@ -31,16 +31,16 @@ The game layer converts a `GameInput` into a bounded kernel run. It owns:
 
 - game coordinates (`session`, `actor`, `timeline`, `tick`);
 - context and skill selection;
-- quick/full/workflow routing;
+- collection of currently authorized tools for one unified Agent loop;
 - optimistic session persistence and duplicate input detection;
 - same-actor ordering and bounded cross-actor concurrency;
-- reusable action, workflow, memory, schedule, and mailbox primitives.
+- reusable action, memory, schedule, and mailbox primitives.
 
 It does not own a universal world model. Context remains opaque JSON supplied by the game, so a turn-based strategy game and a real-time character simulation can use the same runtime without flattening their data into a common schema.
 
 ### Optional packages
 
-- `OpenGameAgent.Extensions` adds policy, durable high-risk tool approval, searchable tools, structured player interaction, goals, host-verified task plans, memory, artifacts, external knowledge, delegation, tracing, and durable workflow graphs.
+- `OpenGameAgent.Extensions` adds policy, durable high-risk tool approval, searchable tools, structured player interaction, goals, host-verified task plans, memory, artifacts, external knowledge, delegation, and tracing.
 - `OpenGameAgent.Memory` adds an optional, model-agnostic embedding contract, rebuildable vector index, lexical/vector hybrid recall, structured diagnostics, and game-time reranking. `OpenGameAgent.Memory.Onnx` optionally implements that contract for an in-process BGE-M3 INT8 model directory. Neither package replaces the authoritative memory save or bundles model weights.
 - `OpenGameAgent.Models` adds provider/model catalogs, capability-aware selection, reasoning levels, cost metadata, dynamic refresh, and replaceable authentication.
 - `OpenGameAgent.Models.BuiltIn` turns the bundled directory into an executable multi-provider model runtime; `OpenGameAgent.Models.Auth.BuiltIn` adds explicitly configured browser and device authorization flows.
@@ -51,9 +51,9 @@ It does not own a universal world model. Context remains opaque JSON supplied by
 - Provider, persistence, engine, client, and server packages stay replaceable and do not change kernel semantics.
 - `OpenGameAgent.Runtime.Protocol` and `OpenGameAgent.Runtime.Hosting` optionally expose the same runtime through a versioned Session/Run/Turn/Item contract, bounded replay, and exact run/turn control. They are not Kernel dependencies; see [OpenGameAgent Runtime Protocol v1](runtime-protocol.md).
 
-`GameAgentBuilder` is the composition root. Extensions register prompt fragments, context, tools, skills, route rules, workflows, hooks, model providers, services, typed lifecycle events, and typed channels. Registration names are scoped and validated, extension state is namespaced inside the session, and the builder is one-shot so a running configuration cannot be mutated accidentally.
+`GameAgentBuilder` is the composition root. Extensions register prompt fragments, context, tools, skills, hooks, model providers, services, typed lifecycle events, and typed channels. Registration names are scoped and validated, extension state is namespaced inside the session, and the builder is one-shot so a running configuration cannot be mutated accidentally.
 
-This separation is the compatibility boundary. The kernel owns canonical messages, streaming, turns, tools, cancellation, steering, and transcript correctness. The game runtime owns game coordinates, actor lanes, route admission, and persistence orchestration. Everything more specialized should normally remain an optional extension.
+This separation is the architectural boundary. The kernel owns canonical messages, streaming, turns, tools, cancellation, steering, and transcript correctness. The game runtime owns game coordinates, actor lanes, capability-scoped tool collection, and persistence orchestration. Everything more specialized should normally remain an optional extension.
 
 ## Authority boundary
 
@@ -120,15 +120,11 @@ The system prompt keeps the most reusable bytes first: base instructions, then s
 
 After a tool turn, `GameAgentRuntime` refreshes authoritative context, tools, and selected skills by default before the next model request. A configured next-turn hook can supply an explicit replacement context instead. Active game-layer runs can also be steered or aborted by `GameSessionKey`; messages never cross actor lanes.
 
-## Routing
+## Agent execution
 
-The route is selected before skills and the kernel run:
+Every input uses the same message-or-tool loop. Context, skills, and authorized tools are collected before the first request. An assistant message ends the turn; tool calls are validated and executed, their results are appended in source order, and the loop continues after refreshing mutable game context and capabilities. The runtime does not spend a second model request classifying task complexity.
 
-- `QuickResponse`: one model turn, no tools;
-- `Agent`: bounded multi-turn model/tool loop;
-- `Workflow`: a named deterministic or hybrid workflow.
-
-Explicit input metadata has highest precedence. Then typed routes and authoritative pending work are applied. Pending work selects the full agent route without spending a classifier request. When an optional classifier is configured, it may still choose Quick for an ordinary input even though tools exist; otherwise the presence of tools conservatively selects Agent. Routing-model usage shares the input's model-token budget and is persisted as a separate cause. Games can replace `IGameRoutePolicy` entirely. See [Execution routing and performance](execution-routing-and-performance.md).
+Goals and ordered task plans are optional tools contributed by extensions. `GameExecutionScopeProvider` lets the authenticated host hide those tools for a specific actor or input without disabling ordinary replies or ordinary game tools. Fixed business processes remain game-owned state machines. See [Agent loop and performance](agent-loop-and-performance.md).
 
 ## Placement
 
@@ -155,7 +151,6 @@ Provider credentials can be supplied directly, resolved from a game-owned creden
 - Custom stores must return the exact state they claim to have saved; mismatched session snapshots, checkpoints, action entries, or receipts fail closed.
 - Local stores write through temporary files and replace the durable target. Processes using the same directory coordinate with cross-process file leases. They are still local save-store building blocks, not a distributed database; multi-host services need transactional shared storage and actor ownership.
 - Bounded limits protect strings, JSON, messages, turns, tokens, queues, tools, callbacks, progress, and concurrency.
-- Durable workflow checkpoints bind the workflow, session, actor, and canonical input. The same interrupted input can resume; a different input is rejected until the unfinished invocation is settled.
 - Optional ordinary-tool recovery uses `IGameRunOperationJournal`. The journal claims a stable operation before dispatch, persists terminal results, and applies each tool's `Never`, `Safe`, or `Recoverable` replay policy after a crash. Non-idempotent tools default to `Never`; read-only and idempotent tools default to `Safe`. `GameActionTool` explicitly uses recovery because its authoritative dispatcher owns the stronger intent/receipt journal.
 - The optional HTTP service accepts JSON only on mutation endpoints, bounds request bodies to 8 MB by default, and parses with a fixed depth limit.
 
@@ -163,6 +158,6 @@ The framework cannot make arbitrary game code transactional. The game must make 
 
 Model attempts remain safe to retry until a canonical assistant message is committed. Completed tool turns, compaction usage, and usage-ledger settlement already use idempotent session CAS records. Exact steer/abort coordinates are intentionally scoped to the live run: after a process restart, clients reconcile the terminal stream/transcript and submit a new follow-up rather than silently replaying a command addressed to an old run ID.
 
-Workflow checkpoints and game-state commits are also separate transactions unless the host supplies a shared transactional implementation. Every workflow node that can cause a side effect should use a stable operation ID and the durable action dispatcher. When several save forks remain accessible in one store, assign a new session/save namespace as well as a new timeline ID; transcript identity is `(session, actor)`.
+When several save forks remain accessible in one store, assign a new session/save namespace as well as a new timeline ID; transcript identity is `(session, actor)`.
 
 The built-in schema validator intentionally implements a common bounded subset: type, enum/const, object properties and required fields, additional properties, arrays, strings, and numeric bounds. The final tool definitions produced by request hooks are preflighted before a provider stream is opened, and returned arguments are validated again before execution. Unsupported assertion keywords fail closed even when nested in an unselected schema branch. For advanced validation, give the tool a permissive `{}` schema and supply its custom validation delegate; mutation handlers must still revalidate business rules.

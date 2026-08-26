@@ -17,8 +17,6 @@ public sealed class GameAgentLatencyBreakdown
         double sessionLoadMilliseconds,
         double contextBuildMilliseconds,
         double toolCollectionMilliseconds,
-        double routingMilliseconds,
-        double routingModelMilliseconds,
         double skillSelectionMilliseconds,
         double? timeToFirstResponseMilliseconds,
         double? providerTimeToFirstResponseMilliseconds,
@@ -38,8 +36,6 @@ public sealed class GameAgentLatencyBreakdown
         SessionLoadMilliseconds = sessionLoadMilliseconds;
         ContextBuildMilliseconds = contextBuildMilliseconds;
         ToolCollectionMilliseconds = toolCollectionMilliseconds;
-        RoutingMilliseconds = routingMilliseconds;
-        RoutingModelMilliseconds = routingModelMilliseconds;
         SkillSelectionMilliseconds = skillSelectionMilliseconds;
         TimeToFirstResponseMilliseconds = timeToFirstResponseMilliseconds;
         ProviderTimeToFirstResponseMilliseconds = providerTimeToFirstResponseMilliseconds;
@@ -60,9 +56,6 @@ public sealed class GameAgentLatencyBreakdown
     public double SessionLoadMilliseconds { get; }
     public double ContextBuildMilliseconds { get; }
     public double ToolCollectionMilliseconds { get; }
-    public double RoutingMilliseconds { get; }
-    public double RoutingModelMilliseconds { get; }
-    public double RoutingFrameworkMilliseconds => Math.Max(0, RoutingMilliseconds - RoutingModelMilliseconds);
     public double SkillSelectionMilliseconds { get; }
     public double? TimeToFirstResponseMilliseconds { get; }
     public double? ProviderTimeToFirstResponseMilliseconds { get; }
@@ -195,18 +188,6 @@ public sealed class GameAgentRunPerformance
         string sessionId,
         string actorId,
         string inputId,
-        string route,
-        string routeReason,
-        string? routeClassificationStatus,
-        string? routeClassificationFailure,
-        string? routeFallbackReason,
-        IReadOnlyList<string> routeClassificationContentKinds,
-        long routeClassificationVisibleContentCharacters,
-        long routeClassificationReasoningCharacters,
-        int? routeClassificationProviderStatusCode,
-        string? routeClassificationProviderFailureCategory,
-        IReadOnlyList<string> routeClassificationProviderRequestFields,
-        string? routeClassificationProviderRequestId,
         string? provider,
         string? model,
         string status,
@@ -225,18 +206,6 @@ public sealed class GameAgentRunPerformance
         SessionId = sessionId;
         ActorId = actorId;
         InputId = inputId;
-        Route = route;
-        RouteReason = routeReason;
-        RouteClassificationStatus = routeClassificationStatus;
-        RouteClassificationFailure = routeClassificationFailure;
-        RouteFallbackReason = routeFallbackReason;
-        RouteClassificationContentKinds = routeClassificationContentKinds;
-        RouteClassificationVisibleContentCharacters = routeClassificationVisibleContentCharacters;
-        RouteClassificationReasoningCharacters = routeClassificationReasoningCharacters;
-        RouteClassificationProviderStatusCode = routeClassificationProviderStatusCode;
-        RouteClassificationProviderFailureCategory = routeClassificationProviderFailureCategory;
-        RouteClassificationProviderRequestFields = routeClassificationProviderRequestFields;
-        RouteClassificationProviderRequestId = routeClassificationProviderRequestId;
         Provider = provider;
         Model = model;
         Status = status;
@@ -256,18 +225,6 @@ public sealed class GameAgentRunPerformance
     public string SessionId { get; }
     public string ActorId { get; }
     public string InputId { get; }
-    public string Route { get; }
-    public string RouteReason { get; }
-    public string? RouteClassificationStatus { get; }
-    public string? RouteClassificationFailure { get; }
-    public string? RouteFallbackReason { get; }
-    public IReadOnlyList<string> RouteClassificationContentKinds { get; }
-    public long RouteClassificationVisibleContentCharacters { get; }
-    public long RouteClassificationReasoningCharacters { get; }
-    public int? RouteClassificationProviderStatusCode { get; }
-    public string? RouteClassificationProviderFailureCategory { get; }
-    public IReadOnlyList<string> RouteClassificationProviderRequestFields { get; }
-    public string? RouteClassificationProviderRequestId { get; }
     public string? Provider { get; }
     public string? Model { get; }
     public string Status { get; }
@@ -299,7 +256,6 @@ public sealed class GameAgentToolAggregate
     internal GameAgentToolAggregate(
         string tool,
         string failureCategory,
-        string route,
         string provider,
         string model,
         int calls,
@@ -312,7 +268,6 @@ public sealed class GameAgentToolAggregate
     {
         Tool = tool;
         FailureCategory = failureCategory;
-        Route = route;
         Provider = provider;
         Model = model;
         Calls = calls;
@@ -326,7 +281,6 @@ public sealed class GameAgentToolAggregate
 
     public string Tool { get; }
     public string FailureCategory { get; }
-    public string Route { get; }
     public string Provider { get; }
     public string Model { get; }
     public int Calls { get; }
@@ -381,8 +335,6 @@ public sealed class GameAgentPerformanceSummary
     public int Replans => Runs.Sum(value => value.Replans);
     public int ProviderRetries => Runs.Sum(value => value.Retries);
     public int ProviderFallbacks => Runs.Sum(value => value.Fallbacks);
-    public int RouteClassificationFailures => Runs.Count(value => value.RouteClassificationFailure is not null);
-    public int RouteFallbacks => Runs.Count(value => value.RouteClassificationStatus == "fallback");
     public int ExactToolRepeatAdvisories => Runs.Sum(value => value.ExactToolRepeatAdvisories);
     public int ExactToolRepeatTerminations => Runs.Sum(value => value.ExactToolRepeatTerminations);
     public long TotalTokens => Runs.Sum(value => value.TotalTokens);
@@ -410,14 +362,12 @@ public sealed class GameAgentPerformanceSummary
             {
                 value.tool.Tool,
                 value.tool.FailureCategory,
-                value.run.Route,
                 Provider = value.tool.Provider ?? value.run.Provider ?? "unknown",
                 Model = value.tool.Model ?? value.run.Model ?? "unknown",
             })
             .Select(group => new GameAgentToolAggregate(
                 group.Key.Tool,
                 group.Key.FailureCategory,
-                group.Key.Route,
                 group.Key.Provider,
                 group.Key.Model,
                 group.Count(),
@@ -429,7 +379,6 @@ public sealed class GameAgentPerformanceSummary
                 group.Sum(value => value.tool.DurationMilliseconds)))
             .OrderBy(value => value.Tool, StringComparer.Ordinal)
             .ThenBy(value => value.FailureCategory, StringComparer.Ordinal)
-            .ThenBy(value => value.Route, StringComparer.Ordinal)
             .ThenBy(value => value.Provider, StringComparer.Ordinal)
             .ThenBy(value => value.Model, StringComparer.Ordinal)
             .ToArray();
@@ -473,13 +422,12 @@ public sealed class GameAgentPerformanceSummary
         var text = new StringBuilder();
         text.AppendLine($"Runs: {Runs.Count}; tools: {ToolCalls}; tool success: {ToolSuccessRate:P2}");
         text.AppendLine($"Retries: {ProviderRetries}; fallbacks: {ProviderFallbacks}; uncertain writes: {UncertainWrites}; duplicates blocked: {DuplicateWritesPrevented}");
-        text.AppendLine($"Route classifier failures: {RouteClassificationFailures}; route fallbacks: {RouteFallbacks}");
         text.AppendLine($"Exact tool-repeat advisories: {ExactToolRepeatAdvisories}; terminated loops: {ExactToolRepeatTerminations}");
         text.AppendLine($"Tokens: {TotalTokens}; cost: {(CostKnown ? (TotalCost ?? 0).ToString("0.######", CultureInfo.InvariantCulture) : "unknown")}");
         foreach (var run in Runs)
         {
             text.AppendLine(
-                $"{run.SessionId}/{run.ActorId}/{run.InputId} route={run.Route} reason={run.RouteReason} classification={run.RouteClassificationStatus ?? "n/a"} classificationFailure={run.RouteClassificationFailure ?? "n/a"} routeFallback={run.RouteFallbackReason ?? "n/a"} classifierContent={string.Join(",", run.RouteClassificationContentKinds)} classifierVisibleChars={run.RouteClassificationVisibleContentCharacters} classifierReasoningChars={run.RouteClassificationReasoningCharacters} classifierProviderStatus={run.RouteClassificationProviderStatusCode?.ToString(CultureInfo.InvariantCulture) ?? "n/a"} classifierProviderFailure={run.RouteClassificationProviderFailureCategory ?? "n/a"} classifierRequestFields={string.Join(",", run.RouteClassificationProviderRequestFields)} classifierRequestId={run.RouteClassificationProviderRequestId ?? "n/a"} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
+                $"{run.SessionId}/{run.ActorId}/{run.InputId} status={run.Status} total={run.Latency.TotalMilliseconds:0.###}ms ttft={Format(run.Latency.TimeToFirstResponseMilliseconds)} tools={run.ToolCalls}");
             foreach (var provider in run.ContextProviders)
             {
                 text.AppendLine(
@@ -507,7 +455,6 @@ public sealed class GameAgentPerformanceSummary
     {
         var entries = source.OrderBy(value => value.OperationalTimestamp).ThenBy(value => value.Sequence).ToArray();
         var input = entries.FirstOrDefault(value => value.Kind == "input.received");
-        var routeEntry = entries.LastOrDefault(value => value.Kind == "route.selected");
         var completed = entries.LastOrDefault(value => value.Kind == "run.completed");
         var messageEnded = entries.LastOrDefault(value => value.Kind == "kernel.messageended");
         var firstResponse = entries.FirstOrDefault(value => value.Kind == "kernel.messagestarted");
@@ -524,8 +471,7 @@ public sealed class GameAgentPerformanceSummary
             .Sum(value => ReadDouble(value, "waitMilliseconds"));
         var executionDuration = Milliseconds(executionStart, executionEnd);
         var toolExecutionDuration = tools.Sum(value => value.DurationMilliseconds);
-        var routingModelDuration = ReadDouble(routeEntry, "modelDurationMilliseconds");
-        var modelRequestDuration = routingModelDuration + modelRequests.Sum(value => value.DurationMilliseconds);
+        var modelRequestDuration = modelRequests.Sum(value => value.DurationMilliseconds);
         var providerTimeToFirstResponse = modelRequests
             .Where(value => value.TimeToFirstResponseMilliseconds is not null)
             .Select(value => value.TimeToFirstResponseMilliseconds)
@@ -541,8 +487,6 @@ public sealed class GameAgentPerformanceSummary
             ReadDouble(input, "sessionLoadMilliseconds"),
             ReadDouble(entries.LastOrDefault(value => value.Kind == "context.collected"), "durationMilliseconds"),
             ReadDouble(entries.LastOrDefault(value => value.Kind == "tools.collected"), "durationMilliseconds"),
-            ReadDouble(routeEntry, "durationMilliseconds"),
-            routingModelDuration,
             ReadDouble(entries.LastOrDefault(value => value.Kind == "skills.selected"), "durationMilliseconds"),
             firstResponse is null ? null : Milliseconds(executionStart, firstResponse.OperationalTimestamp),
             providerTimeToFirstResponse,
@@ -560,18 +504,6 @@ public sealed class GameAgentPerformanceSummary
             sessionId,
             actorId,
             inputId,
-            ReadString(routeEntry, "route") ?? "Unknown",
-            ReadString(routeEntry, "reason") ?? "Unknown",
-            ReadString(routeEntry, "classificationStatus"),
-            ReadString(routeEntry, "classificationFailure"),
-            ReadString(routeEntry, "classificationFallbackReason"),
-            ReadStringArray(routeEntry, "classificationContentKinds"),
-            ReadInt64(routeEntry is null ? null : ReadDetails(routeEntry), "classificationVisibleContentCharacters"),
-            ReadInt64(routeEntry is null ? null : ReadDetails(routeEntry), "classificationReasoningCharacters"),
-            ReadNullableInt32(routeEntry is null ? null : ReadDetails(routeEntry), "classificationProviderStatusCode"),
-            ReadString(routeEntry, "classificationProviderFailureCategory"),
-            ReadStringArray(routeEntry, "classificationProviderRequestFields"),
-            ReadString(routeEntry, "classificationProviderRequestId"),
             ReadString(messageEnded, "provider"),
             ReadString(messageEnded, "responseModel") ?? ReadString(messageEnded, "requestedModel"),
             ReadString(completed, "status") ?? "Unknown",
@@ -794,25 +726,6 @@ public sealed class GameAgentPerformanceSummary
             ? property.GetString()
             : null;
 
-    private static IReadOnlyList<string> ReadStringArray(GameAgentTraceEntry? entry, string name)
-    {
-        if (entry is null)
-        {
-            return Array.Empty<string>();
-        }
-
-        var root = ReadDetails(entry);
-        if (!root.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Array)
-        {
-            return Array.Empty<string>();
-        }
-
-        return Array.AsReadOnly(property.EnumerateArray()
-            .Where(item => item.ValueKind == JsonValueKind.String)
-            .Select(item => item.GetString()!)
-            .ToArray());
-    }
-
     private static double ReadDouble(GameAgentTraceEntry? entry, string name) =>
         entry is null ? 0 : ReadNullableDouble(ReadDetails(entry), name) ?? 0;
 
@@ -831,14 +744,6 @@ public sealed class GameAgentPerformanceSummary
         && property.TryGetInt64(out var number)
             ? number
             : 0;
-
-    private static int? ReadNullableInt32(JsonElement? element, string name) =>
-        element is { ValueKind: JsonValueKind.Object } value
-        && value.TryGetProperty(name, out var property)
-        && property.ValueKind == JsonValueKind.Number
-        && property.TryGetInt32(out var number)
-            ? number
-            : null;
 
     private static bool ReadBoolean(GameAgentTraceEntry? entry, string name, bool defaultValue) =>
         entry is null ? defaultValue : ReadBoolean(ReadDetails(entry), name, defaultValue);

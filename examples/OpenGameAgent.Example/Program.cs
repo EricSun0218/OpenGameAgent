@@ -81,7 +81,7 @@ var result = await runtime.RunAsync(
     });
 
 Console.WriteLine();
-Console.WriteLine($"Status: {result.Status}; route: {result.Route.Route}; revision: {result.SessionRevision}");
+Console.WriteLine($"Status: {result.Status}; revision: {result.SessionRevision}");
 Console.WriteLine("World: " + JsonSerializer.Serialize(world.Snapshot()));
 
 internal sealed class ExampleContextProvider : IGameContextProvider

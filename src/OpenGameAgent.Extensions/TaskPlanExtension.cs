@@ -464,30 +464,22 @@ public sealed class TaskPlanExtension : IGameAgentExtension
     {
         api.RegisterContextProvider(
             "task-plan-guidance",
-            (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
-                !AllowsPersistentPlanning(context)
-                    ? Array.Empty<GameContextSlice>()
-                    : new[]
-                    {
-                        new GameContextSlice(
-                            "task-plan-guidance",
-                            JsonSerializer.Serialize(
-                                "Use manage_task_plan for multi-step work that must survive later inputs. An active or paused plan retains exactly one in-progress step. Paused plans do not drive pending work and must be resumed before advancing. Advance only with evidence the host can verify, never by assertion. Use replace_remaining when new world state invalidates unfinished work; completed steps remain immutable.")),
-                    }));
-        api.RegisterContextProvider(
-            "explicit-plan-guidance",
-            (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
-                AllowsPersistentPlanning(context)
-                && context.Input.Metadata.TryGetValue("agent.route", out var route)
-                && string.Equals(route, "plan", StringComparison.OrdinalIgnoreCase)
-                    ? new[]
-                    {
-                        new GameContextSlice(
-                            "execution-mode",
-                            JsonSerializer.Serialize(
-                                "The host explicitly requested persistent-plan execution. Create or resume a task plan before treating this input as durable multi-input work. Preserve completed steps and require host-verifiable evidence for progress.")),
-                    }
-                    : Array.Empty<GameContextSlice>()));
+            (context, _) =>
+            {
+                if (!AllowsPersistentPlanning(context))
+                {
+                    return new ValueTask<IReadOnlyList<GameContextSlice>>(Array.Empty<GameContextSlice>());
+                }
+
+                PruneTerminalPlans(context.State);
+                return new ValueTask<IReadOnlyList<GameContextSlice>>(new[]
+                {
+                    new GameContextSlice(
+                        "task-plan-guidance",
+                        JsonSerializer.Serialize(
+                            "Use manage_task_plan only for multi-step work that must survive later inputs. An active or paused plan retains exactly one in-progress step. Paused plans do not advance. Advance only with host-verifiable evidence, and replace only unfinished work when new world state invalidates the plan.")),
+                });
+            });
         api.RegisterToolProvider(
             "task-plan-tools",
             (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(
@@ -498,28 +490,10 @@ public sealed class TaskPlanExtension : IGameAgentExtension
                         CreateManageTool(api, context),
                         CreateListTool(context),
                     }));
-        api.RegisterPendingWorkProvider(
-            "active-task-plans",
-            (context, _) =>
-            {
-                if (!AllowsPersistentPlanning(context))
-                {
-                    return new ValueTask<bool>(false);
-                }
-
-                PruneTerminalPlans(context.State);
-                return new ValueTask<bool>(ReadAll(context.State).Any(plan => plan.Status == GameTaskPlanStatus.Active));
-            },
-            priority: 450);
     }
 
     private static bool AllowsPersistentPlanning(GameAgentExtensionRunContext context) =>
-        !IsDirect(context.Input)
-        && context.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning);
-
-    private static bool IsDirect(GameInput input) =>
-        input.Metadata.TryGetValue("agent.route", out var route)
-        && string.Equals(route, "direct", StringComparison.OrdinalIgnoreCase);
+        context.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning);
 
     private AgentTool CreateManageTool(GameAgentExtensionApi api, GameAgentExtensionRunContext context) =>
         new(

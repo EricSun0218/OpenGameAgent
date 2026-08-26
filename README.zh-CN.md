@@ -24,7 +24,7 @@ OpenGameAgent 是专门驱动游戏内 NPC 和 Agent 的开源 C# Runtime。它�
 
 OpenGameAgent 把模型从“对话接口”变成可编程的 NPC 或游戏内 Agent。开发者负责选择模型、提供结构化上下文、注册游戏工具和组合扩展；框架可以边执行边流式输出进度、工具调用和回复，也能在执行过程中调整指令或取消任务。紧凑内核可以单独使用，上层游戏 Runtime 则补齐会话、角色身份、游戏时间线、记忆、计划、多 NPC 调度、引擎线程交接和可靠动作回执。
 
-短任务可以直接运行完整的 ReAct 循环：观察当前状态，判断下一步，调用一个或多个工具，读取结构化结果，再决定继续行动还是回复。复杂任务可以拆成跨输入保存的目标与有序计划，等待游戏事件，保留已经完成的步骤，并在新证据使原方案失效时替换未完成部分。执行路径必须固定的场景，则使用确定性 Workflow。
+所有输入都进入同一条 Agent 循环：模型直接回复时，本轮立刻结束；模型发出工具调用时，Runtime 执行已授权工具、写入结构化结果、刷新游戏上下文，再继续下一轮。框架不会先额外调用一个“任务复杂度分类模型”，也没有彼此割裂的 Quick、Agent、Plan 执行引擎。复杂任务可以选择使用跨输入保存的目标与有序计划，等待游戏事件，保留已完成步骤，并在新证据使原方案失效时替换未完成部分；固定业务流程仍由游戏自己的状态机和工具负责。
 
 OpenGameAgent 可以放在 Godot 或 Unity 进程内，也可以运行在 Unreal Engine 原生客户端背后的 sidecar、.NET 游戏服务端或独立 Agent 服务中。输入是有明确大小限制的 JSON，并可携带持久化图片观察，因此既能表示对话，也能表示战斗状态、模拟 Tick、UI 事件、传感数据、截图或任何游戏自有上下文；输入不必是自然语言。框架不内置模型，同时支持云端和本地 API。
 
@@ -45,11 +45,11 @@ OpenGameAgent 可以放在 Godot 或 Unity 进程内，也可以运行在 Unreal
 
 OpenGameAgent 不绑定任何模型或 Provider。角色通过开发者定义的工具行动，模型不能直接控制游戏状态；所有状态变更始终由游戏裁决。
 
-不是每次互动都需要完整循环。问候和事实回答可以走无副作用的 Quick 路由；需要少量工具的短任务走 Agent 路由；复杂任务再升级为持久计划；执行图固定的流程则交给确定性 Workflow。
+简单对话天然保持低延迟：模型回复一次，本轮就结束，也不会执行工具。需要行动时则在同一循环里继续调用工具；持久 Goal 与 TaskPlan 是可选扩展工具，只有宿主授予持久规划能力后才会向模型开放。
 
 > 当前源码预发布版本：`0.3.0-alpha.4`。在 `1.0` 前公开 API 仍可能调整；正式游戏应锁定不可变 tag 或精确源码提交。
 
-内核边界刻意保持小而稳定。后续游戏特有能力通常应通过扩展、工具、策略、工作流或游戏自有服务加入，而不是继续膨胀模型/工具循环。
+内核边界刻意保持小而稳定。后续游戏特有能力通常应通过扩展、工具、策略或游戏自有服务加入，而不是继续膨胀模型/工具循环。
 
 ## 安装
 
@@ -88,8 +88,8 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 命名时间线、整数 Tick 和可选日历 JSON；
 - 保留浮点数的结构化观察与上下文；
 - 经真实解码校验、内容寻址持久化、模型能力预检与会话授权读取的截图/图片输入；
-- 执行前 `auto`、无副作用 `quick`、短任务 `direct`/`agent`、持久 `plan` 与确定性 Workflow 路由；
-- 宿主推导的执行 scope：未授权角色仍可使用 auto/Quick/短 Agent，但无法看到、唤醒或创建持久计划；
+- 单一“直接回复或调用工具”的 Agent 循环，不额外消耗一次复杂度分类模型请求；
+- 宿主推导的执行 scope：未授权角色仍可正常回复和使用普通工具，但无法看到、唤醒或创建持久计划；
 - 同一角色串行、不同角色有界并行；
 - 先记日志的动作意图与游戏权威回执；
 - 按游戏时间过滤、过期并可自定义排序，且按 session/owner 持久分区的记忆；
@@ -100,7 +100,7 @@ OpenGameAgent 不替游戏规定玩法，而是提供可复用的游戏坐标与
 - 宿主证明的工具调用范围，以及面向高风险调用、可持久化、一次性、绑定世界版本的批准门禁；
 - 在每次模型请求前按输入计算工具可见性；
 - 游戏时间触发器，以及支持无 payload 积压查询的持久邮箱；
-- 可扩展工具、Skills、路由、Workflow、Hooks、事件与服务的类型化接口；
+- 可扩展上下文、工具、Skills、Hooks、事件、Provider 与服务的类型化接口；
 - 能力感知模型目录与开发者托管的短期凭证；
 - 面向 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 的可选本地发现和健康检查；
 - 外部工具按需发现与大型结果产物化；
@@ -120,7 +120,7 @@ Godot / Unity / Unreal Engine sidecar / .NET 游戏服务
         | GameInput（JSON + GameMoment）
         v
 GameAgentRuntime
-  上下文 | Skills | 路由 | 会话 | 角色队列 | 扩展
+  上下文 | Skills | 工具 | 会话 | 角色队列 | 扩展
         |
         v
 紧凑的有状态 Agent 内核 <---- 调整指令 / 追加输入
@@ -141,20 +141,20 @@ GameAgentRuntime
 | --- | --- |
 | Agent 内核 | 有界 ReAct 模型/工具循环、流式类型化消息、工具中间结果、执行中调整指令、追加输入、Hooks、取消、严格会话校验、提供方错误结果化 |
 | 工具执行 | provider 请求前 schema 预检及执行期有界 JSON Schema 子集校验、每个已接受调用都有结果、顺序屏障前后的有序并行分段、冲突键串行、精确重复循环保护、策略拦截/终止、宿主证明的显式/任务范围、持久一次性批准、超时与写入结果未知语义 |
-| 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、auto/quick/direct/plan/Workflow 路由、共享单次输入用量预算、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
+| 游戏 Runtime | 任意 JSON 输入、游戏时钟/时间线、单一“回复或工具”Agent 循环、共享单次输入用量预算、乐观并发会话、输入去重、角色并发、运行中 steering/abort |
 | 实时对话 | 有界 PCM16 流、实时转写/音频事件、字幕时间、插话取消/截断、不中断的后台 Agent handoff/steering，以及可取消替换的表现层行为 |
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
-| 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/路由/Workflow/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
-| 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持动态重规划与持久暂停/恢复且由宿主校验证据的有序任务清单、结构化行为学习、基于既有工具的复合 Skill、显式通用行为发现/采用、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派、追踪和可持久并行工作流图 |
+| 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
+| 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持动态重规划与持久暂停/恢复且由宿主校验证据的有序任务清单、结构化行为学习、基于既有工具的复合 Skill、显式通用行为发现/采用、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派和追踪 |
 | 开发工具 | 有界 JSONL 轨迹、命名上下文 Provider 与记忆召回分段耗时、Provider/框架/宿主归因、工具失败与 durable write 指标、并发 Benchmark runtime、本地仅观察 HTML 回放和离线/CI 评测规则 |
-| 世界原语 | 可恢复动作、有界引擎线程动作交接、可续跑 Workflow、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
+| 世界原语 | 可恢复动作、有界引擎线程动作交接、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
 | 可移植插件 | [Agent Plugins 1.0.0](docs/agent-plugins.md) `plugin.json`、直接子目录 `SKILL.md` 发现、MCP stdio/Streamable HTTP、客户端命名空间、路径限制与组件级故障隔离 |
 | 提供方 | Anthropic、Amazon Bedrock、Google Gemini/Vertex、Mistral、OpenAI Responses/Azure、OpenAI-compatible、OpenAI Realtime、火山实时语音、远程网关和消息网关；重试与回退包装器；中立 Provider 一致性 runner 与 fixture；可选的 Ollama、LM Studio、LocalAI、llama.cpp 与 vLLM 本地发现 |
 | 生成式媒体 | 图片/语音/视频中立注册表、通用异步 HTTP 任务、OpenRouter 渐进预览、OpenAI Images、火山方舟/Seedream，以及可选的 LocalAI 与可信 ComfyUI Workflow 适配器 |
 | 生成资产 | 稳定操作、内容寻址资源、持久生命周期、明确的未知结果、可恢复导入与游戏权威引擎回执 |
-| 持久化 | 崩溃安全的本地会话快照、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、Workflow 检查点、支持旧扁平布局迁移的 session/owner 分区记忆、邮箱、产物、委派、Skills 与提示词模板 |
+| 持久化 | 崩溃安全的本地会话快照、跨进程协调、权威动作日志、带显式重放策略的普通工具运行日志、生成资产任务/资源、支持旧扁平布局迁移的 session/owner 分区记忆、邮箱、产物、委派、Skills 与提示词模板 |
 | 语义记忆 | 可选模型无关嵌入、单次快照权威核验、分区可重建本地向量索引、词法/向量混合召回、无正文分段指标与游戏时间重排 |
 | 运行位置 | `netstandard2.1` 共享运行时可放在 Godot、Unity 或其他 C# 宿主；可选 .NET 8 HTTP/SSE 服务端以及 C#、原生 C++ 客户端 |
 | Runtime 协议 | 可选的版本化 Session/Run/Turn/Item 契约、能力协商、稳定事件 ID、有界重放与 gap 对账、精确 Run/Turn 控制、C# 客户端、Schema/fixture、C++ DTO，以及生成的 TypeScript/Python 客户端和 reducer |
@@ -170,7 +170,7 @@ GameAgentRuntime
 
 `OpenGameAgent.Models.BuiltIn` 会把内置模型目录变成可直接执行的运行时。目前它通过 9 种线路协议分发 27 个提供方定义与数百个可执行文本/工具模型，并统一应用提供方请求格式、推理参数、兼容性、成本、认证、取消与响应限界。开发者也可以绕过目录，直接使用底层 Provider 包连接一个明确的模型和端点。
 
-对于已知的托管 Provider，路由分类与主 Agent 应共用目录驱动 Runtime。底层 OpenAI-compatible 适配器有意要求显式协议设置，不会根据 URL 或模型名猜测供应商。
+对于已知的托管 Provider，应通过目录驱动 Runtime 构建 Agent Provider。底层 OpenAI-compatible 适配器有意要求显式协议设置，不会根据 URL 或模型名猜测供应商。
 
 `OpenGameAgent.Models.Auth.BuiltIn` 为支持的订阅服务提供可选浏览器或设备授权。框架不会内嵌公共客户端注册信息：需要 Client ID 的流程只有在游戏开发者显式提供后才会启用。Windows 桌面宿主可以增加 `OpenGameAgent.Models.Credentials.Windows`，通过同一个 `IGameCredentialStore` 获得有界、原子且使用 CurrentUser DPAPI 的持久化；其他平台可以提供自己的原生安全存储实现而无需修改认证代码。`OpenGameAgent.ProviderTransport` 只向观察器暴露白名单内且有界的响应元数据，不会把凭证或任意响应头交给追踪代码。详见 [Windows 凭据持久化](docs/windows-credentials.zh-CN.md)。
 
@@ -273,7 +273,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [本地模型、语音与媒体](docs/local-models.zh-CN.md)
 - [生成资产与权威导入](docs/generated-assets.md)
 - [图片输入与游戏感知](docs/image-input.md)
-- [执行路由与性能](docs/execution-routing-and-performance.zh-CN.md)
+- [Agent 循环与性能](docs/agent-loop-and-performance.zh-CN.md)
 - [轨迹、回放与离线评测](docs/devtools.md)
 
 ## OpenGameAgent 提供什么？

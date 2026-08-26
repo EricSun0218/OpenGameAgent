@@ -103,24 +103,6 @@ public static class GameAgentValueComparer
             && left.Zip(right, MessageEquals).All(equal => equal);
     }
 
-    public static bool WorkflowInvocationEquals(
-        GameWorkflowInvocationResult? left,
-        GameWorkflowInvocationResult? right)
-    {
-        if (ReferenceEquals(left, right))
-        {
-            return true;
-        }
-
-        return left is not null
-            && right is not null
-            && string.Equals(left.InputId, right.InputId, StringComparison.Ordinal)
-            && left.Complete == right.Complete
-            && left.Succeeded == right.Succeeded
-            && string.Equals(left.Error, right.Error, StringComparison.Ordinal)
-            && MessagesEqual(left.Messages, right.Messages);
-    }
-
     private static bool UsageEquals(ModelUsage? left, ModelUsage? right) =>
         left is null
             ? right is null

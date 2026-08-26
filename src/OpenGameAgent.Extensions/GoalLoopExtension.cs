@@ -264,16 +264,22 @@ public sealed class GoalLoopExtension : IGameAgentExtension
     {
         api.RegisterContextProvider(
             "goal-guidance",
-            (context, _) => new ValueTask<IReadOnlyList<GameContextSlice>>(
-                !AllowsPersistentPlanning(context)
-                    ? Array.Empty<GameContextSlice>()
-                    : new[]
-                    {
-                        new GameContextSlice(
-                            "goal-guidance",
-                            JsonSerializer.Serialize(
-                                "Use manage_goal for work that must survive this turn. Waiting goals must name game-time or game-event conditions; never use real-world time for narrative progress.")),
-                    }));
+            async (context, cancellationToken) =>
+            {
+                if (!AllowsPersistentPlanning(context))
+                {
+                    return Array.Empty<GameContextSlice>();
+                }
+
+                await ResumeWaitingGoalsAsync(api, context, cancellationToken).ConfigureAwait(false);
+                return new[]
+                {
+                    new GameContextSlice(
+                        "goal-guidance",
+                        JsonSerializer.Serialize(
+                            "Use manage_goal for work that must survive this turn. Waiting goals must name game-time or game-event conditions; never use real-world time for narrative progress.")),
+                };
+            });
         api.RegisterToolProvider(
             "goal-tools",
             (context, _) => new ValueTask<IReadOnlyList<AgentTool>>(
@@ -284,29 +290,17 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                         CreateManageTool(api, context),
                         CreateListTool(context),
                     }));
-        api.RegisterPendingWorkProvider(
-            "active-goals",
-            (context, cancellationToken) => AllowsPersistentPlanning(context)
-                ? ResumeAndCheckPendingAsync(api, context, cancellationToken)
-                : new ValueTask<bool>(false),
-            priority: 500);
     }
 
     private static bool AllowsPersistentPlanning(GameAgentExtensionRunContext context) =>
-        !IsDirect(context.Input)
-        && context.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning);
+        context.ExecutionScope.Allows(GameExecutionCapabilities.PersistentPlanning);
 
-    private static bool IsDirect(GameInput input) =>
-        input.Metadata.TryGetValue("agent.route", out var route)
-        && string.Equals(route, "direct", StringComparison.OrdinalIgnoreCase);
-
-    private async ValueTask<bool> ResumeAndCheckPendingAsync(
+    private async ValueTask ResumeWaitingGoalsAsync(
         GameAgentExtensionApi api,
         GameAgentExtensionRunContext context,
         CancellationToken cancellationToken)
     {
         PruneTerminalGoals(context.State);
-        var pending = false;
         foreach (var storedGoal in ReadAll(context.State))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -332,11 +326,7 @@ public sealed class GoalLoopExtension : IGameAgentExtension
                         "resumed"),
                     cancellationToken).ConfigureAwait(false);
             }
-
-            pending |= goal.Status == GameGoalStatus.Active;
         }
-
-        return pending;
     }
 
     private AgentTool CreateManageTool(GameAgentExtensionApi api, GameAgentExtensionRunContext context) =>

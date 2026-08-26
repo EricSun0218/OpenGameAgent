@@ -204,7 +204,7 @@ public sealed class BehaviorLearningExtensionTests
         var provider = new ScriptedProvider(new[] { Text("no learning") });
         await using var runtime = new GameAgentBuilder(provider, "model")
             .UseSessionStore(store)
-            .UseExecutionScope(GameExecutionScope.ShortTaskOnly)
+            .UseExecutionScope(GameExecutionScope.NoOptionalCapabilities)
             .UseExtension(extension)
             .Build();
 
