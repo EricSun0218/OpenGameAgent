@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Preserve bounded OpenAI-compatible structured reasoning details and Amazon Bedrock redacted
+  reasoning as opaque same-provider/API/model continuation state, while stripping that state when
+  the provider, protocol, or model changes.
+- Add `ModelGameTranscriptSummarizer`, a provider-neutral zero-tool adapter for transcript and branch
+  compaction with cache isolation, request preflight, content projection, configurable limits,
+  strict terminal validation, usage preservation, and sanitized failures.
 - Replace the separate Quick/Agent/Plan/Workflow execution routes with one message-or-tool Agent
   loop. A direct assistant message ends the turn, while a tool call executes and continues the same
   loop with refreshed context. Persistent goals and task plans remain optional extension tools gated

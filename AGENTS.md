@@ -9,7 +9,7 @@ This repository is a framework, not a game, world editor, content marketplace, o
 ## Repository map
 
 - `src/OpenGameAgent.Kernel`: engine-neutral stateful model/tool loop.
-- `src/OpenGameAgent`: game coordinates, runtime composition, actions, routing, sessions, workflows, memory, skills, scheduling, mailboxes, and media contracts.
+- `src/OpenGameAgent`: game coordinates, runtime composition, actions, sessions, transcript compaction, memory, skills, scheduling, mailboxes, and media contracts.
 - `src/OpenGameAgent.Persistence`: crash-tolerant local-file implementations.
 - `src/OpenGameAgent.DevTools`: bounded trace recording, observation-only playback, and offline evaluation.
 - `src/OpenGameAgent.Providers.OpenAICompatible`: streaming chat-completions transport.
@@ -71,7 +71,7 @@ Real-editor gates are in `docs/engine-integration.md`.
 - State-changing tool changes require duplicate, uncertain-outcome, and recovery tests.
 - Persistence changes require restart, corruption, atomic-write, and concurrency coverage proportional to the change.
 - Generated-asset changes require duplicate submission, uncertain generation/import, restart, resource-integrity, and authoritative receipt coverage.
-- Routing changes require explicit, typed, classifier-failure, and conservative-fallback tests.
+- Model/tool loop changes require direct-answer, tool-continuation, provider-failure, and bounded-limit tests.
 - Actor or tool concurrency changes require deterministic ordering and saturation tests.
 - Wire/client/server changes require JSON and SSE integration tests.
 - Engine changes require package compilation and the relevant real-editor smoke test before release.

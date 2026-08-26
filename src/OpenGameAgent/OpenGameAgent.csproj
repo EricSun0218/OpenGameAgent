@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
     <RootNamespace>OpenGameAgent</RootNamespace>
-    <Description>Extensible game-native agent runtime with durable actions, game time, skills, routing, workflows, and multi-actor coordination.</Description>
+    <Description>Extensible game-native agent runtime with a bounded model/tool loop, durable actions, game time, skills, memory, and multi-actor coordination.</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.6" />

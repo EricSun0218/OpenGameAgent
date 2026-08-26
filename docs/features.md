@@ -19,7 +19,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Enforce a model-call deadline | `AgentLimits.ModelTimeoutMilliseconds` |
 | Retry transient model failures | `RetryingModelProvider` |
 | Fall back across endpoints/models | `FallbackModelProvider` |
-| Compact before exceeding context | `IGameTranscriptCompactor`, model context-window settings |
+| Compact before exceeding context | `IGameTranscriptCompactor`, `SummarizingGameTranscriptCompactor`, `ModelGameTranscriptSummarizer`, model context-window settings |
 | Run low-latency speech without blocking the agent loop | `RealtimeConversationManager` |
 | Hand complex speech turns to the authoritative game agent | `GameRealtimeAgentBridge` |
 | Cancel played audio when the player interrupts | `IRealtimeTransportSession.TruncateAudioAsync` |
@@ -72,7 +72,7 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Read the current persisted transcript without parsing a store | `GameAgentRuntime.ReadTranscriptAsync`, `ServerGameAgentClient.ReadTranscriptAsync` |
 | Consume one versioned cross-language run/item stream with reconnect and exact control | `OpenGameAgent.Runtime.Protocol`, `GameRuntimeServerClient` |
 | Read capabilities, complete usage, and durable action exchange from C# | `ServerGameAgentClient.ReadCapabilitiesAsync`, `ReadUsageAsync`, `ClaimActionsAsync`, `StreamActionsAsync`, `SubmitActionReceiptAsync`, `ReconcileActionAsync` |
-| Compact a long transcript | `IGameTranscriptCompactor` |
+| Compact a long transcript with a bounded zero-tool model request | `SummarizingGameTranscriptCompactor`, `ModelGameTranscriptSummarizer` |
 
 ## World actions and simulation
 

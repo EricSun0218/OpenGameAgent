@@ -289,3 +289,37 @@ Use `GameAgentRuntime.ReadTranscriptAsync` in-process, or the authorized `POST /
 This is the active model transcript, not an append-only audit log. Compacted messages are represented by their durable summary, and a rollback exposes the restored transcript. Products that require immutable audit history should record it through their own host-owned event or trace storage instead of duplicating the runtime transcript.
 
 `ImageAttachmentContent` is returned as attachment metadata only. Fetch bytes separately through the authorized attachment endpoint when the UI actually needs them. Server hosts must authorize `GameAgentServerOperation.ReadTranscript` before touching the runtime or session store, and should install an audience policy whenever different viewers can see different messages. Owner/public projections remove reasoning, signatures, private messages, and tool details; provider credentials never enter the transcript response.
+
+## Bounded model-backed transcript compaction
+
+Use the official provider-neutral summarizer when long sessions should be compacted by a model rather than by a host-specific delegate:
+
+```csharp
+var summarizer = new ModelGameTranscriptSummarizer(
+    summaryProvider,
+    "summary-model",
+    new ModelGameTranscriptSummarizerOptions
+    {
+        MaximumSourceMessages = 1_024,
+        MaximumInputCharacters = 1_000_000,
+        MaximumSummaryCharacters = 65_536,
+        MaximumContentPartsPerMessage = 128,
+        MaximumStreamEvents = 4_096,
+        TimeoutMilliseconds = 120_000,
+        Parameters = new ModelParameters
+        {
+            Temperature = 0,
+            MaxOutputTokens = 8_192,
+            CacheRetention = ModelCacheRetention.None,
+        },
+    });
+
+var runtime = new GameAgentBuilder(provider, "game-model")
+    .Configure(options => options.TranscriptCompactor =
+        new SummarizingGameTranscriptCompactor(
+            summarizer.SummarizeAsync,
+            maxSummaryAttempts: 3))
+    .Build();
+```
+
+The adapter runs Provider preflight, advertises no tools, uses no canonical session ID, and omits hidden reasoning, tool arguments and IDs, attachment bytes, metadata, and resource URIs from the summary request. It preserves visible outcomes and returns Provider usage to the runtime ledger. Truncated, tool-producing, empty, malformed, post-terminal, over-event, timed-out, or oversized responses fail explicitly; arbitrary Provider exceptions are reduced to bounded diagnostics instead of copying response text into session state. Defaults match the runtime's 1,024-message transcript ceiling and the provider conformance stream boundary, and remain independently configurable for smaller game budgets.

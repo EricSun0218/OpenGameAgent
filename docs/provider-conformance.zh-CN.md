@@ -18,9 +18,10 @@ Runner 会检查：流消费前 preflight、唯一且位于首位的 `Started`�
 
 标准 fixture 提供有界的纯文本请求和带工具请求，不访问公网模型，也不包含凭证。每个厂商适配器仍应在自己的测试里喂入代表性的原始协议帧；一致性 runner 校验统一公开契约，不复制各家的 wire parser。
 
+不透明推理连续性属于 Provider 适配器边界。带签名、加密、结构化或已遮蔽的推理状态，只能在生成它的同一 Provider/API/模型组合中保留，并必须使用该协议的原生字段重放，不能进入非内部投影。OpenAI-compatible 的结构化推理块与 Bedrock 的遮蔽推理都会在写入规范会话前接受大小限制和结构校验；切换 Provider、API 或模型时会移除不透明状态。
+
 一致性测试不代表服务在线、回答质量、价格信息或具体游戏工具已经验证。除了各 Provider 包自身的协议测试，还应运行：
 
 ```powershell
 dotnet test tests/OpenGameAgent.Models.Tests -c Release
 ```
-

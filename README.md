@@ -141,7 +141,7 @@ Read [Architecture](docs/architecture.md) for the ownership and failure boundari
 
 | Area | Capability |
 | --- | --- |
-| Agent kernel | Bounded ReAct model/tool loop, streaming typed messages, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, provider failures as results |
+| Agent kernel | Bounded ReAct model/tool loop, streaming typed messages, typed partial tool results, steering, follow-up, hooks, cancellation, strict transcript validation, safe zero-tool model-backed transcript compaction, provider failures as results |
 | Tool execution | Provider-request schema preflight plus execution-time validation over a bounded JSON Schema subset, guaranteed result for every accepted call, ordered parallel epochs around sequential barriers, conflict-key serialization, exact-repeat loop protection, policy blocking/termination, host-attested explicit/task scopes, durable one-time approval, timeouts, uncertain write outcomes |
 | Game runtime | Arbitrary JSON input, game clocks/timelines, one message-or-tool Agent loop, shared per-input usage budget, optimistic sessions, duplicate-input protection, actor concurrency, active-run steering/abort |
 | Realtime conversation | Bounded PCM16 streaming, live transcription/audio events, subtitle timing, barge-in cancellation/truncation, non-blocking background-agent handoff/steering, and cancel-replace presentation behaviors |

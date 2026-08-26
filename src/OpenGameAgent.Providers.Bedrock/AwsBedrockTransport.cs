@@ -19,6 +19,7 @@ internal static class AwsBedrockTransport
         string model,
         ProviderResponseObserver? responseObserver,
         int responseObserverTimeoutMilliseconds,
+        int maximumResponseCharacters,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         RequestEventHandler? requestHandler = null;
@@ -128,7 +129,22 @@ internal static class AwsBedrockTransport
                 }
                 else if (item.Delta?.ReasoningContent is { } reasoning)
                 {
-                    Enqueue(BedrockProtocolEvent.ReasoningDelta(index, reasoning.Text, reasoning.Signature));
+                    if (reasoning.RedactedContent is { Length: > 0 } redacted)
+                    {
+                        if (redacted.Length > maximumResponseCharacters)
+                        {
+                            streamException = new InvalidDataException(
+                                "Bedrock redacted reasoning exceeded the configured response limit.");
+                            signal.Release();
+                            return;
+                        }
+
+                        Enqueue(BedrockProtocolEvent.RedactedReasoningDelta(index, redacted.ToArray()));
+                    }
+                    else
+                    {
+                        Enqueue(BedrockProtocolEvent.ReasoningDelta(index, reasoning.Text, reasoning.Signature));
+                    }
                 }
             };
             stream.ContentBlockStopReceived += (_, args) =>

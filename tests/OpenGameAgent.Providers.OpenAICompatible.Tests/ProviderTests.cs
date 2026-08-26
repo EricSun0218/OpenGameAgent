@@ -101,6 +101,235 @@ public sealed class ProviderTests
     }
 
     [Fact]
+    public async Task MergesAndReplaysOrderedStructuredReasoningDetails()
+    {
+        const string firstStream = """
+            data: {"choices":[{"delta":{"reasoning":"The plan","reasoning_details":[{"type":"reasoning.text","text":"The","index":0}]} ,"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":" plan","signature":"signed","format":"v1","index":0}]} ,"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":"Checked","index":0}]} ,"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.summary","summary":" state","format":"v1","index":0},{"type":"reasoning.encrypted","id":"opaque-1","data":"ciphertext"}]} ,"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"inspect","arguments":"{}"}}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+            data: [DONE]
+
+            """;
+        const string secondStream = """
+            data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}
+
+            data: [DONE]
+
+            """;
+        var callCount = 0;
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            Interlocked.Increment(ref callCount) == 1 ? firstStream : secondStream,
+            "text/event-stream"));
+        var provider = Create(handler);
+
+        var first = (await CollectAsync(provider.StreamAsync(
+            Request(),
+            TestContext.Current.CancellationToken))).Last().Response!;
+        var reasoning = Assert.IsType<ReasoningContent>(first.Content[0]);
+        Assert.Equal("The plan", reasoning.Text);
+        Assert.NotNull(reasoning.Signature);
+        Assert.NotEqual("reasoning", reasoning.Signature);
+        var tool = Assert.IsType<ToolCallContent>(first.Content[1]);
+        var assistant = new AgentMessage(
+            AgentRole.Assistant,
+            first.Content,
+            DateTimeOffset.UnixEpoch,
+            model: "model",
+            stopReason: ModelStopReason.ToolUse,
+            provider: "openai-compatible",
+            api: "openai-completions");
+        var mixedAssistant = new AgentMessage(
+            AgentRole.Assistant,
+            first.Content.Concat(new AgentContent[] { new ReasoningContent("other", "reasoning") }),
+            DateTimeOffset.UnixEpoch,
+            model: "model",
+            stopReason: ModelStopReason.ToolUse,
+            provider: "openai-compatible",
+            api: "openai-completions");
+        var mixedRequest = new ModelRequest(
+            "model",
+            "rules",
+            new[] { mixedAssistant },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-mixed",
+            1);
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await CollectAsync(provider.StreamAsync(mixedRequest, TestContext.Current.CancellationToken)));
+
+        var excessiveAssistant = new AgentMessage(
+            AgentRole.Assistant,
+            Enumerable.Repeat<AgentContent>(reasoning, 86).Append(tool),
+            DateTimeOffset.UnixEpoch,
+            model: "model",
+            stopReason: ModelStopReason.ToolUse,
+            provider: "openai-compatible",
+            api: "openai-completions");
+        var excessiveRequest = new ModelRequest(
+            "model",
+            "rules",
+            new[] { excessiveAssistant },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-excessive",
+            1);
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await CollectAsync(provider.StreamAsync(excessiveRequest, TestContext.Current.CancellationToken)));
+
+        var continuation = new ModelRequest(
+            "model",
+            "rules",
+            new[]
+            {
+                assistant,
+                AgentMessage.ToolResult(
+                    tool,
+                    new ToolResult(new AgentContent[] { new TextContent("clear") }),
+                    DateTimeOffset.UnixEpoch),
+            },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-2",
+            1);
+
+        await CollectAsync(provider.StreamAsync(continuation, TestContext.Current.CancellationToken));
+
+        using var document = JsonDocument.Parse(handler.RequestBody!);
+        var replayed = document.RootElement.GetProperty("messages")[1].GetProperty("reasoning_details");
+        Assert.Equal(3, replayed.GetArrayLength());
+        Assert.Equal("reasoning.text", replayed[0].GetProperty("type").GetString());
+        Assert.Equal("The plan", replayed[0].GetProperty("text").GetString());
+        Assert.Equal("signed", replayed[0].GetProperty("signature").GetString());
+        Assert.Equal("reasoning.summary", replayed[1].GetProperty("type").GetString());
+        Assert.Equal("Checked state", replayed[1].GetProperty("summary").GetString());
+        Assert.Equal("reasoning.encrypted", replayed[2].GetProperty("type").GetString());
+        Assert.Equal("ciphertext", replayed[2].GetProperty("data").GetString());
+        Assert.False(document.RootElement.GetProperty("messages")[1].TryGetProperty("reasoning", out _));
+
+        var crossModel = new ModelRequest(
+            "other-model",
+            "rules",
+            continuation.Messages,
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-3",
+            1);
+        await CollectAsync(provider.StreamAsync(crossModel, TestContext.Current.CancellationToken));
+
+        using var crossDocument = JsonDocument.Parse(handler.RequestBody!);
+        Assert.False(crossDocument.RootElement.GetProperty("messages")[1]
+            .TryGetProperty("reasoning_details", out _));
+    }
+
+    [Fact]
+    public async Task MergesMoreThanTheLogicalDetailLimitWhenFragmentsBelongToOneDetail()
+    {
+        var details = Enumerable.Range(0, 257)
+            .Select(_ => new { type = "reasoning.text", text = "x", index = 0 })
+            .ToArray();
+        var chunk = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    delta = new { reasoning_details = details },
+                    finish_reason = (string?)null,
+                },
+            },
+        });
+        var firstStream = "data: " + chunk + "\n\ndata: "
+            + "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        const string secondStream = """
+            data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}
+
+            data: [DONE]
+
+            """;
+        var callCount = 0;
+        var handler = new StubHandler(_ => Response(
+            HttpStatusCode.OK,
+            Interlocked.Increment(ref callCount) == 1 ? firstStream : secondStream,
+            "text/event-stream"));
+        var provider = Create(handler);
+        var first = (await CollectAsync(provider.StreamAsync(
+            Request(),
+            TestContext.Current.CancellationToken))).Last().Response!;
+        var assistant = new AgentMessage(
+            AgentRole.Assistant,
+            first.Content,
+            DateTimeOffset.UnixEpoch,
+            model: "model",
+            stopReason: ModelStopReason.Stop,
+            provider: "openai-compatible",
+            api: "openai-completions");
+        var continuation = new ModelRequest(
+            "model",
+            "rules",
+            new[] { assistant, AgentMessage.User("continue") },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-2",
+            1);
+
+        await CollectAsync(provider.StreamAsync(continuation, TestContext.Current.CancellationToken));
+
+        using var document = JsonDocument.Parse(handler.RequestBody!);
+        var replayed = document.RootElement.GetProperty("messages")[1].GetProperty("reasoning_details");
+        Assert.Equal(1, replayed.GetArrayLength());
+        Assert.Equal(new string('x', 257), replayed[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task RejectsMalformedStructuredReasoningBeforeItCanBePersisted()
+    {
+        const string stream = """
+            data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":5}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+            data: [DONE]
+
+            """;
+        var provider = Create(new StubHandler(_ => Response(HttpStatusCode.OK, stream, "text/event-stream")));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
+    public async Task RejectsUnknownStructuredReasoningTypesInsteadOfPersistingOpaqueJson()
+    {
+        const string stream = """
+            data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.future","payload":"opaque"}]},"finish_reason":null}]}
+
+            data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+            data: [DONE]
+
+            """;
+        var provider = Create(new StubHandler(_ => Response(HttpStatusCode.OK, stream, "text/event-stream")));
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await CollectAsync(provider.StreamAsync(Request(), TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
     public async Task SendsToolsExtensionsAndRotatingAuthorizationWithoutLeakingItIntoBody()
     {
         var handler = new StubHandler(_ => Response(

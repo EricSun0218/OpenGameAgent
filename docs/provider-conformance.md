@@ -25,9 +25,10 @@ The runner checks preflight before stream consumption, exactly one leading `Star
 
 The standard fixtures create bounded text-only and tool-capable requests. They do not call a public model endpoint and contain no credentials. A vendor adapter test remains responsible for feeding representative raw frames into the adapter; the conformance runner verifies the public normalized contract rather than duplicating each wire protocol.
 
+Opaque reasoning continuity is part of the provider adapter boundary. An adapter may retain signed, encrypted, structured, or redacted reasoning only for the exact provider/API/model that produced it, must replay it in that protocol's native field, and must keep it out of non-internal projections. OpenAI-compatible structured reasoning blocks and Bedrock redacted reasoning are bounded and validated before they enter the canonical transcript; switching provider, API, or model strips opaque state.
+
 Conformance does not certify service uptime, answer quality, price metadata, or a game-specific tool. Run each provider package's protocol tests as well as:
 
 ```powershell
 dotnet test tests/OpenGameAgent.Models.Tests -c Release
 ```
-

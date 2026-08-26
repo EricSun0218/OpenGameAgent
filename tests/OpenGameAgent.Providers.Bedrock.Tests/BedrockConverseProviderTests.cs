@@ -105,6 +105,121 @@ public sealed class BedrockConverseProviderTests
     }
 
     [Fact]
+    public async Task PreservesAndReplaysOpaqueRedactedReasoningForTheSameModel()
+    {
+        var opaque = new byte[] { 1, 2, 3, 4, 5 };
+        var provider = new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            Transport = (_, token) => RedactedStream(opaque, token),
+        });
+
+        var response = (await CollectAsync(provider.StreamAsync(
+            Request("anthropic.claude-sonnet-4-5"),
+            TestContext.Current.CancellationToken))).Last().Response!;
+
+        var reasoning = Assert.IsType<ReasoningContent>(response.Content[0]);
+        Assert.True(reasoning.Redacted);
+        Assert.Equal("[Reasoning redacted]", reasoning.Text);
+        Assert.Equal(opaque, Convert.FromBase64String(reasoning.Signature!));
+        var replay = new ModelRequest(
+            "anthropic.claude-sonnet-4-5",
+            "rules",
+            new[]
+            {
+                new AgentMessage(
+                    AgentRole.Assistant,
+                    response.Content,
+                    DateTimeOffset.UnixEpoch,
+                    model: "anthropic.claude-sonnet-4-5",
+                    stopReason: ModelStopReason.Stop,
+                    provider: "amazon-bedrock",
+                    api: "bedrock-converse-stream"),
+            },
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-2",
+            1);
+
+        var payload = provider.BuildRequest(replay);
+        Assert.Equal(opaque, payload.Messages[0].Content[0].ReasoningContent.RedactedContent.ToArray());
+
+        var crossModel = new ModelRequest(
+            "anthropic.claude-haiku-4-5",
+            "rules",
+            replay.Messages,
+            Array.Empty<ToolDefinition>(),
+            new ModelParameters(),
+            null,
+            "run-3",
+            1);
+        var crossPayload = provider.BuildRequest(crossModel);
+        Assert.DoesNotContain(
+            crossPayload.Messages.SelectMany(message => message.Content),
+            block => block.ReasoningContent is not null);
+
+        static async IAsyncEnumerable<BedrockProtocolEvent> RedactedStream(
+            byte[] data,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+        {
+            await Task.Yield();
+            token.ThrowIfCancellationRequested();
+            yield return BedrockProtocolEvent.MessageStart("assistant");
+            yield return BedrockProtocolEvent.RedactedReasoningDelta(0, data);
+            yield return BedrockProtocolEvent.ContentStop(0);
+            yield return BedrockProtocolEvent.MessageStop("end_turn");
+        }
+    }
+
+    [Fact]
+    public void RejectsMalformedOpaqueRedactedReasoningInsteadOfLeakingItAsText()
+    {
+        var provider = new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            Transport = (_, token) => MissingStop(token),
+        });
+        var request = AssistantRequest(
+            "anthropic.claude-sonnet-4-5",
+            new ReasoningContent("[Reasoning redacted]", "not-base64", redacted: true));
+
+        Assert.Throws<InvalidDataException>(() => provider.BuildRequest(request));
+
+        var bounded = new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            MaxResponseCharacters = 4,
+            Transport = (_, token) => MissingStop(token),
+        });
+        var oversized = AssistantRequest(
+            "anthropic.claude-sonnet-4-5",
+            new ReasoningContent("[Reasoning redacted]", "AQIDBA==", redacted: true));
+        Assert.Throws<InvalidDataException>(() => bounded.BuildRequest(oversized));
+    }
+
+    [Fact]
+    public async Task RejectsRedactedReasoningWhoseEncodedFormExceedsTheResponseLimit()
+    {
+        var provider = new BedrockConverseProvider(new BedrockConverseProviderOptions
+        {
+            MaxResponseCharacters = 4,
+            Transport = (_, token) => RedactedStream(token),
+        });
+
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await CollectAsync(provider.StreamAsync(
+                Request("anthropic.claude-sonnet-4-5"),
+                TestContext.Current.CancellationToken)));
+
+        static async IAsyncEnumerable<BedrockProtocolEvent> RedactedStream(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+        {
+            await Task.Yield();
+            token.ThrowIfCancellationRequested();
+            yield return BedrockProtocolEvent.MessageStart("assistant");
+            yield return BedrockProtocolEvent.RedactedReasoningDelta(0, new byte[] { 1, 2, 3, 4 });
+        }
+    }
+
+    [Fact]
     public async Task SerializesCacheImagesStrictToolsAndBudgetThinking()
     {
         ConverseStreamRequest? captured = null;

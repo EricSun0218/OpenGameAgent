@@ -160,6 +160,13 @@ internal sealed class BedrockStreamState
             return;
         }
 
+        if (item.HasRedactedReasoning)
+        {
+            var block = GetOrCreate(item.ContentIndex, BlockKind.Reasoning, updates, redacted: true);
+            AppendRedacted(block, item.RedactedReasoning.Span);
+            return;
+        }
+
         if (item.ReasoningText is not null || item.ReasoningSignature is not null)
         {
             var block = GetOrCreate(item.ContentIndex, BlockKind.Reasoning, updates);
@@ -180,11 +187,15 @@ internal sealed class BedrockStreamState
         }
     }
 
-    private Block GetOrCreate(int protocolIndex, BlockKind kind, ICollection<ModelStreamEvent> updates)
+    private Block GetOrCreate(
+        int protocolIndex,
+        BlockKind kind,
+        ICollection<ModelStreamEvent> updates,
+        bool redacted = false)
     {
         if (_byProtocolIndex.TryGetValue(protocolIndex, out var existing))
         {
-            if (existing.Kind != kind)
+            if (existing.Kind != kind || existing.Redacted != redacted)
             {
                 throw new InvalidDataException("Bedrock changed a content block's type while streaming.");
             }
@@ -192,7 +203,7 @@ internal sealed class BedrockStreamState
             return existing;
         }
 
-        var block = new Block(kind, protocolIndex);
+        var block = new Block(kind, protocolIndex) { Redacted = redacted };
         _blocks.Add(block);
         _byProtocolIndex.Add(protocolIndex, block);
         updates.Add(ModelStreamEvent.Update(
@@ -235,7 +246,7 @@ internal sealed class BedrockStreamState
             toolName: block.Name,
             toolCall: toolCall,
             content: kind is ModelStreamEventKind.TextEnded or ModelStreamEventKind.ReasoningEnded
-                ? block.Buffer.ToString()
+                ? (block.Redacted ? "[Reasoning redacted]" : block.Buffer.ToString())
                 : null));
     }
 
@@ -250,7 +261,12 @@ internal sealed class BedrockStreamState
             }
             else if (block.Kind == BlockKind.Reasoning)
             {
-                content.Add(new ReasoningContent(block.Buffer.ToString(), block.Signature.ToString()));
+                content.Add(block.Redacted
+                    ? new ReasoningContent(
+                        "[Reasoning redacted]",
+                        Convert.ToBase64String(block.RedactedBuffer.ToArray()),
+                        redacted: true)
+                    : new ReasoningContent(block.Buffer.ToString(), block.Signature.ToString()));
             }
             else
             {
@@ -306,6 +322,18 @@ internal sealed class BedrockStreamState
         builder.Append(value);
     }
 
+    private void AppendRedacted(Block block, ReadOnlySpan<byte> value)
+    {
+        var oldEncodedCharacters = checked((int)(((block.RedactedBuffer.Length + 2) / 3) * 4));
+        block.RedactedBuffer.Write(value);
+        var newEncodedCharacters = checked((int)(((block.RedactedBuffer.Length + 2) / 3) * 4));
+        _characters = checked(_characters + newEncodedCharacters - oldEncodedCharacters);
+        if (_characters > _maximumCharacters)
+        {
+            throw new InvalidDataException("The Bedrock response exceeded the configured character limit.");
+        }
+    }
+
     private static bool IsJsonObject(string value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -354,6 +382,10 @@ internal sealed class BedrockStreamState
         public StringBuilder Buffer { get; } = new();
 
         public StringBuilder Signature { get; } = new();
+
+        public MemoryStream RedactedBuffer { get; } = new();
+
+        public bool Redacted { get; set; }
 
         public string? Id { get; set; }
 

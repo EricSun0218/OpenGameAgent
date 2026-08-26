@@ -222,6 +222,7 @@ public sealed class OpenAICompatibleProviderOptions
 
 public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCapabilities
 {
+    private const string StructuredReasoningSignaturePrefix = "oga-openai-reasoning-v1:";
     private readonly HttpClient _httpClient;
     private readonly Uri _endpoint;
     private readonly string? _apiKey;
@@ -1358,6 +1359,29 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 assistant["tool_calls"] = calls;
             }
 
+            var structuredReasoning = new List<JsonElement>();
+            if (!_protocol.RequiresThinkingAsText)
+            {
+                foreach (var part in message.Content.OfType<ReasoningContent>())
+                {
+                    if (TryDecodeStructuredReasoning(part.Signature, out var details))
+                    {
+                        if (details.Count > 256 - structuredReasoning.Count)
+                        {
+                            throw new InvalidDataException(
+                                "An assistant message exceeded the structured reasoning detail limit.");
+                        }
+
+                        structuredReasoning.AddRange(details);
+                    }
+                }
+            }
+
+            if (structuredReasoning.Count > 0)
+            {
+                assistant["reasoning_details"] = structuredReasoning.ToArray();
+            }
+
             foreach (var signedReasoning in message.Content
                          .OfType<ReasoningContent>()
                          .Where(content => !string.IsNullOrWhiteSpace(content.Signature))
@@ -1366,6 +1390,17 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 if (_protocol.RequiresThinkingAsText)
                 {
                     break;
+                }
+
+                if (signedReasoning.Key.StartsWith(StructuredReasoningSignaturePrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (structuredReasoning.Count > 0)
+                {
+                    throw new InvalidDataException(
+                        "An assistant message cannot mix structured reasoning with another opaque reasoning format.");
                 }
 
                 if (assistant.ContainsKey(signedReasoning.Key))
@@ -1413,6 +1448,49 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
             ["role"] = role,
             ["content"] = content,
         };
+    }
+
+    private bool TryDecodeStructuredReasoning(
+        string? signature,
+        out IReadOnlyList<JsonElement> details)
+    {
+        details = Array.Empty<JsonElement>();
+        if (string.IsNullOrEmpty(signature)
+            || !signature.StartsWith(StructuredReasoningSignaturePrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var json = signature.Substring(StructuredReasoningSignaturePrefix.Length);
+        if (json.Length > _maxResponseCharacters)
+        {
+            throw new InvalidDataException("Structured reasoning exceeded the configured response limit.");
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 128 });
+            EnsureUnambiguous(document.RootElement, "Structured reasoning contains duplicate JSON property names.");
+            if (document.RootElement.ValueKind != JsonValueKind.Array
+                || document.RootElement.GetArrayLength() is < 1 or > 256)
+            {
+                throw new InvalidDataException("Structured reasoning must contain between 1 and 256 detail objects.");
+            }
+
+            var copy = new List<JsonElement>(document.RootElement.GetArrayLength());
+            foreach (var item in document.RootElement.EnumerateArray())
+            {
+                StructuredReasoningDetail.Validate(item);
+                copy.Add(item.Clone());
+            }
+
+            details = copy.AsReadOnly();
+            return true;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Structured reasoning contains invalid JSON.", exception);
+        }
     }
 
     private object ProjectUserContent(AgentMessage message)
@@ -1748,6 +1826,149 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         return line.ToString(0, length);
     }
 
+    private sealed class StructuredReasoningDetail
+    {
+        private const int MaximumProperties = 64;
+        private const int MaximumPropertyNameCharacters = 256;
+        private readonly Dictionary<string, JsonElement> _fields;
+        private readonly string? _contentField;
+        private readonly StringBuilder? _content;
+
+        private StructuredReasoningDetail(Dictionary<string, JsonElement> fields)
+        {
+            _fields = fields;
+            _contentField = Type switch
+            {
+                "reasoning.text" => "text",
+                "reasoning.summary" => "summary",
+                _ => null,
+            };
+            _content = _contentField is null ? null : new StringBuilder(_fields[_contentField].GetString());
+        }
+
+        public IReadOnlyDictionary<string, JsonElement> Fields
+        {
+            get
+            {
+                if (_contentField is not null)
+                {
+                    _fields[_contentField] = JsonSerializer.SerializeToElement(_content!.ToString());
+                }
+
+                return _fields;
+            }
+        }
+
+        private string Type => _fields["type"].GetString()!;
+
+        public static StructuredReasoningDetail Parse(JsonElement value)
+        {
+            Validate(value);
+            var fields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            foreach (var property in value.EnumerateObject())
+            {
+                fields.Add(property.Name, property.Value.Clone());
+            }
+
+            return new StructuredReasoningDetail(fields);
+        }
+
+        public static void Validate(JsonElement value)
+        {
+            if (value.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("Each structured reasoning detail must be an object.");
+            }
+
+            var properties = value.EnumerateObject().ToArray();
+            if (properties.Length is < 1 or > MaximumProperties
+                || properties.Any(property => property.Name.Length is < 1 or > MaximumPropertyNameCharacters))
+            {
+                throw new InvalidDataException("A structured reasoning detail exceeded its property bounds.");
+            }
+
+            if (!value.TryGetProperty("type", out var typeElement)
+                || typeElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(typeElement.GetString())
+                || typeElement.GetString()!.Length > 128)
+            {
+                throw new InvalidDataException("A structured reasoning detail requires a bounded type.");
+            }
+
+            ValidateOptionalString(value, "id", allowNull: true);
+            ValidateOptionalString(value, "format", allowNull: false);
+            if (value.TryGetProperty("index", out var index)
+                && index.ValueKind != JsonValueKind.Number)
+            {
+                throw new InvalidDataException("A structured reasoning detail index must be numeric.");
+            }
+
+            switch (typeElement.GetString())
+            {
+                case "reasoning.text":
+                    RequireString(value, "text");
+                    ValidateOptionalString(value, "signature", allowNull: true);
+                    break;
+                case "reasoning.summary":
+                    RequireString(value, "summary");
+                    break;
+                case "reasoning.encrypted":
+                    RequireString(value, "data");
+                    break;
+                default:
+                    throw new InvalidDataException("A structured reasoning detail type is not supported.");
+            }
+        }
+
+        public bool TryMerge(StructuredReasoningDetail next)
+        {
+            var contentField = Type switch
+            {
+                "reasoning.text" when next.Type == Type => "text",
+                "reasoning.summary" when next.Type == Type => "summary",
+                _ => null,
+            };
+            if (contentField is null)
+            {
+                return false;
+            }
+
+            _content!.Append(next._fields[contentField].GetString());
+            foreach (var pair in next._fields)
+            {
+                if (!_fields.TryGetValue(pair.Key, out var current)
+                    || current.ValueKind == JsonValueKind.Null)
+                {
+                    _fields[pair.Key] = pair.Value.Clone();
+                }
+            }
+
+            return true;
+        }
+
+        private static void RequireString(JsonElement value, string name)
+        {
+            if (!value.TryGetProperty(name, out var field) || field.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidDataException($"A structured reasoning detail requires string field '{name}'.");
+            }
+        }
+
+        private static void ValidateOptionalString(JsonElement value, string name, bool allowNull)
+        {
+            if (!value.TryGetProperty(name, out var field))
+            {
+                return;
+            }
+
+            if (field.ValueKind != JsonValueKind.String
+                && (!allowNull || field.ValueKind != JsonValueKind.Null))
+            {
+                throw new InvalidDataException($"Structured reasoning field '{name}' has an invalid type.");
+            }
+        }
+    }
+
     private sealed class StreamState
     {
         private readonly StringBuilder _text = new();
@@ -1767,7 +1988,9 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
         private readonly string _requestModel;
         private readonly string _providerId;
         private readonly string _apiId;
-        private string? _reasoningSignature;
+        private readonly List<StructuredReasoningDetail> _reasoningDetails = new();
+        private int _reasoningDetailFragments;
+        private string? _reasoningField;
         private string? _responseModel;
         private string? _responseId;
         private string? _rawStopReason;
@@ -1838,6 +2061,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 {
                     RequireKind(delta, JsonValueKind.Object, "A model stream delta must be an object.");
                     ApplyReasoning(delta, updates);
+                    ApplyStructuredReasoning(delta, updates);
                     ApplyText(delta, "content", _text, ref _textStarted, ModelStreamEventKind.TextStarted, ModelStreamEventKind.TextDelta, updates);
                     if (delta.TryGetProperty("tool_calls", out var calls))
                     {
@@ -2094,7 +2318,7 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                 switch (slot.Kind)
                 {
                     case ContentSlotKind.Reasoning:
-                        content.Add(new ReasoningContent(_reasoning.ToString(), _reasoningSignature));
+                        content.Add(new ReasoningContent(_reasoning.ToString(), ReasoningSignature()));
                         break;
                     case ContentSlotKind.Text:
                         content.Add(new TextContent(_text.ToString()));
@@ -2200,13 +2424,13 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                     continue;
                 }
 
-                if (_reasoningSignature is not null
-                    && !string.Equals(_reasoningSignature, property, StringComparison.Ordinal))
+                if (_reasoningField is not null
+                    && !string.Equals(_reasoningField, property, StringComparison.Ordinal))
                 {
                     throw new InvalidDataException("A model stream changed its reasoning delta field during one response.");
                 }
 
-                _reasoningSignature = property;
+                _reasoningField = property;
                 ApplyText(
                     delta,
                     property,
@@ -2217,6 +2441,72 @@ public sealed class OpenAICompatibleProvider : IModelProvider, IModelProviderCap
                     updates);
                 return;
             }
+        }
+
+        private void ApplyStructuredReasoning(JsonElement delta, ICollection<ModelStreamEvent> updates)
+        {
+            if (!delta.TryGetProperty("reasoning_details", out var details)
+                || details.ValueKind == JsonValueKind.Null)
+            {
+                return;
+            }
+
+            RequireKind(details, JsonValueKind.Array, "Model reasoning_details must be an array or null.");
+            if (details.GetArrayLength() == 0)
+            {
+                return;
+            }
+
+            EnsureReasoningStarted(updates);
+            foreach (var item in details.EnumerateArray())
+            {
+                _reasoningDetailFragments = checked(_reasoningDetailFragments + 1);
+                if (_reasoningDetailFragments > 4_096)
+                {
+                    throw new InvalidDataException("The model response exceeded the structured reasoning fragment limit.");
+                }
+
+                EnsureUnambiguous(item, "Structured reasoning contains duplicate JSON property names.");
+                AddCharacters(item.GetRawText().Length);
+                var detail = StructuredReasoningDetail.Parse(item);
+                if (_reasoningDetails.Count > 0 && _reasoningDetails[^1].TryMerge(detail))
+                {
+                    continue;
+                }
+
+                if (_reasoningDetails.Count >= 256)
+                {
+                    throw new InvalidDataException("The model response exceeded the structured reasoning detail limit.");
+                }
+
+                _reasoningDetails.Add(detail);
+            }
+        }
+
+        private void EnsureReasoningStarted(ICollection<ModelStreamEvent> updates)
+        {
+            if (_reasoningStarted)
+            {
+                return;
+            }
+
+            _reasoningStarted = true;
+            _contentOrder.Add(new ContentSlot(ContentSlotKind.Reasoning));
+            updates.Add(ModelStreamEvent.Update(
+                ModelStreamEventKind.ReasoningStarted,
+                Partial(),
+                contentIndex: ContentIndex(ContentSlotKind.Reasoning)));
+        }
+
+        private string? ReasoningSignature()
+        {
+            if (_reasoningDetails.Count == 0)
+            {
+                return _reasoningField;
+            }
+
+            return StructuredReasoningSignaturePrefix + JsonSerializer.Serialize(
+                _reasoningDetails.Select(detail => detail.Fields));
         }
 
         private void ReadFinishReason(JsonElement choice)

@@ -156,6 +156,7 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
                 request.Model,
                 _responseObserver,
                 _responseObserverTimeoutMilliseconds,
+                _options.MaxResponseCharacters,
                 token);
         }
 
@@ -232,7 +233,7 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
 
             if (message.Role == AgentRole.Assistant)
             {
-                var content = ProjectAssistantContent(message.Content, model);
+                var content = ProjectAssistantContent(message.Content, model, _options.MaxResponseCharacters);
                 if (content.Count > 0)
                 {
                     result.Add(new Message { Role = ConversationRole.Assistant, Content = content });
@@ -302,7 +303,10 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
         return result;
     }
 
-    private static List<ContentBlock> ProjectAssistantContent(IEnumerable<AgentContent> content, string model)
+    private static List<ContentBlock> ProjectAssistantContent(
+        IEnumerable<AgentContent> content,
+        string model,
+        int maximumResponseCharacters)
     {
         var result = new List<ContentBlock>();
         foreach (var item in content)
@@ -311,6 +315,40 @@ public sealed class BedrockConverseProvider : IModelProvider, IModelProviderCapa
             {
                 case TextContent text when NonBlankText(text.Text) is { } sanitized:
                     result.Add(new ContentBlock { Text = sanitized });
+                    break;
+                case ReasoningContent { Redacted: true } redacted:
+                    if (string.IsNullOrWhiteSpace(redacted.Signature))
+                    {
+                        throw new InvalidDataException("Redacted Bedrock reasoning is missing its opaque content.");
+                    }
+
+                    if (redacted.Signature.Length > maximumResponseCharacters)
+                    {
+                        throw new InvalidDataException("Redacted Bedrock reasoning exceeded the configured response limit.");
+                    }
+
+                    byte[] opaque;
+                    try
+                    {
+                        opaque = Convert.FromBase64String(redacted.Signature);
+                    }
+                    catch (FormatException exception)
+                    {
+                        throw new InvalidDataException("Redacted Bedrock reasoning has invalid opaque content.", exception);
+                    }
+
+                    if (opaque.Length == 0)
+                    {
+                        throw new InvalidDataException("Redacted Bedrock reasoning is empty.");
+                    }
+
+                    result.Add(new ContentBlock
+                    {
+                        ReasoningContent = new ReasoningContentBlock
+                        {
+                            RedactedContent = new MemoryStream(opaque, writable: false),
+                        },
+                    });
                     break;
                 case ReasoningContent reasoning when NonBlankText(reasoning.Text) is { } thinking:
                     if (IsClaude(model) && string.IsNullOrWhiteSpace(reasoning.Signature))

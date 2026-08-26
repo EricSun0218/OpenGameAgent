@@ -18,6 +18,8 @@ public enum BedrockProtocolEventKind
 
 public sealed class BedrockProtocolEvent
 {
+    private byte[]? _redactedReasoning;
+
     private BedrockProtocolEvent(BedrockProtocolEventKind kind)
     {
         Kind = kind;
@@ -34,6 +36,10 @@ public sealed class BedrockProtocolEvent
     public string? ReasoningText { get; private set; }
 
     public string? ReasoningSignature { get; private set; }
+
+    public bool HasRedactedReasoning => _redactedReasoning is not null;
+
+    public ReadOnlyMemory<byte> RedactedReasoning => _redactedReasoning ?? ReadOnlyMemory<byte>.Empty;
 
     public string? ToolCallId { get; private set; }
 
@@ -77,6 +83,20 @@ public sealed class BedrockProtocolEvent
             ReasoningText = text,
             ReasoningSignature = signature,
         };
+
+    public static BedrockProtocolEvent RedactedReasoningDelta(int index, ReadOnlyMemory<byte> data)
+    {
+        if (data.IsEmpty)
+        {
+            throw new ArgumentException("Redacted reasoning data cannot be empty.", nameof(data));
+        }
+
+        return new BedrockProtocolEvent(BedrockProtocolEventKind.ContentDelta)
+        {
+            ContentIndex = RequireIndex(index),
+            _redactedReasoning = data.ToArray(),
+        };
+    }
 
     public static BedrockProtocolEvent ToolDelta(int index, string arguments) => new(BedrockProtocolEventKind.ContentDelta)
     {
