@@ -4,6 +4,7 @@
 		{ "path": "./packages/protocol" },
 		{ "path": "./packages/kernel" },
 		{ "path": "./packages/kernel-pi" },
+		{ "path": "./packages/credentials-keyring" },
 		{ "path": "./packages/transcript" },
 		{ "path": "./packages/attachments" },
 		{ "path": "./packages/artifacts" },
