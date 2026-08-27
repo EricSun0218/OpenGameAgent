@@ -13,6 +13,8 @@ import {
 	type GameConversationMessage,
 	type GameConversationStore,
 	type GameEventViewer,
+	type GameImageAttachmentReference,
+	type GameImageAttachmentStore,
 	type GameInput,
 	type GameRunCoordinate,
 	type GameSessionKey,
@@ -29,6 +31,7 @@ export type GameServerOperation =
 	| "usage"
 	| "actions"
 	| "transcript"
+	| "attachments"
 	| "approvals";
 
 export interface GameServerPrincipal {
@@ -71,6 +74,7 @@ export interface GameAgentServerOptions {
 	authorizer: GameServerAuthorizer;
 	actionJournal?: GameActionJournal;
 	conversationStore?: GameConversationStore;
+	imageAttachments?: GameImageAttachmentStore;
 	eventStore?: GameRuntimeEventStore;
 	usageLedger?: GameUsageLedger;
 	approvalBroker?: GameToolApprovalBroker;
@@ -110,6 +114,10 @@ interface ActionReconcileBody extends SessionBody {
 interface TranscriptBody extends SessionBody {
 	cursor?: string;
 	limit?: number;
+}
+
+interface AttachmentReadBody extends SessionBody {
+	attachmentId: string;
 }
 
 interface RunEventsBody extends SessionBody {
@@ -211,6 +219,10 @@ export class GameAgentServer implements AsyncDisposable {
 			}
 			if (path === "/v1/sessions/transcript/read") {
 				await this.readTranscript(request, response, path, body as unknown as TranscriptBody, controller.signal);
+				return;
+			}
+			if (path === "/v1/sessions/attachments/read") {
+				await this.readAttachment(request, response, path, body as unknown as AttachmentReadBody, controller.signal);
 				return;
 			}
 			if (path === "/v1/runs/events/read") {
@@ -458,6 +470,48 @@ export class GameAgentServer implements AsyncDisposable {
 		});
 	}
 
+	private async readAttachment(
+		request: IncomingMessage,
+		response: ServerResponse,
+		path: string,
+		body: AttachmentReadBody,
+		signal: AbortSignal,
+	): Promise<void> {
+		const attachments = this.options.imageAttachments;
+		const conversations = this.options.conversationStore;
+		if (!attachments || !conversations) {
+			this.json(response, 404, { error: "attachments-disabled" });
+			return;
+		}
+		if (!isObject(body) || !isObject(body.session) || typeof body.attachmentId !== "string") {
+			throw new TypeError("Invalid attachment read body.");
+		}
+		if (!(await this.authorize(request, path, "attachments", body.session, body.authentication, signal))) {
+			this.json(response, 403, { error: "forbidden" });
+			return;
+		}
+		const snapshot = await conversations.read(body.session, signal);
+		const reference = this.findAttachmentReference(snapshot.messages, body.attachmentId);
+		if (!reference) {
+			this.json(response, 404, { error: "attachment-not-found" });
+			return;
+		}
+		const attachment = await attachments.read(reference.id, signal);
+		if (!attachment || JSON.stringify(attachment.reference) !== JSON.stringify(reference)) {
+			throw new Error("Authorized image attachment is missing or does not match its transcript reference.");
+		}
+		response.writeHead(200, {
+			"content-type": reference.mimeType,
+			"content-length": attachment.data.byteLength,
+			"cache-control": "private, no-store",
+			etag: `"sha256-${reference.sha256}"`,
+			"x-opengameagent-attachment-id": reference.id,
+			"x-opengameagent-image-width": reference.width,
+			"x-opengameagent-image-height": reference.height,
+		});
+		response.end(Buffer.from(attachment.data));
+	}
+
 	private async readUsage(
 		request: IncomingMessage,
 		response: ServerResponse,
@@ -545,6 +599,19 @@ export class GameAgentServer implements AsyncDisposable {
 			return [part];
 		});
 		return [{ ...message, content }];
+	}
+
+	private findAttachmentReference(
+		messages: readonly GameConversationMessage[],
+		attachmentId: string,
+	): GameImageAttachmentReference | undefined {
+		for (const message of messages) {
+			if (message.role === "summary" || typeof message.content === "string") continue;
+			for (const part of message.content) {
+				if (part.type === "imageRef" && part.attachment.id === attachmentId) return part.attachment;
+			}
+		}
+		return undefined;
 	}
 
 	private encodeCursor(revision: number, index: number): string {

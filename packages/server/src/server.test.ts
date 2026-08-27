@@ -7,6 +7,7 @@ import type {
 	GameAgentEvent,
 	GameAgentKernelPort,
 	GameControlResult,
+	GameImageAttachmentStore,
 	GameInput,
 	GameKernelRunRequest,
 } from "@opengameagent/protocol";
@@ -95,6 +96,7 @@ async function start(
 	stores: {
 		actionJournal?: InMemoryGameActionJournal;
 		conversationStore?: InMemoryGameConversationStore;
+		imageAttachments?: GameImageAttachmentStore;
 		eventStore?: GameRuntimeEventStore;
 		usageLedger?: GameUsageLedger;
 		approvalBroker?: GameToolApprovalBroker;
@@ -292,6 +294,26 @@ describe("GameAgentServer", () => {
 		const kernel = new ServerTestKernel();
 		const conversationStore = new InMemoryGameConversationStore();
 		const gameInput = input("owner-a");
+		const attachmentReference = {
+			id: `img_${"a".repeat(64)}`,
+			sha256: "a".repeat(64),
+			mimeType: "image/png",
+			bytes: 4,
+			width: 16,
+			height: 8,
+		};
+		let attachmentReads = 0;
+		const imageAttachments: GameImageAttachmentStore = {
+			async admit() {
+				return attachmentReference;
+			},
+			async read(id) {
+				attachmentReads += 1;
+				return id === attachmentReference.id
+					? { reference: attachmentReference, data: new Uint8Array([1, 2, 3, 4]) }
+					: undefined;
+			},
+		};
 		await conversationStore.save(gameInput.session, 0, [
 			{ role: "user", content: "hello", timestamp: 1 },
 			{
@@ -303,14 +325,7 @@ describe("GameAgentServer", () => {
 					{ type: "image", mimeType: "image/png", data: "inline-private-bytes" },
 					{
 						type: "imageRef",
-						attachment: {
-							id: `img_${"a".repeat(64)}`,
-							sha256: "a".repeat(64),
-							mimeType: "image/png",
-							bytes: 128,
-							width: 16,
-							height: 8,
-						},
+						attachment: attachmentReference,
 					},
 				],
 				api: "api",
@@ -329,7 +344,7 @@ describe("GameAgentServer", () => {
 				timestamp: 3,
 			},
 		]);
-		const baseUrl = await start(kernel, { conversationStore });
+		const baseUrl = await start(kernel, { conversationStore, imageAttachments });
 		const unauthorized = await fetch(`${baseUrl}/v1/sessions/transcript/read`, {
 			method: "POST",
 			body: JSON.stringify({ authentication: { token: "owner-b" }, session: gameInput.session }),
@@ -359,6 +374,42 @@ describe("GameAgentServer", () => {
 		expect(secondPage).not.toContain("hidden-chain");
 		expect(secondPage).not.toContain("tool-private");
 		expect(secondPage).not.toContain("inline-private-bytes");
+
+		const deniedAttachment = await fetch(`${baseUrl}/v1/sessions/attachments/read`, {
+			method: "POST",
+			body: JSON.stringify({
+				authentication: { token: "owner-b" },
+				session: gameInput.session,
+				attachmentId: attachmentReference.id,
+			}),
+		});
+		expect(deniedAttachment.status).toBe(403);
+		expect(attachmentReads).toBe(0);
+
+		const unlinkedAttachment = await fetch(`${baseUrl}/v1/sessions/attachments/read`, {
+			method: "POST",
+			body: JSON.stringify({
+				authentication: { token: "owner-a" },
+				session: gameInput.session,
+				attachmentId: `img_${"b".repeat(64)}`,
+			}),
+		});
+		expect(unlinkedAttachment.status).toBe(404);
+		expect(attachmentReads).toBe(0);
+
+		const attachment = await fetch(`${baseUrl}/v1/sessions/attachments/read`, {
+			method: "POST",
+			body: JSON.stringify({
+				authentication: { token: "owner-a" },
+				session: gameInput.session,
+				attachmentId: attachmentReference.id,
+			}),
+		});
+		expect(attachment.status).toBe(200);
+		expect(attachment.headers.get("content-type")).toBe("image/png");
+		expect(attachment.headers.get("etag")).toBe(`"sha256-${attachmentReference.sha256}"`);
+		expect(Array.from(new Uint8Array(await attachment.arrayBuffer()))).toEqual([1, 2, 3, 4]);
+		expect(attachmentReads).toBe(1);
 	});
 
 	it("replays authorized run events after an exact sequence without touching the store on denied viewers", async () => {

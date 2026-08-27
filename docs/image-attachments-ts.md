@@ -29,6 +29,8 @@ The local store:
 - never performs an implicit network request or model download;
 - returns attachment metadata, not image bytes, from the public transcript projection.
 
+When both `conversationStore` and `imageAttachments` are configured on `GameAgentServer`, an authenticated client can fetch bytes with `POST /v1/sessions/attachments/read`. The request carries the exact session key and `attachmentId`. The server authorizes the viewer first, then proves that the requested reference occurs in that session's canonical transcript before touching the attachment store. A valid response is the raw image with bounded metadata headers; an ID linked only to another session is not readable.
+
 Inline images remain available for one-shot kernels without an attachment store. Exact live `steer` and `followUp` control messages are synchronous and therefore accept inline images only; resolve durable references before issuing those control calls. Initial runs and persistent transcript restoration support references directly.
 
 Image attachment storage is derived content, not game authority. The game still decides which screenshots or observations a character may see and must authorize any endpoint that retrieves the underlying bytes.

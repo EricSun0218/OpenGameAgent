@@ -29,6 +29,8 @@ const kernel = new PiGameAgentKernel({
 - 不隐式访问网络，也不下载模型；
 - 公开对话投影只返回附件元数据，不返回图片字节。
 
+同时为 `GameAgentServer` 配置 `conversationStore` 和 `imageAttachments` 后，已认证客户端可通过 `POST /v1/sessions/attachments/read` 读取图片。请求包含精确会话键和 `attachmentId`。服务器会先授权查看者，再证明该引用确实存在于该会话的规范对话中，最后才访问附件存储。成功响应为带有有界元数据响应头的原始图片；仅出现在其他会话中的 ID 不可读取。
+
 没有附件存储时，一次性 Kernel 仍可直接使用内联图片。精确 `steer`/`followUp` 控制是同步接口，因此只接受内联图片；调用前应由宿主解析持久引用。初始运行和持久对话恢复都原生支持 `imageRef`。
 
 图片附件是派生内容，不是游戏权威状态。游戏仍负责决定角色可以看到哪些截图或观察，并必须授权任何读取真实图片字节的接口。
