@@ -8,7 +8,7 @@ import type {
 } from "@opengameagent/protocol";
 import { describe, expect, it } from "vitest";
 import { createGameActionTool } from "./action-tool.js";
-import { DurableGameActionDispatcher } from "./dispatcher.js";
+import { DurableGameActionDispatcher, type GameActionDispatchObservation } from "./dispatcher.js";
 import { InMemoryGameActionJournal } from "./journal.js";
 import { createGameActionOperationId } from "./operation-id.js";
 
@@ -202,17 +202,46 @@ describe("reliable game actions", () => {
 		const journal = new InMemoryGameActionJournal();
 		const action = intent("a", "input");
 		let calls = 0;
-		const dispatcher = new DurableGameActionDispatcher(journal, {
-			async execute(value) {
-				calls += 1;
-				expect((await journal.read(value.operationId))?.status).toBe("dispatched");
-				return receipt(value);
+		const observations: GameActionDispatchObservation[] = [];
+		const dispatcher = new DurableGameActionDispatcher(
+			journal,
+			{
+				async execute(value) {
+					calls += 1;
+					expect((await journal.read(value.operationId))?.status).toBe("dispatched");
+					return receipt(value);
+				},
 			},
-		});
+			{ observer: { observeAction: (observation) => observations.push(observation) } },
+		);
 
 		expect((await dispatcher.dispatch(action)).kind).toBe("terminal");
 		expect((await dispatcher.dispatch(action)).kind).toBe("terminal");
 		expect(calls).toBe(1);
+		expect(observations.map((observation) => observation.disposition)).toEqual(["executed", "duplicate-prevented"]);
+		expect(observations[0]).toMatchObject({
+			operationId: action.operationId,
+			action: "place_block",
+			terminalStatus: "committed",
+		});
+		expect(observations[0]?.hostMilliseconds).toBeGreaterThanOrEqual(0);
+		expect(observations[0]?.frameworkMilliseconds).toBeGreaterThanOrEqual(0);
+	});
+
+	it("isolates durable action observer failures", async () => {
+		const action = intent("a", "observer");
+		const dispatcher = new DurableGameActionDispatcher(
+			new InMemoryGameActionJournal(),
+			{ execute: async (value) => receipt(value) },
+			{
+				observer: {
+					observeAction: () => {
+						throw new Error("observer failure");
+					},
+				},
+			},
+		);
+		await expect(dispatcher.dispatch(action)).resolves.toMatchObject({ kind: "terminal" });
 	});
 
 	it("turns a lost receipt into reconcile-only state and never blindly re-executes", async () => {

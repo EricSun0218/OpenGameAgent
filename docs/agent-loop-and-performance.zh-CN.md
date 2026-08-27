@@ -53,4 +53,4 @@ Scope 必须来自经过认证的宿主策略，不能把客户端 metadata 的�
 - 不能为了降低延迟而跳过可靠动作日志、回执、冲突协调或批准门禁。
 - Benchmark 应分别衡量框架、Provider 和游戏宿主耗时。
 
-Benchmark Harness 支持 Fake 或固定 Provider、确定性工具、故障注入、并发、JSON/JSONL 导出与可配置阈值。详见[开发工具](devtools.md)。
+Benchmark Harness 支持 Fake 或固定 Provider、确定性工具、故障注入、并发、JSON/JSONL 导出与可配置阈值。详见[开发工具](devtools.zh-CN.md)。

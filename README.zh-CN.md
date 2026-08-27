@@ -146,7 +146,7 @@ GameAgentRuntime
 | 图片输入 | PNG/JPEG/WebP/GIF 准入、不可变内容寻址存储、仅引用会话、模型能力预检、工具结果图片与授权服务端读取 |
 | 扩展 API | 不可变构建器；提示词/上下文/工具/Skills/Hooks/提供方/服务注册；按输入过滤工具可见性；类型化生命周期事件与通道；命名空间持久状态 |
 | 官方扩展 | 工具策略、高风险执行批准与搜索、玩家结构化提问/推荐回复、目标、支持动态重规划与持久暂停/恢复且由宿主校验证据的有序任务清单、结构化行为学习、基于既有工具的复合 Skill、显式通用行为发现/采用、记忆、产物、外部知识、带谱系与执行租约的重启可恢复委派和追踪 |
-| 开发工具 | 有界 JSONL 轨迹、命名上下文 Provider 与记忆召回分段耗时、Provider/框架/宿主归因、工具失败与 durable write 指标、并发 Benchmark runtime、本地仅观察 HTML 回放和离线/CI 评测规则 |
+| 开发工具 | 有界 JSONL 轨迹、命名运行阶段耗时、Provider 请求区间/框架/权威宿主归因、工具失败与可靠写入指标、并发 Benchmark runtime、仅观察回放和离线/CI 评测规则 |
 | 世界原语 | 可恢复动作、有界引擎线程动作交接、记忆、Skills、信号、游戏时间调度、支持批量只读待处理状态的角色邮箱 |
 | 模型与认证 | 内置模型能力/上下文/推理级别/成本目录、动态刷新、API Key/环境/存储/OAuth/本地认证、开发者托管短期凭证网关 |
 | 外部工具 | 默认按需搜索/描述/调用；小型可信目录可显式选择原生直连暴露 |
@@ -276,7 +276,7 @@ dotnet test OpenGameAgent.sln -c Release --no-build --no-restore
 - [生成资产与权威导入](docs/generated-assets.md)
 - [图片输入与游戏感知](docs/image-input.md)
 - [Agent 循环与性能](docs/agent-loop-and-performance.zh-CN.md)
-- [轨迹、回放与离线评测](docs/devtools.md)
+- [轨迹、回放与离线评测](docs/devtools.zh-CN.md)
 
 ## OpenGameAgent 提供什么？
 

@@ -24,10 +24,12 @@ export interface GameContextSegment {
 }
 
 export interface GameContextProvider {
+	name?: string;
 	provide(input: GameInput, signal: AbortSignal): Promise<GameContextSegment | undefined>;
 }
 
 export interface GamePostToolContextProvider {
+	name?: string;
 	provide(
 		input: GameInput,
 		availableTools: readonly GameTool["definition"][],
@@ -36,6 +38,7 @@ export interface GamePostToolContextProvider {
 }
 
 export interface GameToolProvider {
+	name?: string;
 	provide(input: GameInput, signal: AbortSignal): Promise<readonly GameTool[]>;
 }
 
@@ -53,7 +56,44 @@ export interface GameToolExecutionMiddleware {
 }
 
 export interface GameModelProfilePolicy {
+	name?: string;
 	select(input: GameInput, signal: AbortSignal): Promise<string> | string;
+}
+
+export type GameRuntimeStage =
+	| "run"
+	| "queue"
+	| "prepare-turn"
+	| "context"
+	| "tool-provider"
+	| "tool-catalog"
+	| "post-tool-context"
+	| "model-profile"
+	| "event-store"
+	| "usage-ledger"
+	| "tool-execution";
+
+export interface GameRuntimeStageObservation {
+	schemaVersion: 1;
+	session: GameSessionKey;
+	inputId: string;
+	runId: string;
+	turn: number;
+	stage: GameRuntimeStage;
+	name?: string;
+	startedAt: number;
+	durationMilliseconds: number;
+	outcome: "ok" | "error" | "cancelled";
+	errorCategory?: string;
+}
+
+/**
+ * Observation-only runtime hook. Implementations must stay bounded; failures are
+ * isolated and can never alter Agent execution or game authority.
+ */
+export interface GameRuntimeObserver {
+	observeStage(observation: GameRuntimeStageObservation): void;
+	observeEvent(input: GameInput, event: GameAgentEvent): void;
 }
 
 export interface GameRuntimeEventStore {
@@ -122,6 +162,7 @@ export interface GameAgentRuntimeOptions {
 	maximumContextCharacters?: number;
 	maximumTools?: number;
 	maximumTurns?: number;
+	observer?: GameRuntimeObserver;
 }
 
 export interface GameRunOptions {
@@ -174,11 +215,32 @@ export class GameAgentRuntime {
 		const signal = runOptions.signal ?? new AbortController().signal;
 		const runId = runOptions.runId ?? randomUUID();
 		const key = sessionKey(input.session);
-		const release = await this.scheduler.acquire(key, signal);
+		const runStartedAt = Date.now();
+		const runMonotonicStartedAt = performance.now();
+		let runOutcome: GameRuntimeStageObservation["outcome"] = "ok";
+		let runErrorCategory: string | undefined;
+		let release: (() => void) | undefined;
 		try {
+			release = await this.measureStage(
+				input,
+				runId,
+				0,
+				"queue",
+				undefined,
+				signal,
+				async () => await this.scheduler.acquire(key, signal),
+			);
 			const [{ systemPrompt, tools }, modelProfileId] = await Promise.all([
-				this.prepareTurn(input, signal),
-				this.selectModelProfile(input, signal),
+				this.prepareTurn(input, runId, 0, signal),
+				this.measureStage(
+					input,
+					runId,
+					0,
+					"model-profile",
+					this.options.modelProfilePolicy?.name,
+					signal,
+					async () => await this.selectModelProfile(input, signal),
+				),
 			]);
 			const active: ActiveRuntimeRun = { session: input.session, coordinate: { runId, turn: 0 } };
 			this.activeRuns.set(key, active);
@@ -189,60 +251,115 @@ export class GameAgentRuntime {
 				tools,
 				modelProfileId,
 				maximumTurns: this.maximumTurns,
-				prepareNextTurn: async (_context, turnSignal) => await this.prepareTurn(input, turnSignal),
+				prepareNextTurn: async (context, turnSignal) => await this.prepareTurn(input, runId, context.turn, turnSignal),
 			})) {
 				active.coordinate = { runId: event.runId, turn: event.turn };
-				await this.options.eventStore?.append(input, event, signal);
-				if (event.type === "message.completed" && event.usage) {
-					await this.options.usageLedger?.append(
-						{
-							id: event.eventId,
-							session: input.session,
-							inputId: input.id,
-							runId: event.runId,
-							turn: event.turn,
-							cause: "assistant",
-							...(event.provider === undefined ? {} : { provider: event.provider }),
-							...(event.model === undefined ? {} : { model: event.model }),
-							...(event.responseId === undefined ? {} : { responseId: event.responseId }),
-							usage: event.usage,
-							timestamp: event.timestamp,
-						},
+				if (event.type === "run.failed") {
+					runOutcome = "error";
+					runErrorCategory = event.category;
+				} else if (event.type === "run.aborted") {
+					runOutcome = "cancelled";
+					runErrorCategory = "aborted";
+				}
+				if (this.options.eventStore) {
+					await this.measureStage(
+						input,
+						runId,
+						event.turn,
+						"event-store",
+						event.type,
 						signal,
+						async () => await this.options.eventStore?.append(input, event, signal),
 					);
 				}
+				if (event.type === "message.completed" && event.usage) {
+					const usageEntry: GameUsageEntry = {
+						id: event.eventId,
+						session: input.session,
+						inputId: input.id,
+						runId: event.runId,
+						turn: event.turn,
+						cause: "assistant",
+						...(event.provider === undefined ? {} : { provider: event.provider }),
+						...(event.model === undefined ? {} : { model: event.model }),
+						...(event.responseId === undefined ? {} : { responseId: event.responseId }),
+						usage: event.usage,
+						timestamp: event.timestamp,
+					};
+					if (this.options.usageLedger) {
+						await this.measureStage(
+							input,
+							runId,
+							event.turn,
+							"usage-ledger",
+							"assistant",
+							signal,
+							async () => await this.options.usageLedger?.append(usageEntry, signal),
+						);
+					}
+				}
+				this.observeEvent(input, event);
 				yield event;
 			}
+		} catch (error) {
+			runOutcome = signal.aborted ? "cancelled" : "error";
+			runErrorCategory = safeErrorCategory(error);
+			throw error;
 		} finally {
 			const active = this.activeRuns.get(key);
 			if (active?.coordinate.runId === runId) this.activeRuns.delete(key);
-			release();
+			release?.();
+			this.observeStage({
+				schemaVersion: 1,
+				session: structuredClone(input.session),
+				inputId: input.id,
+				runId,
+				turn: active?.coordinate.turn ?? 0,
+				stage: "run",
+				startedAt: runStartedAt,
+				durationMilliseconds: performance.now() - runMonotonicStartedAt,
+				outcome: runOutcome,
+				...(runErrorCategory === undefined ? {} : { errorCategory: runErrorCategory }),
+			});
 		}
 	}
 
 	private async prepareTurn(
 		input: GameInput,
+		runId: string,
+		turn: number,
 		signal: AbortSignal,
 	): Promise<{ systemPrompt: string; tools: readonly GameTool[] }> {
-		const [contextSegments, tools] = await Promise.all([
-			this.collectContext(input, signal),
-			this.collectTools(input, signal),
-		]);
-		const postToolSegments = (
-			await Promise.all(
-				(this.options.postToolContextProviders ?? []).map((provider) =>
-					provider.provide(
-						input,
-						tools.map((tool) => tool.definition),
-						signal,
+		return await this.measureStage(input, runId, turn, "prepare-turn", undefined, signal, async () => {
+			const [contextSegments, tools] = await Promise.all([
+				this.collectContext(input, runId, turn, signal),
+				this.collectTools(input, runId, turn, signal),
+			]);
+			const postToolSegments = (
+				await Promise.all(
+					(this.options.postToolContextProviders ?? []).map((provider, index) =>
+						this.measureStage(
+							input,
+							runId,
+							turn,
+							"post-tool-context",
+							provider.name ?? `post-tool-context-${index}`,
+							signal,
+							async () =>
+								await provider.provide(
+									input,
+									tools.map((tool) => tool.definition),
+									signal,
+								),
+						),
 					),
-				),
-			)
-		).filter((segment): segment is GameContextSegment => segment !== undefined);
-		return {
-			systemPrompt: this.buildSystemPrompt([...contextSegments, ...postToolSegments]),
-			tools,
-		};
+				)
+			).filter((segment): segment is GameContextSegment => segment !== undefined);
+			return {
+				systemPrompt: this.buildSystemPrompt([...contextSegments, ...postToolSegments]),
+				tools,
+			};
+		});
 	}
 
 	private async selectModelProfile(input: GameInput, signal: AbortSignal): Promise<string> {
@@ -280,8 +397,27 @@ export class GameAgentRuntime {
 		return action();
 	}
 
-	private async collectContext(input: GameInput, signal: AbortSignal): Promise<GameContextSegment[]> {
-		return (await Promise.all((this.options.contextProviders ?? []).map((provider) => provider.provide(input, signal))))
+	private async collectContext(
+		input: GameInput,
+		runId: string,
+		turn: number,
+		signal: AbortSignal,
+	): Promise<GameContextSegment[]> {
+		const segments = await Promise.all(
+			(this.options.contextProviders ?? []).map((provider, index) =>
+				this.measureStage(
+					input,
+					runId,
+					turn,
+					"context",
+					provider.name ?? `context-${index}`,
+					signal,
+					async () => await provider.provide(input, signal),
+				),
+			),
+		);
+
+		return segments
 			.filter((segment): segment is GameContextSegment => segment !== undefined)
 			.sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name));
 	}
@@ -301,30 +437,42 @@ export class GameAgentRuntime {
 		return prompt;
 	}
 
-	private async collectTools(input: GameInput, signal: AbortSignal): Promise<GameTool[]> {
-		const provided = await Promise.all(
-			(this.options.toolProviders ?? []).map((provider) => provider.provide(input, signal)),
-		);
-		const tools = provided.flat();
-		if (tools.length > this.maximumTools) throw new RangeError("Collected game tools exceed the configured limit.");
-		const names = new Set<string>();
-		const visible: GameTool[] = [];
-		for (const tool of tools) {
-			if (names.has(tool.definition.name)) throw new Error(`Duplicate game tool '${tool.definition.name}'.`);
-			names.add(tool.definition.name);
-			preflightGameToolSchema(tool.definition);
-			if ((await this.options.toolVisibility?.isVisible(input, tool.definition, signal)) === false) continue;
-			visible.push(this.wrapTool(tool));
-		}
-		return visible;
+	private async collectTools(input: GameInput, runId: string, turn: number, signal: AbortSignal): Promise<GameTool[]> {
+		return await this.measureStage(input, runId, turn, "tool-catalog", undefined, signal, async () => {
+			const provided = await Promise.all(
+				(this.options.toolProviders ?? []).map((provider, index) =>
+					this.measureStage(
+						input,
+						runId,
+						turn,
+						"tool-provider",
+						provider.name ?? `tool-provider-${index}`,
+						signal,
+						async () => await provider.provide(input, signal),
+					),
+				),
+			);
+			const tools = provided.flat();
+			if (tools.length > this.maximumTools) throw new RangeError("Collected game tools exceed the configured limit.");
+			const names = new Set<string>();
+			const visible: GameTool[] = [];
+			for (const tool of tools) {
+				if (names.has(tool.definition.name)) throw new Error(`Duplicate game tool '${tool.definition.name}'.`);
+				names.add(tool.definition.name);
+				preflightGameToolSchema(tool.definition);
+				if ((await this.options.toolVisibility?.isVisible(input, tool.definition, signal)) === false) continue;
+				visible.push(this.wrapTool(tool));
+			}
+			return visible;
+		});
 	}
 
 	private wrapTool(tool: GameTool): GameTool {
 		const middleware = this.options.toolExecutionMiddleware ?? [];
-		if (middleware.length === 0) return tool;
-		return {
+		const executable: GameTool = {
 			definition: tool.definition,
 			execute: (call, context) => {
+				if (middleware.length === 0) return tool.execute(call, context);
 				let index = middleware.length;
 				const next = (): Promise<GameToolResult> => {
 					index -= 1;
@@ -336,5 +484,84 @@ export class GameAgentRuntime {
 				return next();
 			},
 		};
+		return {
+			definition: executable.definition,
+			execute: async (call, context) =>
+				await this.measureStage(
+					context.input,
+					context.runId,
+					context.turn,
+					"tool-execution",
+					tool.definition.name,
+					context.signal,
+					async () => await executable.execute(call, context),
+				),
+		};
 	}
+
+	private async measureStage<T>(
+		input: GameInput,
+		runId: string,
+		turn: number,
+		stage: GameRuntimeStage,
+		name: string | undefined,
+		signal: AbortSignal,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		const startedAt = Date.now();
+		const monotonicStartedAt = performance.now();
+		try {
+			const result = await operation();
+			this.observeStage({
+				schemaVersion: 1,
+				session: structuredClone(input.session),
+				inputId: input.id,
+				runId,
+				turn,
+				stage,
+				...(name === undefined ? {} : { name }),
+				startedAt,
+				durationMilliseconds: performance.now() - monotonicStartedAt,
+				outcome: "ok",
+			});
+			return result;
+		} catch (error) {
+			this.observeStage({
+				schemaVersion: 1,
+				session: structuredClone(input.session),
+				inputId: input.id,
+				runId,
+				turn,
+				stage,
+				...(name === undefined ? {} : { name }),
+				startedAt,
+				durationMilliseconds: performance.now() - monotonicStartedAt,
+				outcome: signal.aborted ? "cancelled" : "error",
+				errorCategory: safeErrorCategory(error),
+			});
+			throw error;
+		}
+	}
+
+	private observeStage(observation: GameRuntimeStageObservation): void {
+		try {
+			this.options.observer?.observeStage(observation);
+		} catch {
+			// Observation is intentionally isolated from runtime behavior.
+		}
+	}
+
+	private observeEvent(input: GameInput, event: GameAgentEvent): void {
+		try {
+			this.options.observer?.observeEvent(input, event);
+		} catch {
+			// Observation is intentionally isolated from runtime behavior.
+		}
+	}
+}
+
+function safeErrorCategory(error: unknown): string {
+	if (error instanceof DOMException && error.name === "AbortError") return "aborted";
+	if (error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(error.name)) return error.name;
+	return "unknown";
 }

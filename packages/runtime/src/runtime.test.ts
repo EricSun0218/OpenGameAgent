@@ -8,7 +8,7 @@ import type {
 	GameTool,
 } from "@opengameagent/protocol";
 import { describe, expect, it } from "vitest";
-import { GameAgentRuntime } from "./runtime.js";
+import { GameAgentRuntime, type GameRuntimeStageObservation } from "./runtime.js";
 import { ActorScheduler } from "./scheduler.js";
 import { preflightGameToolSchema } from "./tool-schema.js";
 
@@ -318,5 +318,78 @@ describe("GameAgentRuntime", () => {
 		});
 		release?.();
 		await running;
+	});
+
+	it("observes named preparation and tool execution stages without changing runtime behavior", async () => {
+		const stages: GameRuntimeStageObservation[] = [];
+		const observedEvents: string[] = [];
+		const kernel: GameAgentKernelPort = {
+			async *run(request) {
+				yield event(request, "run.started", 1);
+				const tool = request.tools[0];
+				if (!tool) throw new Error("Expected a tool.");
+				await tool.execute(
+					{ id: "call-1", name: tool.definition.name, arguments: { count: 1 } },
+					{
+						input: request.input,
+						runId: request.runId,
+						turn: 1,
+						toolCallIndex: 0,
+						signal: new AbortController().signal,
+					},
+				);
+				yield event(request, "run.completed", 2);
+			},
+			steer: () => ({ accepted: true }),
+			followUp: () => ({ accepted: true }),
+			abort: () => ({ accepted: true }),
+		};
+		const runtime = new GameAgentRuntime({
+			kernel,
+			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
+			contextProviders: [
+				{ name: "world", provide: async () => ({ name: "world", priority: 1, value: { revision: 1 } }) },
+			],
+			toolProviders: [{ name: "actions", provide: async () => [validTool("gather")] }],
+			observer: {
+				observeStage(observation) {
+					stages.push(observation);
+				},
+				observeEvent(_gameInput, observedEvent) {
+					observedEvents.push(observedEvent.type);
+				},
+			},
+		});
+
+		await collect(runtime.run(input("a"), { runId: "observed-run" }));
+
+		expect(stages).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ stage: "context", name: "world", outcome: "ok" }),
+				expect.objectContaining({ stage: "tool-provider", name: "actions", outcome: "ok" }),
+				expect.objectContaining({ stage: "tool-execution", name: "gather", outcome: "ok" }),
+				expect.objectContaining({ stage: "run", runId: "observed-run", outcome: "ok" }),
+			]),
+		);
+		expect(observedEvents).toEqual(["run.started", "run.completed"]);
+	});
+
+	it("isolates observer failures from successful runs", async () => {
+		const runtime = new GameAgentRuntime({
+			kernel: new CapturingKernel(),
+			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
+			observer: {
+				observeStage() {
+					throw new Error("observer-stage-failure");
+				},
+				observeEvent() {
+					throw new Error("observer-event-failure");
+				},
+			},
+		});
+
+		await expect(collect(runtime.run(input("a"), { runId: "isolated-observer" }))).resolves.toHaveLength(2);
 	});
 });

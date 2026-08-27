@@ -1,91 +1,109 @@
-# Traces, playback, and offline evaluation
+# Traces, performance, benchmarks, and offline evaluation
 
-`OpenGameAgent.DevTools` turns the bounded lifecycle events produced by `GameAgentTracingExtension` into an append-only JSONL recording. The companion CLI can summarize a recording, generate a self-contained local HTML report, or evaluate it in CI.
+[中文](devtools.zh-CN.md)
 
-Playback is observation-only. It never calls a model, executes a tool, dispatches a durable action, restores a checkpoint, or touches the game host. Use the runtime's normal recovery protocols when an action must actually be reconciled.
+`@opengameagent/devtools` is an optional observation package for `@opengameagent/runtime`. It does not sit in the model/tool loop and cannot authorize or execute game actions.
 
 ## Record a run
 
-Reference the runtime, extensions, and DevTools projects or equivalent release packages:
+```ts
+import {
+  GameRuntimeTraceObserver,
+  JsonLinesGameTraceSink,
+} from "@opengameagent/devtools";
+import { GameAgentRuntime } from "@opengameagent/runtime";
 
-```xml
-<ItemGroup>
-  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent/OpenGameAgent.csproj" />
-  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.Extensions/OpenGameAgent.Extensions.csproj" />
-  <ProjectReference Include="path/to/OpenGameAgent/src/OpenGameAgent.DevTools/OpenGameAgent.DevTools.csproj" />
-</ItemGroup>
+const traceSink = new JsonLinesGameTraceSink("traces/session-001.jsonl");
+const traceObserver = new GameRuntimeTraceObserver(traceSink);
+const runtime = new GameAgentRuntime({
+  kernel,
+  baseSystemPrompt: "Act only through registered game tools.",
+  defaultModelProfileId: "default",
+  observer: traceObserver,
+});
+
+const actions = new DurableGameActionDispatcher(journal, executor, {
+  observer: traceObserver,
+});
+
+for await (const event of runtime.run(input)) {
+  render(event);
+}
+await traceSink.close();
 ```
 
-Register the sink as an ordinary extension:
+The default projection records correlation IDs, lifecycle kinds, audience, model identity, usage, safe error categories, character counts, tool names, tool success, and bounded timings. It excludes:
 
-```csharp
-await using var trace = new JsonLinesGameAgentTraceSink(
-    "traces/session-001.jsonl",
-    new GameAgentTraceFileOptions
-    {
-        Mode = GameAgentTraceFileMode.CreateNew,
-        MaximumFileBytes = 256L * 1024 * 1024,
-        FlushEachEntry = true,
-    });
+- input content and context;
+- message text;
+- tool arguments, progress payloads, results, and details;
+- provider failure messages and response bodies;
+- credentials and hidden reasoning.
 
-var runtime = new GameAgentBuilder(modelProvider, "model-id")
-    .UseExtension(new GameAgentTracingExtension(trace))
-    // Add game context, tools, stores, and other extensions here.
-    .Build();
+`includeVisibleText` is an explicit local-debug opt-in. Internal-audience text remains excluded even when this option is enabled. Each record and queue is bounded. Trace failures are isolated from Agent execution.
+
+When continuing an existing JSONL file after a process restart, read its last record and pass that sequence as `initialSequence`; the reader rejects duplicate or decreasing sequences.
+
+## Timing and usage
+
+The runtime observer separates:
+
+- actor queue time;
+- total turn preparation;
+- each named context, post-tool context, and tool provider;
+- tool-catalog construction and schema preflight;
+- model-profile selection;
+- runtime event-store and usage-ledger writes;
+- each tool execution and total run duration.
+
+`summarizeGamePerformance(recording)` derives per-run and aggregate TTFT, first-tool latency, tool duration/failure rate, provider/model grouping, tokens, reasoning/cache usage, and known or unknown cost. Passing the same observer to `DurableGameActionDispatcher` also records framework versus authoritative-host time, uncertain writes, reconcile requirements, conflict blocking, and duplicate-write prevention without recording action arguments or results. Unknown prices remain `null`; they are never reported as zero.
+
+```ts
+import { readGameTraceRecording, summarizeGamePerformance } from "@opengameagent/devtools";
+
+const recording = await readGameTraceRecording("traces/session-001.jsonl");
+const summary = summarizeGamePerformance(recording);
+console.log(summary.runLatency.p95, summary.timeToFirstOutput.p95);
 ```
 
-Input payloads and tool arguments are omitted by default. Enable `GameAgentTracingOptions.IncludeInputPayload` or `IncludeToolArguments` only when the trace's storage and viewer authorization match the data's sensitivity. Credentials are resolved below the trace boundary and are not part of trace entries.
+Event timestamps measure the provider-facing interval from `turn.started` to the first visible message or tool call. Named stage observations isolate framework work around that interval. Provider adapters and authoritative action handlers can add their own safe records to the same sink when deeper network/host attribution is needed.
 
-The writer serializes concurrent events, flushes complete JSONL entries, bounds each line and the whole file, and refuses to continue after an interrupted write. The reader accepts a valid final JSON object without a trailing newline and can ignore one crash-truncated final line. Corruption in the middle of a recording fails closed.
+## Deterministic benchmarks
 
-Each entry keeps game time (`timelineId`, `tick`, optional calendar JSON) separate from the operational UTC timestamp. Completed runs record provider/model/response identity and full token and known-cost fields. `session.saved` entries include the persistent cumulative usage ledger and per-cause totals.
+`runGameBenchmark` accepts a caller-owned scenario. The scenario can create a runtime with a fixed or fake provider and deterministic tools. Warmups, bounded concurrency, iteration timeout, fault injection, and thresholds are built in.
 
-## Performance and reliability summary
-
-`GameAgentPerformanceSummary.Create(recording)` derives per-input and aggregate JSON/JSONL/text metrics without replaying work. It separates queue, framework preparation, provider request/TTFT, tool, authoritative host-action, durable-action framework, and total latency; categorizes tool failures; and counts retries, fallbacks, uncertain writes, recoveries, duplicate-write prevention, exact-repeat advisories/terminations, tokens, and known/unknown cost. Aggregates are keyed by tool, failure category, resolved provider, and model.
-
-For repeatable load and failure testing, use `GameAgentBenchmarkRunner` with a scenario that returns a bounded trace recording. The runner supports fixed or fake providers, injected faults, warmups, concurrency, iteration timeouts, and caller-owned thresholds. `RealtimeMetricsCollector` and `GameMediaMetricsCollector` add optional bounded STT/TTS/barge-in and media asset-ready timings.
-
-See [Agent loop and performance](agent-loop-and-performance.md) for the complete API, attribution rules, examples, and Chinese documentation.
-
-## Inspect and replay observations
-
-Run the CLI from source:
-
-```powershell
-dotnet run --project tools/OpenGameAgent.DevTools.Cli -- \
-  inspect traces/session-001.jsonl --out artifacts/session-001.html
+```ts
+const report = await runGameBenchmark(
+  {
+    name: "npc-tool-loop",
+    run: async ({ iteration, signal }) => runFixture(iteration, signal),
+  },
+  {
+    warmupIterations: 2,
+    iterations: 50,
+    concurrency: 4,
+    iterationTimeoutMilliseconds: 30_000,
+    thresholds: {
+      maximumP95RunMilliseconds: 2_000,
+      maximumToolFailureRate: 0.01,
+      maximumFailedIterations: 0,
+    },
+  },
+);
 ```
 
-The report is a self-contained local HTML file with filters, a timeline scrubber, playback speed, failure highlighting, and paged rendering for long sessions. Untrusted trace values are embedded as base64 JSON and rendered with `textContent` under a restrictive content-security policy.
+Reports can be written as JSON or JSONL, or formatted as bounded human-readable text. A timeout still completes when a faulty scenario ignores its cancellation signal; the signal is also aborted so cooperative providers and tools can stop their work.
 
-To omit event details from the report:
+## Offline evaluation and replay
 
-```powershell
-dotnet run --project tools/OpenGameAgent.DevTools.Cli -- \
-  inspect traces/session-001.jsonl --no-details
-```
+`evaluateGameTrace` provides bounded run-duration, TTFT, tool-failure, unknown-cost, required-event, forbidden-event, and forbidden-tool checks. Custom rules receive an independent timeout signal and cannot hang the evaluation result.
 
-## Summarize or evaluate in CI
-
-```powershell
-dotnet run --project tools/OpenGameAgent.DevTools.Cli -- \
-  summarize traces/session-001.jsonl --out artifacts/summary.json
-
-dotnet run --project tools/OpenGameAgent.DevTools.Cli -- \
-  evaluate traces/session-001.jsonl \
-  --spec examples/trace-evaluation.json \
-  --out artifacts/evaluation.json
-```
-
-The `evaluate` command exits with `0` when every rule passes, `2` for a valid recording with failed rules, and `1` for invalid input or storage errors. Specifications are strict JSON: duplicate or unknown properties are rejected.
-
-Built-in rules cover entry, failed-run, tool-call, tool-error, and run-duration limits plus required or forbidden event kinds and tools. Games can add bounded custom rules through `IGameAgentTraceEvaluationRule`; each rule has an independent timeout and a failing rule cannot hang the evaluation process.
+`replayGameTrace` replays immutable observations to a callback. It never calls a provider, executes a tool, dispatches a durable action, restores a save, or writes game state. Durable journals and authoritative receipts remain the only source of truth for action recovery.
 
 ## Security and retention
 
-- Treat trace files as potentially private game telemetry.
-- Keep payload capture disabled unless it is needed for a controlled test.
-- Apply game-owned retention and access policy to recordings and generated reports.
-- Do not treat playback as proof that a world mutation did or did not commit; authoritative receipts and journals remain the source of truth.
-- Do not use an operational timestamp as narrative time. Evaluate story order against `GameMoment`.
+- Treat trace files as private game telemetry even with the default projection.
+- Keep visible-text capture disabled outside controlled local debugging.
+- Apply game-owned access, retention, and deletion policies.
+- Use game time and timeline/generation coordinates for narrative order; operational timestamps are only performance evidence.
+- Do not infer that a world mutation committed from a trace. Reconcile the durable action journal and receipt.
