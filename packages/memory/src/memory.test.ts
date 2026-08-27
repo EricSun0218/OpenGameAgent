@@ -116,6 +116,67 @@ describe("SqliteGameMemoryStore", () => {
 		expect(result.diagnostics.authoritativeCandidates).toBeLessThanOrEqual(128);
 	});
 
+	it("applies metadata and game-time filters before every bounded candidate limit", async () => {
+		const path = await databasePath();
+		using store = new SqliteGameMemoryStore(path, { embedding: embedding(), maximumCandidates: 32 });
+		const gameSession = session();
+		const target = memory("filtered-target", gameSession, {
+			scope: "owner",
+			kind: "promise",
+			tags: ["quest", "private"],
+			searchText: "apple",
+			importance: 0.9,
+			moment: { tick: 40 },
+		});
+		const decoys = Array.from({ length: 256 }, (_, index) =>
+			memory(`decoy-${index}`, gameSession, {
+				scope: "owner",
+				kind: "observation",
+				tags: ["noise"],
+				searchText: "apple",
+				importance: 1,
+				moment: { tick: 100 + index },
+			}),
+		);
+		await store.putMany([target, ...decoys]);
+
+		const filtered = await store.search({
+			session: gameSession,
+			text: "orchard",
+			scopes: ["owner"],
+			kinds: ["promise"],
+			tags: ["quest", "private"],
+			atOrBeforeTick: 50,
+			minimumImportance: 0.8,
+			limit: 1,
+		});
+
+		expect(filtered.matches.map((match) => match.memory.id)).toEqual(["filtered-target"]);
+		expect(filtered.diagnostics.vectorCandidates).toBe(1);
+		expect(filtered.diagnostics.authoritativeCandidates).toBe(1);
+
+		const metadataOnly = await store.search({
+			session: gameSession,
+			scopes: ["owner"],
+			kinds: ["promise"],
+			tags: ["quest", "private"],
+			atOrBeforeTick: 50,
+			minimumImportance: 0.8,
+			limit: 1,
+		});
+		expect(metadataOnly.matches.map((match) => match.memory.id)).toEqual(["filtered-target"]);
+		expect(metadataOnly.diagnostics.authoritativeCandidates).toBe(1);
+	});
+
+	it("validates bounded query filters before preparing SQL", async () => {
+		const path = await databasePath();
+		using store = new SqliteGameMemoryStore(path);
+		await expect(
+			store.search({ session: session(), kinds: Array.from({ length: 65 }, (_, index) => `kind-${index}`), limit: 1 }),
+		).rejects.toThrow(/kinds/);
+		await expect(store.search({ session: session(), tags: ["invalid tag"], limit: 1 })).rejects.toThrow(/tags/);
+	});
+
 	it("uses an explicit embedding identity and rebuilds derived vectors after model changes", async () => {
 		const path = await databasePath();
 		using first = new SqliteGameMemoryStore(path, { embedding: embedding("1") });

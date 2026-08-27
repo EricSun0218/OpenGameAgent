@@ -49,6 +49,10 @@ The provider performs XLM-RoBERTa tokenization, attention-mask mean pooling, and
 
 The embedding identity includes the explicit model version and preprocessing contract. `SqliteGameMemoryStore` stores vectors as a derived index under that identity. After changing the version or preprocessing, create the store with the new provider and call `rebuildEmbeddings(session)` for the affected save boundary. Authoritative memories remain unchanged.
 
+Recall is bounded before authoritative JSON is loaded. Visibility plus optional scope, kind, tag, game-tick, and importance predicates are applied inside both FTS and vector-candidate SQL before `LIMIT`; tag membership uses a normalized index. Hybrid candidates are merged by their lexical/vector relevance and importance before the configured candidate cap. This prevents a long-lived NPC's unrelated recent history from crowding a valid filtered memory out of a small result window.
+
+`GameMemorySearchResult.diagnostics` reports embedding, lexical, vector-candidate, authoritative-load, and rerank time plus candidate counts. It never contains query text or memory content.
+
 Metrics contain only mode, batch size, queue/load/tokenization/inference time, truncation count, and a bounded failure category. They never contain source text, token IDs, model output, credentials, or file bytes.
 
 Run the deterministic tests with `npm test`. To exercise a real model directory:

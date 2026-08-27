@@ -47,6 +47,10 @@ Provider 完成 XLM-RoBERTa 分词、基于 attention mask 的均值池化和 L2
 
 嵌入 identity 包含显式模型版本与预处理契约。`SqliteGameMemoryStore` 按该 identity 保存可重建的派生向量索引。更换模型版本或预处理后，用新 Provider 打开存储，并对相应存档边界调用 `rebuildEmbeddings(session)`；权威记忆不会被改写。
 
+在加载权威 JSON 之前，召回候选就已经受到上限约束。可见性以及可选的 scope、kind、tag、游戏 tick 和 importance 条件会在 FTS 与向量候选 SQL 的 `LIMIT` 之前执行，标签使用规范化索引。词法/向量相关性和重要度会先完成混合排序，再应用候选上限，避免长期 NPC 的无关近期历史把真正符合筛选条件的记忆挤出小结果窗口。
+
+`GameMemorySearchResult.diagnostics` 会报告 Embedding、词法查询、向量候选、权威记录加载和重排耗时及候选数量；其中不包含查询原文或记忆正文。
+
 指标只包含模式、批大小、排队/加载/分词/推理耗时、截断数量和有界失败类别，不包含原文、Token ID、模型输出、凭据或模型文件内容。
 
 普通测试运行 `npm test`。使用真实模型目录进行 smoke：

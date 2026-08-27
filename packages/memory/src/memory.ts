@@ -76,8 +76,11 @@ export interface SqliteGameMemoryStoreOptions {
 interface CandidateRow {
 	row_id: number;
 	rank?: number;
+	importance?: number;
 	vector?: Uint8Array;
 }
+
+const validMemoryScopes = new Set(["actor", "owner", "world"] as const);
 
 interface MemoryRow {
 	row_id: number;
@@ -161,6 +164,15 @@ function ftsQuery(text: string): string | undefined {
 	return [...grams].map((gram) => `"${gram.replaceAll('"', '""')}"`).join(" OR ");
 }
 
+function bm25RankToScore(rank: number): number {
+	if (!Number.isFinite(rank)) return 1 / 1_000;
+	if (rank < 0) {
+		const relevance = -rank;
+		return relevance / (1 + relevance);
+	}
+	return 1 / (1 + rank);
+}
+
 function validatePortableId(value: string, name: string): void {
 	if (!/^[a-z0-9][a-z0-9._:-]{0,191}$/i.test(value))
 		throw new TypeError(`${name} is not a portable bounded identifier.`);
@@ -222,6 +234,17 @@ export class SqliteGameMemoryStore implements Disposable {
 			) STRICT;
 			CREATE INDEX IF NOT EXISTS game_memory_vector_bucket_lookup
 				ON game_memory_vector_buckets(embedding_identity,bucket,row_id DESC);
+			CREATE TABLE IF NOT EXISTS game_memory_tags (
+				tag TEXT NOT NULL,
+				row_id INTEGER NOT NULL REFERENCES game_memories(row_id) ON DELETE CASCADE,
+				PRIMARY KEY(tag,row_id)
+			) STRICT;
+			CREATE INDEX IF NOT EXISTS game_memories_actor_filtered
+				ON game_memories(world_id,save_id,timeline_id,generation,actor_id,scope,kind,tick DESC,importance DESC,row_id DESC);
+			CREATE INDEX IF NOT EXISTS game_memories_owner_filtered
+				ON game_memories(world_id,save_id,timeline_id,generation,owner_id,scope,kind,tick DESC,importance DESC,row_id DESC);
+			CREATE INDEX IF NOT EXISTS game_memories_world_filtered
+				ON game_memories(world_id,save_id,timeline_id,generation,scope,kind,tick DESC,importance DESC,row_id DESC);
 		`);
 		this.database.exec("PRAGMA foreign_keys=ON;");
 	}
@@ -267,6 +290,7 @@ export class SqliteGameMemoryStore implements Disposable {
 				world_id,save_id,timeline_id,generation,owner_id,session_id,actor_id,memory_id,scope,kind,tags_json,
 				importance,tick,created_at,memory_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 			const insertFts = this.database.prepare("INSERT INTO game_memory_fts(rowid,search_text,tags) VALUES (?,?,?)");
+			const insertTag = this.database.prepare("INSERT INTO game_memory_tags(tag,row_id) VALUES (?,?)");
 			for (let index = 0; index < values.length; index += 1) {
 				const { memory, json } = values[index] as { memory: GameMemory; json: string };
 				const existing = readExisting.get(
@@ -299,6 +323,7 @@ export class SqliteGameMemoryStore implements Disposable {
 				);
 				const rowId = Number(inserted.lastInsertRowid);
 				insertFts.run(rowId, memory.searchText ?? "", (memory.tags ?? []).join(" "));
+				for (const tag of new Set(memory.tags ?? [])) insertTag.run(tag, rowId);
 				const vector = vectors?.[index];
 				if (vector && this.identity) this.writeVector(rowId, this.identity, vector);
 			}
@@ -326,18 +351,23 @@ export class SqliteGameMemoryStore implements Disposable {
 			returned: 0,
 		};
 		const lexical = new Map<number, number>();
+		const importance = new Map<number, number>();
 		const vectorScores = new Map<number, number>();
 		const candidateLimit = Math.min(this.maximumCandidates, Math.max(query.limit * 16, 32));
+		const filter = this.queryPredicate(query);
 		const expression = query.text ? ftsQuery(query.text) : undefined;
 		const lexicalStart = now();
 		if (expression) {
 			const rows = this.database
-				.prepare(`SELECT m.row_id, bm25(game_memory_fts) AS rank
+				.prepare(`SELECT m.row_id,m.importance,bm25(game_memory_fts) AS rank
 				FROM game_memory_fts JOIN game_memories m ON m.row_id=game_memory_fts.rowid
-				WHERE game_memory_fts MATCH ? AND ${this.scopePredicate(query.session)}
+				WHERE game_memory_fts MATCH ? AND ${filter.sql}
 				ORDER BY rank LIMIT ?`)
-				.all(expression, ...this.scopeValues(query.session), candidateLimit) as unknown as CandidateRow[];
-			for (const row of rows) lexical.set(row.row_id, 1 / (1 + Math.max(0, Number(row.rank ?? 0))));
+				.all(expression, ...filter.values, candidateLimit) as unknown as CandidateRow[];
+			for (const row of rows) {
+				lexical.set(row.row_id, bm25RankToScore(Number(row.rank)));
+				importance.set(row.row_id, Number(row.importance ?? 0));
+			}
 		}
 		diagnostics.lexicalMilliseconds = now() - lexicalStart;
 		diagnostics.lexicalCandidates = lexical.size;
@@ -354,20 +384,17 @@ export class SqliteGameMemoryStore implements Disposable {
 				const buckets = vectorBuckets(queryVector);
 				const placeholders = buckets.map(() => "?").join(",");
 				const rows = this.database
-					.prepare(`SELECT DISTINCT b.row_id,v.vector
+					.prepare(`SELECT b.row_id,v.vector,m.importance,COUNT(*) AS bucket_matches
 					FROM game_memory_vector_buckets b JOIN game_memory_vectors v ON v.row_id=b.row_id
 					JOIN game_memories m ON m.row_id=b.row_id
-					WHERE b.embedding_identity=? AND b.bucket IN (${placeholders}) AND ${this.scopePredicate(query.session)}
-					ORDER BY b.row_id DESC LIMIT ?`)
-					.all(
-						this.identity,
-						...buckets,
-						...this.scopeValues(query.session),
-						candidateLimit,
-					) as unknown as CandidateRow[];
+					WHERE b.embedding_identity=? AND b.bucket IN (${placeholders}) AND ${filter.sql}
+					GROUP BY b.row_id
+					ORDER BY bucket_matches DESC,b.row_id DESC LIMIT ?`)
+					.all(this.identity, ...buckets, ...filter.values, candidateLimit) as unknown as CandidateRow[];
 				for (const row of rows) {
 					if (!row.vector) throw new Error("Stored memory vector is missing.");
 					vectorScores.set(row.row_id, similarity(queryVector, decodeVector(row.vector, queryVector.length)));
+					importance.set(row.row_id, Number(row.importance ?? 0));
 				}
 				diagnostics.vectorCandidateMilliseconds = now() - vectorStart;
 			} catch (error) {
@@ -377,16 +404,16 @@ export class SqliteGameMemoryStore implements Disposable {
 		}
 		diagnostics.vectorCandidates = vectorScores.size;
 
-		const ids = new Set([...lexical.keys(), ...vectorScores.keys()]);
+		let ids = this.selectCandidates(lexical, vectorScores, importance, candidateLimit);
 		if (ids.size === 0) {
 			const rows = this.database
-				.prepare(`SELECT row_id FROM game_memories m WHERE ${this.scopePredicate(query.session)}
+				.prepare(`SELECT row_id FROM game_memories m WHERE ${filter.sql}
 				ORDER BY importance DESC,tick DESC,row_id DESC LIMIT ?`)
-				.all(...this.scopeValues(query.session), candidateLimit) as unknown as CandidateRow[];
-			for (const row of rows) ids.add(row.row_id);
+				.all(...filter.values, candidateLimit) as unknown as CandidateRow[];
+			ids = new Set(rows.map((row) => row.row_id));
 		}
 		const authoritativeStart = now();
-		const boundedIds = [...ids].slice(0, candidateLimit);
+		const boundedIds = [...ids];
 		const rows =
 			boundedIds.length === 0
 				? []
@@ -496,6 +523,65 @@ export class SqliteGameMemoryStore implements Disposable {
 		return [session.worldId, session.saveId, session.timelineId, session.generation, session.actorId, session.ownerId];
 	}
 
+	private queryPredicate(query: GameMemoryQuery): { sql: string; values: (string | number)[] } {
+		const clauses = [this.scopePredicate(query.session)];
+		const values: (string | number)[] = [...this.scopeValues(query.session)];
+		if (query.scopes) {
+			if (query.scopes.length === 0) clauses.push("1=0");
+			else {
+				clauses.push(`m.scope IN (${query.scopes.map(() => "?").join(",")})`);
+				values.push(...query.scopes);
+			}
+		}
+		if (query.kinds) {
+			if (query.kinds.length === 0) clauses.push("1=0");
+			else {
+				clauses.push(`m.kind IN (${query.kinds.map(() => "?").join(",")})`);
+				values.push(...query.kinds);
+			}
+		}
+		for (const tag of query.tags ?? []) {
+			clauses.push("EXISTS (SELECT 1 FROM game_memory_tags mt WHERE mt.tag=? AND mt.row_id=m.row_id)");
+			values.push(tag);
+		}
+		if (query.atOrBeforeTick !== undefined) {
+			clauses.push("m.tick<=?");
+			values.push(query.atOrBeforeTick);
+		}
+		if (query.minimumImportance !== undefined) {
+			clauses.push("m.importance>=?");
+			values.push(query.minimumImportance);
+		}
+		return { sql: clauses.join(" AND "), values };
+	}
+
+	private selectCandidates(
+		lexical: ReadonlyMap<number, number>,
+		vectors: ReadonlyMap<number, number>,
+		importance: ReadonlyMap<number, number>,
+		limit: number,
+	): Set<number> {
+		return new Set(
+			[...new Set([...lexical.keys(), ...vectors.keys()])]
+				.map((rowId) => {
+					const lexicalScore = lexical.get(rowId);
+					const vectorScore = vectors.get(rowId);
+					const relevance =
+						lexicalScore === undefined
+							? vectorScore === undefined
+								? 0
+								: (vectorScore + 1) / 2
+							: vectorScore === undefined
+								? lexicalScore
+								: lexicalScore * 0.4 + ((vectorScore + 1) / 2) * 0.6;
+					return { rowId, score: relevance * 0.9 + (importance.get(rowId) ?? 0) * 0.1 };
+				})
+				.sort((left, right) => right.score - left.score || right.rowId - left.rowId)
+				.slice(0, limit)
+				.map(({ rowId }) => rowId),
+		);
+	}
+
 	private matches(memory: GameMemory, query: GameMemoryQuery): boolean {
 		if (query.scopes && !query.scopes.includes(memory.scope)) return false;
 		if (query.kinds && !query.kinds.includes(memory.kind)) return false;
@@ -516,9 +602,10 @@ export class SqliteGameMemoryStore implements Disposable {
 	}
 
 	private validateMemory(memory: GameMemory): void {
+		this.validateSession(memory.session);
 		validatePortableId(memory.id, "Memory id");
 		validatePortableId(memory.kind, "Memory kind");
-		if (!(["actor", "owner", "world"] as const).includes(memory.scope)) throw new TypeError("Memory scope is invalid.");
+		if (!validMemoryScopes.has(memory.scope)) throw new TypeError("Memory scope is invalid.");
 		if (!Number.isFinite(memory.importance) || memory.importance < 0 || memory.importance > 1)
 			throw new RangeError("Memory importance must be between 0 and 1.");
 		if (!Number.isFinite(memory.moment?.tick) || !Number.isSafeInteger(memory.createdAt) || memory.createdAt < 0)
@@ -530,6 +617,7 @@ export class SqliteGameMemoryStore implements Disposable {
 	}
 
 	private validateQuery(query: GameMemoryQuery): void {
+		this.validateSession(query.session);
 		if (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > 128)
 			throw new RangeError("Memory query limit must be between 1 and 128.");
 		if (query.text !== undefined && query.text.length > this.maximumSearchCharacters)
@@ -541,6 +629,29 @@ export class SqliteGameMemoryStore implements Disposable {
 			throw new RangeError("minimumImportance is invalid.");
 		if (query.atOrBeforeTick !== undefined && !Number.isFinite(query.atOrBeforeTick))
 			throw new RangeError("atOrBeforeTick is invalid.");
+		if (
+			query.scopes &&
+			(query.scopes.length > validMemoryScopes.size || query.scopes.some((scope) => !validMemoryScopes.has(scope)))
+		)
+			throw new TypeError("Memory query scopes are invalid.");
+		if (
+			query.kinds &&
+			(query.kinds.length > 64 || query.kinds.some((kind) => !/^[a-z0-9][a-z0-9._:-]{0,191}$/i.test(kind)))
+		)
+			throw new TypeError("Memory query kinds are invalid.");
+		if (query.tags && (query.tags.length > 64 || query.tags.some((tag) => !/^[\p{L}\p{N}._:-]{1,64}$/u.test(tag))))
+			throw new TypeError("Memory query tags are invalid.");
+	}
+
+	private validateSession(session: GameSessionKey): void {
+		validatePortableId(session.worldId, "World id");
+		validatePortableId(session.saveId, "Save id");
+		validatePortableId(session.timelineId, "Timeline id");
+		validatePortableId(session.ownerId, "Owner id");
+		validatePortableId(session.sessionId, "Session id");
+		validatePortableId(session.actorId, "Actor id");
+		if (!Number.isSafeInteger(session.generation) || session.generation < 0)
+			throw new RangeError("Session generation is invalid.");
 	}
 
 	private ensureOpen(): void {
