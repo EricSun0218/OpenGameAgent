@@ -6,6 +6,7 @@
 		{ "path": "./packages/kernel-pi" },
 		{ "path": "./packages/actions" },
 		{ "path": "./packages/storage-sqlite" },
-		{ "path": "./packages/runtime" }
+		{ "path": "./packages/runtime" },
+		{ "path": "./packages/server" }
 	]
 }

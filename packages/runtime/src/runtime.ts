@@ -33,6 +33,13 @@ export interface GameToolVisibilityPolicy {
 
 export interface GameRuntimeEventStore {
 	append(input: GameInput, event: GameAgentEvent, signal: AbortSignal): Promise<void>;
+	read?(
+		session: GameSessionKey,
+		runId: string,
+		afterSequence: number,
+		maximum: number,
+		signal?: AbortSignal,
+	): Promise<readonly GameAgentEvent[]>;
 }
 
 export interface GameAgentRuntimeOptions {

@@ -1,5 +1,5 @@
 {
-	"name": "@opengameagent/storage-sqlite",
+	"name": "@opengameagent/server",
 	"version": "0.4.0-dev.0",
 	"type": "module",
 	"license": "MIT",

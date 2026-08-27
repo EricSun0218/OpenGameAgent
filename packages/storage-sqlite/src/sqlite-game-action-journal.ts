@@ -202,6 +202,39 @@ export class SqliteGameActionJournal implements GameActionJournal, Disposable {
 		return row ? this.toEntry(row) : undefined;
 	}
 
+	async listPending(
+		session: GameActionIntent["session"],
+		maximum: number,
+		signal?: AbortSignal,
+	): Promise<readonly GameActionJournalEntry[]> {
+		this.ensureOpen();
+		signal?.throwIfAborted();
+		if (!Number.isInteger(maximum) || maximum < 1 || maximum > 256)
+			throw new RangeError("maximum must be between 1 and 256.");
+		const rows = this.database
+			.prepare(`
+				SELECT operation_id, intent_json, status, attempt, prepared_at, dispatched_at, receipt_json
+				FROM game_action_journal
+				WHERE world_id = ? AND save_id = ? AND timeline_id = ? AND generation = ?
+					AND status IN ('prepared','dispatched','uncertain')
+					AND json_extract(intent_json, '$.session.ownerId') = ?
+					AND json_extract(intent_json, '$.session.sessionId') = ?
+					AND json_extract(intent_json, '$.session.actorId') = ?
+				ORDER BY prepared_at, operation_id LIMIT ?
+			`)
+			.all(
+				session.worldId,
+				session.saveId,
+				session.timelineId,
+				session.generation,
+				session.ownerId,
+				session.sessionId,
+				session.actorId,
+				maximum,
+			) as unknown as ActionRow[];
+		return rows.map((row) => this.toEntry(row));
+	}
+
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;

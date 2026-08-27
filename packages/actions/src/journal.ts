@@ -12,6 +12,11 @@ export interface GameActionJournal {
 	markUncertain(operationId: string, signal?: AbortSignal): Promise<GameActionJournalEntry>;
 	submitReceipt(receipt: GameActionReceipt, signal?: AbortSignal): Promise<GameActionJournalEntry>;
 	read(operationId: string, signal?: AbortSignal): Promise<GameActionJournalEntry | undefined>;
+	listPending(
+		session: GameActionIntent["session"],
+		maximum: number,
+		signal?: AbortSignal,
+	): Promise<readonly GameActionJournalEntry[]>;
 }
 
 function sameIntent(left: GameActionIntent, right: GameActionIntent): boolean {
@@ -130,6 +135,30 @@ export class InMemoryGameActionJournal implements GameActionJournal {
 			signal?.throwIfAborted();
 			const entry = this.entries.get(operationId);
 			return entry ? clone(entry) : undefined;
+		});
+	}
+
+	async listPending(
+		session: GameActionIntent["session"],
+		maximum: number,
+		signal?: AbortSignal,
+	): Promise<readonly GameActionJournalEntry[]> {
+		if (!Number.isInteger(maximum) || maximum < 1 || maximum > 256)
+			throw new RangeError("maximum must be between 1 and 256.");
+		return this.exclusive(() => {
+			signal?.throwIfAborted();
+			return [...this.entries.values()]
+				.filter(
+					(entry) =>
+						sameSession(entry.intent.session, session) &&
+						(entry.status === "prepared" || entry.status === "dispatched" || entry.status === "uncertain"),
+				)
+				.sort(
+					(left, right) =>
+						left.preparedAt - right.preparedAt || left.intent.operationId.localeCompare(right.intent.operationId),
+				)
+				.slice(0, maximum)
+				.map(clone);
 		});
 	}
 
