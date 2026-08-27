@@ -10,6 +10,7 @@ import type {
 	ImagesOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ComfyUiImageGenerator } from "./comfyui-image-generator.js";
 import { OpenAIImageGenerator, VolcengineImageGenerator } from "./http-image-generators.js";
 import { GameMediaRegistry } from "./media.js";
 import { PiGameImageGenerator } from "./pi-images.js";
@@ -273,5 +274,82 @@ describe("HTTP image generators", () => {
 		}
 		expect(message).toBe("The image provider returned HTTP 400.");
 		expect(message).not.toContain(hidden);
+	});
+});
+
+describe("ComfyUiImageGenerator", () => {
+	it("uploads references, submits a host workflow, polls history, and downloads bounded outputs", async () => {
+		const calls: Array<{ url: URL; init: RequestInit }> = [];
+		let submitted: Record<string, unknown> | undefined;
+		const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(String(input));
+			calls.push({ url, init: init ?? {} });
+			if (url.pathname.endsWith("/upload/image")) return new Response("{}", { status: 200 });
+			if (url.pathname.endsWith("/prompt")) {
+				submitted = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return new Response(JSON.stringify({ prompt_id: "prompt-1" }), { status: 200 });
+			}
+			if (url.pathname.endsWith("/history/prompt-1")) {
+				return new Response(
+					JSON.stringify({
+						"prompt-1": {
+							status: { completed: true },
+							outputs: { "9": { images: [{ filename: "output.png", subfolder: "", type: "output" }] } },
+						},
+					}),
+					{ status: 200 },
+				);
+			}
+			if (url.pathname.endsWith("/view")) {
+				return new Response(png(), { status: 200, headers: { "content-type": "image/png" } });
+			}
+			return new Response(undefined, { status: 404 });
+		});
+		const generator = new ComfyUiImageGenerator({
+			model: "local-workflow",
+			endpoint: "http://127.0.0.1:8188/",
+			workflow: {
+				"6": { class_type: "CLIPTextEncode", inputs: { text: "" } },
+				"7": { class_type: "LoadImage", inputs: { image: "" } },
+				"9": { class_type: "SaveImage", inputs: { images: ["8", 0] } },
+			},
+			promptTarget: { nodeId: "6", input: "text" },
+			referenceTargets: [{ nodeId: "7", input: "image" }],
+			outputNodeIds: ["9"],
+			fetch,
+		});
+		const progress: string[] = [];
+		const result = await generator.generate(
+			{
+				id: "comfy-1",
+				session,
+				kind: "image",
+				prompt: "a lantern garden",
+				sources: [{ kind: "image", mimeType: "image/png", data: png() }],
+			},
+			(event) => {
+				progress.push(event.stage);
+			},
+		);
+		const prompt = submitted?.["prompt"] as Record<string, { inputs: Record<string, unknown> }>;
+		expect(prompt["6"]?.inputs["text"]).toBe("a lantern garden");
+		expect(prompt["7"]?.inputs["image"]).toMatch(/^[a-f0-9]{64}\.png$/u);
+		expect(calls.map((call) => call.url.pathname)).toEqual(["/upload/image", "/prompt", "/history/prompt-1", "/view"]);
+		expect(calls[3]?.url.searchParams.get("filename")).toBe("output.png");
+		expect(result.responseId).toBe("prompt-1");
+		expect(Buffer.from(result.outputs[0]?.data ?? [])).toEqual(png());
+		expect(progress).toEqual(["submitted", "completed"]);
+	});
+
+	it("rejects remote endpoints and workflow-controlled reference overflow", async () => {
+		expect(
+			() =>
+				new ComfyUiImageGenerator({
+					model: "workflow",
+					endpoint: "https://remote.example.test/",
+					workflow: { "1": { inputs: { text: "" } } },
+					promptTarget: { nodeId: "1", input: "text" },
+				}),
+		).toThrow("loopback");
 	});
 });

@@ -1,3 +1,4 @@
+export * from "./comfyui-image-generator.js";
 export * from "./http-image-generators.js";
 export * from "./media.js";
 export * from "./pi-images.js";
