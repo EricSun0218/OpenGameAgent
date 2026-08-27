@@ -15,6 +15,7 @@
 		{ "path": "./packages/skills" },
 		{ "path": "./packages/approvals" },
 		{ "path": "./packages/mailbox" },
+		{ "path": "./packages/scheduling" },
 		{ "path": "./packages/evolution" },
 		{ "path": "./packages/media" },
 		{ "path": "./packages/realtime" },
