@@ -10,6 +10,7 @@ import type {
 	ImagesOptions,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OpenAIImageGenerator, VolcengineImageGenerator } from "./http-image-generators.js";
 import { GameMediaRegistry } from "./media.js";
 import { PiGameImageGenerator } from "./pi-images.js";
 import { FileGameMediaResourceStore } from "./resource-store.js";
@@ -159,5 +160,118 @@ describe("PiGameImageGenerator", () => {
 		await expect(generator.generate({ id: "x", session, kind: "image", prompt: "x", sources: [] })).rejects.toThrow(
 			"base64",
 		);
+	});
+});
+
+describe("HTTP image generators", () => {
+	it("builds bounded OpenAI generation and multipart edit requests", async () => {
+		const calls: Array<{ url: string; init: RequestInit }> = [];
+		const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			calls.push({ url: String(input), init: init ?? {} });
+			return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from(png()).toString("base64") }] }), {
+				status: 200,
+				headers: { "content-type": "application/json", "x-request-id": "request-1" },
+			});
+		});
+		const generator = new OpenAIImageGenerator({
+			provider: "openai",
+			model: "gpt-image",
+			endpoint: "https://api.example.test/v1/images",
+			fetch,
+			authentication: { resolve: async () => ({ bearerToken: "secret-token" }) },
+		});
+		const generated = await generator.generate({
+			id: "generation",
+			session,
+			kind: "image",
+			prompt: "a garden",
+			sources: [],
+			parameters: { size: "1024x1536", output_format: "png", n: 1 },
+		});
+		expect(generated.responseId).toBe("request-1");
+		expect(calls[0]?.url).toBe("https://api.example.test/v1/images/generations");
+		expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({
+			model: "gpt-image",
+			prompt: "a garden",
+			size: "1024x1536",
+		});
+		expect(new Headers(calls[0]?.init.headers).get("authorization")).toBe("Bearer secret-token");
+
+		await generator.generate({
+			id: "edit",
+			session,
+			kind: "image",
+			prompt: "add a lantern",
+			sources: [
+				{ kind: "image", mimeType: "image/png", data: png() },
+				{ kind: "image", mimeType: "image/png", data: png() },
+			],
+		});
+		expect(calls[1]?.url).toBe("https://api.example.test/v1/images/edits");
+		const form = calls[1]?.init.body;
+		expect(form).toBeInstanceOf(FormData);
+		expect((form as FormData).getAll("image[]")).toHaveLength(2);
+	});
+
+	it("builds Volcengine Seedream requests with image arrays and no watermark by default", async () => {
+		let body: Record<string, unknown> | undefined;
+		const fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				JSON.stringify({
+					data: [{ b64_json: Buffer.from(png()).toString("base64") }],
+					usage: { generated_images: 1 },
+				}),
+				{ status: 200, headers: { "content-type": "application/json", "x-tt-logid": "ark-1" } },
+			);
+		});
+		const generator = new VolcengineImageGenerator({
+			provider: "volcengine",
+			model: "seedream",
+			endpoint: "https://ark.example.test/api/v3/images/generations",
+			fetch,
+		});
+		const result = await generator.generate({
+			id: "seedream-1",
+			session,
+			kind: "image",
+			prompt: "a village",
+			sources: [{ kind: "image", mimeType: "image/png", data: png() }],
+			parameters: { size: "2048x1152" },
+		});
+		expect(body).toMatchObject({
+			model: "seedream",
+			response_format: "b64_json",
+			size: "2048x1152",
+			stream: false,
+			watermark: false,
+		});
+		expect(body?.["image"]).toEqual([`data:image/png;base64,${Buffer.from(png()).toString("base64")}`]);
+		expect(result.responseId).toBe("ark-1");
+	});
+
+	it("does not expose credentials, prompts, or provider bodies in errors", async () => {
+		const hidden = "private-value";
+		const generator = new OpenAIImageGenerator({
+			provider: "openai",
+			model: "gpt-image",
+			endpoint: "https://api.example.test/v1/images",
+			authentication: { resolve: async () => ({ bearerToken: hidden }) },
+			fetch: async () => new Response(JSON.stringify({ error: hidden }), { status: 400 }),
+		});
+		let message = "";
+		try {
+			await generator.generate({
+				id: "failed",
+				session,
+				kind: "image",
+				prompt: hidden,
+				sources: [],
+			});
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toBe("The image provider returned HTTP 400.");
+		expect(message).not.toContain(hidden);
 	});
 });

@@ -52,6 +52,15 @@ export interface GameMediaGenerator {
 	): Promise<GameMediaGenerationResult>;
 }
 
+export interface GameMediaProviderAuthenticationResult {
+	bearerToken?: string;
+	headers?: Readonly<Record<string, string>>;
+}
+
+export interface GameMediaProviderAuthentication {
+	resolve(provider: string, signal?: AbortSignal): Promise<GameMediaProviderAuthenticationResult | undefined>;
+}
+
 export interface GameMediaResourceStore {
 	save(binary: GameMediaBinary, signal?: AbortSignal): Promise<GameMediaResource>;
 	read(resource: GameMediaResource, signal?: AbortSignal): Promise<GameMediaBinary>;
