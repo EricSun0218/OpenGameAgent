@@ -7,6 +7,7 @@
 		{ "path": "./packages/transcript" },
 		{ "path": "./packages/attachments" },
 		{ "path": "./packages/interactions" },
+		{ "path": "./packages/policy" },
 		{ "path": "./packages/actions" },
 		{ "path": "./packages/storage-sqlite" },
 		{ "path": "./packages/memory" },
