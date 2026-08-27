@@ -248,6 +248,55 @@ describe("PiGameAgentKernel", () => {
 		expect(events.filter((event) => event.type === "turn.started")).toHaveLength(2);
 	});
 
+	it("preserves structured game tool error status through the Pi result hook", async () => {
+		let requests = 0;
+		let secondContext: Context | undefined;
+		const streamFn: StreamFn = (_model, context) => {
+			requests += 1;
+			if (requests === 1) {
+				return completedStream(
+					assistant([{ type: "toolCall", id: "denied-1", name: "dangerous_action", arguments: {} }], "toolUse"),
+				);
+			}
+			secondContext = context;
+			return completedStream(assistant([{ type: "text", text: "I will not repeat it." }], "stop"));
+		};
+		const tool: GameTool = {
+			definition: {
+				name: "dangerous_action",
+				label: "Dangerous action",
+				description: "A test action that is denied by the host.",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+			},
+			execute: async () => ({
+				content: [{ type: "json", value: { status: "denied" } }],
+				details: { decision: "host-policy" },
+				isError: true,
+			}),
+		};
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
+		const events = await collect(
+			kernel.run({
+				runId: "run-denied",
+				input: input("input-denied"),
+				systemPrompt: "Respect tool results.",
+				tools: [tool],
+				modelProfileId: "default",
+				maximumTurns: 3,
+			}),
+		);
+
+		expect(secondContext?.messages.find((message) => message.role === "toolResult")).toMatchObject({
+			role: "toolResult",
+			isError: true,
+			details: { decision: "host-policy" },
+		});
+		expect(events.find((event) => event.type === "tool.completed")).toMatchObject({
+			type: "tool.completed",
+			result: { isError: true, details: { decision: "host-policy" } },
+		});
+	});
+
 	it("applies a refreshed system prompt and tool catalog before the next provider request", async () => {
 		let requests = 0;
 		let refreshedContext: Context | undefined;

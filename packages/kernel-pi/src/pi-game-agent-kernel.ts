@@ -454,6 +454,7 @@ function toPiTool(
 	active: ActivePiRun,
 	store: GameImageAttachmentStore | undefined,
 	maximumInlineImageCharacters: number,
+	outcomes: WeakMap<object, boolean>,
 ): AgentTool<TSchema, JsonValue> {
 	return {
 		name: tool.definition.name,
@@ -474,7 +475,7 @@ function toPiTool(
 				{ id: toolCallId, name: tool.definition.name, arguments: params as JsonObject },
 				context,
 			);
-			return {
+			const projected = {
 				content: await Promise.all(
 					result.content.map(async (item) => {
 						if (item.type === "image") {
@@ -492,6 +493,8 @@ function toPiTool(
 				),
 				details: result.details ?? null,
 			};
+			outcomes.set(projected, result.isError === true);
+			return projected;
 		},
 	};
 }
@@ -622,6 +625,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 			}
 		}
 		const prepareNextTurn = request.prepareNextTurn;
+		const toolOutcomes = new WeakMap<object, boolean>();
 		const agent = new Agent({
 			streamFn: resolved.streamFn,
 			convertToLlm: toPiLlmMessages,
@@ -630,7 +634,14 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 				model: resolved.model,
 				thinkingLevel: resolved.thinkingLevel,
 				tools: request.tools.map((tool) =>
-					toPiTool(tool, request, active, this.options.imageAttachments, this.maximumInlineImageCharacters),
+					toPiTool(
+						tool,
+						request,
+						active,
+						this.options.imageAttachments,
+						this.maximumInlineImageCharacters,
+						toolOutcomes,
+					),
 				),
 				messages:
 					conversation === undefined
@@ -640,6 +651,10 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 									toPiMessage(message, this.options.imageAttachments, operationSignal),
 								),
 							),
+			},
+			afterToolCall: async ({ result }) => {
+				const isError = toolOutcomes.get(result);
+				return isError === undefined ? undefined : { isError };
 			},
 			sessionId: request.input.session.sessionId,
 			shouldStopAfterTurn: () => active.turn >= request.maximumTurns,
@@ -661,7 +676,14 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 									...context.context,
 									systemPrompt: update.systemPrompt,
 									tools: update.tools.map((tool) =>
-										toPiTool(tool, request, active, this.options.imageAttachments, this.maximumInlineImageCharacters),
+										toPiTool(
+											tool,
+											request,
+											active,
+											this.options.imageAttachments,
+											this.maximumInlineImageCharacters,
+											toolOutcomes,
+										),
 									),
 								},
 							};
