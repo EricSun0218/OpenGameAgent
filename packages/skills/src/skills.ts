@@ -20,6 +20,7 @@ export interface GameSkill {
 
 export interface GameSkillSource {
 	list(signal?: AbortSignal): Promise<readonly GameSkill[]>;
+	listForInput?(input: GameInput, signal?: AbortSignal): Promise<readonly GameSkill[]>;
 	readResource?(skillId: string, relativePath: string, signal?: AbortSignal): Promise<string>;
 }
 
@@ -184,6 +185,51 @@ export class InMemoryGameSkillSource implements GameSkillSource {
 	async list(signal?: AbortSignal): Promise<readonly GameSkill[]> {
 		signal?.throwIfAborted();
 		return this.skills.map(cloneSkill);
+	}
+}
+
+export class CompositeGameSkillSource implements GameSkillSource {
+	constructor(
+		private readonly sources: readonly GameSkillSource[],
+		private readonly maximumSkills = 10_000,
+	) {
+		if (!Number.isInteger(maximumSkills) || maximumSkills < 0 || maximumSkills > 100_000)
+			throw new RangeError("maximumSkills is invalid.");
+	}
+
+	async list(signal?: AbortSignal): Promise<readonly GameSkill[]> {
+		return this.merge(await Promise.all(this.sources.map((source) => source.list(signal))));
+	}
+
+	async listForInput(input: GameInput, signal?: AbortSignal): Promise<readonly GameSkill[]> {
+		return this.merge(
+			await Promise.all(this.sources.map((source) => source.listForInput?.(input, signal) ?? source.list(signal))),
+		);
+	}
+
+	async readResource(skillId: string, relativePath: string, signal?: AbortSignal): Promise<string> {
+		for (const source of this.sources) {
+			signal?.throwIfAborted();
+			const inventory = await source.list(signal);
+			if (!inventory.some((skill) => skill.id === skillId)) continue;
+			if (!source.readResource) throw new Error("This skill source does not expose referenced resources.");
+			return source.readResource(skillId, relativePath, signal);
+		}
+		throw new Error("Skill is not available.");
+	}
+
+	private merge(inventories: readonly (readonly GameSkill[])[]): readonly GameSkill[] {
+		const merged = new Map<string, GameSkill>();
+		for (const inventory of inventories) {
+			for (const skill of inventory) {
+				if (merged.has(skill.id)) throw new Error(`Duplicate skill id '${skill.id}'.`);
+				merged.set(skill.id, cloneSkill(skill));
+				if (merged.size > this.maximumSkills) throw new RangeError("Skill count exceeds its configured limit.");
+			}
+		}
+		return [...merged.values()].sort(
+			(left, right) => right.priority - left.priority || left.id.localeCompare(right.id),
+		);
 	}
 }
 
@@ -367,7 +413,7 @@ export function createGameSkillExtension(options: GameSkillExtensionOptions): Ga
 		},
 		postToolContextProvider: {
 			async provide(input, definitions, signal) {
-				const inventory = await options.source.list(signal);
+				const inventory = await (options.source.listForInput?.(input, signal) ?? options.source.list(signal));
 				const toolNames = definitions.map((definition) => definition.name);
 				const tools = new Set(toolNames);
 				const eligible = inventory.filter(

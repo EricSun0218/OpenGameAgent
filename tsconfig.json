@@ -11,6 +11,7 @@
 		{ "path": "./packages/skills" },
 		{ "path": "./packages/approvals" },
 		{ "path": "./packages/mailbox" },
+		{ "path": "./packages/evolution" },
 		{ "path": "./packages/runtime" },
 		{ "path": "./packages/server" }
 	]
