@@ -1,0 +1,22 @@
+{
+	"name": "@opengameagent/memory-onnx",
+	"version": "0.4.0-dev.0",
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"dependencies": {
+		"@huggingface/tokenizers": "0.1.3",
+		"@opengameagent/memory": "0.4.0-dev.0",
+		"onnxruntime-node": "1.29.0"
+	}
+}
