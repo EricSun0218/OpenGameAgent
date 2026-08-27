@@ -8,6 +8,7 @@ import type {
 	GameRunCoordinate,
 	GameSessionKey,
 	GameTool,
+	GameUsage,
 	JsonValue,
 } from "@opengameagent/protocol";
 import { ActorScheduler } from "./scheduler.js";
@@ -31,6 +32,10 @@ export interface GameToolVisibilityPolicy {
 	isVisible(input: GameInput, tool: GameTool["definition"], signal: AbortSignal): Promise<boolean> | boolean;
 }
 
+export interface GameModelProfilePolicy {
+	select(input: GameInput, signal: AbortSignal): Promise<string> | string;
+}
+
 export interface GameRuntimeEventStore {
 	append(input: GameInput, event: GameAgentEvent, signal: AbortSignal): Promise<void>;
 	read?(
@@ -42,13 +47,54 @@ export interface GameRuntimeEventStore {
 	): Promise<readonly GameAgentEvent[]>;
 }
 
+export type GameUsageCause = "assistant" | "routing" | "compaction" | "media" | "realtime";
+
+export interface GameUsageEntry {
+	id: string;
+	session: GameSessionKey;
+	inputId: string;
+	runId: string;
+	turn: number;
+	cause: GameUsageCause;
+	provider?: string;
+	model?: string;
+	responseId?: string;
+	usage: GameUsage;
+	timestamp: number;
+}
+
+export interface GameUsageTotal {
+	records: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	reasoning: number;
+	totalTokens: number;
+	unknownCostRecords: number;
+	cost: number | null;
+}
+
+export interface GameUsageSummary {
+	total: GameUsageTotal;
+	byCause: Partial<Record<GameUsageCause, GameUsageTotal>>;
+}
+
+export interface GameUsageLedger {
+	append(entry: GameUsageEntry, signal?: AbortSignal): Promise<void>;
+	summarize(session: GameSessionKey, signal?: AbortSignal): Promise<GameUsageSummary>;
+}
+
 export interface GameAgentRuntimeOptions {
 	kernel: GameAgentKernelPort;
 	baseSystemPrompt: string;
 	contextProviders?: readonly GameContextProvider[];
 	toolProviders?: readonly GameToolProvider[];
 	toolVisibility?: GameToolVisibilityPolicy;
+	modelProfilePolicy?: GameModelProfilePolicy;
+	defaultModelProfileId: string;
 	eventStore?: GameRuntimeEventStore;
+	usageLedger?: GameUsageLedger;
 	maximumConcurrentActors?: number;
 	maximumQueuedRuns?: number;
 	maximumContextCharacters?: number;
@@ -108,9 +154,10 @@ export class GameAgentRuntime {
 		const key = sessionKey(input.session);
 		const release = await this.scheduler.acquire(key, signal);
 		try {
-			const [systemPrompt, tools] = await Promise.all([
+			const [systemPrompt, tools, modelProfileId] = await Promise.all([
 				this.buildSystemPrompt(input, signal),
 				this.collectTools(input, signal),
+				this.selectModelProfile(input, signal),
 			]);
 			const active: ActiveRuntimeRun = { session: input.session, coordinate: { runId, turn: 0 } };
 			this.activeRuns.set(key, active);
@@ -119,10 +166,29 @@ export class GameAgentRuntime {
 				input,
 				systemPrompt,
 				tools,
+				modelProfileId,
 				maximumTurns: this.maximumTurns,
 			})) {
 				active.coordinate = { runId: event.runId, turn: event.turn };
 				await this.options.eventStore?.append(input, event, signal);
+				if (event.type === "message.completed" && event.usage) {
+					await this.options.usageLedger?.append(
+						{
+							id: event.eventId,
+							session: input.session,
+							inputId: input.id,
+							runId: event.runId,
+							turn: event.turn,
+							cause: "assistant",
+							...(event.provider === undefined ? {} : { provider: event.provider }),
+							...(event.model === undefined ? {} : { model: event.model }),
+							...(event.responseId === undefined ? {} : { responseId: event.responseId }),
+							usage: event.usage,
+							timestamp: event.timestamp,
+						},
+						signal,
+					);
+				}
 				yield event;
 			}
 		} finally {
@@ -130,6 +196,15 @@ export class GameAgentRuntime {
 			if (active?.coordinate.runId === runId) this.activeRuns.delete(key);
 			release();
 		}
+	}
+
+	private async selectModelProfile(input: GameInput, signal: AbortSignal): Promise<string> {
+		const profileId =
+			(await this.options.modelProfilePolicy?.select(input, signal)) ?? this.options.defaultModelProfileId;
+		if (typeof profileId !== "string" || profileId.length < 1 || profileId.length > 128) {
+			throw new RangeError("The selected model profile id must contain between 1 and 128 characters.");
+		}
+		return profileId;
 	}
 
 	steer(session: GameSessionKey, expected: GameRunCoordinate, input: GameInput): GameControlResult {

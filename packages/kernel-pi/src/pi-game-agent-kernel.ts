@@ -1,16 +1,8 @@
-import {
-	Agent,
-	type AgentEvent,
-	type AgentMessage,
-	type AgentTool,
-	type StreamFn,
-} from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type {
-	Api,
 	AssistantMessage,
 	ImageContent,
 	Message,
-	Model,
 	StopReason,
 	TextContent,
 	ThinkingContent,
@@ -39,11 +31,10 @@ import type {
 } from "@opengameagent/protocol";
 import type { TSchema } from "typebox";
 import { AsyncQueue } from "./async-queue.js";
+import type { PiGameModelResolver, ResolvedPiGameModel } from "./model-registry.js";
 
 export interface PiGameAgentKernelOptions {
-	model: Model<Api>;
-	streamFn: StreamFn;
-	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	models: PiGameModelResolver;
 	conversationStore?: GameConversationStore;
 }
 
@@ -58,6 +49,7 @@ interface ActivePiRun {
 	runId: string;
 	turn: number;
 	closed: boolean;
+	usage?: GameUsage;
 }
 type ActiveReadyPiRun = ActivePiRun & { agent: Agent };
 
@@ -70,6 +62,31 @@ function toGameUsage(usage: Usage): GameUsage {
 		...(usage.reasoning === undefined ? {} : { reasoning: usage.reasoning }),
 		totalTokens: usage.totalTokens,
 		cost: { ...usage.cost },
+	};
+}
+
+function addGameUsage(left: GameUsage | undefined, right: GameUsage): GameUsage {
+	if (!left) return right;
+	const cost =
+		left.cost === undefined || right.cost === undefined
+			? undefined
+			: {
+					input: left.cost.input + right.cost.input,
+					output: left.cost.output + right.cost.output,
+					cacheRead: left.cost.cacheRead + right.cost.cacheRead,
+					cacheWrite: left.cost.cacheWrite + right.cost.cacheWrite,
+					total: left.cost.total + right.cost.total,
+				};
+	return {
+		input: left.input + right.input,
+		output: left.output + right.output,
+		cacheRead: left.cacheRead + right.cacheRead,
+		cacheWrite: left.cacheWrite + right.cacheWrite,
+		...(left.reasoning === undefined && right.reasoning === undefined
+			? {}
+			: { reasoning: (left.reasoning ?? 0) + (right.reasoning ?? 0) }),
+		totalTokens: left.totalTokens + right.totalTokens,
+		...(cost === undefined ? {} : { cost }),
 	};
 }
 
@@ -387,12 +404,13 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 		setLastVisibleText: (text: string) => void,
 	): Promise<void> {
 		const conversation = await this.options.conversationStore?.read(request.input.session);
+		const resolved = this.options.models.resolve(request.modelProfileId);
 		const agent = new Agent({
-			streamFn: this.options.streamFn,
+			streamFn: resolved.streamFn,
 			initialState: {
 				systemPrompt: request.systemPrompt,
-				model: this.options.model,
-				thinkingLevel: this.options.thinkingLevel ?? "off",
+				model: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
 				tools: request.tools.map(toPiTool),
 				messages: conversation?.messages.map(toPiMessage) ?? [],
 			},
@@ -409,7 +427,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 					agent.signal,
 				);
 			}
-			this.projectEvent(event, active, request, makeEvent, queue, getLastVisibleText(), setLastVisibleText);
+			this.projectEvent(event, active, request, resolved, makeEvent, queue, getLastVisibleText(), setLastVisibleText);
 		});
 		await agent.prompt(inputToMessage(request.input));
 	}
@@ -418,6 +436,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 		event: AgentEvent,
 		active: ActivePiRun,
 		request: GameKernelRunRequest,
+		resolved: ResolvedPiGameModel,
 		makeEvent: (event: ProjectedGameAgentEvent) => GameAgentEvent,
 		queue: AsyncQueue<GameAgentEvent>,
 		lastVisibleText: string,
@@ -425,7 +444,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 	): void {
 		switch (event.type) {
 			case "agent_start":
-				queue.push(makeEvent({ type: "run.started", inputId: request.input.id }));
+				queue.push(makeEvent({ type: "run.started", inputId: request.input.id, model: resolved.descriptor }));
 				break;
 			case "turn_start":
 				active.turn += 1;
@@ -441,11 +460,16 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 			}
 			case "message_end":
 				if (event.message.role === "assistant") {
+					const usage = toGameUsage(event.message.usage);
+					active.usage = addGameUsage(active.usage, usage);
 					queue.push(
 						makeEvent({
 							type: "message.completed",
 							text: visibleText(event.message),
-							usage: toGameUsage(event.message.usage),
+							usage,
+							provider: event.message.provider,
+							model: event.message.model,
+							...(event.message.responseId === undefined ? {} : { responseId: event.message.responseId }),
 						}),
 					);
 				}
@@ -485,7 +509,9 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 				queue.push(makeEvent({ type: "turn.completed" }));
 				break;
 			case "agent_end":
-				queue.push(makeEvent({ type: "run.completed" }));
+				queue.push(
+					makeEvent({ type: "run.completed", ...(active.usage === undefined ? {} : { usage: active.usage }) }),
+				);
 				break;
 			case "message_start":
 				break;

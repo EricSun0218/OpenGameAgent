@@ -43,7 +43,22 @@ const event = (
 		timestamp: Date.now(),
 	};
 	return type === "run.started"
-		? { ...common, type, turn: 0, inputId: request.input.id }
+		? {
+				...common,
+				type,
+				turn: 0,
+				inputId: request.input.id,
+				model: {
+					profileId: request.modelProfileId,
+					provider: "test",
+					model: "test",
+					api: "test",
+					reasoning: false,
+					input: ["text"],
+					contextWindow: 4096,
+					maximumOutputTokens: 1024,
+				},
+			}
 		: { ...common, type, turn: 1 };
 };
 
@@ -149,6 +164,12 @@ describe("GameAgentRuntime", () => {
 		const runtime = new GameAgentRuntime({
 			kernel,
 			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
+			modelProfilePolicy: {
+				select(gameInput) {
+					return gameInput.type === "npc.image" ? "vision-local" : "default";
+				},
+			},
 			contextProviders: [
 				{
 					async provide() {
@@ -182,6 +203,7 @@ describe("GameAgentRuntime", () => {
 
 		const events = await collect(runtime.run(input("a", "image", "npc.image"), { runId: "run-image" }));
 		expect(kernel.requests).toHaveLength(1);
+		expect(kernel.requests[0]?.modelProfileId).toBe("vision-local");
 		expect(kernel.requests[0]?.tools.map((tool) => tool.definition.name)).toEqual(["generate_image"]);
 		expect(kernel.requests[0]?.systemPrompt.indexOf("high")).toBeLessThan(
 			kernel.requests[0]?.systemPrompt.indexOf("low") ?? 0,
@@ -194,6 +216,7 @@ describe("GameAgentRuntime", () => {
 		const runtime = new GameAgentRuntime({
 			kernel,
 			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
 			toolProviders: [
 				{
 					async provide() {
@@ -226,7 +249,7 @@ describe("GameAgentRuntime", () => {
 			followUp: () => ({ accepted: true }),
 			abort: () => ({ accepted: true }),
 		};
-		const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base" });
+		const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base", defaultModelProfileId: "default" });
 		const running = collect(runtime.run(input("a"), { runId: "active-run" }));
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(runtime.abort(session("a"), { runId: "older-run", turn: 0 })).toEqual({

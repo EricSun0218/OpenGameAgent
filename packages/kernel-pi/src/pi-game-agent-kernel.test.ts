@@ -10,6 +10,7 @@ import {
 import { InMemoryGameConversationStore } from "@opengameagent/kernel";
 import type { GameAgentEvent, GameInput, GameSessionKey, GameTool } from "@opengameagent/protocol";
 import { describe, expect, it } from "vitest";
+import type { PiGameModelResolver } from "./model-registry.js";
 import { PiGameAgentKernel } from "./pi-game-agent-kernel.js";
 
 const model: Model<Api> = {
@@ -24,6 +25,29 @@ const model: Model<Api> = {
 	contextWindow: 16_384,
 	maxTokens: 4_096,
 };
+
+function modelResolver(streamFn: StreamFn): PiGameModelResolver {
+	return {
+		resolve(profileId) {
+			expect(profileId).toBe("default");
+			return {
+				model,
+				streamFn,
+				thinkingLevel: "off",
+				descriptor: {
+					profileId,
+					provider: model.provider,
+					model: model.id,
+					api: model.api,
+					reasoning: model.reasoning,
+					input: model.input,
+					contextWindow: model.contextWindow,
+					maximumOutputTokens: model.maxTokens,
+				},
+			};
+		},
+	};
+}
 
 const session: GameSessionKey = {
 	worldId: "world",
@@ -106,7 +130,7 @@ describe("PiGameAgentKernel", () => {
 			capturedContext = context;
 			return completedStream(assistant([{ type: "text", text: "I can see it." }], "stop"));
 		};
-		const kernel = new PiGameAgentKernel({ model, streamFn });
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
 
 		const events = await collect(
 			kernel.run({
@@ -117,6 +141,7 @@ describe("PiGameAgentKernel", () => {
 				]),
 				systemPrompt: "Act inside the game using registered tools.",
 				tools: [],
+				modelProfileId: "default",
 				maximumTurns: 4,
 			}),
 		);
@@ -172,7 +197,7 @@ describe("PiGameAgentKernel", () => {
 				return { content: [{ type: "json", value: { passable: true } }], details: { source: "host" } };
 			},
 		};
-		const kernel = new PiGameAgentKernel({ model, streamFn });
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
 
 		const events = await collect(
 			kernel.run({
@@ -180,6 +205,7 @@ describe("PiGameAgentKernel", () => {
 				input: input("input-tools"),
 				systemPrompt: "Use tools.",
 				tools: [tool],
+				modelProfileId: "default",
 				maximumTurns: 4,
 			}),
 		);
@@ -210,7 +236,7 @@ describe("PiGameAgentKernel", () => {
 				),
 			);
 		};
-		const kernel = new PiGameAgentKernel({ model, streamFn, conversationStore });
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn), conversationStore });
 
 		await collect(
 			kernel.run({
@@ -218,6 +244,7 @@ describe("PiGameAgentKernel", () => {
 				input: input("input-memory-1"),
 				systemPrompt: "Remember.",
 				tools: [],
+				modelProfileId: "default",
 				maximumTurns: 2,
 			}),
 		);
@@ -241,6 +268,7 @@ describe("PiGameAgentKernel", () => {
 				input: input("input-memory-2"),
 				systemPrompt: "Remember.",
 				tools: [],
+				modelProfileId: "default",
 				maximumTurns: 2,
 			}),
 		);
@@ -271,12 +299,13 @@ describe("PiGameAgentKernel", () => {
 			});
 			return stream;
 		};
-		const kernel = new PiGameAgentKernel({ model, streamFn });
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
 		const events = kernel.run({
 			runId: "run-control",
 			input: input("input-control"),
 			systemPrompt: "Wait.",
 			tools: [],
+			modelProfileId: "default",
 			maximumTurns: 2,
 		});
 		const collecting = collect(events);

@@ -18,7 +18,7 @@ import {
 	type JsonObject,
 	projectGameAgentEvent,
 } from "@opengameagent/protocol";
-import type { GameAgentRuntime, GameRuntimeEventStore } from "@opengameagent/runtime";
+import type { GameAgentRuntime, GameRuntimeEventStore, GameUsageLedger } from "@opengameagent/runtime";
 
 export type GameServerOperation = "run" | "steer" | "follow-up" | "abort" | "usage" | "actions" | "transcript";
 
@@ -63,6 +63,7 @@ export interface GameAgentServerOptions {
 	actionJournal?: GameActionJournal;
 	conversationStore?: GameConversationStore;
 	eventStore?: GameRuntimeEventStore;
+	usageLedger?: GameUsageLedger;
 	maximumRequestBytes?: number;
 }
 
@@ -193,6 +194,10 @@ export class GameAgentServer implements AsyncDisposable {
 			}
 			if (path === "/v1/runs/events/read") {
 				await this.readRunEvents(request, response, path, body as unknown as RunEventsBody, controller.signal);
+				return;
+			}
+			if (path === "/v1/sessions/usage") {
+				await this.readUsage(request, response, path, body as unknown as SessionBody, controller.signal);
 				return;
 			}
 			const operations = new Map<string, GameServerOperation>([
@@ -422,6 +427,26 @@ export class GameAgentServer implements AsyncDisposable {
 			gap: events.length > 0 && events[0]?.sequence !== afterSequence + 1,
 			nextSequence: events.at(-1)?.sequence ?? afterSequence,
 		});
+	}
+
+	private async readUsage(
+		request: IncomingMessage,
+		response: ServerResponse,
+		path: string,
+		body: SessionBody,
+		signal: AbortSignal,
+	): Promise<void> {
+		const ledger = this.options.usageLedger;
+		if (!ledger) {
+			this.json(response, 404, { error: "usage-disabled" });
+			return;
+		}
+		if (!isObject(body) || !isObject(body.session)) throw new TypeError("Invalid usage body.");
+		if (!(await this.authorize(request, path, "usage", body.session, body.authentication, signal))) {
+			this.json(response, 403, { error: "forbidden" });
+			return;
+		}
+		this.json(response, 200, { summary: await ledger.summarize(body.session, signal) });
 	}
 
 	private projectTranscriptMessage(message: GameConversationMessage, viewer: GameEventViewer): unknown[] {

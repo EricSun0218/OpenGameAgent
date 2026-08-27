@@ -73,6 +73,17 @@ export interface GameUsage {
 	};
 }
 
+export interface GameResolvedModel {
+	profileId: string;
+	provider: string;
+	model: string;
+	api: string;
+	reasoning: boolean;
+	input: readonly ("text" | "image")[];
+	contextWindow: number;
+	maximumOutputTokens: number;
+}
+
 export type GameConversationContent =
 	| { type: "text"; text: string; signature?: string }
 	| { type: "image"; mimeType: string; data: string }
@@ -139,14 +150,21 @@ interface GameAgentEventBase {
 }
 
 export type GameAgentEvent =
-	| (GameAgentEventBase & { type: "run.started"; inputId: string })
+	| (GameAgentEventBase & { type: "run.started"; inputId: string; model: GameResolvedModel })
 	| (GameAgentEventBase & { type: "run.completed"; usage?: GameUsage })
 	| (GameAgentEventBase & { type: "run.failed"; category: string; message: string })
 	| (GameAgentEventBase & { type: "run.aborted" })
 	| (GameAgentEventBase & { type: "turn.started" })
 	| (GameAgentEventBase & { type: "turn.completed" })
 	| (GameAgentEventBase & { type: "message.delta"; text: string })
-	| (GameAgentEventBase & { type: "message.completed"; text: string; usage?: GameUsage })
+	| (GameAgentEventBase & {
+			type: "message.completed";
+			text: string;
+			usage?: GameUsage;
+			provider?: string;
+			model?: string;
+			responseId?: string;
+	  })
 	| (GameAgentEventBase & { type: "tool.started"; call: GameToolCall })
 	| (GameAgentEventBase & { type: "tool.progress"; callId: string; update: JsonValue })
 	| (GameAgentEventBase & { type: "tool.completed"; callId: string; result: GameToolResult });
@@ -156,6 +174,7 @@ export interface GameKernelRunRequest {
 	input: GameInput;
 	systemPrompt: string;
 	tools: readonly GameTool[];
+	modelProfileId: string;
 	maximumTurns: number;
 }
 

@@ -9,7 +9,7 @@ import type {
 	GameInput,
 	GameKernelRunRequest,
 } from "@opengameagent/protocol";
-import { GameAgentRuntime, type GameRuntimeEventStore } from "@opengameagent/runtime";
+import { GameAgentRuntime, type GameRuntimeEventStore, type GameUsageLedger } from "@opengameagent/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { GameAgentServer, type GameServerAuthenticator, OwnerGameServerAuthorizer } from "./server.js";
 
@@ -40,7 +40,23 @@ class ServerTestKernel implements GameAgentKernelPort {
 			audience: { visibility: "owner" } as const,
 			timestamp: 1,
 		};
-		yield { ...common, type: "run.started", sequence: 1, eventId: `${request.runId}:1`, inputId: request.input.id };
+		yield {
+			...common,
+			type: "run.started",
+			sequence: 1,
+			eventId: `${request.runId}:1`,
+			inputId: request.input.id,
+			model: {
+				profileId: request.modelProfileId,
+				provider: "test",
+				model: "test",
+				api: "test",
+				reasoning: false,
+				input: ["text"],
+				contextWindow: 4096,
+				maximumOutputTokens: 1024,
+			},
+		};
 		yield {
 			...common,
 			type: "tool.started",
@@ -79,9 +95,10 @@ async function start(
 		actionJournal?: InMemoryGameActionJournal;
 		conversationStore?: InMemoryGameConversationStore;
 		eventStore?: GameRuntimeEventStore;
+		usageLedger?: GameUsageLedger;
 	} = {},
 ): Promise<string> {
-	const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base" });
+	const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base", defaultModelProfileId: "default" });
 	const server = new GameAgentServer({
 		runtime,
 		authenticator,
@@ -324,6 +341,47 @@ describe("GameAgentServer", () => {
 			}),
 		});
 		expect(await allowed.json()).toEqual({ events: stored, gap: false, nextSequence: 2 });
+		expect(reads).toBe(1);
+	});
+
+	it("authorizes session usage before reading its ledger", async () => {
+		const kernel = new ServerTestKernel();
+		const gameInput = input("owner-a");
+		let reads = 0;
+		const usageLedger: GameUsageLedger = {
+			async append() {},
+			async summarize() {
+				reads += 1;
+				return {
+					total: {
+						records: 1,
+						input: 10,
+						output: 2,
+						cacheRead: 0,
+						cacheWrite: 0,
+						reasoning: 0,
+						totalTokens: 12,
+						unknownCostRecords: 1,
+						cost: null,
+					},
+					byCause: {},
+				};
+			},
+		};
+		const baseUrl = await start(kernel, { usageLedger });
+		const denied = await fetch(`${baseUrl}/v1/sessions/usage`, {
+			method: "POST",
+			body: JSON.stringify({ authentication: { token: "owner-b" }, session: gameInput.session }),
+		});
+		expect(denied.status).toBe(403);
+		expect(reads).toBe(0);
+
+		const allowed = await fetch(`${baseUrl}/v1/sessions/usage`, {
+			method: "POST",
+			body: JSON.stringify({ authentication: { token: "owner-a" }, session: gameInput.session }),
+		});
+		expect(allowed.status).toBe(200);
+		expect(await allowed.json()).toMatchObject({ summary: { total: { totalTokens: 12, cost: null } } });
 		expect(reads).toBe(1);
 	});
 });
