@@ -112,6 +112,15 @@ export interface RealtimeTransport {
 	connect(options: RealtimeConversationOptions, signal?: AbortSignal): Promise<RealtimeTransportSession>;
 }
 
+export interface RealtimeProviderAuthenticationResult {
+	apiKey?: string;
+	headers?: Readonly<Record<string, string>>;
+}
+
+export interface RealtimeProviderAuthentication {
+	resolve(provider: string, signal?: AbortSignal): Promise<RealtimeProviderAuthenticationResult | undefined>;
+}
+
 export type RealtimeEventHandler = (event: RealtimeConversationEvent, signal: AbortSignal) => void | Promise<void>;
 
 export type RealtimeGameInputFactory = (
