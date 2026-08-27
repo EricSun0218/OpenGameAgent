@@ -1,4 +1,10 @@
-import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	type AgentEvent,
+	type AgentLoopTurnUpdate,
+	type AgentMessage,
+	type AgentTool,
+} from "@earendil-works/pi-agent-core";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -416,6 +422,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 	): Promise<void> {
 		const conversation = await this.options.conversationStore?.read(request.input.session);
 		const resolved = this.options.models.resolve(request.modelProfileId);
+		const prepareNextTurn = request.prepareNextTurn;
 		const agent = new Agent({
 			streamFn: resolved.streamFn,
 			initialState: {
@@ -427,6 +434,29 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 			},
 			sessionId: request.input.session.sessionId,
 			shouldStopAfterTurn: () => active.turn >= request.maximumTurns,
+			...(prepareNextTurn
+				? {
+						prepareNextTurnWithContext: async (context, signal): Promise<AgentLoopTurnUpdate | undefined> => {
+							const update = await prepareNextTurn(
+								{
+									input: request.input,
+									runId: request.runId,
+									turn: active.turn,
+									hadToolResults: context.toolResults.length > 0,
+								},
+								signal ?? new AbortController().signal,
+							);
+							if (!update) return undefined;
+							return {
+								context: {
+									...context.context,
+									systemPrompt: update.systemPrompt,
+									tools: update.tools.map((tool) => toPiTool(tool, request, active)),
+								},
+							};
+						},
+					}
+				: {}),
 		});
 		active.agent = agent;
 		agent.subscribe(async (event) => {

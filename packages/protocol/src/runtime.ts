@@ -189,6 +189,22 @@ export interface GameKernelRunRequest {
 	tools: readonly GameTool[];
 	modelProfileId: string;
 	maximumTurns: number;
+	prepareNextTurn?: (
+		context: GameKernelTurnPreparationContext,
+		signal: AbortSignal,
+	) => Promise<GameKernelTurnUpdate | undefined>;
+}
+
+export interface GameKernelTurnPreparationContext {
+	input: GameInput;
+	runId: string;
+	turn: number;
+	hadToolResults: boolean;
+}
+
+export interface GameKernelTurnUpdate {
+	systemPrompt: string;
+	tools: readonly GameTool[];
 }
 
 export interface GameControlResult {

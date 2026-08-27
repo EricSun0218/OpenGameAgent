@@ -218,6 +218,51 @@ describe("PiGameAgentKernel", () => {
 		expect(events.filter((event) => event.type === "turn.started")).toHaveLength(2);
 	});
 
+	it("applies a refreshed system prompt and tool catalog before the next provider request", async () => {
+		let requests = 0;
+		let refreshedContext: Context | undefined;
+		const streamFn: StreamFn = (_model, context) => {
+			requests += 1;
+			if (requests === 1) {
+				return completedStream(
+					assistant([{ type: "toolCall", id: "refresh-1", name: "old_action", arguments: {} }], "toolUse"),
+				);
+			}
+			refreshedContext = context;
+			return completedStream(assistant([{ type: "text", text: "refreshed" }], "stop"));
+		};
+		const tool = (name: string): GameTool => ({
+			definition: {
+				name,
+				label: name,
+				description: "A dynamic authoritative action.",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+			},
+			execute: async () => ({ content: [{ type: "json", value: { committed: true } }] }),
+		});
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
+		const preparations: number[] = [];
+
+		await collect(
+			kernel.run({
+				runId: "run-refresh",
+				input: input("input-refresh"),
+				systemPrompt: "world revision 1",
+				tools: [tool("old_action")],
+				modelProfileId: "default",
+				maximumTurns: 4,
+				async prepareNextTurn(context) {
+					preparations.push(context.turn);
+					return { systemPrompt: "world revision 2", tools: [tool("new_action")] };
+				},
+			}),
+		);
+
+		expect(preparations).toContain(1);
+		expect(refreshedContext?.systemPrompt).toBe("world revision 2");
+		expect(refreshedContext?.tools?.map((candidate) => candidate.name)).toEqual(["new_action"]);
+	});
+
 	it("restores the complete normalized transcript for long-lived NPC sessions", async () => {
 		const conversationStore = new InMemoryGameConversationStore();
 		let requestCount = 0;

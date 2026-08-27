@@ -256,6 +256,41 @@ describe("GameAgentRuntime", () => {
 		expect(kernel.requests[0]?.systemPrompt).not.toContain("hidden");
 	});
 
+	it("re-collects authoritative context and visible tools before a later model turn", async () => {
+		let worldRevision = 1;
+		let updatedPrompt = "";
+		let updatedTools: readonly GameTool[] = [];
+		const kernel: GameAgentKernelPort = {
+			async *run(request) {
+				yield event(request, "run.started", 1);
+				worldRevision = 2;
+				const update = await request.prepareNextTurn?.(
+					{ input: request.input, runId: request.runId, turn: 1, hadToolResults: true },
+					new AbortController().signal,
+				);
+				updatedPrompt = update?.systemPrompt ?? "";
+				updatedTools = update?.tools ?? [];
+				yield event(request, "run.completed", 2);
+			},
+			steer: () => ({ accepted: true }),
+			followUp: () => ({ accepted: true }),
+			abort: () => ({ accepted: true }),
+		};
+		const runtime = new GameAgentRuntime({
+			kernel,
+			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
+			contextProviders: [
+				{ provide: async () => ({ name: "world", priority: 10, value: { revision: worldRevision } }) },
+			],
+			toolProviders: [{ provide: async () => [validTool(worldRevision === 1 ? "old_action" : "new_action")] }],
+		});
+
+		await collect(runtime.run(input("a"), { runId: "refresh-run" }));
+		expect(updatedPrompt).toContain('"revision":2');
+		expect(updatedTools.map((tool) => tool.definition.name)).toEqual(["new_action"]);
+	});
+
 	it("rejects stale exact controls before they reach the kernel", async () => {
 		let release: (() => void) | undefined;
 		const kernel: GameAgentKernelPort = {

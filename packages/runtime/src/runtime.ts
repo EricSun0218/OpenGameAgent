@@ -176,23 +176,10 @@ export class GameAgentRuntime {
 		const key = sessionKey(input.session);
 		const release = await this.scheduler.acquire(key, signal);
 		try {
-			const [contextSegments, tools, modelProfileId] = await Promise.all([
-				this.collectContext(input, signal),
-				this.collectTools(input, signal),
+			const [{ systemPrompt, tools }, modelProfileId] = await Promise.all([
+				this.prepareTurn(input, signal),
 				this.selectModelProfile(input, signal),
 			]);
-			const postToolSegments = (
-				await Promise.all(
-					(this.options.postToolContextProviders ?? []).map((provider) =>
-						provider.provide(
-							input,
-							tools.map((tool) => tool.definition),
-							signal,
-						),
-					),
-				)
-			).filter((segment): segment is GameContextSegment => segment !== undefined);
-			const systemPrompt = this.buildSystemPrompt([...contextSegments, ...postToolSegments]);
 			const active: ActiveRuntimeRun = { session: input.session, coordinate: { runId, turn: 0 } };
 			this.activeRuns.set(key, active);
 			for await (const event of this.options.kernel.run({
@@ -202,6 +189,7 @@ export class GameAgentRuntime {
 				tools,
 				modelProfileId,
 				maximumTurns: this.maximumTurns,
+				prepareNextTurn: async (_context, turnSignal) => await this.prepareTurn(input, turnSignal),
 			})) {
 				active.coordinate = { runId: event.runId, turn: event.turn };
 				await this.options.eventStore?.append(input, event, signal);
@@ -230,6 +218,31 @@ export class GameAgentRuntime {
 			if (active?.coordinate.runId === runId) this.activeRuns.delete(key);
 			release();
 		}
+	}
+
+	private async prepareTurn(
+		input: GameInput,
+		signal: AbortSignal,
+	): Promise<{ systemPrompt: string; tools: readonly GameTool[] }> {
+		const [contextSegments, tools] = await Promise.all([
+			this.collectContext(input, signal),
+			this.collectTools(input, signal),
+		]);
+		const postToolSegments = (
+			await Promise.all(
+				(this.options.postToolContextProviders ?? []).map((provider) =>
+					provider.provide(
+						input,
+						tools.map((tool) => tool.definition),
+						signal,
+					),
+				),
+			)
+		).filter((segment): segment is GameContextSegment => segment !== undefined);
+		return {
+			systemPrompt: this.buildSystemPrompt([...contextSegments, ...postToolSegments]),
+			tools,
+		};
 	}
 
 	private async selectModelProfile(input: GameInput, signal: AbortSignal): Promise<string> {
