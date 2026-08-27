@@ -16,6 +16,7 @@ const mimeKinds: Readonly<Record<string, GameMediaKind>> = {
 	"audio/wav": "audio",
 	"audio/mpeg": "audio",
 	"audio/ogg": "audio",
+	"audio/flac": "audio",
 	"video/mp4": "video",
 	"video/webm": "video",
 };
@@ -40,6 +41,8 @@ function matchesMagic(mimeType: string, bytes: Uint8Array): boolean {
 			return bytes.length >= 3 && (text(0, 3) === "ID3" || (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe0) === 0xe0));
 		case "audio/ogg":
 			return bytes.length >= 4 && text(0, 4) === "OggS";
+		case "audio/flac":
+			return bytes.length >= 4 && text(0, 4) === "fLaC";
 		case "video/mp4":
 			return bytes.length >= 12 && text(4, 4) === "ftyp";
 		case "video/webm":
