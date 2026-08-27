@@ -1,5 +1,13 @@
-import type { GameActionIntent, GameActionReceipt, GameSessionKey } from "@opengameagent/protocol";
+import type {
+	GameActionIntent,
+	GameActionReceipt,
+	GameInput,
+	GameSessionKey,
+	GameToolDefinition,
+	GameToolExecutionContext,
+} from "@opengameagent/protocol";
 import { describe, expect, it } from "vitest";
+import { createGameActionTool } from "./action-tool.js";
 import { DurableGameActionDispatcher } from "./dispatcher.js";
 import { InMemoryGameActionJournal } from "./journal.js";
 import { createGameActionOperationId } from "./operation-id.js";
@@ -45,7 +53,143 @@ function receipt(action: GameActionIntent, status: GameActionReceipt["status"] =
 	};
 }
 
+const gameInput = (actorId = "a"): GameInput => ({
+	id: "input",
+	type: "npc.command",
+	session: session(actorId),
+	moment: { tick: 20 },
+	content: [{ type: "text", text: "Place a block." }],
+});
+
+const executionContext = (input = gameInput()): GameToolExecutionContext => ({
+	input,
+	runId: "run-input",
+	turn: 1,
+	toolCallIndex: 0,
+	signal: new AbortController().signal,
+});
+
+const actionDefinition: GameToolDefinition = {
+	name: "place_block",
+	label: "Place block",
+	description: "Places one block through the authoritative game host.",
+	parameters: {
+		type: "object",
+		properties: { x: { type: "number" }, block: { type: "string" } },
+		required: ["x", "block"],
+		additionalProperties: false,
+	},
+};
+
 describe("reliable game actions", () => {
+	it("exposes a bounded semantic receipt while retaining canonical host details", async () => {
+		const journal = new InMemoryGameActionJournal();
+		let executed: GameActionIntent | undefined;
+		const tool = createGameActionTool({
+			definition: actionDefinition,
+			dispatcher: new DurableGameActionDispatcher(journal, {
+				async execute(value) {
+					executed = value;
+					return receipt(value);
+				},
+			}),
+			expectedRevision: 7,
+			conflictKey: () => "tile:4:2",
+		});
+
+		const result = await tool.execute(
+			{ id: "call", name: "place_block", arguments: { x: 4.5, block: "stone" } },
+			executionContext(),
+		);
+
+		expect(result).toMatchObject({
+			content: [{ type: "json", value: { action: "place_block", status: "committed", result: { placed: true } } }],
+			isError: false,
+		});
+		expect(JSON.stringify(result.content)).not.toMatch(/operationId|stateRevision|timelineId|expectedRevision/);
+		expect(result.details).toMatchObject({
+			kind: "terminal",
+			entry: {
+				intent: { operationId: executed?.operationId, conflictKey: "tile:4:2", expectedRevision: 7 },
+				receipt: { stateRevision: 8 },
+			},
+		});
+	});
+
+	it("deduplicates an identical model tool replay with the stable operation identity", async () => {
+		const journal = new InMemoryGameActionJournal();
+		let calls = 0;
+		const tool = createGameActionTool({
+			definition: actionDefinition,
+			dispatcher: new DurableGameActionDispatcher(journal, {
+				async execute(value) {
+					calls += 1;
+					return receipt(value);
+				},
+			}),
+			expectedRevision: 7,
+		});
+		const call = { id: "call", name: "place_block", arguments: { x: 4.5, block: "stone" } } as const;
+		await tool.execute(call, executionContext());
+		await tool.execute(call, executionContext());
+		expect(calls).toBe(1);
+	});
+
+	it("fails closed when a host receipt projection throws, is invalid, or exceeds its bound", async () => {
+		for (const projectReceipt of [
+			() => {
+				throw new Error("private projection failure");
+			},
+			() => ["not-an-object"] as never,
+			() => ({ summary: "x".repeat(65) }),
+		]) {
+			const journal = new InMemoryGameActionJournal();
+			const tool = createGameActionTool({
+				definition: actionDefinition,
+				dispatcher: new DurableGameActionDispatcher(journal, {
+					async execute(value) {
+						return receipt(value);
+					},
+				}),
+				expectedRevision: 7,
+				projectReceipt,
+				maximumModelReceiptCharacters: 64,
+			});
+			const result = await tool.execute(
+				{ id: "call", name: "place_block", arguments: { x: 4.5, block: "stone" } },
+				executionContext(),
+			);
+			expect(result.content).toEqual([{ type: "json", value: { status: "projection_failed" } }]);
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.content)).not.toMatch(/operationId|stateRevision|timelineId/);
+			expect(result.details).toMatchObject({ entry: { status: "committed" } });
+		}
+	});
+
+	it("reports uncertain replay as reconcile-only without executing the world write twice", async () => {
+		const journal = new InMemoryGameActionJournal();
+		let calls = 0;
+		const tool = createGameActionTool({
+			definition: actionDefinition,
+			dispatcher: new DurableGameActionDispatcher(journal, {
+				async execute() {
+					calls += 1;
+					throw new Error("receipt was lost");
+				},
+			}),
+			expectedRevision: 7,
+		});
+		const call = { id: "call", name: "place_block", arguments: { x: 4.5, block: "stone" } } as const;
+		await expect(tool.execute(call, executionContext())).rejects.toThrow(/receipt was lost/);
+		const replay = await tool.execute(call, executionContext());
+		expect(replay).toMatchObject({
+			content: [{ type: "json", value: { status: "reconcile_required" } }],
+			isError: true,
+			details: { kind: "reconcile", entry: { status: "uncertain" } },
+		});
+		expect(calls).toBe(1);
+	});
+
 	it("creates stable versioned operation IDs without actor or session collisions", () => {
 		const first = intent("a", "input");
 		expect(first.operationId).toMatch(/^oga2_[A-Za-z0-9_-]{43}$/);
