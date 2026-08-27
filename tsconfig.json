@@ -15,6 +15,7 @@
 		{ "path": "./packages/media" },
 		{ "path": "./packages/realtime" },
 		{ "path": "./packages/realtime-openai" },
+		{ "path": "./packages/realtime-volcengine" },
 		{ "path": "./packages/runtime" },
 		{ "path": "./packages/server" }
 	]
