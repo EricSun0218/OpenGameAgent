@@ -235,6 +235,27 @@ describe("GameAgentRuntime", () => {
 		expect(kernel.requests).toHaveLength(0);
 	});
 
+	it("builds post-tool context from the final filtered tool catalog", async () => {
+		const kernel = new CapturingKernel();
+		const runtime = new GameAgentRuntime({
+			kernel,
+			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
+			toolProviders: [{ provide: async () => [validTool("visible"), validTool("hidden")] }],
+			toolVisibility: { isVisible: (_gameInput, tool) => tool.name !== "hidden" },
+			postToolContextProviders: [
+				{
+					async provide(_gameInput, tools) {
+						return { name: "tool-dependent", priority: 2, value: tools.map((tool) => tool.name) };
+					},
+				},
+			],
+		});
+		await collect(runtime.run(input("a"), { runId: "post-tool" }));
+		expect(kernel.requests[0]?.systemPrompt).toContain("visible");
+		expect(kernel.requests[0]?.systemPrompt).not.toContain("hidden");
+	});
+
 	it("rejects stale exact controls before they reach the kernel", async () => {
 		let release: (() => void) | undefined;
 		const kernel: GameAgentKernelPort = {

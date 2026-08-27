@@ -24,6 +24,14 @@ export interface GameContextProvider {
 	provide(input: GameInput, signal: AbortSignal): Promise<GameContextSegment | undefined>;
 }
 
+export interface GamePostToolContextProvider {
+	provide(
+		input: GameInput,
+		availableTools: readonly GameTool["definition"][],
+		signal: AbortSignal,
+	): Promise<GameContextSegment | undefined>;
+}
+
 export interface GameToolProvider {
 	provide(input: GameInput, signal: AbortSignal): Promise<readonly GameTool[]>;
 }
@@ -89,6 +97,7 @@ export interface GameAgentRuntimeOptions {
 	kernel: GameAgentKernelPort;
 	baseSystemPrompt: string;
 	contextProviders?: readonly GameContextProvider[];
+	postToolContextProviders?: readonly GamePostToolContextProvider[];
 	toolProviders?: readonly GameToolProvider[];
 	toolVisibility?: GameToolVisibilityPolicy;
 	modelProfilePolicy?: GameModelProfilePolicy;
@@ -154,11 +163,23 @@ export class GameAgentRuntime {
 		const key = sessionKey(input.session);
 		const release = await this.scheduler.acquire(key, signal);
 		try {
-			const [systemPrompt, tools, modelProfileId] = await Promise.all([
-				this.buildSystemPrompt(input, signal),
+			const [contextSegments, tools, modelProfileId] = await Promise.all([
+				this.collectContext(input, signal),
 				this.collectTools(input, signal),
 				this.selectModelProfile(input, signal),
 			]);
+			const postToolSegments = (
+				await Promise.all(
+					(this.options.postToolContextProviders ?? []).map((provider) =>
+						provider.provide(
+							input,
+							tools.map((tool) => tool.definition),
+							signal,
+						),
+					),
+				)
+			).filter((segment): segment is GameContextSegment => segment !== undefined);
+			const systemPrompt = this.buildSystemPrompt([...contextSegments, ...postToolSegments]);
 			const active: ActiveRuntimeRun = { session: input.session, coordinate: { runId, turn: 0 } };
 			this.activeRuns.set(key, active);
 			for await (const event of this.options.kernel.run({
@@ -233,14 +254,18 @@ export class GameAgentRuntime {
 		return action();
 	}
 
-	private async buildSystemPrompt(input: GameInput, signal: AbortSignal): Promise<string> {
-		const segments = (
-			await Promise.all((this.options.contextProviders ?? []).map((provider) => provider.provide(input, signal)))
-		)
+	private async collectContext(input: GameInput, signal: AbortSignal): Promise<GameContextSegment[]> {
+		return (await Promise.all((this.options.contextProviders ?? []).map((provider) => provider.provide(input, signal))))
 			.filter((segment): segment is GameContextSegment => segment !== undefined)
 			.sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name));
+	}
+
+	private buildSystemPrompt(segments: readonly GameContextSegment[]): string {
+		const ordered = [...segments].sort(
+			(left, right) => right.priority - left.priority || left.name.localeCompare(right.name),
+		);
 		let prompt = this.options.baseSystemPrompt;
-		for (const segment of segments) {
+		for (const segment of ordered) {
 			const serialized = `\n<game-context name=${JSON.stringify(segment.name)}>${JSON.stringify(segment.value)}</game-context>`;
 			if (prompt.length + serialized.length > this.maximumContextCharacters) {
 				throw new RangeError("Collected game context exceeds the configured character limit.");

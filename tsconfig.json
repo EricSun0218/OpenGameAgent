@@ -8,6 +8,7 @@
 		{ "path": "./packages/storage-sqlite" },
 		{ "path": "./packages/memory" },
 		{ "path": "./packages/planning" },
+		{ "path": "./packages/skills" },
 		{ "path": "./packages/runtime" },
 		{ "path": "./packages/server" }
 	]
