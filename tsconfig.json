@@ -12,6 +12,7 @@
 		{ "path": "./packages/approvals" },
 		{ "path": "./packages/mailbox" },
 		{ "path": "./packages/evolution" },
+		{ "path": "./packages/media" },
 		{ "path": "./packages/runtime" },
 		{ "path": "./packages/server" }
 	]

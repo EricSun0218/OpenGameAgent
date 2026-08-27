@@ -1,0 +1,21 @@
+{
+	"name": "@opengameagent/media",
+	"version": "0.4.0-dev.0",
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist"
+	],
+	"dependencies": {
+		"@earendil-works/pi-ai": "0.84.3",
+		"@opengameagent/protocol": "0.4.0-dev.0"
+	}
+}
