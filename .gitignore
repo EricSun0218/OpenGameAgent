@@ -8,6 +8,10 @@ TestResults/
 *.user
 *.suo
 node_modules/
+coverage/
+packages/*/dist/
+packages/*/*.tsbuildinfo
+*.tsbuildinfo
 protocol/runtime/v1/typescript/dist/
 protocol/runtime/v1/python/build/
 protocol/runtime/v1/python/*.egg-info/
