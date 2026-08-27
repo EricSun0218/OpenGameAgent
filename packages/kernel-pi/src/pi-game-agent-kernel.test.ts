@@ -191,9 +191,10 @@ describe("PiGameAgentKernel", () => {
 					additionalProperties: false,
 				},
 			},
-			async execute(call) {
+			async execute(call, context) {
 				executions += 1;
 				expect(call.arguments).toEqual({ x: 12, y: 8 });
+				expect(context).toMatchObject({ input, runId: "run-tools", turn: 1, toolCallIndex: 0 });
 				return { content: [{ type: "json", value: { passable: true } }], details: { source: "host" } };
 			},
 		};

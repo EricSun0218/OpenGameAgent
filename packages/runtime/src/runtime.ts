@@ -8,6 +8,9 @@ import type {
 	GameRunCoordinate,
 	GameSessionKey,
 	GameTool,
+	GameToolCall,
+	GameToolExecutionContext,
+	GameToolResult,
 	GameUsage,
 	JsonValue,
 } from "@opengameagent/protocol";
@@ -38,6 +41,15 @@ export interface GameToolProvider {
 
 export interface GameToolVisibilityPolicy {
 	isVisible(input: GameInput, tool: GameTool["definition"], signal: AbortSignal): Promise<boolean> | boolean;
+}
+
+export interface GameToolExecutionMiddleware {
+	execute(
+		tool: GameTool["definition"],
+		call: GameToolCall,
+		context: GameToolExecutionContext,
+		next: () => Promise<GameToolResult>,
+	): Promise<GameToolResult>;
 }
 
 export interface GameModelProfilePolicy {
@@ -100,6 +112,7 @@ export interface GameAgentRuntimeOptions {
 	postToolContextProviders?: readonly GamePostToolContextProvider[];
 	toolProviders?: readonly GameToolProvider[];
 	toolVisibility?: GameToolVisibilityPolicy;
+	toolExecutionMiddleware?: readonly GameToolExecutionMiddleware[];
 	modelProfilePolicy?: GameModelProfilePolicy;
 	defaultModelProfileId: string;
 	eventStore?: GameRuntimeEventStore;
@@ -288,8 +301,27 @@ export class GameAgentRuntime {
 			names.add(tool.definition.name);
 			preflightGameToolSchema(tool.definition);
 			if ((await this.options.toolVisibility?.isVisible(input, tool.definition, signal)) === false) continue;
-			visible.push(tool);
+			visible.push(this.wrapTool(tool));
 		}
 		return visible;
+	}
+
+	private wrapTool(tool: GameTool): GameTool {
+		const middleware = this.options.toolExecutionMiddleware ?? [];
+		if (middleware.length === 0) return tool;
+		return {
+			definition: tool.definition,
+			execute: (call, context) => {
+				let index = middleware.length;
+				const next = (): Promise<GameToolResult> => {
+					index -= 1;
+					if (index < 0) return tool.execute(call, context);
+					const current = middleware[index];
+					if (!current) throw new Error("Tool execution middleware chain is corrupt.");
+					return current.execute(tool.definition, call, context, next);
+				};
+				return next();
+			},
+		};
 	}
 }

@@ -7,6 +7,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { GameActionJournal } from "@opengameagent/actions";
+import type { GameToolApprovalBroker, GameToolApprovalResponse } from "@opengameagent/approvals";
 import {
 	type GameActionReceipt,
 	type GameConversationMessage,
@@ -20,7 +21,15 @@ import {
 } from "@opengameagent/protocol";
 import type { GameAgentRuntime, GameRuntimeEventStore, GameUsageLedger } from "@opengameagent/runtime";
 
-export type GameServerOperation = "run" | "steer" | "follow-up" | "abort" | "usage" | "actions" | "transcript";
+export type GameServerOperation =
+	| "run"
+	| "steer"
+	| "follow-up"
+	| "abort"
+	| "usage"
+	| "actions"
+	| "transcript"
+	| "approvals";
 
 export interface GameServerPrincipal {
 	id: string;
@@ -64,6 +73,7 @@ export interface GameAgentServerOptions {
 	conversationStore?: GameConversationStore;
 	eventStore?: GameRuntimeEventStore;
 	usageLedger?: GameUsageLedger;
+	approvalBroker?: GameToolApprovalBroker;
 	maximumRequestBytes?: number;
 }
 
@@ -106,6 +116,17 @@ interface RunEventsBody extends SessionBody {
 	runId: string;
 	afterSequence?: number;
 	maximum?: number;
+}
+
+interface ApprovalListBody extends SessionBody {
+	maximum?: number;
+}
+
+interface ApprovalResponseBody extends SessionBody {
+	approvalId: string;
+	expectedRevision: number;
+	decision: "approve" | "deny";
+	reason?: string;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -198,6 +219,14 @@ export class GameAgentServer implements AsyncDisposable {
 			}
 			if (path === "/v1/sessions/usage") {
 				await this.readUsage(request, response, path, body as unknown as SessionBody, controller.signal);
+				return;
+			}
+			if (path === "/v1/tool-approvals/list") {
+				await this.listApprovals(request, response, path, body as unknown as ApprovalListBody, controller.signal);
+				return;
+			}
+			if (path === "/v1/tool-approvals/respond") {
+				await this.respondApproval(request, response, path, body as unknown as ApprovalResponseBody, controller.signal);
 				return;
 			}
 			const operations = new Map<string, GameServerOperation>([
@@ -447,6 +476,61 @@ export class GameAgentServer implements AsyncDisposable {
 			return;
 		}
 		this.json(response, 200, { summary: await ledger.summarize(body.session, signal) });
+	}
+
+	private async listApprovals(
+		request: IncomingMessage,
+		response: ServerResponse,
+		path: string,
+		body: ApprovalListBody,
+		signal: AbortSignal,
+	): Promise<void> {
+		const broker = this.options.approvalBroker;
+		if (!broker) {
+			this.json(response, 404, { error: "tool-approvals-disabled" });
+			return;
+		}
+		if (!isObject(body) || !isObject(body.session)) throw new TypeError("Invalid approval list body.");
+		if (!(await this.authorize(request, path, "approvals", body.session, body.authentication, signal))) {
+			this.json(response, 403, { error: "forbidden" });
+			return;
+		}
+		const maximum = body.maximum ?? 32;
+		this.json(response, 200, { approvals: await broker.listPending(body.session, maximum, signal) });
+	}
+
+	private async respondApproval(
+		request: IncomingMessage,
+		response: ServerResponse,
+		path: string,
+		body: ApprovalResponseBody,
+		signal: AbortSignal,
+	): Promise<void> {
+		const broker = this.options.approvalBroker;
+		if (!broker) {
+			this.json(response, 404, { error: "tool-approvals-disabled" });
+			return;
+		}
+		if (
+			!isObject(body) ||
+			!isObject(body.session) ||
+			typeof body.approvalId !== "string" ||
+			!Number.isInteger(body.expectedRevision) ||
+			(body.decision !== "approve" && body.decision !== "deny")
+		)
+			throw new TypeError("Invalid approval response body.");
+		if (!(await this.authorize(request, path, "approvals", body.session, body.authentication, signal))) {
+			this.json(response, 403, { error: "forbidden" });
+			return;
+		}
+		const approvalResponse: GameToolApprovalResponse = {
+			session: body.session,
+			approvalId: body.approvalId,
+			expectedRevision: body.expectedRevision,
+			decision: body.decision,
+			...(body.reason === undefined ? {} : { reason: body.reason }),
+		};
+		this.json(response, 200, { approval: await broker.respond(approvalResponse, signal) });
 	}
 
 	private projectTranscriptMessage(message: GameConversationMessage, viewer: GameEventViewer): unknown[] {

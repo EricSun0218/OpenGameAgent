@@ -1,4 +1,5 @@
 import { createGameActionOperationId, InMemoryGameActionJournal } from "@opengameagent/actions";
+import { GameToolApprovalBroker, SqliteGameToolApprovalStore } from "@opengameagent/approvals";
 import { InMemoryGameConversationStore } from "@opengameagent/kernel";
 import type {
 	GameActionIntent,
@@ -96,6 +97,7 @@ async function start(
 		conversationStore?: InMemoryGameConversationStore;
 		eventStore?: GameRuntimeEventStore;
 		usageLedger?: GameUsageLedger;
+		approvalBroker?: GameToolApprovalBroker;
 	} = {},
 ): Promise<string> {
 	const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base", defaultModelProfileId: "default" });
@@ -157,6 +159,57 @@ describe("GameAgentServer", () => {
 
 		expect(response.status).toBe(403);
 		expect(kernel.requests).toHaveLength(0);
+	});
+
+	it("authorizes pending approval reads and decisions from principal ownership", async () => {
+		using approvalStore = new SqliteGameToolApprovalStore(":memory:");
+		const approvalBroker = new GameToolApprovalBroker(approvalStore);
+		const gameInput = input("owner-a");
+		const request = {
+			approvalId: "approval-v1-server",
+			policyId: "confirm",
+			session: gameInput.session,
+			inputId: gameInput.id,
+			runId: "run",
+			turn: 1,
+			toolCallIndex: 0,
+			toolCallId: "call",
+			toolName: "write_world",
+			risk: "high" as const,
+			canonicalArguments: "{}",
+			argumentsDigest: "digest",
+			world: { generationId: "world-1", revision: 3 },
+			requestedAt: Date.now(),
+			expiresAt: Date.now() + 10_000,
+		};
+		await approvalBroker.prepare(request);
+		const baseUrl = await start(new ServerTestKernel(), { approvalBroker });
+		const denied = await fetch(`${baseUrl}/v1/tool-approvals/list`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ authentication: { token: "owner-b" }, session: gameInput.session }),
+		});
+		expect(denied.status).toBe(403);
+		const listed = await fetch(`${baseUrl}/v1/tool-approvals/list`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ authentication: { token: "owner-a" }, session: gameInput.session }),
+		});
+		expect(await listed.json()).toMatchObject({
+			approvals: [{ status: "pending", request: { toolName: "write_world" } }],
+		});
+		const responded = await fetch(`${baseUrl}/v1/tool-approvals/respond`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				authentication: { token: "owner-a" },
+				session: gameInput.session,
+				approvalId: request.approvalId,
+				expectedRevision: 1,
+				decision: "deny",
+			}),
+		});
+		expect(await responded.json()).toMatchObject({ approval: { status: "denied", revision: 2 } });
 	});
 
 	it("streams authorized events while stripping non-internal tool details", async () => {

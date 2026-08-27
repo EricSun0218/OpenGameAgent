@@ -146,7 +146,8 @@ function goalTool(input: GameInput, options: GamePlanningExtensionOptions): Game
 				additionalProperties: false,
 			},
 		},
-		async execute(call, signal) {
+		async execute(call, context) {
+			const { signal } = context;
 			const action = requiredString(call.arguments, "action");
 			const id = action === "list" ? undefined : requiredString(call.arguments, "id");
 			await authorize(input, "goal", action, id, call.arguments, options, signal);
@@ -250,7 +251,8 @@ function taskPlanTool(input: GameInput, options: GamePlanningExtensionOptions): 
 				additionalProperties: false,
 			},
 		},
-		async execute(call, signal) {
+		async execute(call, context) {
+			const { signal } = context;
 			const action = requiredString(call.arguments, "action");
 			const id = action === "list" ? undefined : requiredString(call.arguments, "id");
 			await authorize(input, "task-plan", action, id, call.arguments, options, signal);

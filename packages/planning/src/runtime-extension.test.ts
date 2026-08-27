@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GameInput } from "@opengameagent/protocol";
+import type { GameInput, GameToolExecutionContext } from "@opengameagent/protocol";
 import { preflightGameToolSchema } from "@opengameagent/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteGamePlanningStore } from "./planning.js";
@@ -24,6 +24,10 @@ const input: GameInput = {
 	content: [{ type: "json", value: { command: "build" } }],
 };
 
+function executionContext(): GameToolExecutionContext {
+	return { input, runId: "run-1", turn: 1, toolCallIndex: 0, signal: new AbortController().signal };
+}
+
 async function planningStore(): Promise<SqliteGamePlanningStore> {
 	const directory = await mkdtemp(join(tmpdir(), "oga-planning-extension-"));
 	directories.push(directory);
@@ -45,7 +49,7 @@ describe("GamePlanningExtension", () => {
 		const goalTool = tools.find((tool) => tool.definition.name === "manage_game_goal");
 		await goalTool?.execute(
 			{ id: "call-goal", name: "manage_game_goal", arguments: { action: "create", id: "goal", data: { target: 1 } } },
-			new AbortController().signal,
+			executionContext(),
 		);
 		expect((await store.listGoals(input.session))[0]?.id).toBe("goal");
 		expect(await store.listGoals({ ...input.session, actorId: "other" })).toEqual([]);
@@ -80,7 +84,7 @@ describe("GamePlanningExtension", () => {
 					steps: [{ id: "step", data: { action: "work" } }],
 				},
 			},
-			new AbortController().signal,
+			executionContext(),
 		);
 		await expect(
 			planTool?.execute(
@@ -89,7 +93,7 @@ describe("GamePlanningExtension", () => {
 					name: "manage_game_task_plan",
 					arguments: { action: "advance", id: "plan", expectedRevision: 1, evidence: "claimed" },
 				},
-				new AbortController().signal,
+				executionContext(),
 			),
 		).rejects.toThrow("evidence was rejected");
 		const completed = await planTool?.execute(
@@ -98,7 +102,7 @@ describe("GamePlanningExtension", () => {
 				name: "manage_game_task_plan",
 				arguments: { action: "advance", id: "plan", expectedRevision: 1, evidence: "verified" },
 			},
-			new AbortController().signal,
+			executionContext(),
 		);
 		expect(JSON.stringify(completed)).toContain("completed");
 		expect(evidenceCalls).toBe(2);
@@ -116,7 +120,7 @@ describe("GamePlanningExtension", () => {
 						reason: "model request",
 					},
 				},
-				new AbortController().signal,
+				executionContext(),
 			),
 		).rejects.toThrow("rejected by the host");
 	});

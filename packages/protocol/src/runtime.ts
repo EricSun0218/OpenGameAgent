@@ -38,12 +38,25 @@ export interface GameToolDefinition {
 	description: string;
 	parameters: JsonObject;
 	executionMode?: "parallel" | "sequential";
+	risk?: "read" | "low" | "medium" | "high" | "critical";
 }
 
 export interface GameToolCall {
 	id: string;
 	name: string;
 	arguments: JsonObject;
+}
+
+/**
+ * Trusted coordinates supplied by the runtime when a model-requested tool is
+ * about to execute. They are never accepted from model output or client input.
+ */
+export interface GameToolExecutionContext {
+	input: GameInput;
+	runId: string;
+	turn: number;
+	toolCallIndex: number;
+	signal: AbortSignal;
 }
 
 export interface GameToolResult {
@@ -54,7 +67,7 @@ export interface GameToolResult {
 
 export interface GameTool {
 	definition: GameToolDefinition;
-	execute(call: GameToolCall, signal: AbortSignal): Promise<GameToolResult>;
+	execute(call: GameToolCall, context: GameToolExecutionContext): Promise<GameToolResult>;
 }
 
 export interface GameUsage {

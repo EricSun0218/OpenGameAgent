@@ -9,6 +9,7 @@
 		{ "path": "./packages/memory" },
 		{ "path": "./packages/planning" },
 		{ "path": "./packages/skills" },
+		{ "path": "./packages/approvals" },
 		{ "path": "./packages/runtime" },
 		{ "path": "./packages/server" }
 	]

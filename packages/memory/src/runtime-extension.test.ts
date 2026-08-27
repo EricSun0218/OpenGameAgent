@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GameInput } from "@opengameagent/protocol";
+import type { GameInput, GameToolExecutionContext } from "@opengameagent/protocol";
 import { preflightGameToolSchema } from "@opengameagent/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteGameMemoryStore } from "./memory.js";
@@ -24,6 +24,10 @@ const input: GameInput = {
 	moment: { tick: 42.5 },
 	content: [{ type: "json", value: { subject: "orchard" } }],
 };
+
+function executionContext(): GameToolExecutionContext {
+	return { input, runId: "run-1", turn: 1, toolCallIndex: 0, signal: new AbortController().signal };
+}
 
 afterEach(async () => {
 	for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
@@ -57,8 +61,8 @@ describe("GameMemoryExtension", () => {
 				importance: 0.8,
 			},
 		};
-		const first = await remember?.execute(call, new AbortController().signal);
-		const second = await remember?.execute(call, new AbortController().signal);
+		const first = await remember?.execute(call, executionContext());
+		const second = await remember?.execute(call, executionContext());
 		expect(first).toEqual(second);
 		expect(
 			(await memoryStore.search({ session: input.session, text: "apple orchard", limit: 8 })).matches,
@@ -67,7 +71,7 @@ describe("GameMemoryExtension", () => {
 		await expect(
 			remember?.execute(
 				{ ...call, id: "owner-call", arguments: { ...call.arguments, scope: "owner" } },
-				new AbortController().signal,
+				executionContext(),
 			),
 		).rejects.toThrow(/not authorized/);
 	});

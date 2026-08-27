@@ -1,5 +1,5 @@
 {
-	"name": "@opengameagent/server",
+	"name": "@opengameagent/approvals",
 	"version": "0.4.0-dev.0",
 	"type": "module",
 	"license": "MIT",
@@ -15,8 +15,6 @@
 		"dist"
 	],
 	"dependencies": {
-		"@opengameagent/actions": "0.4.0-dev.0",
-		"@opengameagent/approvals": "0.4.0-dev.0",
 		"@opengameagent/protocol": "0.4.0-dev.0",
 		"@opengameagent/runtime": "0.4.0-dev.0"
 	}

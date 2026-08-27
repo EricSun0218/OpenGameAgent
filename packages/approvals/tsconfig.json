@@ -6,10 +6,5 @@
 		"tsBuildInfoFile": "dist/.tsbuildinfo"
 	},
 	"include": ["src/**/*.ts"],
-	"references": [
-		{ "path": "../protocol" },
-		{ "path": "../runtime" },
-		{ "path": "../actions" },
-		{ "path": "../approvals" }
-	]
+	"references": [{ "path": "../protocol" }, { "path": "../runtime" }]
 }

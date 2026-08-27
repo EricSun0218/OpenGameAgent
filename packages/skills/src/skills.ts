@@ -326,7 +326,8 @@ function loadTool(
 				additionalProperties: false,
 			},
 		},
-		async execute(call, signal) {
+		async execute(call, context) {
+			const { signal } = context;
 			const id = call.arguments["id"];
 			const resource = call.arguments["resource"];
 			if (typeof id !== "string" || (resource !== undefined && typeof resource !== "string"))

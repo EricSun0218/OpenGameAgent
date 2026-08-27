@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GameInput } from "@opengameagent/protocol";
+import type { GameInput, GameToolExecutionContext } from "@opengameagent/protocol";
 import { preflightGameToolSchema } from "@opengameagent/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createGameSkillExtension, DirectoryGameSkillSource } from "./skills.js";
@@ -22,6 +22,10 @@ const input: GameInput = {
 	moment: { tick: 10 },
 	content: [{ type: "text", text: "build" }],
 };
+
+function executionContext(): GameToolExecutionContext {
+	return { input, runId: "run-1", turn: 1, toolCallIndex: 0, signal: new AbortController().signal };
+}
 
 async function root(): Promise<string> {
 	const directory = await mkdtemp(join(tmpdir(), "oga-skills-"));
@@ -106,7 +110,7 @@ describe("GameSkillExtension", () => {
 		await expect(
 			tools[0]?.execute(
 				{ id: "call", name: "load_game_skill", arguments: { id: "build-shelter" } },
-				new AbortController().signal,
+				executionContext(),
 			),
 		).rejects.toThrow("not advertised");
 
@@ -123,7 +127,7 @@ describe("GameSkillExtension", () => {
 		expect(JSON.stringify(segment?.value)).not.toContain("private-skill");
 		const loaded = await tools[0]?.execute(
 			{ id: "call", name: "load_game_skill", arguments: { id: "build-shelter" } },
-			new AbortController().signal,
+			executionContext(),
 		);
 		expect(loaded?.content).toEqual([{ type: "text", text: "Build carefully." }]);
 	});

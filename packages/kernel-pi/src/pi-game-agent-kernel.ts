@@ -25,6 +25,7 @@ import type {
 	GameRunCoordinate,
 	GameSessionKey,
 	GameTool,
+	GameToolExecutionContext,
 	GameUsage,
 	JsonObject,
 	JsonValue,
@@ -48,6 +49,7 @@ interface ActivePiRun {
 	session: GameSessionKey;
 	runId: string;
 	turn: number;
+	toolCallIndex: number;
 	closed: boolean;
 	usage?: GameUsage;
 }
@@ -282,7 +284,7 @@ function toPiMessage(message: GameConversationMessage): Message {
 	};
 }
 
-function toPiTool(tool: GameTool): AgentTool<TSchema, JsonValue> {
+function toPiTool(tool: GameTool, request: GameKernelRunRequest, active: ActivePiRun): AgentTool<TSchema, JsonValue> {
 	return {
 		name: tool.definition.name,
 		label: tool.definition.label,
@@ -290,9 +292,17 @@ function toPiTool(tool: GameTool): AgentTool<TSchema, JsonValue> {
 		parameters: tool.definition.parameters as TSchema,
 		...(tool.definition.executionMode === undefined ? {} : { executionMode: tool.definition.executionMode }),
 		async execute(toolCallId, params, signal) {
+			const context: GameToolExecutionContext = {
+				input: request.input,
+				runId: request.runId,
+				turn: active.turn,
+				toolCallIndex: active.toolCallIndex,
+				signal: signal ?? new AbortController().signal,
+			};
+			active.toolCallIndex += 1;
 			const result = await tool.execute(
 				{ id: toolCallId, name: tool.definition.name, arguments: params as JsonObject },
-				signal ?? new AbortController().signal,
+				context,
 			);
 			return {
 				content: result.content.map((item) => {
@@ -324,6 +334,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 			session: request.input.session,
 			runId: request.runId,
 			turn: 0,
+			toolCallIndex: 0,
 			closed: false,
 		};
 		this.activeRuns.set(request.runId, active);
@@ -411,7 +422,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 				systemPrompt: request.systemPrompt,
 				model: resolved.model,
 				thinkingLevel: resolved.thinkingLevel,
-				tools: request.tools.map(toPiTool),
+				tools: request.tools.map((tool) => toPiTool(tool, request, active)),
 				messages: conversation?.messages.map(toPiMessage) ?? [],
 			},
 			sessionId: request.input.session.sessionId,
@@ -448,6 +459,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 				break;
 			case "turn_start":
 				active.turn += 1;
+				active.toolCallIndex = 0;
 				setLastVisibleText("");
 				queue.push(makeEvent({ type: "turn.started" }));
 				break;

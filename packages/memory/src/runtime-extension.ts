@@ -94,7 +94,8 @@ function rememberTool(input: GameInput, options: GameMemoryExtensionOptions): Ga
 				additionalProperties: false,
 			},
 		},
-		async execute(call, signal) {
+		async execute(call, context) {
+			const { signal } = context;
 			const scope = call.arguments["scope"];
 			const kind = call.arguments["kind"];
 			const importance = call.arguments["importance"];
@@ -153,7 +154,8 @@ function searchTool(input: GameInput, options: GameMemoryExtensionOptions): Game
 				additionalProperties: false,
 			},
 		},
-		async execute(call, signal) {
+		async execute(call, context) {
+			const { signal } = context;
 			const limit = call.arguments["limit"];
 			if (typeof limit !== "number") throw new TypeError("Memory search limit is required.");
 			const scopes = stringArray(call.arguments["scopes"], "scopes", 3) as GameMemoryScope[] | undefined;
