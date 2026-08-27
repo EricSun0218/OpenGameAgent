@@ -536,6 +536,7 @@ export class GameAgentServer implements AsyncDisposable {
 	private projectTranscriptMessage(message: GameConversationMessage, viewer: GameEventViewer): unknown[] {
 		if (viewer.internal === true) return [message];
 		if (message.role === "toolResult") return [];
+		if (message.role === "summary") return [message];
 		if (typeof message.content === "string") return [message];
 		const content = message.content.flatMap((part): unknown[] => {
 			if (part.type === "reasoning" || part.type === "toolCall") return [];

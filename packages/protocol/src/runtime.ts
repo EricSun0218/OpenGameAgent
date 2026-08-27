@@ -105,6 +105,7 @@ export type GameConversationContent =
 
 export type GameConversationMessage =
 	| { role: "user"; content: string | readonly GameConversationContent[]; timestamp: number }
+	| { role: "summary"; summary: string; tokensBefore: number; timestamp: number }
 	| {
 			role: "assistant";
 			content: readonly GameConversationContent[];

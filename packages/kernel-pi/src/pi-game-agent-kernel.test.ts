@@ -329,6 +329,66 @@ describe("PiGameAgentKernel", () => {
 		);
 	});
 
+	it("persists a compacted transcript before the next run and sends its summary to the provider", async () => {
+		const conversationStore = new InMemoryGameConversationStore();
+		await conversationStore.save(session, 0, [{ role: "user", content: "old history", timestamp: 1 }]);
+		let capturedContext: Context | undefined;
+		const streamFn: StreamFn = (_model, context) => {
+			capturedContext = context;
+			return completedStream(assistant([{ type: "text", text: "continued" }], "stop"));
+		};
+		const kernel = new PiGameAgentKernel({
+			models: modelResolver(streamFn),
+			conversationStore,
+			conversationCompactor: {
+				async compact(request) {
+					expect(request.snapshot.revision).toBe(1);
+					expect(request.model.contextWindow).toBe(model.contextWindow);
+					return {
+						messages: [
+							{ role: "summary", summary: "The old request was completed.", tokensBefore: 9000, timestamp: 2 },
+						],
+						changed: true,
+						tokensBefore: 9000,
+						tokensAfter: 10,
+						summarizedMessages: 1,
+						usage: {
+							input: 4,
+							output: 2,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 6,
+							cost: { input: 0.004, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.006 },
+						},
+					};
+				},
+			},
+		});
+
+		const events = await collect(
+			kernel.run({
+				runId: "run-compacted",
+				input: input("input-compacted"),
+				systemPrompt: "Continue.",
+				tools: [],
+				modelProfileId: "default",
+				maximumTurns: 2,
+			}),
+		);
+
+		expect(capturedContext?.messages[0]).toMatchObject({
+			role: "user",
+			content: expect.stringContaining("<conversation-summary>"),
+		});
+		const persisted = await conversationStore.read(session);
+		expect(persisted.revision).toBe(3);
+		expect(JSON.stringify(persisted.messages)).not.toContain("old history");
+		expect(JSON.stringify(persisted.messages)).toContain("The old request was completed.");
+		expect(events.find((event) => event.type === "run.completed")).toMatchObject({
+			usage: { input: 14, output: 6, totalTokens: 22, cost: { total: 0.036 } },
+		});
+	});
+
 	it("requires exact run and turn coordinates for control", async () => {
 		let release: (() => void) | undefined;
 		const streamFn: StreamFn = (_model, _context, options) => {

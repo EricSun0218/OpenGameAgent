@@ -36,6 +36,7 @@ import type {
 	JsonObject,
 	JsonValue,
 } from "@opengameagent/protocol";
+import type { GameConversationCompactor } from "@opengameagent/transcript";
 import type { TSchema } from "typebox";
 import { AsyncQueue } from "./async-queue.js";
 import type { PiGameModelResolver, ResolvedPiGameModel } from "./model-registry.js";
@@ -43,12 +44,26 @@ import type { PiGameModelResolver, ResolvedPiGameModel } from "./model-registry.
 export interface PiGameAgentKernelOptions {
 	models: PiGameModelResolver;
 	conversationStore?: GameConversationStore;
+	conversationCompactor?: GameConversationCompactor;
 }
 
 type GameAgentEventPayload<T> = T extends GameAgentEvent
 	? Omit<T, "sequence" | "eventId" | "runId" | "turn" | "audience" | "timestamp">
 	: never;
 type ProjectedGameAgentEvent = GameAgentEventPayload<GameAgentEvent>;
+
+interface PiGameSummaryMessage {
+	role: "gameSummary";
+	summary: string;
+	tokensBefore: number;
+	timestamp: number;
+}
+
+declare module "@earendil-works/pi-agent-core" {
+	interface CustomAgentMessages {
+		gameSummary: PiGameSummaryMessage;
+	}
+}
 
 interface ActivePiRun {
 	agent?: Agent;
@@ -174,6 +189,14 @@ function toGameContent(
 }
 
 function toGameMessage(message: AgentMessage): GameConversationMessage {
+	if (message.role === "gameSummary") {
+		return {
+			role: "summary",
+			summary: message.summary,
+			tokensBefore: message.tokensBefore,
+			timestamp: message.timestamp,
+		};
+	}
 	if (message.role === "user") {
 		return {
 			role: "user",
@@ -250,7 +273,15 @@ function toPiContent(
 	});
 }
 
-function toPiMessage(message: GameConversationMessage): Message {
+function toPiMessage(message: GameConversationMessage): AgentMessage {
+	if (message.role === "summary") {
+		return {
+			role: "gameSummary",
+			summary: message.summary,
+			tokensBefore: message.tokensBefore,
+			timestamp: message.timestamp,
+		};
+	}
 	if (message.role === "user") {
 		return {
 			role: "user",
@@ -288,6 +319,22 @@ function toPiMessage(message: GameConversationMessage): Message {
 		isError: message.isError,
 		timestamp: message.timestamp,
 	};
+}
+
+function toPiLlmMessages(messages: AgentMessage[]): Message[] {
+	const projected: Message[] = [];
+	for (const message of messages) {
+		if (message.role === "gameSummary") {
+			projected.push({
+				role: "user",
+				content: `<conversation-summary>\n${message.summary}\n</conversation-summary>`,
+				timestamp: message.timestamp,
+			});
+		} else if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
+			projected.push(message);
+		}
+	}
+	return projected;
 }
 
 function toPiTool(tool: GameTool, request: GameKernelRunRequest, active: ActivePiRun): AgentTool<TSchema, JsonValue> {
@@ -420,11 +467,26 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 		getLastVisibleText: () => string,
 		setLastVisibleText: (text: string) => void,
 	): Promise<void> {
-		const conversation = await this.options.conversationStore?.read(request.input.session);
 		const resolved = this.options.models.resolve(request.modelProfileId);
+		let conversation = await this.options.conversationStore?.read(request.input.session);
+		if (conversation && this.options.conversationStore && this.options.conversationCompactor) {
+			const compacted = await this.options.conversationCompactor.compact(
+				{ session: request.input.session, snapshot: conversation, model: resolved.descriptor },
+				new AbortController().signal,
+			);
+			if (compacted.usage !== undefined) active.usage = addGameUsage(active.usage, compacted.usage);
+			if (compacted.changed) {
+				conversation = await this.options.conversationStore.save(
+					request.input.session,
+					conversation.revision,
+					compacted.messages,
+				);
+			}
+		}
 		const prepareNextTurn = request.prepareNextTurn;
 		const agent = new Agent({
 			streamFn: resolved.streamFn,
+			convertToLlm: toPiLlmMessages,
 			initialState: {
 				systemPrompt: request.systemPrompt,
 				model: resolved.model,

@@ -4,6 +4,7 @@
 		{ "path": "./packages/protocol" },
 		{ "path": "./packages/kernel" },
 		{ "path": "./packages/kernel-pi" },
+		{ "path": "./packages/transcript" },
 		{ "path": "./packages/actions" },
 		{ "path": "./packages/storage-sqlite" },
 		{ "path": "./packages/memory" },
