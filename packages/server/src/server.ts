@@ -541,6 +541,7 @@ export class GameAgentServer implements AsyncDisposable {
 		const content = message.content.flatMap((part): unknown[] => {
 			if (part.type === "reasoning" || part.type === "toolCall") return [];
 			if (part.type === "image") return [{ type: "image", mimeType: part.mimeType, inline: false }];
+			if (part.type === "imageRef") return [{ type: "imageRef", attachment: part.attachment }];
 			return [part];
 		});
 		return [{ ...message, content }];

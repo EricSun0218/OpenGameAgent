@@ -301,6 +301,17 @@ describe("GameAgentServer", () => {
 					{ type: "toolCall", id: "call", name: "private", arguments: { hidden: true } },
 					{ type: "text", text: "visible" },
 					{ type: "image", mimeType: "image/png", data: "inline-private-bytes" },
+					{
+						type: "imageRef",
+						attachment: {
+							id: `img_${"a".repeat(64)}`,
+							sha256: "a".repeat(64),
+							mimeType: "image/png",
+							bytes: 128,
+							width: 16,
+							height: 8,
+						},
+					},
 				],
 				api: "api",
 				provider: "provider",
@@ -343,6 +354,8 @@ describe("GameAgentServer", () => {
 		const secondPage = JSON.stringify(await second.json());
 		expect(secondPage).toContain("visible");
 		expect(secondPage).toContain('"inline":false');
+		expect(secondPage).toContain('"type":"imageRef"');
+		expect(secondPage).toContain(`img_${"a".repeat(64)}`);
 		expect(secondPage).not.toContain("hidden-chain");
 		expect(secondPage).not.toContain("tool-private");
 		expect(secondPage).not.toContain("inline-private-bytes");

@@ -8,7 +8,15 @@ import {
 	type Model,
 } from "@earendil-works/pi-ai";
 import { InMemoryGameConversationStore } from "@opengameagent/kernel";
-import type { GameAgentEvent, GameInput, GameSessionKey, GameTool } from "@opengameagent/protocol";
+import type {
+	GameAgentEvent,
+	GameImageAttachment,
+	GameImageAttachmentReference,
+	GameImageAttachmentStore,
+	GameInput,
+	GameSessionKey,
+	GameTool,
+} from "@opengameagent/protocol";
 import { describe, expect, it } from "vitest";
 import type { PiGameModelResolver } from "./model-registry.js";
 import { PiGameAgentKernel } from "./pi-game-agent-kernel.js";
@@ -121,6 +129,28 @@ async function collect(iterable: AsyncIterable<GameAgentEvent>): Promise<GameAge
 	const events: GameAgentEvent[] = [];
 	for await (const event of iterable) events.push(event);
 	return events;
+}
+
+class TestAttachmentStore implements GameImageAttachmentStore {
+	private readonly values = new Map<string, GameImageAttachment>();
+
+	async admit(mimeType: string, data: Uint8Array): Promise<GameImageAttachmentReference> {
+		const sha256 = createHash("sha256").update(data).digest("hex");
+		const reference = {
+			id: `img_${sha256}`,
+			sha256,
+			mimeType,
+			bytes: data.byteLength,
+			width: 1,
+			height: 1,
+		};
+		this.values.set(reference.id, { reference, data: new Uint8Array(data) });
+		return reference;
+	}
+
+	async read(id: string): Promise<GameImageAttachment | undefined> {
+		return this.values.get(id);
+	}
 }
 
 describe("PiGameAgentKernel", () => {
@@ -329,6 +359,85 @@ describe("PiGameAgentKernel", () => {
 		);
 	});
 
+	it("persists images as immutable references and resolves them only at the provider boundary", async () => {
+		const conversationStore = new InMemoryGameConversationStore();
+		const imageAttachments = new TestAttachmentStore();
+		const contexts: Context[] = [];
+		const streamFn: StreamFn = (_model, context) => {
+			contexts.push(context);
+			return completedStream(assistant([{ type: "text", text: "seen" }], "stop"));
+		};
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn), conversationStore, imageAttachments });
+		const image = Buffer.from(
+			"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000049454e44ae426082",
+			"hex",
+		).toString("base64");
+
+		await collect(
+			kernel.run({
+				runId: "run-image-1",
+				input: input("input-image-1", [{ type: "image", mimeType: "image/png", data: image }]),
+				systemPrompt: "Observe.",
+				tools: [],
+				modelProfileId: "default",
+				maximumTurns: 2,
+			}),
+		);
+		const firstSnapshot = await conversationStore.read(session);
+		const serialized = JSON.stringify(firstSnapshot.messages);
+		expect(serialized).toContain('"type":"imageRef"');
+		expect(serialized).not.toContain(image);
+
+		await collect(
+			kernel.run({
+				runId: "run-image-2",
+				input: input("input-image-2"),
+				systemPrompt: "Remember the image.",
+				tools: [],
+				modelProfileId: "default",
+				maximumTurns: 2,
+			}),
+		);
+		const restored = contexts[1]?.messages.find((message) => message.role === "user" && Array.isArray(message.content));
+		expect(restored?.content).toEqual(expect.arrayContaining([{ type: "image", mimeType: "image/png", data: image }]));
+	});
+
+	it("fails closed before a provider call when an image reference is missing or tampered", async () => {
+		let providerCalls = 0;
+		const streamFn: StreamFn = () => {
+			providerCalls += 1;
+			return completedStream(assistant([{ type: "text", text: "unexpected" }], "stop"));
+		};
+		const kernel = new PiGameAgentKernel({
+			models: modelResolver(streamFn),
+			imageAttachments: new TestAttachmentStore(),
+		});
+		const events = await collect(
+			kernel.run({
+				runId: "run-missing-image",
+				input: input("input-missing-image", [
+					{
+						type: "imageRef",
+						attachment: {
+							id: `img_${"a".repeat(64)}`,
+							sha256: "a".repeat(64),
+							mimeType: "image/png",
+							bytes: 1,
+							width: 1,
+							height: 1,
+						},
+					},
+				]),
+				systemPrompt: "Observe.",
+				tools: [],
+				modelProfileId: "default",
+				maximumTurns: 2,
+			}),
+		);
+		expect(providerCalls).toBe(0);
+		expect(events).toEqual([expect.objectContaining({ type: "run.failed", category: "kernel" })]);
+	});
+
 	it("persists a compacted transcript before the next run and sends its summary to the provider", async () => {
 		const conversationStore = new InMemoryGameConversationStore();
 		await conversationStore.save(session, 0, [{ role: "user", content: "old history", timestamp: 1 }]);
@@ -431,3 +540,5 @@ describe("PiGameAgentKernel", () => {
 		expect(kernel.abort(session, { runId: "run-control", turn: 1 })).toEqual({ accepted: false, reason: "not-active" });
 	});
 });
+
+import { createHash } from "node:crypto";

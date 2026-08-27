@@ -84,6 +84,7 @@ function contentCharacters(content: string | readonly GameConversationContent[])
 				characters += part.text.length;
 				break;
 			case "image":
+			case "imageRef":
 				characters += IMAGE_TOKEN_ESTIMATE * 4;
 				break;
 			case "toolCall":
@@ -117,7 +118,9 @@ function sanitizeMessage(message: GameConversationMessage): string | undefined {
 	if (message.role === "summary") return `[Prior summary]\n${message.summary}`;
 	if (message.role === "user") {
 		const text = visibleText(message.content).join("\n");
-		const hasImage = Array.isArray(message.content) && message.content.some((part) => part.type === "image");
+		const hasImage =
+			Array.isArray(message.content) &&
+			message.content.some((part) => part.type === "image" || part.type === "imageRef");
 		const value = [text, hasImage ? "[image omitted]" : ""].filter(Boolean).join("\n");
 		return value.length === 0 ? undefined : `[User]\n${value}`;
 	}

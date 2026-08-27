@@ -18,10 +18,30 @@ export interface GameMoment {
 	phase?: string;
 }
 
+export interface GameImageAttachmentReference {
+	id: string;
+	sha256: string;
+	mimeType: string;
+	bytes: number;
+	width: number;
+	height: number;
+}
+
+export interface GameImageAttachment {
+	reference: GameImageAttachmentReference;
+	data: Uint8Array;
+}
+
+export interface GameImageAttachmentStore {
+	admit(mimeType: string, data: Uint8Array, signal?: AbortSignal): Promise<GameImageAttachmentReference>;
+	read(id: string, signal?: AbortSignal): Promise<GameImageAttachment | undefined>;
+}
+
 export type GameInputContent =
 	| { type: "text"; text: string }
 	| { type: "json"; value: JsonValue }
-	| { type: "image"; mimeType: string; data: string };
+	| { type: "image"; mimeType: string; data: string }
+	| { type: "imageRef"; attachment: GameImageAttachmentReference };
 
 export interface GameInput {
 	id: string;
@@ -100,6 +120,7 @@ export interface GameResolvedModel {
 export type GameConversationContent =
 	| { type: "text"; text: string; signature?: string }
 	| { type: "image"; mimeType: string; data: string }
+	| { type: "imageRef"; attachment: GameImageAttachmentReference }
 	| { type: "reasoning"; text: string; signature?: string; redacted?: boolean }
 	| { type: "toolCall"; id: string; name: string; arguments: JsonObject; signature?: string };
 
