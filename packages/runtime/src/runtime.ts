@@ -168,6 +168,17 @@ export interface GameAgentRuntimeOptions {
 export interface GameRunOptions {
 	runId?: string;
 	signal?: AbortSignal;
+	maximumTurns?: number;
+	/**
+	 * Host-authoritative fence evaluated immediately before every Tool execution
+	 * for this run. Returning false prevents the Tool and produces a fixed,
+	 * model-visible error result without exposing authorization details.
+	 */
+	authorizeToolExecution?: (
+		tool: GameTool["definition"],
+		call: GameToolCall,
+		context: GameToolExecutionContext,
+	) => Promise<boolean> | boolean;
 }
 
 interface ActiveRuntimeRun {
@@ -214,6 +225,10 @@ export class GameAgentRuntime {
 	async *run(input: GameInput, runOptions: GameRunOptions = {}): AsyncIterable<GameAgentEvent> {
 		const signal = runOptions.signal ?? new AbortController().signal;
 		const runId = runOptions.runId ?? randomUUID();
+		const maximumTurns = runOptions.maximumTurns ?? this.maximumTurns;
+		if (!Number.isInteger(maximumTurns) || maximumTurns < 1 || maximumTurns > this.maximumTurns) {
+			throw new RangeError(`maximumTurns must be between 1 and ${this.maximumTurns}.`);
+		}
 		const key = sessionKey(input.session);
 		const runStartedAt = Date.now();
 		const runMonotonicStartedAt = performance.now();
@@ -231,7 +246,7 @@ export class GameAgentRuntime {
 				async () => await this.scheduler.acquire(key, signal),
 			);
 			const [{ systemPrompt, tools }, modelProfileId] = await Promise.all([
-				this.prepareTurn(input, runId, 0, signal),
+				this.prepareTurn(input, runId, 0, signal, runOptions.authorizeToolExecution),
 				this.measureStage(
 					input,
 					runId,
@@ -250,8 +265,9 @@ export class GameAgentRuntime {
 				systemPrompt,
 				tools,
 				modelProfileId,
-				maximumTurns: this.maximumTurns,
-				prepareNextTurn: async (context, turnSignal) => await this.prepareTurn(input, runId, context.turn, turnSignal),
+				maximumTurns,
+				prepareNextTurn: async (context, turnSignal) =>
+					await this.prepareTurn(input, runId, context.turn, turnSignal, runOptions.authorizeToolExecution),
 			})) {
 				active.coordinate = { runId: event.runId, turn: event.turn };
 				if (event.type === "run.failed") {
@@ -329,11 +345,12 @@ export class GameAgentRuntime {
 		runId: string,
 		turn: number,
 		signal: AbortSignal,
+		authorizeToolExecution?: GameRunOptions["authorizeToolExecution"],
 	): Promise<{ systemPrompt: string; tools: readonly GameTool[] }> {
 		return await this.measureStage(input, runId, turn, "prepare-turn", undefined, signal, async () => {
 			const [contextSegments, tools] = await Promise.all([
 				this.collectContext(input, runId, turn, signal),
-				this.collectTools(input, runId, turn, signal),
+				this.collectTools(input, runId, turn, signal, authorizeToolExecution),
 			]);
 			const postToolSegments = (
 				await Promise.all(
@@ -437,7 +454,13 @@ export class GameAgentRuntime {
 		return prompt;
 	}
 
-	private async collectTools(input: GameInput, runId: string, turn: number, signal: AbortSignal): Promise<GameTool[]> {
+	private async collectTools(
+		input: GameInput,
+		runId: string,
+		turn: number,
+		signal: AbortSignal,
+		authorizeToolExecution?: GameRunOptions["authorizeToolExecution"],
+	): Promise<GameTool[]> {
 		return await this.measureStage(input, runId, turn, "tool-catalog", undefined, signal, async () => {
 			const provided = await Promise.all(
 				(this.options.toolProviders ?? []).map((provider, index) =>
@@ -461,17 +484,23 @@ export class GameAgentRuntime {
 				names.add(tool.definition.name);
 				preflightGameToolSchema(tool.definition);
 				if ((await this.options.toolVisibility?.isVisible(input, tool.definition, signal)) === false) continue;
-				visible.push(this.wrapTool(tool));
+				visible.push(this.wrapTool(tool, authorizeToolExecution));
 			}
 			return visible;
 		});
 	}
 
-	private wrapTool(tool: GameTool): GameTool {
+	private wrapTool(tool: GameTool, authorizeToolExecution?: GameRunOptions["authorizeToolExecution"]): GameTool {
 		const middleware = this.options.toolExecutionMiddleware ?? [];
 		const executable: GameTool = {
 			definition: tool.definition,
-			execute: (call, context) => {
+			execute: async (call, context) => {
+				if (authorizeToolExecution && !(await authorizeToolExecution(tool.definition, call, context))) {
+					return {
+						isError: true,
+						content: [{ type: "json", value: { error: "run_authority_expired" } }],
+					};
+				}
 				if (middleware.length === 0) return tool.execute(call, context);
 				let index = middleware.length;
 				const next = (): Promise<GameToolResult> => {

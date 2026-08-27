@@ -20,6 +20,7 @@
 		{ "path": "./packages/mailbox" },
 		{ "path": "./packages/scheduling" },
 		{ "path": "./packages/evolution" },
+		{ "path": "./packages/delegation" },
 		{ "path": "./packages/media" },
 		{ "path": "./packages/realtime" },
 		{ "path": "./packages/realtime-openai" },

@@ -375,6 +375,65 @@ describe("GameAgentRuntime", () => {
 		expect(observedEvents).toEqual(["run.started", "run.completed"]);
 	});
 
+	it("checks a run-scoped authority fence immediately before every tool execution", async () => {
+		let executions = 0;
+		let checks = 0;
+		const results: unknown[] = [];
+		const fencedTool = validTool("world_write");
+		fencedTool.execute = async () => {
+			executions += 1;
+			return { content: [{ type: "text", text: "mutated" }] };
+		};
+		const kernel: GameAgentKernelPort = {
+			async *run(request) {
+				yield event(request, "run.started", 1);
+				const tool = request.tools[0];
+				if (!tool) throw new Error("Expected a tool.");
+				for (let index = 0; index < 2; index += 1) {
+					results.push(
+						await tool.execute(
+							{ id: `call-${index}`, name: tool.definition.name, arguments: { count: 1 } },
+							{
+								input: request.input,
+								runId: request.runId,
+								turn: 1,
+								toolCallIndex: index,
+								signal: new AbortController().signal,
+							},
+						),
+					);
+				}
+				yield event(request, "run.completed", 2);
+			},
+			steer: () => ({ accepted: true }),
+			followUp: () => ({ accepted: true }),
+			abort: () => ({ accepted: true }),
+		};
+		const runtime = new GameAgentRuntime({
+			kernel,
+			baseSystemPrompt: "base",
+			defaultModelProfileId: "default",
+			toolProviders: [{ provide: async () => [fencedTool] }],
+		});
+
+		await collect(
+			runtime.run(input("a"), {
+				runId: "fenced-run",
+				authorizeToolExecution: () => {
+					checks += 1;
+					return checks === 1;
+				},
+			}),
+		);
+
+		expect(checks).toBe(2);
+		expect(executions).toBe(1);
+		expect(results[1]).toEqual({
+			isError: true,
+			content: [{ type: "json", value: { error: "run_authority_expired" } }],
+		});
+	});
+
 	it("isolates observer failures from successful runs", async () => {
 		const runtime = new GameAgentRuntime({
 			kernel: new CapturingKernel(),
