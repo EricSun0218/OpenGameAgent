@@ -6,6 +6,7 @@
 		{ "path": "./packages/kernel-pi" },
 		{ "path": "./packages/transcript" },
 		{ "path": "./packages/attachments" },
+		{ "path": "./packages/artifacts" },
 		{ "path": "./packages/interactions" },
 		{ "path": "./packages/policy" },
 		{ "path": "./packages/actions" },

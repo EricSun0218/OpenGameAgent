@@ -3,6 +3,8 @@ obj/
 TestResults/
 /artifacts/
 **/artifacts/
+!packages/artifacts/
+!packages/artifacts/**
 .vs/
 .idea/
 *.user
