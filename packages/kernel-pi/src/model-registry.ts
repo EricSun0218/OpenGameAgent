@@ -47,6 +47,8 @@ export interface PiOpenAICompatibleProvider {
 	baseUrl: string;
 	protocol?: "completions" | "responses";
 	requiresCredential?: boolean;
+	/** Non-secret placeholder required by some OpenAI-compatible clients for an unauthenticated loopback server. */
+	anonymousApiKey?: string;
 	models: readonly PiOpenAICompatibleModel[];
 }
 
@@ -209,7 +211,8 @@ export function createPiGameModelRegistry(options: PiGameModelRegistryOptions): 
 									...(credential.env === undefined ? {} : { env: credential.env }),
 								};
 							}
-							return provider.requiresCredential === true ? undefined : { auth: {} };
+							if (provider.requiresCredential === true) return undefined;
+							return { auth: provider.anonymousApiKey === undefined ? {} : { apiKey: provider.anonymousApiKey } };
 						},
 					},
 				},
