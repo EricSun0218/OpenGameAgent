@@ -317,6 +317,30 @@ describe("GameAgentServer", () => {
 		expect(await reconcile.json()).toMatchObject({ entry: { status: "committed", receipt: { stateRevision: 3 } } });
 	});
 
+	it("streams a durable action once and turns a reconnect into reconciliation", async () => {
+		const journal = new InMemoryGameActionJournal();
+		const intent = actionIntent();
+		await journal.prepare(intent);
+		const baseUrl = await start(new ServerTestKernel(), { actionJournal: journal });
+		const readDelivery = async () => {
+			const controller = new AbortController();
+			const response = await fetch(`${baseUrl}/v1/actions/stream`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ authentication: { token: "owner-a" }, session: intent.session }),
+				signal: controller.signal,
+			});
+			const reader = response.body?.getReader();
+			if (!reader) throw new Error("Expected action stream.");
+			const first = await reader.read();
+			controller.abort();
+			return new TextDecoder().decode(first.value);
+		};
+		expect(await readDelivery()).toContain('"kind":"dispatch"');
+		expect(await readDelivery()).toContain('"kind":"reconcile"');
+		expect((await journal.read(intent.operationId))?.attempt).toBe(1);
+	});
+
 	it("authorizes and paginates transcript reads without exposing reasoning, tool details, or inline image bytes", async () => {
 		const kernel = new ServerTestKernel();
 		const conversationStore = new InMemoryGameConversationStore();

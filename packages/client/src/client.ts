@@ -73,7 +73,21 @@ export class GameAgentClient {
 		);
 		if (!response.ok) throw await this.error(response);
 		if (!response.body) throw new GameAgentClientError("Run stream has no response body.", 502, "empty-stream");
-		yield* parseEventStream(response.body, this.maximumEventBytes, options.signal);
+		yield* parseEventStream<GameAgentEvent>(response.body, this.maximumEventBytes, options.signal);
+	}
+
+	async *streamActions(
+		session: GameSessionKey,
+		options: { maximum?: number; signal?: AbortSignal } = {},
+	): AsyncGenerator<GameActionClaim> {
+		const response = await this.postRaw(
+			"/v1/actions/stream",
+			{ session, ...(options.maximum === undefined ? {} : { maximum: options.maximum }) },
+			options.signal,
+		);
+		if (!response.ok) throw await this.error(response);
+		if (!response.body) throw new GameAgentClientError("Action stream has no response body.", 502, "empty-stream");
+		yield* parseEventStream<GameActionClaim>(response.body, this.maximumEventBytes, options.signal);
 	}
 
 	steer(session: GameSessionKey, expected: GameRunCoordinate, input: GameInput, signal?: AbortSignal) {
@@ -281,11 +295,11 @@ async function readBoundedText(response: Response, maximumBytes: number): Promis
 	return text;
 }
 
-async function* parseEventStream(
+async function* parseEventStream<T>(
 	stream: ReadableStream<Uint8Array>,
 	maximumEventBytes: number,
 	signal?: AbortSignal,
-): AsyncGenerator<GameAgentEvent> {
+): AsyncGenerator<T> {
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
 	let pending = "";
@@ -317,7 +331,7 @@ async function* parseEventStream(
 						typeof error === "string" ? error : "stream-failed",
 					);
 				}
-				yield parsed as GameAgentEvent;
+				yield parsed as T;
 				delimiter = findEventDelimiter(pending);
 			}
 			if (new TextEncoder().encode(pending).byteLength > maximumEventBytes)

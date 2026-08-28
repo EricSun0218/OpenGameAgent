@@ -6,6 +6,7 @@ import {
 	type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
+import { setTimeout as delay } from "node:timers/promises";
 import type { GameActionJournal } from "@opengameagent/actions";
 import type { GameToolApprovalBroker, GameToolApprovalResponse } from "@opengameagent/approvals";
 import {
@@ -222,6 +223,10 @@ export class GameAgentServer implements AsyncDisposable {
 				await this.claimActions(request, response, path, body as unknown as ActionClaimBody, controller.signal);
 				return;
 			}
+			if (path === "/v1/actions/stream") {
+				await this.streamActions(request, response, path, body as unknown as ActionClaimBody, controller.signal);
+				return;
+			}
 			if (path === "/v1/actions/receipt") {
 				await this.submitActionReceipt(
 					request,
@@ -392,6 +397,50 @@ export class GameAgentServer implements AsyncDisposable {
 		const claims = [];
 		for (const entry of pending) claims.push(await journal.claimDispatch(entry.intent.operationId, signal));
 		this.json(response, 200, { claims });
+	}
+
+	private async streamActions(
+		request: IncomingMessage,
+		response: ServerResponse,
+		path: string,
+		body: ActionClaimBody,
+		signal: AbortSignal,
+	): Promise<void> {
+		const journal = this.options.actionJournal;
+		if (!journal) {
+			this.json(response, 404, { error: "action-exchange-disabled" });
+			return;
+		}
+		if (!isObject(body) || !isObject(body.session)) throw new TypeError("Invalid action stream body.");
+		if (!(await this.authorize(request, path, "actions", body.session, body.authentication, signal))) {
+			this.json(response, 403, { error: "forbidden" });
+			return;
+		}
+		const maximum = body.maximum ?? 1;
+		if (!Number.isInteger(maximum) || maximum < 1 || maximum > 32)
+			throw new RangeError("maximum must be between 1 and 32.");
+		response.writeHead(200, {
+			"content-type": "text/event-stream; charset=utf-8",
+			"cache-control": "no-store",
+			connection: "keep-alive",
+		});
+		const delivered = new Set<string>();
+		while (!signal.aborted) {
+			const pending = await journal.listPending(body.session, maximum, signal);
+			for (const entry of pending) {
+				const claim = await journal.claimDispatch(entry.intent.operationId, signal);
+				const fingerprint = `${claim.entry.intent.operationId}:${claim.kind}:${claim.entry.status}:${claim.entry.attempt}`;
+				if (delivered.has(fingerprint)) continue;
+				delivered.add(fingerprint);
+				response.write(
+					`id: ${claim.entry.intent.operationId}:${claim.entry.attempt}\nevent: action.delivery\ndata: ${JSON.stringify(claim)}\n\n`,
+				);
+			}
+			await delay(100, undefined, { signal }).catch((error: unknown) => {
+				if (!signal.aborted) throw error;
+			});
+		}
+		response.end();
 	}
 
 	private async submitActionReceipt(

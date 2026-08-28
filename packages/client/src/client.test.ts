@@ -85,6 +85,21 @@ describe("GameAgentClient", () => {
 		} satisfies Partial<GameAgentClientError>);
 	});
 
+	it("projects action deliveries as a typed stream", async () => {
+		const claim = {
+			kind: "reconcile",
+			entry: { intent: { operationId: "op" }, status: "uncertain", attempt: 1 },
+		};
+		const client = new GameAgentClient({
+			baseUrl: "https://agent.example",
+			fetch: (async () =>
+				new Response(`event: action.delivery\ndata: ${JSON.stringify(claim)}\n\n`, { status: 200 })) as typeof fetch,
+		});
+		const deliveries = [];
+		for await (const delivery of client.streamActions(session)) deliveries.push(delivery);
+		expect(deliveries).toEqual([claim]);
+	});
+
 	it("rejects plaintext remote endpoints and oversized events", async () => {
 		expect(() => new GameAgentClient({ baseUrl: "http://agent.example" })).toThrow(/require HTTPS/);
 		const client = new GameAgentClient({

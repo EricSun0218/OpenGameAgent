@@ -27,3 +27,5 @@ for await (const event of client.run(input, { signal })) {
 The body credential is intended for constrained loopback clients that cannot set headers. It is mapped to a principal by the server authenticator and never becomes part of `GameInput`. Remote plaintext HTTP is rejected by the client; non-loopback deployments require HTTPS. URLs cannot contain credentials, redirects are rejected, and response/event sizes are bounded.
 
 After a disconnect, do not replay a world-writing input blindly. Read persisted events with `readRunEvents(session, runId, { afterSequence })`, inspect `gap`, and reconcile every delivered action whose journal state is not terminal. Exact control always includes the expected run ID and turn so a late client cannot steer or abort a newer run for the same actor.
+
+`streamActions(session)` is the push form of the durable action exchange. A first delivery can have `kind: "dispatch"`; after that claim has crossed the server boundary, reconnecting yields `kind: "reconcile"` with the same operation rather than authorizing another execution. Only an authoritative terminal receipt completes it.
