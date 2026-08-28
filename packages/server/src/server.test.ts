@@ -150,6 +150,33 @@ afterEach(async () => {
 });
 
 describe("GameAgentServer", () => {
+	it("reports the enabled protocol surface without exposing configuration", async () => {
+		const baseUrl = await start(new ServerTestKernel(), {
+			actionJournal: new InMemoryGameActionJournal(),
+			conversationStore: new InMemoryGameConversationStore(),
+		});
+		const response = await fetch(`${baseUrl}/v1/capabilities`);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			protocolVersion: 1,
+			features: {
+				runs: true,
+				exactControl: true,
+				eventReplay: false,
+				actionExchange: true,
+				transcript: true,
+				attachments: false,
+				usage: false,
+				approvals: false,
+			},
+			limits: {
+				maximumRequestBytes: 1024 * 1024,
+				maximumTranscriptPageSize: 100,
+				maximumActionClaims: 32,
+			},
+		});
+	});
+
 	it("derives ownership from authentication and rejects payload-only impersonation before runtime access", async () => {
 		const kernel = new ServerTestKernel();
 		const baseUrl = await start(kernel);

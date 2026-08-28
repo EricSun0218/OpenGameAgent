@@ -81,56 +81,71 @@ export interface GameAgentServerOptions {
 	maximumRequestBytes?: number;
 }
 
-interface RunBody {
+export interface GameServerCapabilities {
+	protocolVersion: 1;
+	features: {
+		runs: true;
+		exactControl: true;
+		eventReplay: boolean;
+		actionExchange: boolean;
+		transcript: boolean;
+		attachments: boolean;
+		usage: boolean;
+		approvals: boolean;
+	};
+	limits: { maximumRequestBytes: number; maximumTranscriptPageSize: 100; maximumActionClaims: 32 };
+}
+
+export interface RunBody {
 	authentication?: JsonObject;
 	input: GameInput;
 	runId?: string;
 }
 
-interface ControlBody {
+export interface ControlBody {
 	authentication?: JsonObject;
 	session: GameSessionKey;
 	expected: GameRunCoordinate;
 	input?: GameInput;
 }
 
-interface SessionBody {
+export interface SessionBody {
 	authentication?: JsonObject;
 	session: GameSessionKey;
 }
 
-interface ActionClaimBody extends SessionBody {
+export interface ActionClaimBody extends SessionBody {
 	maximum?: number;
 }
 
-interface ActionReceiptBody extends SessionBody {
+export interface ActionReceiptBody extends SessionBody {
 	receipt: GameActionReceipt;
 }
 
-interface ActionReconcileBody extends SessionBody {
+export interface ActionReconcileBody extends SessionBody {
 	operationId: string;
 }
 
-interface TranscriptBody extends SessionBody {
+export interface TranscriptBody extends SessionBody {
 	cursor?: string;
 	limit?: number;
 }
 
-interface AttachmentReadBody extends SessionBody {
+export interface AttachmentReadBody extends SessionBody {
 	attachmentId: string;
 }
 
-interface RunEventsBody extends SessionBody {
+export interface RunEventsBody extends SessionBody {
 	runId: string;
 	afterSequence?: number;
 	maximum?: number;
 }
 
-interface ApprovalListBody extends SessionBody {
+export interface ApprovalListBody extends SessionBody {
 	maximum?: number;
 }
 
-interface ApprovalResponseBody extends SessionBody {
+export interface ApprovalResponseBody extends SessionBody {
 	approvalId: string;
 	expectedRevision: number;
 	decision: "approve" | "deny";
@@ -186,6 +201,10 @@ export class GameAgentServer implements AsyncDisposable {
 		});
 		try {
 			const path = new URL(request.url ?? "/", "http://localhost").pathname;
+			if (request.method === "GET" && path === "/v1/capabilities") {
+				this.json(response, 200, this.capabilities());
+				return;
+			}
 			if (request.method === "GET" && path === "/health") {
 				this.json(response, 200, { status: "ok" });
 				return;
@@ -260,6 +279,27 @@ export class GameAgentServer implements AsyncDisposable {
 				response.end();
 			}
 		}
+	}
+
+	private capabilities(): GameServerCapabilities {
+		return {
+			protocolVersion: 1,
+			features: {
+				runs: true,
+				exactControl: true,
+				eventReplay: this.options.eventStore?.read !== undefined,
+				actionExchange: this.options.actionJournal !== undefined,
+				transcript: this.options.conversationStore !== undefined,
+				attachments: this.options.imageAttachments !== undefined && this.options.conversationStore !== undefined,
+				usage: this.options.usageLedger !== undefined,
+				approvals: this.options.approvalBroker !== undefined,
+			},
+			limits: {
+				maximumRequestBytes: this.maximumRequestBytes,
+				maximumTranscriptPageSize: 100,
+				maximumActionClaims: 32,
+			},
+		};
 	}
 
 	private async run(

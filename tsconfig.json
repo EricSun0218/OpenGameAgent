@@ -30,6 +30,7 @@
 		{ "path": "./packages/realtime-local" },
 		{ "path": "./packages/runtime" },
 		{ "path": "./packages/devtools" },
-		{ "path": "./packages/server" }
+		{ "path": "./packages/server" },
+		{ "path": "./packages/client" }
 	]
 }
