@@ -17,7 +17,7 @@ import type {
 	GameSessionKey,
 	GameTool,
 } from "@opengameagent/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PiGameModelResolver } from "./model-registry.js";
 import { PiGameAgentKernel } from "./pi-game-agent-kernel.js";
 
@@ -165,6 +165,7 @@ describe("PiGameAgentKernel", () => {
 		const events = await collect(
 			kernel.run({
 				runId: "run-1",
+				signal: new AbortController().signal,
 				input: input("input-1", [
 					{ type: "json", value: { blocks: [{ kind: "stone", x: 1.5, y: 2, z: -3.25 }] } },
 					{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
@@ -233,6 +234,7 @@ describe("PiGameAgentKernel", () => {
 		const events = await collect(
 			kernel.run({
 				runId: "run-tools",
+				signal: new AbortController().signal,
 				input: input("input-tools"),
 				systemPrompt: "Use tools.",
 				tools: [tool],
@@ -246,6 +248,57 @@ describe("PiGameAgentKernel", () => {
 		expect(events.filter((event) => event.type === "tool.started")).toHaveLength(1);
 		expect(events.filter((event) => event.type === "tool.completed")).toHaveLength(1);
 		expect(events.filter((event) => event.type === "turn.started")).toHaveLength(2);
+	});
+
+	it("awaits the exact tool-start event boundary before dispatching the tool", async () => {
+		let requests = 0;
+		let executions = 0;
+		let observerEntered = false;
+		let releaseObserver: (() => void) | undefined;
+		const streamFn: StreamFn = () => {
+			requests += 1;
+			return requests === 1
+				? completedStream(
+						assistant([{ type: "toolCall", id: "write-1", name: "write_world", arguments: {} }], "toolUse"),
+					)
+				: completedStream(assistant([{ type: "text", text: "done" }], "stop"));
+		};
+		const tool: GameTool = {
+			definition: {
+				name: "write_world",
+				label: "Write world",
+				description: "Mutate authoritative state for an ordering test.",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+			},
+			execute: async () => {
+				executions += 1;
+				return { content: [{ type: "json", value: { committed: true } }] };
+			},
+		};
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
+		const running = collect(
+			kernel.run({
+				runId: "run-event-boundary",
+				signal: new AbortController().signal,
+				input: input("input-event-boundary"),
+				systemPrompt: "Use tools.",
+				tools: [tool],
+				modelProfileId: "default",
+				maximumTurns: 3,
+				async beforeEvent(event) {
+					if (event.type !== "tool.started") return;
+					observerEntered = true;
+					await new Promise<void>((resolve) => {
+						releaseObserver = resolve;
+					});
+				},
+			}),
+		);
+		await vi.waitFor(() => expect(observerEntered).toBe(true));
+		expect(executions).toBe(0);
+		releaseObserver?.();
+		await running;
+		expect(executions).toBe(1);
 	});
 
 	it("preserves structured game tool error status through the Pi result hook", async () => {
@@ -278,6 +331,7 @@ describe("PiGameAgentKernel", () => {
 		const events = await collect(
 			kernel.run({
 				runId: "run-denied",
+				signal: new AbortController().signal,
 				input: input("input-denied"),
 				systemPrompt: "Respect tool results.",
 				tools: [tool],
@@ -325,6 +379,7 @@ describe("PiGameAgentKernel", () => {
 		await collect(
 			kernel.run({
 				runId: "run-refresh",
+				signal: new AbortController().signal,
 				input: input("input-refresh"),
 				systemPrompt: "world revision 1",
 				tools: [tool("old_action")],
@@ -366,6 +421,7 @@ describe("PiGameAgentKernel", () => {
 		await collect(
 			kernel.run({
 				runId: "run-memory-1",
+				signal: new AbortController().signal,
 				input: input("input-memory-1"),
 				systemPrompt: "Remember.",
 				tools: [],
@@ -390,6 +446,7 @@ describe("PiGameAgentKernel", () => {
 		await collect(
 			kernel.run({
 				runId: "run-memory-2",
+				signal: new AbortController().signal,
 				input: input("input-memory-2"),
 				systemPrompt: "Remember.",
 				tools: [],
@@ -425,6 +482,7 @@ describe("PiGameAgentKernel", () => {
 		await collect(
 			kernel.run({
 				runId: "run-image-1",
+				signal: new AbortController().signal,
 				input: input("input-image-1", [{ type: "image", mimeType: "image/png", data: image }]),
 				systemPrompt: "Observe.",
 				tools: [],
@@ -440,6 +498,7 @@ describe("PiGameAgentKernel", () => {
 		await collect(
 			kernel.run({
 				runId: "run-image-2",
+				signal: new AbortController().signal,
 				input: input("input-image-2"),
 				systemPrompt: "Remember the image.",
 				tools: [],
@@ -464,6 +523,7 @@ describe("PiGameAgentKernel", () => {
 		const events = await collect(
 			kernel.run({
 				runId: "run-missing-image",
+				signal: new AbortController().signal,
 				input: input("input-missing-image", [
 					{
 						type: "imageRef",
@@ -526,6 +586,7 @@ describe("PiGameAgentKernel", () => {
 		const events = await collect(
 			kernel.run({
 				runId: "run-compacted",
+				signal: new AbortController().signal,
 				input: input("input-compacted"),
 				systemPrompt: "Continue.",
 				tools: [],
@@ -566,6 +627,7 @@ describe("PiGameAgentKernel", () => {
 		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
 		const events = kernel.run({
 			runId: "run-control",
+			signal: new AbortController().signal,
 			input: input("input-control"),
 			systemPrompt: "Wait.",
 			tools: [],
@@ -585,8 +647,46 @@ describe("PiGameAgentKernel", () => {
 		});
 		expect(kernel.abort(session, { runId: "run-control", turn: 1 })).toEqual({ accepted: true });
 		release?.();
-		await collecting;
+		const collected = await collecting;
+		expect(collected.some((event) => event.type === "run.aborted")).toBe(true);
 		expect(kernel.abort(session, { runId: "run-control", turn: 1 })).toEqual({ accepted: false, reason: "not-active" });
+	});
+
+	it("propagates the run cancellation signal into the provider and emits an aborted terminal event", async () => {
+		let providerSignal: AbortSignal | undefined;
+		const streamFn: StreamFn = (_model, _context, options) => {
+			providerSignal = options?.signal;
+			const stream = new MockAssistantStream();
+			options?.signal?.addEventListener(
+				"abort",
+				() =>
+					stream.push({
+						type: "error",
+						reason: "aborted",
+						error: assistant([], "aborted"),
+					}),
+				{ once: true },
+			);
+			return stream;
+		};
+		const kernel = new PiGameAgentKernel({ models: modelResolver(streamFn) });
+		const controller = new AbortController();
+		const collecting = collect(
+			kernel.run({
+				runId: "run-signal-cancel",
+				signal: controller.signal,
+				input: input("input-signal-cancel"),
+				systemPrompt: "Wait.",
+				tools: [],
+				modelProfileId: "default",
+				maximumTurns: 2,
+			}),
+		);
+		await vi.waitFor(() => expect(providerSignal).toBeDefined());
+		controller.abort();
+		const events = await collecting;
+		expect(providerSignal?.aborted).toBe(true);
+		expect(events.at(-1)?.type).toBe("run.aborted");
 	});
 });
 

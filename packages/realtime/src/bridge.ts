@@ -1,4 +1,4 @@
-import type { GameAgentEvent, GameRunCoordinate, GameSessionKey } from "@opengameagent/protocol";
+import type { GameAgentEvent, GameInput, GameRunCoordinate, GameSessionKey } from "@opengameagent/protocol";
 import type { GameAgentRuntime } from "@opengameagent/runtime";
 import type { RealtimeGameInputFactory, RealtimeHandoffRequest } from "./contracts.js";
 import type { RealtimeConversation } from "./conversation.js";
@@ -8,7 +8,7 @@ export interface GameRealtimeAgentBridgeOptions {
 	maximumHandoffCharacters?: number;
 	handoffFlushMilliseconds?: number;
 	steerActiveRun?: boolean;
-	agentEventObserver?: (event: GameAgentEvent, signal: AbortSignal) => void | Promise<void>;
+	agentEventObserver?: (input: GameInput, event: GameAgentEvent, signal: AbortSignal) => void | Promise<void>;
 }
 
 interface CheckedBridgeOptions {
@@ -16,7 +16,7 @@ interface CheckedBridgeOptions {
 	maximumHandoffCharacters: number;
 	handoffFlushMilliseconds: number;
 	steerActiveRun: boolean;
-	agentEventObserver?: (event: GameAgentEvent, signal: AbortSignal) => void | Promise<void>;
+	agentEventObserver?: (input: GameInput, event: GameAgentEvent, signal: AbortSignal) => void | Promise<void>;
 }
 
 interface ActiveRun {
@@ -103,12 +103,20 @@ export class GameRealtimeAgentBridge {
 
 	private async accept(handoff: RealtimeHandoffRequest, signal: AbortSignal): Promise<void> {
 		if (this.disposed) return;
+		const handoffSignal = AbortSignal.any([signal, this.lifetime.signal]);
 		if (!handoff.transcript || handoff.transcript.length > this.options.maximumHandoffCharacters) {
 			if (!handoff.isTranscriptTail)
-				await this.conversation.sendHandoff(handoff.handoffId, "Handoff rejected.", "final", true, signal);
+				await this.conversation.sendHandoff(handoff.handoffId, "Handoff rejected.", "final", true, handoffSignal);
 			return;
 		}
-		const input = await this.inputFactory(handoff, this.session, signal);
+		let input: Awaited<ReturnType<RealtimeGameInputFactory>>;
+		try {
+			input = await this.inputFactory(handoff, this.session, handoffSignal);
+		} catch (error) {
+			if (handoffSignal.aborted) return;
+			throw error;
+		}
+		if (this.disposed || handoffSignal.aborted) return;
 		if (!sameSession(input.session, this.session))
 			throw new Error("Realtime input factory changed the authoritative session.");
 		const active = this.active;
@@ -117,13 +125,13 @@ export class GameRealtimeAgentBridge {
 			const result = this.runtime.steer(this.session, coordinate, input);
 			if (result.accepted) {
 				if (!handoff.isTranscriptTail)
-					await this.conversation.sendHandoff(handoff.handoffId, "", "commentary", false, signal);
+					await this.conversation.sendHandoff(handoff.handoffId, "", "commentary", false, handoffSignal);
 				return;
 			}
 		}
 		if (this.queue.length >= this.options.maximumQueuedHandoffs) {
 			if (!handoff.isTranscriptTail)
-				await this.conversation.sendHandoff(handoff.handoffId, "Handoff queue is full.", "final", true, signal);
+				await this.conversation.sendHandoff(handoff.handoffId, "Handoff queue is full.", "final", true, handoffSignal);
 			return;
 		}
 		this.queue.push({ handoff, input });
@@ -151,13 +159,17 @@ export class GameRealtimeAgentBridge {
 		try {
 			let buffer = "";
 			let lastFlush = Date.now();
-			for await (const event of this.runtime.run(input, { signal })) {
+			const observer = this.options.agentEventObserver;
+			const agentEventObserver =
+				observer === undefined
+					? undefined
+					: async (observedInput: GameInput, event: GameAgentEvent, eventSignal: AbortSignal) =>
+							await observer(observedInput, event, eventSignal);
+			for await (const event of this.runtime.run(input, {
+				signal,
+				...(agentEventObserver === undefined ? {} : { agentEventObserver }),
+			})) {
 				active.coordinate = { runId: event.runId, turn: event.turn };
-				try {
-					await this.options.agentEventObserver?.(event, signal);
-				} catch {
-					// Observers are diagnostic/authorization hooks and cannot control the agent loop.
-				}
 				if (handoff.isTranscriptTail) continue;
 				if (event.type === "message.delta") {
 					buffer += event.text;

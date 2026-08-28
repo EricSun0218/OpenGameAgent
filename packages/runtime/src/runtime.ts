@@ -179,6 +179,12 @@ export interface GameRunOptions {
 		call: GameToolCall,
 		context: GameToolExecutionContext,
 	) => Promise<boolean> | boolean;
+	/**
+	 * Awaited before each kernel event becomes externally visible and before
+	 * causally subsequent work. Failures are isolated; cancellation is delivered
+	 * through the supplied signal.
+	 */
+	agentEventObserver?: (input: GameInput, event: GameAgentEvent, signal: AbortSignal) => void | Promise<void>;
 }
 
 interface ActiveRuntimeRun {
@@ -259,13 +265,25 @@ export class GameAgentRuntime {
 			]);
 			const active: ActiveRuntimeRun = { session: input.session, coordinate: { runId, turn: 0 } };
 			this.activeRuns.set(key, active);
+			const beforeEvent =
+				runOptions.agentEventObserver === undefined
+					? undefined
+					: async (event: GameAgentEvent, eventSignal: AbortSignal): Promise<void> => {
+							try {
+								await runOptions.agentEventObserver?.(input, event, AbortSignal.any([signal, eventSignal]));
+							} catch {
+								// The awaited boundary preserves ordering, but observers never own Agent control.
+							}
+						};
 			for await (const event of this.options.kernel.run({
 				runId,
 				input,
+				signal,
 				systemPrompt,
 				tools,
 				modelProfileId,
 				maximumTurns,
+				...(beforeEvent === undefined ? {} : { beforeEvent }),
 				prepareNextTurn: async (context, turnSignal) =>
 					await this.prepareTurn(input, runId, context.turn, turnSignal, runOptions.authorizeToolExecution),
 			})) {

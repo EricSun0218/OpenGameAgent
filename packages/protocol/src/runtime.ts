@@ -207,6 +207,7 @@ export type GameAgentEvent =
 export interface GameKernelRunRequest {
 	runId: string;
 	input: GameInput;
+	signal: AbortSignal;
 	systemPrompt: string;
 	tools: readonly GameTool[];
 	modelProfileId: string;
@@ -215,6 +216,12 @@ export interface GameKernelRunRequest {
 		context: GameKernelTurnPreparationContext,
 		signal: AbortSignal,
 	) => Promise<GameKernelTurnUpdate | undefined>;
+	/**
+	 * Awaited event boundary. Kernels invoke this before publishing an event or
+	 * performing work that is causally after it, including Tool execution after
+	 * `tool.started`. The runtime isolates hook failures from the Agent loop.
+	 */
+	beforeEvent?: (event: GameAgentEvent, signal: AbortSignal) => Promise<void>;
 }
 
 export interface GameKernelTurnPreparationContext {

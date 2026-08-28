@@ -6,7 +6,7 @@ import type {
 	GameToolDefinition,
 	GameToolExecutionContext,
 } from "@opengameagent/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createGameActionTool } from "./action-tool.js";
 import { DurableGameActionDispatcher, type GameActionDispatchObservation } from "./dispatcher.js";
 import { InMemoryGameActionJournal } from "./journal.js";
@@ -281,5 +281,104 @@ describe("reliable game actions", () => {
 		expect(await journal.claimDispatch(nextGeneration.operationId)).toMatchObject({ kind: "dispatch" });
 		await journal.submitReceipt(receipt(first, "rejected"));
 		expect(await journal.claimDispatch(second.operationId)).toMatchObject({ kind: "dispatch" });
+	});
+
+	it("waits for same-key actions across actors while allowing different keys to run in parallel", async () => {
+		const journal = new InMemoryGameActionJournal();
+		let concurrent = 0;
+		let maximumConcurrent = 0;
+		const started: string[] = [];
+		const releases = new Map<string, () => void>();
+		const dispatcher = new DurableGameActionDispatcher(
+			journal,
+			{
+				async execute(value) {
+					started.push(value.inputId);
+					concurrent += 1;
+					maximumConcurrent = Math.max(maximumConcurrent, concurrent);
+					await new Promise<void>((resolve) => releases.set(value.inputId, resolve));
+					concurrent -= 1;
+					return receipt(value);
+				},
+			},
+			{ conflictPollIntervalMilliseconds: 1, maximumConflictWaitMilliseconds: 1_000 },
+		);
+		const first = intent("a", "first", "shared-resource");
+		const second = intent("b", "second", "shared-resource");
+		const independent = intent("c", "independent", "other-resource");
+		const firstRun = dispatcher.dispatch(first);
+		await vi.waitFor(() => expect(started).toContain("first"));
+		const secondRun = dispatcher.dispatch(second);
+		const independentRun = dispatcher.dispatch(independent);
+		await vi.waitFor(() => expect(started).toContain("independent"));
+		expect(started).not.toContain("second");
+		expect(maximumConcurrent).toBe(2);
+
+		releases.get("first")?.();
+		await vi.waitFor(() => expect(started).toContain("second"));
+		releases.get("second")?.();
+		releases.get("independent")?.();
+		await expect(Promise.all([firstRun, secondRun, independentRun])).resolves.toHaveLength(3);
+	});
+
+	it("keeps an uncertain conflict blocked across cancellation until authoritative reconciliation", async () => {
+		const journal = new InMemoryGameActionJournal();
+		const first = intent("a", "uncertain", "shared-resource");
+		const second = intent("b", "waiting", "shared-resource");
+		let calls = 0;
+		const dispatcher = new DurableGameActionDispatcher(
+			journal,
+			{
+				async execute(value) {
+					calls += 1;
+					if (value.operationId === first.operationId) throw new Error("receipt lost after delivery");
+					return receipt(value);
+				},
+			},
+			{ conflictPollIntervalMilliseconds: 1, maximumConflictWaitMilliseconds: 1_000 },
+		);
+		await expect(dispatcher.dispatch(first)).rejects.toThrow(/receipt lost/);
+		const cancellation = new AbortController();
+		const waiting = dispatcher.dispatch(second, cancellation.signal);
+		await vi.waitFor(() => expect(calls).toBe(1));
+		cancellation.abort();
+		await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+		expect((await journal.read(second.operationId))?.status).toBe("prepared");
+
+		await dispatcher.reconcile(receipt(first, "rejected"));
+		await expect(dispatcher.dispatch(second)).resolves.toMatchObject({ kind: "terminal" });
+		expect(calls).toBe(2);
+	});
+
+	it("returns bounded reconcile state when a conflicting action does not reach a terminal receipt", async () => {
+		const journal = new InMemoryGameActionJournal();
+		const first = intent("a", "blocking", "shared-resource");
+		const second = intent("b", "bounded-wait", "shared-resource");
+		let releaseFirst: (() => void) | undefined;
+		const dispatcher = new DurableGameActionDispatcher(
+			journal,
+			{
+				async execute(value) {
+					if (value.operationId === first.operationId) {
+						await new Promise<void>((resolve) => {
+							releaseFirst = resolve;
+						});
+					}
+					return receipt(value);
+				},
+			},
+			{ conflictPollIntervalMilliseconds: 1, maximumConflictWaitMilliseconds: 5 },
+		);
+		const blocking = dispatcher.dispatch(first);
+		await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+
+		await expect(dispatcher.dispatch(second)).resolves.toMatchObject({
+			kind: "reconcile",
+			blockingOperationId: first.operationId,
+		});
+		expect((await journal.read(second.operationId))?.status).toBe("prepared");
+
+		releaseFirst?.();
+		await blocking;
 	});
 });

@@ -130,8 +130,16 @@ class SteeringKernel implements GameAgentKernelPort {
 	aborts: GameRunCoordinate[] = [];
 	private release: (() => void) | undefined;
 
+	releaseRun(): void {
+		this.release?.();
+	}
+
 	async *run(request: GameKernelRunRequest): AsyncIterable<GameAgentEvent> {
-		yield {
+		const publish = async (event: GameAgentEvent): Promise<GameAgentEvent> => {
+			await request.beforeEvent?.(event, request.signal);
+			return event;
+		};
+		yield await publish({
 			...eventBase(request.runId, 0, 1),
 			type: "run.started",
 			inputId: request.input.id,
@@ -145,14 +153,14 @@ class SteeringKernel implements GameAgentKernelPort {
 				contextWindow: 8_192,
 				maximumOutputTokens: 1_024,
 			},
-		};
-		yield { ...eventBase(request.runId, 1, 2), type: "turn.started" };
+		});
+		yield await publish({ ...eventBase(request.runId, 1, 2), type: "turn.started" });
 		await new Promise<void>((resolve) => {
 			this.release = resolve;
 		});
-		yield { ...eventBase(request.runId, 1, 3), type: "message.delta", text: "hello" };
-		yield { ...eventBase(request.runId, 1, 4), type: "message.completed", text: "hello" };
-		yield { ...eventBase(request.runId, 1, 5), type: "run.completed" };
+		yield await publish({ ...eventBase(request.runId, 1, 3), type: "message.delta", text: "hello" });
+		yield await publish({ ...eventBase(request.runId, 1, 4), type: "message.completed", text: "hello" });
+		yield await publish({ ...eventBase(request.runId, 1, 5), type: "run.completed" });
 	}
 
 	steer(_session: GameSessionKey, expected: GameRunCoordinate, next: GameInput): GameControlResult {
@@ -218,7 +226,8 @@ describe("GameRealtimeAgentBridge", () => {
 			async (handoff) => input(handoff.handoffId, handoff.transcript),
 			{
 				handoffFlushMilliseconds: 10,
-				agentEventObserver: (event) => {
+				agentEventObserver: (observedInput, event) => {
+					expect(observedInput.id).toBe("first");
 					observed.push(event.type);
 				},
 			},
@@ -241,6 +250,76 @@ describe("GameRealtimeAgentBridge", () => {
 			expect(transport.session.handoffs.some((value) => value.id === "first" && value.completed)).toBe(true),
 		);
 		expect(observed).toEqual(["run.started", "turn.started", "message.delta", "message.completed", "run.completed"]);
+		await bridge.dispose();
+		await conversation.stop();
+	});
+
+	it("cancels a pending input factory on disposal without faulting the conversation", async () => {
+		const kernel = new SteeringKernel();
+		const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base", defaultModelProfileId: "default" });
+		const transport = new FakeRealtimeTransport();
+		const conversation = new RealtimeConversation(transport);
+		await conversation.start({ model: "realtime", voice: "voice" });
+		let entered = false;
+		let cancelled = false;
+		const bridge = new GameRealtimeAgentBridge(runtime, conversation, session, async (_handoff, _session, signal) => {
+			entered = true;
+			await new Promise<void>((_resolve, reject) => {
+				signal.addEventListener(
+					"abort",
+					() => {
+						cancelled = true;
+						reject(signal.reason);
+					},
+					{ once: true },
+				);
+			});
+			return input("never", "never");
+		});
+		transport.session.stream.push({
+			type: "handoff.requested",
+			timestamp: 1,
+			handoff: { handoffId: "pending", transcript: "wait" },
+		});
+		await vi.waitFor(() => expect(entered).toBe(true));
+		await bridge.dispose();
+		await vi.waitFor(() => expect(cancelled).toBe(true));
+		expect(conversation.state).toBe("active");
+		await conversation.stop();
+	});
+
+	it("isolates observer failures and supplies the original authoritative input", async () => {
+		const kernel = new SteeringKernel();
+		const runtime = new GameAgentRuntime({ kernel, baseSystemPrompt: "base", defaultModelProfileId: "default" });
+		const transport = new FakeRealtimeTransport();
+		const conversation = new RealtimeConversation(transport);
+		await conversation.start({ model: "realtime", voice: "voice" });
+		const observed: string[] = [];
+		const bridge = new GameRealtimeAgentBridge(
+			runtime,
+			conversation,
+			session,
+			async (handoff) => input(handoff.handoffId, handoff.transcript),
+			{
+				handoffFlushMilliseconds: 10,
+				agentEventObserver: (observedInput, event) => {
+					expect(observedInput.id).toBe("observer");
+					observed.push(event.type);
+					if (event.type === "run.started") throw new Error("observer failed");
+				},
+			},
+		);
+		transport.session.stream.push({
+			type: "handoff.requested",
+			timestamp: 1,
+			handoff: { handoffId: "observer", transcript: "hello" },
+		});
+		await vi.waitFor(() => expect(observed).toContain("turn.started"));
+		kernel.releaseRun();
+		await vi.waitFor(() => expect(observed).toContain("run.completed"));
+		await vi.waitFor(() =>
+			expect(transport.session.handoffs.some((value) => value.id === "observer" && value.completed)).toBe(true),
+		);
 		await bridge.dispose();
 		await conversation.stop();
 	});

@@ -76,6 +76,7 @@ interface ActivePiRun {
 	turn: number;
 	toolCallIndex: number;
 	closed: boolean;
+	aborted: boolean;
 	usage?: GameUsage;
 }
 type ActiveReadyPiRun = ActivePiRun & { agent: Agent };
@@ -468,7 +469,7 @@ function toPiTool(
 				runId: request.runId,
 				turn: active.turn,
 				toolCallIndex: active.toolCallIndex,
-				signal: signal ?? new AbortController().signal,
+				signal: signal === undefined ? request.signal : AbortSignal.any([signal, request.signal]),
 			};
 			active.toolCallIndex += 1;
 			const result = await tool.execute(
@@ -525,6 +526,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 			turn: 0,
 			toolCallIndex: 0,
 			closed: false,
+			aborted: false,
 		};
 		this.activeRuns.set(request.runId, active);
 		const makeEvent = (event: ProjectedGameAgentEvent): GameAgentEvent => {
@@ -581,7 +583,10 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 	}
 
 	abort(session: GameSessionKey, expected: GameRunCoordinate): GameControlResult {
-		return this.control(session, expected, (run) => run.agent.abort());
+		return this.control(session, expected, (run) => {
+			run.aborted = true;
+			run.agent.abort();
+		});
 	}
 
 	private control(
@@ -608,12 +613,12 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 		setLastVisibleText: (text: string) => void,
 	): Promise<void> {
 		const resolved = this.options.models.resolve(request.modelProfileId);
-		const operationSignal = new AbortController().signal;
-		let conversation = await this.options.conversationStore?.read(request.input.session);
+		const operationSignal = request.signal;
+		let conversation = await this.options.conversationStore?.read(request.input.session, operationSignal);
 		if (conversation && this.options.conversationStore && this.options.conversationCompactor) {
 			const compacted = await this.options.conversationCompactor.compact(
 				{ session: request.input.session, snapshot: conversation, model: resolved.descriptor },
-				new AbortController().signal,
+				operationSignal,
 			);
 			if (compacted.usage !== undefined) active.usage = addGameUsage(active.usage, compacted.usage);
 			if (compacted.changed) {
@@ -621,6 +626,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 					request.input.session,
 					conversation.revision,
 					compacted.messages,
+					operationSignal,
 				);
 			}
 		}
@@ -668,7 +674,7 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 									turn: active.turn,
 									hadToolResults: context.toolResults.length > 0,
 								},
-								signal ?? new AbortController().signal,
+								signal === undefined ? request.signal : AbortSignal.any([signal, request.signal]),
 							);
 							if (!update) return undefined;
 							return {
@@ -692,32 +698,55 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 				: {}),
 		});
 		active.agent = agent;
-		agent.subscribe(async (event) => {
+		const agentSignal = agent.signal ?? request.signal;
+		agent.subscribe(async (event, eventSignal) => {
 			if (event.type === "agent_end" && this.options.conversationStore) {
 				await this.options.conversationStore.save(
 					request.input.session,
 					conversation?.revision ?? 0,
 					await Promise.all(
 						agent.state.messages.map((message) =>
-							toGameMessage(message, this.options.imageAttachments, this.maximumInlineImageCharacters, agent.signal),
+							toGameMessage(message, this.options.imageAttachments, this.maximumInlineImageCharacters, agentSignal),
 						),
 					),
-					agent.signal,
+					AbortSignal.any([agentSignal, request.signal]),
 				);
 			}
-			this.projectEvent(event, active, request, resolved, makeEvent, queue, getLastVisibleText(), setLastVisibleText);
+			await this.projectEvent(
+				event,
+				active,
+				request,
+				resolved,
+				makeEvent,
+				queue,
+				getLastVisibleText(),
+				setLastVisibleText,
+				AbortSignal.any([request.signal, eventSignal]),
+			);
 		});
-		await agent.prompt(
-			await inputToMessage(
-				request.input,
-				this.options.imageAttachments,
-				this.maximumInlineImageCharacters,
-				agent.signal,
-			),
-		);
+		const abort = () => {
+			active.aborted = true;
+			agent.abort();
+		};
+		request.signal.addEventListener("abort", abort, { once: true });
+		try {
+			if (request.signal.aborted) agent.abort();
+			else {
+				await agent.prompt(
+					await inputToMessage(
+						request.input,
+						this.options.imageAttachments,
+						this.maximumInlineImageCharacters,
+						AbortSignal.any([agentSignal, request.signal]),
+					),
+				);
+			}
+		} finally {
+			request.signal.removeEventListener("abort", abort);
+		}
 	}
 
-	private projectEvent(
+	private async projectEvent(
 		event: AgentEvent,
 		active: ActivePiRun,
 		request: GameKernelRunRequest,
@@ -726,77 +755,78 @@ export class PiGameAgentKernel implements GameAgentKernelPort {
 		queue: AsyncQueue<GameAgentEvent>,
 		lastVisibleText: string,
 		setLastVisibleText: (text: string) => void,
-	): void {
+		signal: AbortSignal,
+	): Promise<void> {
+		const publish = async (payload: ProjectedGameAgentEvent): Promise<void> => {
+			const projected = makeEvent(payload);
+			await request.beforeEvent?.(projected, signal);
+			queue.push(projected);
+		};
 		switch (event.type) {
 			case "agent_start":
-				queue.push(makeEvent({ type: "run.started", inputId: request.input.id, model: resolved.descriptor }));
+				await publish({ type: "run.started", inputId: request.input.id, model: resolved.descriptor });
 				break;
 			case "turn_start":
 				active.turn += 1;
 				active.toolCallIndex = 0;
 				setLastVisibleText("");
-				queue.push(makeEvent({ type: "turn.started" }));
+				await publish({ type: "turn.started" });
 				break;
 			case "message_update": {
 				const text = visibleText(event.message);
 				const delta = text.startsWith(lastVisibleText) ? text.slice(lastVisibleText.length) : text;
-				if (delta.length > 0) queue.push(makeEvent({ type: "message.delta", text: delta }));
+				if (delta.length > 0) await publish({ type: "message.delta", text: delta });
 				setLastVisibleText(text);
 				break;
 			}
 			case "message_end":
 				if (event.message.role === "assistant") {
+					if (event.message.stopReason === "aborted") active.aborted = true;
 					const usage = toGameUsage(event.message.usage);
 					active.usage = addGameUsage(active.usage, usage);
-					queue.push(
-						makeEvent({
-							type: "message.completed",
-							text: visibleText(event.message),
-							usage,
-							provider: event.message.provider,
-							model: event.message.model,
-							...(event.message.responseId === undefined ? {} : { responseId: event.message.responseId }),
-						}),
-					);
+					await publish({
+						type: "message.completed",
+						text: visibleText(event.message),
+						usage,
+						provider: event.message.provider,
+						model: event.message.model,
+						...(event.message.responseId === undefined ? {} : { responseId: event.message.responseId }),
+					});
 				}
 				break;
 			case "tool_execution_start":
-				queue.push(
-					makeEvent({
-						type: "tool.started",
-						call: { id: event.toolCallId, name: event.toolName, arguments: toJsonValue(event.args) as JsonObject },
-					}),
-				);
+				await publish({
+					type: "tool.started",
+					call: { id: event.toolCallId, name: event.toolName, arguments: toJsonValue(event.args) as JsonObject },
+				});
 				break;
 			case "tool_execution_update":
-				queue.push(
-					makeEvent({ type: "tool.progress", callId: event.toolCallId, update: toJsonValue(event.partialResult) }),
-				);
+				await publish({ type: "tool.progress", callId: event.toolCallId, update: toJsonValue(event.partialResult) });
 				break;
 			case "tool_execution_end": {
 				const result = event.result as {
 					content?: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
 					details?: unknown;
 				};
-				queue.push(
-					makeEvent({
-						type: "tool.completed",
-						callId: event.toolCallId,
-						result: {
-							content: result.content ?? [],
-							...(result.details === undefined ? {} : { details: toJsonValue(result.details) }),
-							isError: event.isError,
-						},
-					}),
-				);
+				await publish({
+					type: "tool.completed",
+					callId: event.toolCallId,
+					result: {
+						content: result.content ?? [],
+						...(result.details === undefined ? {} : { details: toJsonValue(result.details) }),
+						isError: event.isError,
+					},
+				});
 				break;
 			}
 			case "turn_end":
-				queue.push(makeEvent({ type: "turn.completed" }));
+				await publish({ type: "turn.completed" });
 				break;
 			case "agent_end":
-				queue.push(
-					makeEvent({ type: "run.completed", ...(active.usage === undefined ? {} : { usage: active.usage }) }),
+				await publish(
+					active.aborted
+						? { type: "run.aborted" }
+						: { type: "run.completed", ...(active.usage === undefined ? {} : { usage: active.usage }) },
 				);
 				break;
 			case "message_start":

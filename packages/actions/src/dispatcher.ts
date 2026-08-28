@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { GameActionIntent, GameActionJournalEntry, GameActionReceipt } from "@opengameagent/protocol";
 import type { GameActionJournal } from "./journal.js";
 
@@ -42,14 +43,34 @@ export interface GameActionObserver {
 
 export interface DurableGameActionDispatcherOptions {
 	observer?: GameActionObserver;
+	conflictPollIntervalMilliseconds?: number;
+	maximumConflictWaitMilliseconds?: number;
 }
 
 export class DurableGameActionDispatcher {
+	private readonly conflictPollIntervalMilliseconds: number;
+	private readonly maximumConflictWaitMilliseconds: number;
+
 	constructor(
 		private readonly journal: GameActionJournal,
 		private readonly executor: GameActionExecutor,
 		private readonly options: DurableGameActionDispatcherOptions = {},
-	) {}
+	) {
+		this.conflictPollIntervalMilliseconds = boundedInteger(
+			options.conflictPollIntervalMilliseconds,
+			25,
+			1,
+			60_000,
+			"conflictPollIntervalMilliseconds",
+		);
+		this.maximumConflictWaitMilliseconds = boundedInteger(
+			options.maximumConflictWaitMilliseconds,
+			30_000,
+			this.conflictPollIntervalMilliseconds,
+			3_600_000,
+			"maximumConflictWaitMilliseconds",
+		);
+	}
 
 	async dispatch(intent: GameActionIntent, signal?: AbortSignal): Promise<GameActionDispatchResult> {
 		const startedAt = Date.now();
@@ -60,7 +81,7 @@ export class DurableGameActionDispatcher {
 		const dispatchSignal = signal ?? new AbortController().signal;
 		try {
 			await this.journal.prepare(intent, signal);
-			const claim = await this.journal.claimDispatch(intent.operationId, signal);
+			const claim = await this.claimWhenAvailable(intent.operationId, dispatchSignal);
 			if (claim.kind === "terminal") {
 				this.observe(intent, startedAt, monotonicStartedAt, hostMilliseconds, {
 					disposition: "duplicate-prevented",
@@ -129,6 +150,17 @@ export class DurableGameActionDispatcher {
 		return entry;
 	}
 
+	private async claimWhenAvailable(operationId: string, signal: AbortSignal) {
+		const deadline = performance.now() + this.maximumConflictWaitMilliseconds;
+		while (true) {
+			const claim = await this.journal.claimDispatch(operationId, signal);
+			if (claim.kind !== "blocked") return claim;
+			const remaining = deadline - performance.now();
+			if (remaining <= 0) return claim;
+			await delay(Math.min(this.conflictPollIntervalMilliseconds, remaining), undefined, { signal });
+		}
+	}
+
 	private observe(
 		intent: GameActionIntent,
 		startedAt: number,
@@ -157,6 +189,12 @@ export class DurableGameActionDispatcher {
 			// Observation is intentionally isolated from durable dispatch semantics.
 		}
 	}
+}
+
+function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number, name: string) {
+	const result = value ?? fallback;
+	if (!Number.isInteger(result) || result < minimum || result > maximum) throw new RangeError(`${name} is invalid.`);
+	return result;
 }
 
 function safeErrorCategory(error: unknown): string {
