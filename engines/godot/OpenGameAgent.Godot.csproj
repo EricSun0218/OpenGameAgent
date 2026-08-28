@@ -1,0 +1,13 @@
+<Project Sdk="Godot.NET.Sdk/4.7.1">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="addons/open_game_agent/runtime/**/*.cs" />
+    <ProjectReference Include="../dotnet/OpenGameAgent.EngineClient/OpenGameAgent.EngineClient.csproj" />
+  </ItemGroup>
+</Project>

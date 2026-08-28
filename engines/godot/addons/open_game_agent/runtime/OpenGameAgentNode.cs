@@ -1,472 +1,177 @@
-#nullable enable
-
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using Godot;
-using OpenGameAgent.Client;
+using OpenGameAgent.EngineClient;
 
 namespace OpenGameAgent.Godot;
 
-[GlobalClass]
+/// <summary>
+/// Main-thread bridge from Godot 4 .NET to a separately hosted OpenGameAgent runtime.
+/// Agent state and model credentials remain outside the game process.
+/// </summary>
 public partial class OpenGameAgentNode : Node
 {
-    public static readonly StringName RunEventSignal = new("run_event");
-    public static readonly StringName RunCompletedSignal = new("run_completed");
-    public static readonly StringName RunFailedSignal = new("run_failed");
+    [Signal]
+    public delegate void StreamEventEventHandler(string eventId, string eventName, string eventJson);
 
-    private readonly object _gate = new();
-    private readonly Dictionary<string, CancellationTokenSource> _runs = new(StringComparer.Ordinal);
-    private readonly Queue<QueuedSignal> _signals = new();
-    private GameAgentRuntime? _runtime;
-    private ServerGameAgentClient? _remoteClient;
-    private int _maximumConcurrentRuns = 64;
-    private int _maximumQueuedSignals = 4096;
-    private int _maximumSignalsPerFrame = 256;
-    private int _queuedTerminalSignals;
-    private bool _exiting;
+    [Signal]
+    public delegate void RequestFailedEventHandler(string category);
 
-    public override void _Ready()
+    [Export]
+    public string ServerUrl { get; set; } = "http://127.0.0.1:4317/";
+
+    [Export(PropertyHint.Range, "1,4096,1")]
+    public int MaximumPendingCallbacks { get; set; } = 256;
+
+    [Export(PropertyHint.Range, "1,1024,1")]
+    public int MaximumCallbacksPerFrame { get; set; } = 32;
+
+    private readonly ConcurrentQueue<Action> _callbacks = new();
+    private CancellationTokenSource? _lifetime;
+    private EngineGameAgentClient? _client;
+    private Func<CancellationToken, ValueTask<string?>>? _authenticationProvider;
+    private int _pendingCallbacks;
+
+    /// <summary>Configures body authentication before the client is first used.</summary>
+    public void ConfigureAuthentication(Func<CancellationToken, ValueTask<string?>> provider)
     {
-        AddUserSignal(RunEventSignal, new global::Godot.Collections.Array
-        {
-            SignalArgument("input_id", Variant.Type.String),
-            SignalArgument("event_json", Variant.Type.String),
-        });
-        AddUserSignal(RunCompletedSignal, new global::Godot.Collections.Array
-        {
-            SignalArgument("input_id", Variant.Type.String),
-            SignalArgument("result_json", Variant.Type.String),
-        });
-        AddUserSignal(RunFailedSignal, new global::Godot.Collections.Array
-        {
-            SignalArgument("input_id", Variant.Type.String),
-            SignalArgument("error", Variant.Type.String),
-        });
+        if (_client is not null) throw new InvalidOperationException("Configure authentication before first use.");
+        _authenticationProvider = provider ?? throw new ArgumentNullException(nameof(provider));
     }
 
-    public void Configure(
-        GameAgentRuntime runtime,
-        int maximumConcurrentRuns = 64,
-        int maximumQueuedSignals = 4096,
-        int maximumSignalsPerFrame = 256)
+    /// <summary>Starts one streamed run. Signals are emitted from the Godot main thread.</summary>
+    public async Task RunJsonAsync(string inputJson, string? runId = null, CancellationToken cancellationToken = default)
     {
-        ValidateLimits(maximumConcurrentRuns, maximumQueuedSignals, maximumSignalsPerFrame);
-
-        lock (_gate)
+        EngineGameAgentClient client = EnsureClient();
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
+            EnsureLifetime().Token,
+            cancellationToken);
+        try
         {
-            if (_runs.Count > 0 || _signals.Count > 0)
-            {
-                throw new InvalidOperationException("The runtime cannot be replaced while runs or queued signals remain.");
-            }
-
-            _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
-            _remoteClient = null;
-            _maximumConcurrentRuns = maximumConcurrentRuns;
-            _maximumQueuedSignals = maximumQueuedSignals;
-            _maximumSignalsPerFrame = maximumSignalsPerFrame;
-            _exiting = false;
+            await client.RunAsync(inputJson, QueueEventAsync, runId, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+        }
+        catch (EngineGameAgentClientException error)
+        {
+            QueueCallback(() => EmitSignal(SignalName.RequestFailed, error.Category));
+        }
+        catch
+        {
+            QueueCallback(() => EmitSignal(SignalName.RequestFailed, "client-failure"));
+            throw;
         }
     }
 
-    public void ConfigureRemote(
-        ServerGameAgentClient client,
-        int maximumConcurrentRuns = 64,
-        int maximumQueuedSignals = 4096,
-        int maximumSignalsPerFrame = 256)
+    /// <summary>Streams pending durable action deliveries on the same main-thread event channel.</summary>
+    public async Task StreamActionsJsonAsync(
+        string sessionJson,
+        int maximum = 1,
+        CancellationToken cancellationToken = default)
     {
-        ValidateLimits(maximumConcurrentRuns, maximumQueuedSignals, maximumSignalsPerFrame);
-
-        lock (_gate)
+        EngineGameAgentClient client = EnsureClient();
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
+            EnsureLifetime().Token,
+            cancellationToken);
+        try
         {
-            if (_runs.Count > 0 || _signals.Count > 0)
-            {
-                throw new InvalidOperationException("The client cannot be replaced while runs or queued signals remain.");
-            }
-
-            _remoteClient = client ?? throw new ArgumentNullException(nameof(client));
-            _runtime = null;
-            _maximumConcurrentRuns = maximumConcurrentRuns;
-            _maximumQueuedSignals = maximumQueuedSignals;
-            _maximumSignalsPerFrame = maximumSignalsPerFrame;
-            _exiting = false;
+            await client.StreamActionsAsync(sessionJson, QueueEventAsync, maximum, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested)
+        {
+        }
+        catch (EngineGameAgentClientException error)
+        {
+            QueueCallback(() => EmitSignal(SignalName.RequestFailed, error.Category));
         }
     }
+
+    public Task<bool> SteerJsonAsync(
+        string sessionJson,
+        string expectedRunCoordinateJson,
+        string inputJson,
+        CancellationToken cancellationToken = default)
+        => EnsureClient().SteerAsync(sessionJson, expectedRunCoordinateJson, inputJson, cancellationToken);
+
+    public Task<bool> FollowUpJsonAsync(
+        string sessionJson,
+        string expectedRunCoordinateJson,
+        string inputJson,
+        CancellationToken cancellationToken = default)
+        => EnsureClient().FollowUpAsync(sessionJson, expectedRunCoordinateJson, inputJson, cancellationToken);
+
+    public Task<bool> AbortJsonAsync(
+        string sessionJson,
+        string expectedRunCoordinateJson,
+        CancellationToken cancellationToken = default)
+        => EnsureClient().AbortAsync(sessionJson, expectedRunCoordinateJson, cancellationToken);
+
+    public EngineGameAgentClient Client => EnsureClient();
 
     public override void _Process(double delta)
     {
-        _ = delta;
-        var processed = 0;
-        while (processed < _maximumSignalsPerFrame)
+        int maximum = Math.Max(1, MaximumCallbacksPerFrame);
+        for (int index = 0; index < maximum && _callbacks.TryDequeue(out Action? callback); index++)
         {
-            QueuedSignal queued;
-            lock (_gate)
-            {
-                if (_signals.Count == 0)
-                {
-                    break;
-                }
-
-                queued = _signals.Dequeue();
-                if (queued.Terminal)
-                {
-                    _queuedTerminalSignals--;
-                }
-            }
-
-            processed++;
-            EmitSignal(queued.Signal, queued.InputId, queued.Payload);
-        }
-    }
-
-    public string RunJson(string inputJson)
-    {
-        var input = GameAgentWire.ParseInput(inputJson);
-        Start(input);
-        return input.InputId;
-    }
-
-    public Task<GameAgentRunResult> RunAsync(GameInput input, CancellationToken cancellationToken = default)
-    {
-        GameAgentRuntime runtime;
-        lock (_gate)
-        {
-            runtime = _runtime ?? throw new InvalidOperationException("Configure the node before running an agent.");
-        }
-
-        return runtime.RunAsync(input, cancellationToken);
-    }
-
-    public Task<RemoteGameAgentResult> RunRemoteAsync(GameInput input, CancellationToken cancellationToken = default)
-    {
-        ServerGameAgentClient client;
-        lock (_gate)
-        {
-            client = _remoteClient ?? throw new InvalidOperationException("Configure a remote client before running remotely.");
-        }
-
-        return client.RunAsync(input, cancellationToken);
-    }
-
-    public Task<bool> SteerActorAsync(
-        string sessionId,
-        string actorId,
-        string payloadJson,
-        CancellationToken cancellationToken = default)
-    {
-        GameAgentRuntime? runtime;
-        ServerGameAgentClient? client;
-        lock (_gate)
-        {
-            runtime = _runtime;
-            client = _remoteClient;
-        }
-
-        var key = new GameSessionKey(sessionId, actorId);
-        if (runtime is not null)
-        {
-            return Task.FromResult(runtime.TrySteer(
-                key,
-                OpenGameAgent.Kernel.AgentMessage.UserJson(payloadJson)));
-        }
-
-        return (client ?? throw new InvalidOperationException("Configure the node before steering an agent."))
-            .SteerAsync(key, payloadJson, cancellationToken);
-    }
-
-    public Task<bool> AbortActorAsync(
-        string sessionId,
-        string actorId,
-        CancellationToken cancellationToken = default)
-    {
-        GameAgentRuntime? runtime;
-        ServerGameAgentClient? client;
-        lock (_gate)
-        {
-            runtime = _runtime;
-            client = _remoteClient;
-        }
-
-        var key = new GameSessionKey(sessionId, actorId);
-        if (runtime is not null)
-        {
-            return Task.FromResult(runtime.TryAbort(key));
-        }
-
-        return (client ?? throw new InvalidOperationException("Configure the node before aborting an agent."))
-            .AbortAsync(key, cancellationToken);
-    }
-
-    public bool Cancel(string inputId)
-    {
-        CancellationTokenSource cancellation;
-        lock (_gate)
-        {
-            if (!_runs.TryGetValue(inputId, out cancellation!))
-            {
-                return false;
-            }
-        }
-
-        try
-        {
-            cancellation.Cancel();
-            return true;
-        }
-        catch (ObjectDisposedException)
-        {
-            return false;
-        }
-        catch (AggregateException)
-        {
-            return true;
+            Interlocked.Decrement(ref _pendingCallbacks);
+            callback();
         }
     }
 
     public override void _ExitTree()
     {
-        CancellationTokenSource[] active;
-        lock (_gate)
+        CancellationTokenSource? lifetime = Interlocked.Exchange(ref _lifetime, null);
+        if (lifetime is not null)
         {
-            _exiting = true;
-            active = new CancellationTokenSource[_runs.Count];
-            _runs.Values.CopyTo(active, 0);
-            _runs.Clear();
-            _signals.Clear();
-            _queuedTerminalSignals = 0;
+            lifetime.Cancel();
+            lifetime.Dispose();
         }
-
-        foreach (var cancellation in active)
-        {
-            try
-            {
-                cancellation.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-            catch (AggregateException)
-            {
-            }
-        }
+        Interlocked.Exchange(ref _client, null)?.Dispose();
+        while (_callbacks.TryDequeue(out _)) Interlocked.Decrement(ref _pendingCallbacks);
     }
 
-    private void Start(GameInput input)
+    private Task QueueEventAsync(EngineGameAgentEvent item, CancellationToken cancellationToken)
     {
-        GameAgentRuntime? runtime;
-        ServerGameAgentClient? remoteClient;
-        CancellationTokenSource cancellation;
-        lock (_gate)
-        {
-            if (_exiting)
-            {
-                throw new InvalidOperationException("The node is leaving the scene tree.");
-            }
-
-            runtime = _runtime;
-            remoteClient = _remoteClient;
-            if (runtime is null && remoteClient is null)
-            {
-                throw new InvalidOperationException("Configure the node before running an agent.");
-            }
-            if (_runs.Count >= _maximumConcurrentRuns)
-            {
-                throw new GameRuntimeLimitException(nameof(_maximumConcurrentRuns), "The Godot node has too many active runs.");
-            }
-
-            if (_runs.Count + _queuedTerminalSignals >= _maximumQueuedSignals)
-            {
-                throw new GameRuntimeLimitException(nameof(_maximumQueuedSignals), "The Godot node cannot reserve another terminal signal.");
-            }
-
-            if (_runs.ContainsKey(input.InputId))
-            {
-                throw new InvalidOperationException("The input ID is already running.");
-            }
-
-            cancellation = new CancellationTokenSource();
-            _runs.Add(input.InputId, cancellation);
-        }
-
-        _ = runtime is not null
-            ? ExecuteLocalAsync(runtime, input, cancellation)
-            : ExecuteRemoteAsync(remoteClient!, input, cancellation);
+        cancellationToken.ThrowIfCancellationRequested();
+        QueueCallback(() => EmitSignal(SignalName.StreamEvent, item.Id, item.Name, item.Json));
+        return Task.CompletedTask;
     }
 
-    private async Task ExecuteLocalAsync(
-        GameAgentRuntime runtime,
-        GameInput input,
-        CancellationTokenSource cancellation)
+    private void QueueCallback(Action callback)
     {
-        try
+        int pending = Interlocked.Increment(ref _pendingCallbacks);
+        if (pending > Math.Clamp(MaximumPendingCallbacks, 1, 4096))
         {
-            var result = await runtime.RunAsync(
-                input,
-                (_, agentEvent, _) =>
-                {
-                    QueueSignal(RunEventSignal, input.InputId, GameAgentWire.SerializeEvent(agentEvent), terminal: false);
-                    return default;
-                },
-                cancellation.Token).ConfigureAwait(false);
-            QueueSignal(RunCompletedSignal, input.InputId, GameAgentWire.SerializeResult(result), terminal: true);
+            Interlocked.Decrement(ref _pendingCallbacks);
+            throw new InvalidOperationException("The OpenGameAgent main-thread callback queue is full.");
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-        {
-            QueueSignal(RunFailedSignal, input.InputId, "canceled", terminal: true);
-        }
-        catch (Exception exception)
-        {
-            QueueSignal(RunFailedSignal, input.InputId, exception.Message, terminal: true);
-        }
-        finally
-        {
-            lock (_gate)
-            {
-                _runs.Remove(input.InputId);
-            }
-
-            cancellation.Dispose();
-        }
+        _callbacks.Enqueue(callback);
     }
 
-    private async Task ExecuteRemoteAsync(
-        ServerGameAgentClient client,
-        GameInput input,
-        CancellationTokenSource cancellation)
+    private EngineGameAgentClient EnsureClient()
     {
-        try
+        if (_client is not null) return _client;
+        var options = new EngineGameAgentClientOptions(new Uri(ServerUrl))
         {
-            var result = await client.StreamAsync(
-                input,
-                (agentEvent, _) =>
-                {
-                    if (string.Equals(agentEvent.Name, "agent", StringComparison.Ordinal))
-                    {
-                        QueueSignal(RunEventSignal, input.InputId, agentEvent.Json, terminal: false);
-                    }
-
-                    return default;
-                },
-                cancellation.Token).ConfigureAwait(false);
-            QueueSignal(RunCompletedSignal, input.InputId, result.Json, terminal: true);
-        }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-        {
-            QueueSignal(RunFailedSignal, input.InputId, "canceled", terminal: true);
-        }
-        catch (Exception exception)
-        {
-            QueueSignal(RunFailedSignal, input.InputId, exception.Message, terminal: true);
-        }
-        finally
-        {
-            lock (_gate)
-            {
-                _runs.Remove(input.InputId);
-            }
-
-            cancellation.Dispose();
-        }
+            AuthenticationJsonProvider = _authenticationProvider,
+        };
+        var created = new EngineGameAgentClient(options);
+        EngineGameAgentClient? existing = Interlocked.CompareExchange(ref _client, created, null);
+        if (existing is null) return created;
+        created.Dispose();
+        return existing;
     }
 
-    private void QueueSignal(StringName signal, string inputId, string payload, bool terminal)
+    private CancellationTokenSource EnsureLifetime()
     {
-        lock (_gate)
-        {
-            if (_exiting)
-            {
-                return;
-            }
-
-            if (_signals.Count >= _maximumQueuedSignals)
-            {
-                if (!terminal)
-                {
-                    return;
-                }
-
-                DropOldestNonTerminalSignal();
-            }
-
-            _signals.Enqueue(new QueuedSignal(signal, inputId, payload, terminal));
-            if (terminal)
-            {
-                _queuedTerminalSignals++;
-            }
-        }
-    }
-
-    private void DropOldestNonTerminalSignal()
-    {
-        var count = _signals.Count;
-        var dropped = false;
-        for (var index = 0; index < count; index++)
-        {
-            var queued = _signals.Dequeue();
-            if (!dropped && !queued.Terminal)
-            {
-                dropped = true;
-                continue;
-            }
-
-            _signals.Enqueue(queued);
-        }
-
-        if (!dropped)
-        {
-            throw new InvalidOperationException("The Godot signal queue has no non-terminal signal to replace.");
-        }
-    }
-
-    private static void ValidateLimits(
-        int maximumConcurrentRuns,
-        int maximumQueuedSignals,
-        int maximumSignalsPerFrame)
-    {
-        if (maximumConcurrentRuns <= 0 || maximumConcurrentRuns > 4096)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumConcurrentRuns));
-        }
-
-        if (maximumQueuedSignals <= 0 || maximumQueuedSignals > 1_000_000)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumQueuedSignals));
-        }
-
-        if (maximumQueuedSignals < maximumConcurrentRuns)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumQueuedSignals), "The signal queue must reserve one terminal signal per active run.");
-        }
-
-        if (maximumSignalsPerFrame <= 0 || maximumSignalsPerFrame > 100_000)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maximumSignalsPerFrame));
-        }
-    }
-
-    private static global::Godot.Collections.Dictionary SignalArgument(string name, Variant.Type type) => new()
-    {
-        ["name"] = name,
-        ["type"] = (int)type,
-    };
-
-    private readonly struct QueuedSignal
-    {
-        public QueuedSignal(StringName signal, string inputId, string payload, bool terminal)
-        {
-            Signal = signal;
-            InputId = inputId;
-            Payload = payload;
-            Terminal = terminal;
-        }
-
-        public StringName Signal { get; }
-
-        public string InputId { get; }
-
-        public string Payload { get; }
-
-        public bool Terminal { get; }
+        if (_lifetime is not null) return _lifetime;
+        var created = new CancellationTokenSource();
+        CancellationTokenSource? existing = Interlocked.CompareExchange(ref _lifetime, created, null);
+        if (existing is null) return created;
+        created.Dispose();
+        return existing;
     }
 }

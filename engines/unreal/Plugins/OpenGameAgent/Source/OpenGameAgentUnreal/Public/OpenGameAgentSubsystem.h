@@ -1,260 +1,88 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "HttpFwd.h"
+#include "Interfaces/IHttpRequest.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "OpenGameAgentSubsystem.generated.h"
 
-struct FOpenGameAgentRunState;
-struct FOpenGameAgentActionStreamState;
+USTRUCT(BlueprintType)
+struct OPENGAMEAGENTUNREAL_API FOpenGameAgentEvent
+{
+    GENERATED_BODY()
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
-    FOpenGameAgentRunEvent,
-    const FString&, InputId,
-    const FString&, EventName,
-    const FString&, EventJson);
+    UPROPERTY(BlueprintReadOnly, Category = "OpenGameAgent")
+    FString EventId;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
-    FOpenGameAgentRunCompleted,
-    const FString&, InputId,
-    const FString&, ResultJson);
+    UPROPERTY(BlueprintReadOnly, Category = "OpenGameAgent")
+    FString EventName;
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
-    FOpenGameAgentRunFailed,
-    const FString&, InputId,
-    const FString&, Error);
+    UPROPERTY(BlueprintReadOnly, Category = "OpenGameAgent")
+    FString Json;
+};
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
-    FOpenGameAgentControlCompleted,
-    const FString&, Operation,
-    const FString&, SessionId,
-    const FString&, ActorId,
-    bool, Accepted,
-    const FString&, Error);
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
-    FOpenGameAgentActionResponse,
-    const FString&, Operation,
-    const FString&, SessionId,
-    const FString&, ActorId,
-    const FString&, ResponseJson,
-    const FString&, Error);
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
-    FOpenGameAgentQueryResponse,
-    const FString&, Operation,
-    const FString&, SessionId,
-    const FString&, ActorId,
-    const FString&, ResponseJson,
-    const FString&, Error);
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
-    FOpenGameAgentActionStreamEvent,
-    const FString&, StreamId,
-    const FString&, SessionId,
-    const FString&, ActorId,
-    const FString&, EventName,
-    const FString&, EventJson);
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
-    FOpenGameAgentActionStreamClosed,
-    const FString&, StreamId,
-    const FString&, SessionId,
-    const FString&, ActorId,
-    const FString&, Error);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOpenGameAgentStreamEventSignature, const FString&, RequestId, const FOpenGameAgentEvent&, Event);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOpenGameAgentJsonResponseSignature, const FString&, RequestId, const FString&, Path, int32, StatusCode, const FString&, Json);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOpenGameAgentFailureSignature, const FString&, RequestId, const FString&, Category);
 
 /**
- * Blueprint and C++ bridge to a trusted OpenGameAgent HTTP/SSE sidecar or server.
- * Gameplay authority remains in Unreal; this subsystem only transports structured inputs,
- * streamed agent events, steering, and cancellation on the game thread.
+ * Game-instance scoped native client. The Agent loop remains in the OpenGameAgent service;
+ * Unreal owns world validation, action execution, and authoritative receipts.
  */
-UCLASS(BlueprintType)
-class OPENGAMEAGENTUNREAL_API UOpenGameAgentSubsystem final : public UGameInstanceSubsystem
+UCLASS()
+class OPENGAMEAGENTUNREAL_API UOpenGameAgentSubsystem : public UGameInstanceSubsystem
 {
     GENERATED_BODY()
 
 public:
     UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
-    FOpenGameAgentRunEvent OnRunEvent;
+    FOpenGameAgentStreamEventSignature OnStreamEvent;
 
     UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
-    FOpenGameAgentRunCompleted OnRunCompleted;
+    FOpenGameAgentJsonResponseSignature OnJsonResponse;
 
     UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
-    FOpenGameAgentRunFailed OnRunFailed;
+    FOpenGameAgentFailureSignature OnRequestFailed;
 
-    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
-    FOpenGameAgentControlCompleted OnControlCompleted;
-
-    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
-    FOpenGameAgentActionResponse OnActionResponse;
-
-    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent")
-    FOpenGameAgentQueryResponse OnQueryResponse;
-
-    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent|Actions")
-    FOpenGameAgentActionStreamEvent OnActionStreamEvent;
-
-    UPROPERTY(BlueprintAssignable, Category = "OpenGameAgent|Actions")
-    FOpenGameAgentActionStreamClosed OnActionStreamClosed;
-
-    /** Configure a remote sidecar. Plain HTTP is accepted only for loopback unless explicitly allowed. */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
-    bool ConfigureRemote(
-        const FString& ServerBaseUrl,
-        const FString& ApiKey,
-        bool bAllowInsecureRemoteHttp,
-        FString& Error);
+    bool Configure(const FString& InServerUrl, const FString& InAuthenticationObjectJson);
 
-    /**
-     * Start a server-streaming run from canonical GameAgentWire input JSON.
-     * Returns false before network dispatch when the request is invalid or capacity is exhausted.
-     */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
-    bool RunJson(const FString& InputJson, FString& InputId, FString& Error);
+    FString StartRun(const FString& InputObjectJson, const FString& RunId = FString());
 
-    /** Inject a structured JSON observation into the active session/actor run. */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
-    bool SteerActor(
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString& PayloadJson,
-        FString& Error);
+    FString StreamActions(const FString& SessionObjectJson, int32 Maximum = 1);
 
-    /** Request an abort for the active session/actor run. */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
-    bool AbortActor(const FString& SessionId, const FString& ActorId, FString& Error);
+    FString PostJson(const FString& Path, const FString& BodyObjectJson);
 
-    /** Cancel only this Unreal HTTP caller. The durable action boundary remains authoritative. */
     UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
-    bool CancelRun(const FString& InputId);
+    FString Steer(const FString& SessionObjectJson, const FString& ExpectedRunCoordinateJson, const FString& InputObjectJson);
 
-    /** Read the server's bounded public capability document. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
-    bool ReadServerCapabilities(FString& Error);
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
+    FString FollowUp(const FString& SessionObjectJson, const FString& ExpectedRunCoordinateJson, const FString& InputObjectJson);
 
-    /** Read the authorized persisted usage ledger for a session actor. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
-    bool ReadUsage(const FString& SessionId, const FString& ActorId, FString& Error);
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
+    FString Abort(const FString& SessionObjectJson, const FString& ExpectedRunCoordinateJson);
 
-    /** Read one authorized, revision-bound page of the active persisted transcript. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
-    bool ReadTranscript(
-        const FString& SessionId,
-        const FString& ActorId,
-        int32 PageSize,
-        const FString& Cursor,
-        FString& Error);
-
-    /** Read one authorized image attachment. The response JSON contains bounded base64 data. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Queries")
-    bool ReadImageAttachment(
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString& AttachmentId,
-        FString& Error);
-
-    /** Read a bounded batch of already-durable external action deliveries for this authorized actor. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
-    bool ClaimActions(
-        const FString& SessionId,
-        const FString& ActorId,
-        int32 Limit,
-        FString& Error);
-
-    /**
-     * Submit the canonical /v1/actions/receipt request JSON after Unreal has reconciled and settled the operation.
-     * The request must bind session, actor, operation, timeline, generation, and authority revisions.
-     */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
-    bool SubmitActionReceiptJson(const FString& ReceiptRequestJson, FString& Error);
-
-    /** Read the durable prepared/dispatched/completed state for one operation. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
-    bool ReconcileAction(
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString& OperationId,
-        FString& Error);
-
-    /** Start an authorized long-lived stream of already-durable external action deliveries. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
-    bool StartActionStream(
-        const FString& SessionId,
-        const FString& ActorId,
-        int32 Limit,
-        FString& StreamId,
-        FString& Error);
-
-    /** Stop only the selected action-delivery stream. It does not change any action outcome. */
-    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent|Actions")
-    bool StopActionStream(const FString& StreamId);
-
-    UFUNCTION(BlueprintPure, Category = "OpenGameAgent")
-    int32 GetActiveRunCount() const;
-
-    UFUNCTION(BlueprintPure, Category = "OpenGameAgent|Actions")
-    int32 GetActiveActionStreamCount() const;
+    /** Cancels only the local HTTP request. It does not claim rollback of a dispatched durable action. */
+    UFUNCTION(BlueprintCallable, Category = "OpenGameAgent")
+    bool CancelLocalRequest(const FString& RequestId);
 
     virtual void Deinitialize() override;
 
 private:
-    static constexpr int32 MaximumActiveRuns = 64;
-    static constexpr int32 MaximumActiveActionStreams = 64;
-    static constexpr int32 MaximumActiveRequests = 128;
-    static constexpr int32 MaximumRequestCharacters = 8000000;
-    static constexpr int32 MaximumResponseBytes = 16000000;
-    static constexpr int32 MaximumEventCharacters = 4000000;
+    FString StartStream(const FString& Path, const FString& BodyObjectJson);
+    FString StartJsonRequest(const FString& Path, const FString& BodyObjectJson);
+    FString StartControl(const FString& Operation, const FString& SessionObjectJson, const FString& ExpectedRunCoordinateJson, const FString* InputObjectJson);
+    bool CreateAuthenticatedBody(const FString& BodyObjectJson, FString& OutBody) const;
+    bool ValidateServerUrl(const FString& Value, FString& OutNormalized) const;
+    bool ValidatePath(const FString& Path) const;
+    void CompleteRequest(const FString& RequestId);
 
-    FString BaseUrl;
-    FString AuthorizationValue;
-    TMap<FString, TSharedPtr<FOpenGameAgentRunState, ESPMode::ThreadSafe>> ActiveRuns;
-    TMap<FString, TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>> ActiveActionStreams;
-    TSet<FHttpRequestPtr> ActiveRequests;
-    bool bConfigured = false;
-    bool bShuttingDown = false;
-
-    void HandleProgress(const FString& InputId);
-    void HandleComplete(const FString& InputId, bool bConnectedSuccessfully);
-    bool FeedAvailableResponseBytes(
-        const FString& InputId,
-        const TSharedPtr<FOpenGameAgentRunState, ESPMode::ThreadSafe>& State,
-        FString& Error);
-    void FailRun(const FString& InputId, const FString& Error);
-    void HandleActionStreamProgress(const FString& StreamId);
-    void HandleActionStreamComplete(const FString& StreamId, bool bConnectedSuccessfully);
-    bool FeedAvailableActionStreamBytes(
-        const FString& StreamId,
-        const TSharedPtr<FOpenGameAgentActionStreamState, ESPMode::ThreadSafe>& State,
-        FString& Error);
-    void FailActionStream(const FString& StreamId, const FString& Error);
-    bool SendControl(
-        const FString& Operation,
-        const FString& Path,
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString* PayloadJson,
-        FString& Error);
-    bool SendActionRequest(
-        const FString& Operation,
-        const FString& Path,
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString& RequestJson,
-        FString& Error);
-    bool SendQueryRequest(
-        const FString& Operation,
-        const FString& Path,
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString& RequestJson,
-        FString& Error);
-    bool SendJsonResponseRequest(
-        const FString& Operation,
-        const FString& Path,
-        const FString& SessionId,
-        const FString& ActorId,
-        const FString& RequestJson,
-        bool bQueryResponse,
-        FString& Error);
+    FString ServerUrl = TEXT("http://127.0.0.1:4317/");
+    FString AuthenticationObjectJson;
+    TMap<FString, FHttpRequestPtr> ActiveRequests;
+    int32 MaximumRequestBytes = 1024 * 1024;
+    int32 MaximumResponseBytes = 4 * 1024 * 1024;
+    int32 MaximumEventBytes = 1024 * 1024;
 };

@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "com.opengameagent.client": "file:../../../Packages/com.opengameagent.client"
+  }
+}

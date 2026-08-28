@@ -24,9 +24,14 @@ protocol/runtime/v1/python/**/__pycache__/
 Library/
 Temp/
 Logs/
+UserSettings/
+*.log
 DerivedDataCache/
 Intermediate/
 Saved/
+engines/unity/TestProjects/*/ProjectSettings/*
+!engines/unity/TestProjects/*/ProjectSettings/ProjectVersion.txt
+engines/unity/TestProjects/*/Packages/packages-lock.json
 
 # Local secrets and provider credentials.
 .env

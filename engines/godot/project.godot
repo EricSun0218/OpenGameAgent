@@ -1,0 +1,11 @@
+[application]
+config/name="OpenGameAgent Godot Client Test"
+
+[dotnet]
+project/assembly_name="OpenGameAgent.Godot"
+
+[editor_plugins]
+enabled=PackedStringArray("res://addons/open_game_agent/plugin.cfg")
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
