@@ -1,43 +1,43 @@
 # Generated media
 
-OpenGameAgent defines provider-neutral image, audio, and video generation contracts. It does not include a model, asset database, editor, moderation policy, or runtime decoder.
+OpenGameAgent defines one provider-neutral contract for image, audio, and video generation. It does not bundle model weights, an asset editor, a moderation service, or a game decoder.
 
-## Contracts
+## Core contracts
 
-- `GameMediaGenerationRequest` carries a stable request ID, media kind, structured context, provider parameters, optional prompt, and source resource references.
-- `IGameMediaGenerator` performs generation and reports bounded progress.
-- `GameMediaGenerationResult` returns one or more `ResourceContent` references plus structured metadata.
-- `GameMediaGenerationProgress` may carry a bounded preview resource. When generation is exposed as a tool, inline data is converted to typed image/audio/video progress content for the host UI.
-- `GameMediaGenerationTool` exposes a generator to the agent as a non-idempotent write by default; a stable request ID lets the media service deduplicate or resume submissions when it implements that guarantee.
+- `GameMediaGenerationRequest` carries a stable request ID, exact game session, media kind, prompt, optional parameters, and zero or more bounded binary sources.
+- `GameMediaGenerator` performs generation and may emit bounded progress.
+- `GameMediaGenerationResult` returns validated binary outputs plus provider/model identity, response ID, and usage when available.
+- `GameMediaRegistry` selects a registered provider/model, validates request and result limits, applies cancellation and a hard timeout, and rejects provider identity or media-kind mismatches.
+- `DurableGameMediaPipeline` adds crash-safe generation, content-addressed resources, and authoritative engine import. See [Generated assets and authoritative import](generated-assets.md).
+- `createDurableGameMediaTool` exposes that pipeline as an ordinary Agent Tool while keeping canonical recovery coordinates out of the default model-visible projection.
 
-`OpenGameAgent.Media` adds a provider/model registry on top of these contracts. It validates model capability, media kind, authentication, request/result limits, refresh races, cancellation, and timeouts, then returns an in-band completed/failed/canceled generation result. The registry retains the underlying generator's progress and async job behavior.
+## Included adapters
 
-`OpenGameAgent.Providers.MediaHttp` implements a bounded JSON HTTP transport for cloud or local APIs that implement the documented request/job shape. If a service uses different fields, authentication, upload semantics, or durable job handles, adapt it behind `IGameMediaGenerator` instead of pretending the wire formats are interchangeable. The game is responsible for downloading or importing resources after validating origin, content type, size, checksum, license metadata, storage quota, and content policy. `GameGeneratedAssetPipeline` provides an optional persistent lifecycle for this step; see [Generated assets and authoritative import](generated-assets.md).
+| Adapter | Use |
+| --- | --- |
+| Catalog-backed image adapter | Shared image-model registry, including registered OpenRouter image models |
+| `OpenAIImageGenerator` | Official OpenAI image generation and multipart edits with one or more reference images |
+| `VolcengineImageGenerator` | Ark/Seedream generation with bounded data-URL references, explicit size, `stream=false`, and `watermark=false` by default |
+| `ComfyUiImageGenerator` | Trusted local ComfyUI workflow submission, progress, history, and bounded output retrieval |
+| `LocalAiMediaGenerator` | LocalAI-compatible image, speech, and video endpoints |
 
-`OpenGameAgent.Providers.OpenRouter` is a dedicated image-generation adapter with model discovery, text and image references, buffered or SSE results, progressive previews, usage metadata, and the same unified provider authentication used by the media registry. It is separate from the generic HTTP adapter because its wire contract is different.
+Adapters use the shared authentication boundary or an explicitly trusted local endpoint. Remote plaintext HTTP is rejected; loopback HTTP must be explicitly allowed. Credentials, prompts, provider response bodies, and source base64 are excluded from public errors and metadata.
 
-`OpenGameAgent.Providers.OpenAI.Images` calls the official Images generation/edit endpoints. It sends one or more resolved `GameMediaGenerationRequest.Sources` as multipart `image[]` fields for edits and returns validated inline PNG, JPEG, or WebP resources. `OpenGameAgent.Providers.Volcengine.Images` calls the Ark/Seedream generations endpoint, sends references as a bounded data-URL array, defaults to `stream=false` and `watermark=false`, and supports explicit sizes such as `2048x1152`. Both adapters use `IGameProviderAuthentication`; prompts, credentials, and reference bytes are excluded from returned metadata and error messages.
-
-Both direct adapters accept only inline PNG, JPEG, or WebP sources whose MIME type matches their bytes. Resolve attachment IDs or game-owned files before invoking the provider. Their default HTTP transport disables redirects, remote endpoints require HTTPS, and explicitly enabled plaintext HTTP is limited to loopback development endpoints. OpenAI sizes are strictly limited to `auto`, `1024x1024`, `1024x1536`, and `1536x1024`; `2048x1152` is rejected rather than fabricated. Seedream accepts an explicit `2048x1152` request. A game that needs an OpenAI result in that canvas should perform a deterministic post-generation letterbox or other game-owned transform.
-
-Use `GetApiKeyAsync` when credentials rotate or expire during long-running jobs. Status URLs are restricted to the submission endpoint's origin by default. If cross-origin polling is enabled, authorization is still withheld from the other origin unless `SendAuthorizationToCrossOriginStatusUrls` is explicitly enabled.
+OpenAI image sizes are limited to values accepted by that API. The adapter does not invent a `2048x1152` request or distort an output. Seedream may accept an explicit `2048x1152` request. Canvas fitting, letterboxing, cropping policy, engine compression, and texture import remain game-owned deterministic transforms.
 
 ## Recommended flow
 
 ```text
-agent requests media
-  -> game creates stable request ID
-  -> provider returns progress and resource references
-  -> game downloads into quarantine
-  -> validate bytes and policy
-  -> import through engine asset pipeline
-  -> commit game-owned asset record
+Agent calls a visible media Tool
+  -> host derives stable operation ID and exact expected world revision
+  -> durable job records generation dispatch
+  -> selected provider returns bounded binary output
+  -> content-addressed resource store validates and persists bytes
+  -> durable job records the manifest
+  -> game-owned importer validates and commits on the engine thread
+  -> authoritative receipt settles the job
 ```
 
-Do not treat a URL returned by a model or generation endpoint as a safe game asset. Avoid loading remote bytes directly into a renderer, audio decoder, or video decoder without bounds and validation.
+Do not treat a model-returned URL as a finished asset and do not load untrusted bytes directly into a renderer, audio decoder, or video decoder. Validate origin, redirects, size, MIME and magic bytes, dimensions/duration, storage quota, content policy, licensing, and the current save generation before import.
 
-The generic HTTP adapter keeps polling while one call is alive and sends the stable request ID on submission. A media service should make that ID idempotent so retrying the same game request resumes or returns the same job instead of charging twice. The generic contract does not expose a portable mid-job handle. If a product must survive a process restart while a long video or batch job is pending, use a service-specific `IGameMediaGenerator` that persists the provider job ID in game-owned state.
-
-## HTTP shape
-
-The adapter submits camel-case JSON with `requestId`, `kind`, `prompt`, `context`, `parameters`, and `sources`. A successful endpoint returns either an immediately completed job or a queued/running job. Job documents use `status`, optional `statusUrl`, optional `retryAfterMs`, optional `progress`, and completed `outputs` containing `uri`, `mediaType`, and optional `name`. Optional `metadata`, `requestId`, and `error` fields are preserved. Response bodies, source/output counts, polling attempts, retry intervals, and request bytes are bounded by `HttpMediaGeneratorOptions`.
+Provider generation and engine import are external side effects. Cancellation or a lost response after dispatch becomes an explicit uncertain state. Recovery must use provider evidence or the game's stable operation ledger; it must not blindly repeat a charged generation or world mutation.

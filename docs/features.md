@@ -99,14 +99,13 @@ This page maps product needs to the smallest reusable OpenGameAgent primitive.
 | Run durable dependency graphs | game-owned scheduler; use OGA durable actions for every world write |
 | Compose review, draft, validation, repair, and publication stages | game-owned orchestration, validators, and commit tools |
 | Generate a planner graph or behavior asset | structured model output, game-owned compiler/validator, durable publication tool |
-| Generate images/audio/video | `IGameMediaGenerator`, `GameMediaGenerationTool` |
-| Route generation by provider/model and media capability | `GameMediaModelRegistry` |
-| Call official OpenAI image generation/edit endpoints | `OpenAIImageProvider` |
-| Call Volcengine Ark/Seedream with reference images and explicit sizes | `VolcengineImageProvider` |
-| Materialize generated media as durable game assets | `GameGeneratedAssetPipeline`, `IGameGeneratedAssetResourceStore` |
-| Expose persistent asset generation as an agent tool | `GameGeneratedAssetTool` |
-| Import generated assets through authoritative game actions | `GameGeneratedAssetActionImporter`, `DurableGameActionDispatcher` |
-| Recover an interrupted asset import without repeating the mutation | `GameGeneratedAssetPipeline.ResumeImportAsync` |
+| Generate images/audio/video | `GameMediaGenerator`, `GameMediaRegistry` |
+| Call official OpenAI image generation/edit endpoints | `OpenAIImageGenerator` |
+| Call Volcengine Ark/Seedream with reference images and explicit sizes | `VolcengineImageGenerator` |
+| Use trusted local image/audio/video services | `ComfyUiImageGenerator`, `LocalAiMediaGenerator` |
+| Materialize generated media as durable game assets | `DurableGameMediaPipeline`, `GameMediaResourceStore` |
+| Expose persistent asset generation as an Agent Tool | `createDurableGameMediaTool` |
+| Recover an interrupted asset import without repeating the mutation | `DurableGameMediaPipeline.resumeImport` |
 | Spill large tool output and retrieve it later | `ArtifactExtension`, `IGameAgentArtifactStore` |
 | Recall scoped memory through an extension | `GameMemoryExtension` |
 
