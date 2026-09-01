@@ -4,23 +4,23 @@
     ".NETStandard,Version=v2.1": {
       "System.Text.Json": {
         "type": "Direct",
-        "requested": "[10.0.10, )",
-        "resolved": "10.0.10",
-        "contentHash": "bmsO6UdYtBdtn32zYXfsh7KlyTIzV/3V9hdT9RIb4pXKgYOsNxXR+VbWigNwBtNFVGYGm6Hwmqw5a+/IWFd36Q==",
+        "requested": "[10.0.11, )",
+        "resolved": "10.0.11",
+        "contentHash": "X2rXQy7g8KEUvWVbAz6vOk6byI1eMgmzFeXbKxq4BfZCfFy5S91K+K+hd4ZBlSp0wL1Y8FyGRXs6+hvABTjwQw==",
         "dependencies": {
-          "Microsoft.Bcl.AsyncInterfaces": "10.0.10",
+          "Microsoft.Bcl.AsyncInterfaces": "10.0.11",
           "System.Buffers": "4.6.1",
-          "System.IO.Pipelines": "10.0.10",
+          "System.IO.Pipelines": "10.0.11",
           "System.Memory": "4.6.3",
           "System.Runtime.CompilerServices.Unsafe": "6.1.2",
-          "System.Text.Encodings.Web": "10.0.10",
+          "System.Text.Encodings.Web": "10.0.11",
           "System.Threading.Tasks.Extensions": "4.6.3"
         }
       },
       "Microsoft.Bcl.AsyncInterfaces": {
         "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "TFI6OKYE1XZz4SGuTSH70c6SBdPpFktXsoa1gCxTr3mKrhmXirnvaS0tKz+J3ZWICEAmMpEGn59nO4ICtUpQXA=="
+        "resolved": "10.0.11",
+        "contentHash": "pUkYI1f99hY9giu/MRaEVN53RO7skXwR7FGtVvFJCK5ezdg5i0W+z1yj/91X5aKv07xGuSB5n1g/Zt2P4Ooq6g=="
       },
       "Microsoft.Bcl.Memory": {
         "type": "Transitive",
@@ -95,8 +95,8 @@
       },
       "System.IO.Pipelines": {
         "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "7WX0W96y3dpQdYG4sEGdh38g3/0lOD4/dKbn2rRVOVzKhzoZUn2gKNIKaFeKWs8RCbpFfmmEWsRhSy95hMpvqA==",
+        "resolved": "10.0.11",
+        "contentHash": "rg8LPOZ62quw3aTnsQNh9rssncaMs69WEM1DiJdDkV+o4Llb2s5Pasy5Bulfm8zL+pE4gDcSQo7V2zW2jvxwYg==",
         "dependencies": {
           "System.Buffers": "4.6.1",
           "System.Memory": "4.6.3",
@@ -125,8 +125,8 @@
       },
       "System.Text.Encodings.Web": {
         "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "o16m2YpDN/pjHsnxf9pTGwkpcuvjW8v1/wGUwJtM1c3QZUKm7ZEO/eYRJg7iIx6GxS2Zv9lAMHpiQwHDdgqauA==",
+        "resolved": "10.0.11",
+        "contentHash": "R7H2/Oqr3onFff/JKDpfRjwxcQZlocF/eQ0ce8go/OTjqz+6LEp/fZK8j1YnDobtysChATEg7krVq4hQJ3IoeQ==",
         "dependencies": {
           "System.Buffers": "4.6.1",
           "System.Memory": "4.6.3",
@@ -147,7 +147,7 @@
         "type": "Project",
         "dependencies": {
           "OpenGameAgent.Kernel": "[0.3.0-alpha.4, )",
-          "System.Text.Json": "[8.0.6, )"
+          "System.Text.Json": "[10.0.11, )"
         }
       },
       "opengameagent.attachments": {
@@ -171,7 +171,7 @@
         "type": "Project",
         "dependencies": {
           "OpenGameAgent.Attachments": "[0.3.0-alpha.4, )",
-          "System.Text.Json": "[8.0.6, )"
+          "System.Text.Json": "[10.0.11, )"
         }
       },
       "opengameagent.media": {
@@ -184,7 +184,8 @@
       "opengameagent.models": {
         "type": "Project",
         "dependencies": {
-          "OpenGameAgent.Kernel": "[0.3.0-alpha.4, )"
+          "OpenGameAgent.Kernel": "[0.3.0-alpha.4, )",
+          "System.Text.Json": "[10.0.11, )"
         }
       },
       "opengameagent.persistence": {
@@ -193,7 +194,7 @@
           "OpenGameAgent": "[0.3.0-alpha.4, )",
           "OpenGameAgent.Extensions": "[0.3.0-alpha.4, )",
           "OpenGameAgent.Media": "[0.3.0-alpha.4, )",
-          "System.Text.Json": "[8.0.6, )"
+          "System.Text.Json": "[10.0.11, )"
         }
       }
     }
