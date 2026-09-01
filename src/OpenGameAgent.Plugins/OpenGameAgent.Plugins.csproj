@@ -5,7 +5,7 @@
     <PackageId>OpenGameAgent.Plugins</PackageId>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="10.0.10" />
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Persistence\OpenGameAgent.Persistence.csproj" />

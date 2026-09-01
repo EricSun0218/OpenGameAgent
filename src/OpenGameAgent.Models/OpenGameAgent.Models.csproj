@@ -8,6 +8,7 @@
     <ProjectReference Include="..\OpenGameAgent.Kernel\OpenGameAgent.Kernel.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
     <EmbeddedResource Include="Data\model-directory.json" />
   </ItemGroup>
 </Project>

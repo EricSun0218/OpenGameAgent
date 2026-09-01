@@ -5,7 +5,7 @@
     <Description>Extensible game-native agent runtime with a bounded model/tool loop, durable actions, game time, skills, memory, and multi-actor coordination.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Kernel\OpenGameAgent.Kernel.csproj" />
