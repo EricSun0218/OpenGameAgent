@@ -5,7 +5,7 @@
     <Description>OpenAI Realtime WebSocket transport for OpenGameAgent realtime conversations.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Realtime\OpenGameAgent.Realtime.csproj" />

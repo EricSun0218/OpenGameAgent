@@ -4,6 +4,6 @@
     <Description>Versioned, transport-neutral runtime protocol and client reducer for OpenGameAgent.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="8.0.6" />
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
   </ItemGroup>
 </Project>
