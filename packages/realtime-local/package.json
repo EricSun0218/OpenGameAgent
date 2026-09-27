@@ -30,7 +30,7 @@
 		"@opengameagent/realtime": "0.1.0-alpha.0",
 		"@opengameagent/runtime": "0.1.0-alpha.0",
 		"onnxruntime-web": "1.29.0",
-		"openai": "6.40.0"
+		"openai": "7.23.0"
 	},
 	"engines": {
 		"node": "24.x"
