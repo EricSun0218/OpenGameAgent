@@ -9,6 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenGameAgent.Protocol\OpenGameAgent.Protocol.csproj" />
-    <PackageReference Include="System.Net.ServerSentEvents" Version="10.0.11" />
+    <PackageReference Include="System.Net.ServerSentEvents" Version="10.0.12" />
   </ItemGroup>
 </Project>
