@@ -1,0 +1,19 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"lib": ["ES2024", "DOM", "DOM.Iterable"],
+		"rootDir": "src",
+		"outDir": "dist",
+		"tsBuildInfoFile": "dist/.tsbuildinfo"
+	},
+	"include": ["src/**/*.ts"],
+	"references": [
+		{ "path": "../protocol" },
+		{ "path": "../agent" },
+		{ "path": "../client" },
+		{ "path": "../health" },
+		{ "path": "../media" },
+		{ "path": "../realtime" },
+		{ "path": "../realtime-local" }
+	]
+}

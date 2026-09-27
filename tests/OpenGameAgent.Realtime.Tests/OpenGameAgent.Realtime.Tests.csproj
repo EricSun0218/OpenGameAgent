@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Realtime.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Realtime\OpenGameAgent.Realtime.csproj" />
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAI.Realtime\OpenGameAgent.Providers.OpenAI.Realtime.csproj" />
-  </ItemGroup>
-</Project>

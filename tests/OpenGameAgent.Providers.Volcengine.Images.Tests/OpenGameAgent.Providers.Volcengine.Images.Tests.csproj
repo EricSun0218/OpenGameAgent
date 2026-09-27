@@ -1,5 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Volcengine.Images\OpenGameAgent.Providers.Volcengine.Images.csproj" />
-  </ItemGroup>
-</Project>

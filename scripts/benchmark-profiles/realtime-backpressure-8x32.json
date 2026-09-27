@@ -1,0 +1,27 @@
+{
+	"profile": "realtime-backpressure-8x32",
+	"purpose": "OpenGameAgent P2 realtime backpressure and same-channel recovery acceptance workload only; not a product or runtime default",
+	"sessionId": "realtime-backpressure-acceptance",
+	"actorCount": 8,
+	"cyclesPerActor": 32,
+	"maxActiveActors": 8,
+	"maxQueuedRuns": 8,
+	"eventBacklogCapacity": 32,
+	"textBacklogCapacity": 32,
+	"textEventBacklogCapacity": 36,
+	"maxTotalTurns": 1024,
+	"maxSyntheticSegmentsPerWave": 264,
+	"progressTimeoutMs": 5000,
+	"evidence": {
+		"actorCount": "host-required acceptance input: exactly eight independent voice channels are exercised in every wave; not a runtime concurrency default",
+		"cyclesPerActor": "host-required acceptance input: exactly thirty-two failure-and-recovery cycles are exercised per channel; not a runtime turn-count default",
+		"maxActiveActors": "derived as actorCount because every wave starts one turn on each independent actor and intentionally requires no waiting actor lane",
+		"maxQueuedRuns": "derived as actorCount because each serial wave synchronously starts exactly one turn per actor before runtime activation drains admission; no later wave overlaps it",
+		"eventBacklogCapacity": "host-required acceptance input: the stalled public-event consumer admits exactly thirty-two events before the next event fails closed; not a product backlog default",
+		"textBacklogCapacity": "host-required acceptance input: the stalled TTS consumer admits exactly thirty-two text segments before the next segment fails closed; not a product backlog default",
+		"textEventBacklogCapacity": "derived as textBacklogCapacity plus the exact four non-audio public events in a failed text-backpressure turn; this also exceeds the exact six-event recovery turn",
+		"maxTotalTurns": "derived as actorCount multiplied by cyclesPerActor multiplied by the exact four turns in each event-failure/event-recovery/text-failure/text-recovery cycle",
+		"maxSyntheticSegmentsPerWave": "derived as actorCount multiplied by the larger of eventBacklogCapacity and textBacklogCapacity plus the one rejected boundary segment; it is the explicit provider-allocation budget per wave",
+		"progressTimeoutMs": "reference-derived from the locked Vitest 4.1.11 non-browser per-test default; the deadline resets on every settled turn or collected stream and is not a runtime timeout default"
+	}
+}

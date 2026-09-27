@@ -1,23 +1,31 @@
-# OpenGameAgent for Unreal Engine 5.8
+# Unreal sidecar client
 
-This optional native C++ plugin connects Unreal Engine to an OpenGameAgent sidecar or trusted server over the public JSON/SSE protocol. It does not embed a CLR or provider credential in the Unreal process.
+`OpenGameAgent` is the supported Unreal C++ integration. Unity 6, Godot, and Unreal consume the same Runtime Protocol,
+while the TypeScript sidecar owns Pi, model access, memory, planning, and optional extensions. The game remains the only
+authority that applies world changes.
 
-Copy `Plugins/OpenGameAgent` into the Unreal project's `Plugins` directory, enable the plugin, and obtain `UOpenGameAgentSubsystem` from the game instance. Call `ConfigureRemote`, then submit canonical `GameAgentWire` JSON through `RunJson`. The native C++ subsystem is the stable adapter surface; its `UFUNCTION` and multicast-delegate annotations provide a thin Blueprint projection of the same API.
+On the currently gated Unreal 5.8 Win64 x64 target, the plugin uses the engine-bundled libcurl and Unreal's certificate manager. Redirect following, ambient proxy use, netrc credentials, and non-HTTP protocols are disabled. A target without this verified backend fails closed instead of falling back to a transport that could replay an authenticated POST across a redirect.
 
-`RunJson` preserves arbitrary structured payloads, floating-point values, game timeline/tick fields, metadata, and supported content. `SteerActor` injects a structured observation into an active actor, `AbortActor` stops the authoritative run, and `CancelRun` only cancels the local HTTP caller. All delegates are delivered on the Unreal game thread.
+The host must configure the module's process-wide concurrent-request and queued-request budgets once through `FOpenGameAgentModule::ConfigureTransport` before constructing clients. Each client separately requires host-configured request, JSON response, attachment response, aggregate response-header, response-header count, access-token, URL, and total-timeout budgets. Repeating the same module configuration is idempotent; attempting to change it after the shared transport is created fails closed. The shared bounded worker pool and bounded GameThread handoff keep those process budgets effective from admission through completion delivery. The total timeout starts at admission and therefore includes queue wait.
 
-For authoritative world mutations, use `ClaimActions` or `StartActionStream`, reconcile each returned operation against the Unreal save/operation ledger, execute or resume it on the game thread, and call `SubmitActionReceiptJson`. `ReconcileAction` reads the durable exchange state after a restart or uncertain delivery. Action responses arrive through `OnActionResponse`; streamed deliveries arrive through `OnActionStreamEvent`. Stopping a delivery stream does not settle or cancel an action.
+All public client request methods must be called on the GameThread; both immediate failures and asynchronous completions therefore share one callback-thread contract. The header callback selects the success or error body budget before the body callback can store bytes; `Content-Length` is checked before the body, while unknown-length and chunked bodies remain incrementally bounded. Cancelling before GameThread delivery begins synchronously detaches and suppresses the user callback. Once delivery has begun, cancellation does not retract a callback already executing. The module stops admission, drains transport work and queued completion destruction, and then releases its static libcurl process state; dynamic module reload is disabled.
 
-`ReadUsage`, `ReadTranscript`, and `ReadImageAttachment` expose the server's authorized, bounded read APIs through `OnQueryResponse`. Transcript cursors remain opaque and revision-bound. Attachment metadata can be read with the transcript; attachment bytes are fetched explicitly. `ReadServerCapabilities` lets a client inspect the currently deployed server surface without coupling gameplay code to a server build.
+`ReadAttachment` verifies the immutable reference, PNG media, length, strong ETag, privacy and nosniff policy, SHA-256 identity, and RFC 9530 digest before returning owned bytes.
 
-The sidecar owns the agent runtime, providers, persistence, and durable action exchange. Unreal remains authoritative for gameplay. A world mutation should be claimed through the action exchange, reconciled against the game's operation ledger, executed on the game thread, and answered with a final receipt. Do not treat streamed text or cancellation as proof that a mutation committed or did not commit.
+`ReadDeferred`, `ResumeDeferred`, and `AbandonDeferred` expose the same Runtime deferred-response lifecycle on the GameThread. Every invocation makes one authenticated request through the existing bounded transport; the client does not poll, retry, coalesce, or infer command completion. Cancelling an `IOpenGameAgentRequest` suppresses its local callback when delivery has not begun, but it does not abandon provider work. After an uncertain response, reconcile locally with `ReadDeferred` before issuing another explicit command. If the host also consumes the canonical Runtime event stream through an external process or SDK, reconcile that stream as an additional source of durable evidence; this Unreal package does not expose the event stream. Call `AbandonDeferred` only when provider abandonment is intended.
 
-Plain HTTP is accepted by default only for `localhost`, `127.0.0.1`, or `[::1]`. Remote services should use HTTPS and short-lived player/session credentials. A permanent model-provider key must not ship in the game client.
+Create an `IOpenGameAgentAuthoritativeActionAdapter`, configure `FOpenGameAgentActionPumpOptions`, and keep the returned shared pump alive. Execution duration, idle polling, and the finite receipt/reconcile retry-delay schedule are required host policy; the plugin supplies no operational defaults. Call `Tick` from the GameThread and `Stop` during teardown.
 
-The adapter does not depend on Blueprint as its implementation layer. Early Unreal Engine 6 builds can continue using the C++ and Blueprint surfaces; a future Verse projection can bind the same native subsystem and wire protocol without moving the agent runtime into the engine process.
+The pump consumes the Runtime's atomic next-delivery contract one action at a time. A `dispatch` delivery calls `Execute`; a `reconcile` delivery calls only `Inspect`. Execution receives a cooperative context whose `TryCommit` checks the local epoch, stop/deadline, GameThread, and the adapter's `RecheckExpectedAuthority` result immediately before running one synchronous game-owned world transaction. That transaction receives the complete action and owns operation deduplication, world mutation, and resulting evidence. Duplicate, cancelled, expired, and late completions cannot open a new write. Receipt and reconciliation requests retain the delivery's exact claim token and attempt. Only no-response/ambiguous transport failures and 5xx responses use the host retry schedule; 3xx and other 4xx responses halt. A 409 first reads Runtime authority: a current unresolved fence can be inspected, but a second unchanged unresolved fence halts instead of re-inspecting forever. An outcome that remains unknown halts without admitting a later action.
 
-Run the real-editor build and automation gate with:
+The module uses the Unreal 5.8-supported C++20 level and Unreal JSON types, so the plugin does not bundle a second JSON
+runtime or expose a separate engine-neutral C++ client.
 
-```powershell
-./engines/unreal/test-plugin.ps1 -UnrealRoot '<UE_5.8>'
-```
+`npm run unreal:structure:check` verifies the portable thin-plugin structure. The host-required command
+`npm run unreal:check -- --engine-root=<path> --timeout-ms=<host-budget>` packages the plugin with Unreal Build Tool in
+Editor, Development Game, and Shipping Game configurations, then runs validation and real transport automation in an
+unattended editor. The explicit gate timeout bounds each external process, helper readiness and helper shutdown; the same
+host budget is passed to the transport fixture. The transport gate uses isolated source and redirect-target listeners to
+prove that a 307 never reaches the second listener, and verifies status-selected limits with both `Content-Length` and
+chunked bodies. The current compatibility gate targets Unreal Engine 5.8 Win64 x64; other targets and older engine
+versions are validated only when a consumer requires them.

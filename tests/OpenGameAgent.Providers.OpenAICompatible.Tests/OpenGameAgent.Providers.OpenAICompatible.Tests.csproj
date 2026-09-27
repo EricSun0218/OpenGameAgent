@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Providers.OpenAICompatible.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAICompatible\OpenGameAgent.Providers.OpenAICompatible.csproj" />
-  </ItemGroup>
-</Project>

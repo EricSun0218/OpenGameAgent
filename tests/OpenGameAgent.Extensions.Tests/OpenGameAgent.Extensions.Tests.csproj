@@ -1,8 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Extensions.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Extensions\OpenGameAgent.Extensions.csproj" />
-  </ItemGroup>
-</Project>

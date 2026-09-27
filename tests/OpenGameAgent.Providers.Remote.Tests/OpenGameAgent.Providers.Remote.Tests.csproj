@@ -1,8 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Providers.Remote.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Remote\OpenGameAgent.Providers.Remote.csproj" />
-  </ItemGroup>
-</Project>

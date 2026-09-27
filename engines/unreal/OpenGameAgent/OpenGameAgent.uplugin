@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0-alpha.0",
+	"FriendlyName": "OpenGameAgent Runtime Client",
+	"Description": "Thin Unreal client for an OpenGameAgent TypeScript sidecar.",
+	"Category": "AI",
+	"CreatedBy": "OpenGameAgent contributors",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "OpenGameAgent",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

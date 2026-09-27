@@ -1,5 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Runtime.Hosting\OpenGameAgent.Runtime.Hosting.csproj" />
-  </ItemGroup>
-</Project>

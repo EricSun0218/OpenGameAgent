@@ -1,0 +1,43 @@
+{
+	"name": "@opengameagent/client",
+	"version": "0.1.0-alpha.0",
+	"description": "Generated TypeScript protocol client for OpenGameAgent",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE",
+		"THIRD_PARTY_NOTICES.md"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@opengameagent/actions": "0.1.0-alpha.0",
+		"@opengameagent/protocol": "0.1.0-alpha.0"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/client"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

@@ -1,8 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Providers.MediaHttp.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.MediaHttp\OpenGameAgent.Providers.MediaHttp.csproj" />
-  </ItemGroup>
-</Project>

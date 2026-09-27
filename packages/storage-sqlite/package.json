@@ -1,0 +1,49 @@
+{
+	"name": "@opengameagent/storage-sqlite",
+	"version": "0.1.0-alpha.0",
+	"description": "Single SQLite authority for OpenGameAgent events, transcripts, and extension state",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@opengameagent/actions": "0.1.0-alpha.0",
+		"@opengameagent/artifacts": "0.1.0-alpha.0",
+		"@opengameagent/delegation": "0.1.0-alpha.0",
+		"@opengameagent/extensions": "0.1.0-alpha.0",
+		"@opengameagent/media": "0.1.0-alpha.0",
+		"@opengameagent/memory": "0.1.0-alpha.0",
+		"@opengameagent/protocol": "0.1.0-alpha.0",
+		"better-sqlite3": "13.0.3",
+		"tinyqueue": "3.0.0"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/storage-sqlite"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

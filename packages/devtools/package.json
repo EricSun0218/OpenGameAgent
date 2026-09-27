@@ -1,0 +1,56 @@
+{
+	"name": "@opengameagent/devtools",
+	"version": "0.1.0-alpha.0",
+	"description": "Safe OpenTelemetry, replay, evaluation, limits, and conformance tools for OpenGameAgent",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./pi-fakes": {
+			"types": "./dist/pi-fakes.d.ts",
+			"import": "./dist/pi-fakes.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "0.85.1",
+		"@earendil-works/pi-ai": "0.85.1",
+		"@opengameagent/agent": "0.1.0-alpha.0",
+		"@opengameagent/protocol": "0.1.0-alpha.0",
+		"@opentelemetry/api": "1.9.1",
+		"@opentelemetry/sdk-node": "0.221.0",
+		"async-mutex": "0.5.0",
+		"typebox": "1.3.19",
+		"write-file-atomic": "7.0.0"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"devDependencies": {
+		"@types/write-file-atomic": "4.0.3"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/devtools"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

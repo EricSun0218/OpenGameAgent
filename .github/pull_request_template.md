@@ -5,11 +5,11 @@ Describe the user-visible behavior and the Runtime or engine boundary affected.
 ## Verification
 
 - [ ] Added or updated tests for changed behavior.
-- [ ] Ran the relevant .NET, Godot, Unity, package, or privacy gates.
-- [ ] Updated wire, compatibility notes, examples, and documentation where required.
+- [ ] Ran the portable gate and relevant Godot, Unity, or Unreal checks.
+- [ ] Updated protocol artifacts, examples, and documentation where required.
 - [ ] Updated both English and Chinese READMEs when a shared product fact changed.
 - [ ] Confirmed no credentials, private material, generated engine state, or proprietary assets are included.
-- [ ] Documented breaking changes and migration steps.
+- [ ] Documented breaking changes and affected integration contracts.
 
 ## Authority and recovery review
 

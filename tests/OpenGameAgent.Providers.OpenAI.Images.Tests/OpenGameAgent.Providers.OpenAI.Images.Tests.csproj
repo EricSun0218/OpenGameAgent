@@ -1,5 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.OpenAI.Images\OpenGameAgent.Providers.OpenAI.Images.csproj" />
-  </ItemGroup>
-</Project>

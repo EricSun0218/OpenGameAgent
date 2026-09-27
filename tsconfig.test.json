@@ -1,0 +1,39 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"composite": false,
+		"declaration": false,
+		"declarationMap": false,
+		"noEmit": true,
+		"paths": {
+			"@opengameagent/actions/runtime-validation": ["./packages/actions/src/runtime-validation.ts"],
+			"@opengameagent/agent/runtime-internal": ["./packages/agent/src/runtime-activation.ts"],
+			"@opengameagent/extension-kit": ["./packages/extension-kit/src/index.ts"],
+			"@opengameagent/agent": ["./packages/agent/src/index.ts"],
+			"@opengameagent/characters": ["./packages/characters/src/index.ts"],
+			"@opengameagent/realtime": ["./packages/realtime/src/index.ts"],
+			"@opengameagent/realtime-local": ["./packages/realtime-local/src/index.ts"],
+			"@opengameagent/attachments": ["./packages/attachments/src/index.ts"],
+			"@opengameagent/protocol": ["./packages/protocol/src/index.ts"],
+			"@opengameagent/runtime": ["./packages/runtime/src/index.ts"],
+			"@opengameagent/actions": ["./packages/actions/src/index.ts"],
+			"@opengameagent/memory": ["./packages/memory/src/index.ts"],
+			"@opengameagent/memory-usearch": ["./packages/memory-usearch/src/index.ts"],
+			"@opengameagent/memory-ai-sdk": ["./packages/memory-ai-sdk/src/index.ts"],
+			"@opengameagent/memory-bge-m3": ["./packages/memory-bge-m3/src/index.ts"],
+			"@opengameagent/memory-agent": ["./packages/memory-agent/src/index.ts"],
+			"@opengameagent/extensions": ["./packages/extensions/src/index.ts"],
+			"@opengameagent/delegation": ["./packages/delegation/src/index.ts"],
+			"@opengameagent/integrations": ["./packages/integrations/src/index.ts"],
+			"@opengameagent/credentials-windows": ["./packages/credentials-windows/src/index.ts"],
+			"@opengameagent/media": ["./packages/media/src/index.ts"],
+			"@opengameagent/resources": ["./packages/resources/src/index.ts"],
+			"@opengameagent/storage-sqlite": ["./packages/storage-sqlite/src/index.ts"],
+			"@opengameagent/server": ["./packages/server/src/index.ts"],
+			"@opengameagent/client": ["./packages/client/dist/index.d.ts"],
+			"@opengameagent/health": ["./packages/health/src/index.ts"]
+		},
+		"rootDir": "."
+	},
+	"include": ["packages/*/test/**/*.ts", "vitest.config.ts"]
+}

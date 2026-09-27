@@ -34,6 +34,7 @@ body:
         - Persistence or remote hosting
         - Godot integration
         - Unity integration
+        - Unreal Engine integration
         - Evaluation, observability, or developer experience
     validations:
       required: true

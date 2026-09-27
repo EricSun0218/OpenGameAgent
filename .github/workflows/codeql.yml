@@ -4,28 +4,34 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '17 3 * * 2'
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, csharp]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
-        env:
-          DOTNET_INSTALL_DIR: ${{ runner.temp }}/.dotnet
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          global-json-file: global.json
-      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
-          languages: csharp
-          build-mode: manual
-          queries: security-extended
-      - run: dotnet restore OpenGameAgent.sln --locked-mode
-      - run: dotnet build OpenGameAgent.sln -c Release --no-restore
-      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - name: Analyze source
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}

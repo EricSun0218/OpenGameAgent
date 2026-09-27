@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Providers.Google.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Google\OpenGameAgent.Providers.Google.csproj" />
-    <ProjectReference Include="..\..\src\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
-  </ItemGroup>
-</Project>

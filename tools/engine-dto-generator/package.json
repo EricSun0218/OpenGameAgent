@@ -1,0 +1,21 @@
+{
+	"name": "opengameagent-engine-dto-generator",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"scripts": {
+		"generate": "node generate.mjs"
+	},
+	"dependencies": {
+		"quicktype-core": "26.0.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "tools/engine-dto-generator"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

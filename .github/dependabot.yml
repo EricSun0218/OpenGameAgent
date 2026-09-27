@@ -1,7 +1,18 @@
 version: 2
 updates:
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /tools/openapi-generator
+      - /tools/engine-dto-generator
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
   - package-ecosystem: nuget
-    directory: /
+    directories:
+      - /engines/godot/csharp/src/OpenGameAgent.Client
+      - /engines/godot/OpenGameAgentGodot
+      - /engines/godot/OpenGameAgentGodot.Conformance
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

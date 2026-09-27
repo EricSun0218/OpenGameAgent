@@ -1,0 +1,21 @@
+{
+	"profile": "runtime-scheduler-256x32",
+	"purpose": "OpenGameAgent P2 scheduler acceptance workload only; not a product or runtime default",
+	"sessionId": "runtime-scheduler-acceptance",
+	"actorCount": 256,
+	"runsPerActor": 32,
+	"maxActiveActors": 8,
+	"maxQueuedRuns": 8192,
+	"maxInputBytes": 4,
+	"maxInputDepth": 1,
+	"progressTimeoutMs": 5000,
+	"evidence": {
+		"actorCount": "host-required P2 acceptance workload: exactly 256 registered actor lanes",
+		"runsPerActor": "host-required P2 acceptance workload: exactly 32 admitted runs per actor lane",
+		"maxActiveActors": "host-required P2 acceptance workload: exactly 8 simultaneously active actor lanes",
+		"maxQueuedRuns": "derived as actorCount multiplied by runsPerActor so the synchronous burst exactly fills the configured waiting-run capacity",
+		"maxInputBytes": "derived as the exact canonical JSON and UTF-8 byte length of the benchmark's null payload",
+		"maxInputDepth": "derived as the runtime's admitted positive minimum because the benchmark's null payload has no nested container",
+		"progressTimeoutMs": "reference-derived from the locked Vitest 4.1.11 non-browser per-test default; the deadline resets on every observed progress event and is not a runtime timeout default"
+	}
+}

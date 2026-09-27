@@ -1,0 +1,33 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "urn:opengameagent:agent-plugin-package:signatures:1",
+	"title": "OpenGameAgent signed Agent Plugin package signatures v1",
+	"type": "object",
+	"additionalProperties": false,
+	"required": ["schema", "signatures"],
+	"properties": {
+		"schema": {
+			"const": "urn:opengameagent:agent-plugin-package:1"
+		},
+		"signatures": {
+			"type": "array",
+			"minItems": 1,
+			"uniqueItems": true,
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": ["keyId", "signature"],
+				"properties": {
+					"keyId": {
+						"type": "string",
+						"minLength": 1
+					},
+					"signature": {
+						"type": "string",
+						"pattern": "^[A-Za-z0-9_-]{85}[AQgw]$"
+					}
+				}
+			}
+		}
+	}
+}

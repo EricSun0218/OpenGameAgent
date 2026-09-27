@@ -1,0 +1,43 @@
+{
+	"name": "@opengameagent/media",
+	"version": "0.1.0-alpha.0",
+	"description": "Optional durable output media jobs for OpenGameAgent",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@opengameagent/protocol": "0.1.0-alpha.0",
+		"@opengameagent/resources": "0.1.0-alpha.0",
+		"async-mutex": "0.5.0"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/media"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

@@ -1,8 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Providers.Volcengine.Realtime.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Volcengine.Realtime\OpenGameAgent.Providers.Volcengine.Realtime.csproj" />
-  </ItemGroup>
-</Project>

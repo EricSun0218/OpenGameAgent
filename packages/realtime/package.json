@@ -1,0 +1,43 @@
+{
+	"name": "@opengameagent/realtime",
+	"version": "0.1.0-alpha.0",
+	"description": "Provider-neutral realtime voice coordination over the Pi-backed OpenGameAgent runtime",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@opengameagent/health": "0.1.0-alpha.0",
+		"@opengameagent/protocol": "0.1.0-alpha.0",
+		"@opengameagent/runtime": "0.1.0-alpha.0"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/realtime"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

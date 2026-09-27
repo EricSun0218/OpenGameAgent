@@ -1,0 +1,26 @@
+{
+	"name": "opengameagent-openapi-generator",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"generate": "node generate.mjs"
+	},
+	"dependencies": {
+		"@hey-api/openapi-ts": "0.99.0",
+		"typescript": "5.9.3"
+	},
+	"overrides": {
+		"@hey-api/json-schema-ref-parser": {
+			"js-yaml": "4.3.2"
+		}
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "tools/openapi-generator"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

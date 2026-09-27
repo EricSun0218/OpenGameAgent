@@ -1,0 +1,26 @@
+{
+	"dependencies": {
+		"com.opengameagent.client": {
+			"version": "file:../../Packages/com.opengameagent.client",
+			"depth": 0,
+			"source": "local",
+			"dependencies": {
+				"com.unity.nuget.newtonsoft-json": "3.2.2",
+				"com.unity.modules.unitywebrequest": "1.0.0"
+			}
+		},
+		"com.unity.nuget.newtonsoft-json": {
+			"version": "3.2.2",
+			"depth": 1,
+			"source": "registry",
+			"dependencies": {},
+			"url": "https://packages.unity.com"
+		},
+		"com.unity.modules.unitywebrequest": {
+			"version": "1.0.0",
+			"depth": 1,
+			"source": "builtin",
+			"dependencies": {}
+		}
+	}
+}

@@ -1,0 +1,33 @@
+{
+	"files": [],
+	"references": [
+		{ "path": "./packages/extension-kit" },
+		{ "path": "./packages/characters" },
+		{ "path": "./packages/realtime" },
+		{ "path": "./packages/realtime-local" },
+		{ "path": "./packages/png" },
+		{ "path": "./packages/protocol" },
+		{ "path": "./packages/resources" },
+		{ "path": "./packages/agent" },
+		{ "path": "./packages/runtime" },
+		{ "path": "./packages/actions" },
+		{ "path": "./packages/storage-sqlite" },
+		{ "path": "./packages/server" },
+		{ "path": "./packages/client" },
+		{ "path": "./packages/devtools" },
+		{ "path": "./packages/memory" },
+		{ "path": "./packages/memory-usearch" },
+		{ "path": "./packages/memory-ai-sdk" },
+		{ "path": "./packages/memory-bge-m3" },
+		{ "path": "./packages/memory-agent" },
+		{ "path": "./packages/extensions" },
+		{ "path": "./packages/artifacts" },
+		{ "path": "./packages/delegation" },
+		{ "path": "./packages/integrations" },
+		{ "path": "./packages/credentials-windows" },
+		{ "path": "./packages/attachments" },
+		{ "path": "./packages/observations" },
+		{ "path": "./packages/health" },
+		{ "path": "./packages/media" }
+	]
+}

@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.Providers.Bedrock.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Providers.Bedrock\OpenGameAgent.Providers.Bedrock.csproj" />
-    <ProjectReference Include="..\..\src\OpenGameAgent.ProviderTransport\OpenGameAgent.ProviderTransport.csproj" />
-  </ItemGroup>
-</Project>

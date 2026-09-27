@@ -1,0 +1,64 @@
+{
+	"name": "opengameagent",
+	"version": "0.1.0-alpha.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"engines": {
+		"node": "24.x"
+	},
+	"packageManager": "npm@11.12.1",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"clean": "tsc -b --clean --pretty false",
+		"tools:ci": "npm ci --prefix tools/openapi-generator --ignore-scripts && npm ci --prefix tools/engine-dto-generator --ignore-scripts",
+		"format": "biome format --write .",
+		"format:check": "biome format .",
+		"generate": "tsc -b packages/protocol --pretty false && node scripts/generate-runtime-openapi.mjs && biome format --write protocol/runtime-v1.openapi.json && npm run generate --prefix tools/openapi-generator && npm run generate --prefix tools/engine-dto-generator",
+		"generate:check": "node scripts/check-generated.mjs",
+		"lint": "biome lint .",
+		"typecheck": "tsc -b --pretty false && tsc -p tsconfig.test.json --pretty false",
+		"build": "npm run clean && tsc -b --pretty false",
+		"test": "vitest run",
+		"test:coverage": "vitest run --coverage",
+		"benchmark:bge-m3": "node scripts/benchmark-bge-m3.mjs",
+		"benchmark:memory": "node scripts/benchmark-memory-recall.mjs",
+		"benchmark:media": "node scripts/benchmark-media-size.mjs",
+		"benchmark:media:check": "node scripts/check-media-size-benchmark.mjs",
+		"benchmark:runtime": "node scripts/benchmark-runtime-scheduler.mjs",
+		"benchmark:realtime": "node scripts/benchmark-realtime-backpressure.mjs",
+		"package:metadata:check": "node scripts/check-package-metadata.mjs",
+		"package:check": "npm run package:metadata:check && npm pack --workspaces --dry-run",
+		"security": "npm audit --audit-level=high && npm audit --prefix tools/openapi-generator --audit-level=high && npm audit --prefix tools/engine-dto-generator --audit-level=high",
+		"public-tree": "node scripts/check-public-tree.mjs",
+		"unreal:structure:check": "node scripts/check-unreal-structure.mjs",
+		"unreal:check": "node scripts/run-unreal-engine-gate.mjs",
+		"godot:check": "node scripts/run-engine-gates.mjs godot",
+		"unity:check": "node scripts/run-engine-gates.mjs unity",
+		"engine:check": "npm run unity:check && npm run godot:check && npm run unreal:check",
+		"gate": "npm run tools:ci && npm run format:check && npm run lint && npm run generate:check && npm run typecheck && npm run test && npm run build && npm run example:local && npm run benchmark:media:check && npm run package:check && npm run security && npm run unreal:structure:check && npm run public-tree",
+		"full:gate": "npm run gate && npm run engine:check",
+		"example:local": "node examples/local-runtime.mjs"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.11",
+		"@earendil-works/pi-ai": "0.85.1",
+		"@types/better-sqlite3": "9.6.0",
+		"@types/node": "26.4.0",
+		"@types/ws": "8.18.1",
+		"@vitest/coverage-v8": "4.1.11",
+		"fast-check": "4.9.0",
+		"sharp": "0.35.4",
+		"typescript": "7.0.2",
+		"vitest": "4.1.11"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

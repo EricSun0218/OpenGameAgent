@@ -1,0 +1,51 @@
+{
+	"name": "@opengameagent/extension-kit",
+	"version": "0.1.0-alpha.0",
+	"description": "Developer manifest, conformance, scaffold, and editor reload tools for OpenGameAgent extensions",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@earendil-works/pi-ai": "0.85.1",
+		"@opengameagent/agent": "0.1.0-alpha.0",
+		"@opengameagent/protocol": "0.1.0-alpha.0",
+		"@opengameagent/runtime": "0.1.0-alpha.0",
+		"async-mutex": "0.5.0",
+		"semver": "7.8.5",
+		"validate-npm-package-name": "8.0.0"
+	},
+	"devDependencies": {
+		"@types/semver": "7.8.0",
+		"@types/validate-npm-package-name": "4.0.2"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/extension-kit"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

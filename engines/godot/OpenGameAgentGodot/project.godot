@@ -1,0 +1,11 @@
+[application]
+
+config/name="OpenGameAgent Godot Client Gate"
+
+[dotnet]
+
+project/assembly_name="OpenGameAgentGodot"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"

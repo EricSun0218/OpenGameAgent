@@ -1,0 +1,10 @@
+{
+  "name": "OpenGameAgent.Unity",
+  "rootNamespace": "OpenGameAgent.Unity",
+  "references": [
+    "Unity.Newtonsoft.Json"
+  ],
+  "autoReferenced": true,
+  "overrideReferences": false,
+  "noEngineReferences": false
+}

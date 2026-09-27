@@ -1,0 +1,44 @@
+{
+	"name": "@opengameagent/memory-bge-m3",
+	"version": "0.1.0-alpha.0",
+	"description": "Optional local BGE-M3 embedding adapter for OpenGameAgent memory",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist/**/*.js",
+		"dist/**/*.d.ts",
+		"dist/**/*.d.ts.map",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -b --pretty false"
+	},
+	"dependencies": {
+		"@huggingface/tokenizers": "0.1.3",
+		"@opengameagent/memory": "0.1.0-alpha.0",
+		"onnxruntime-web": "1.29.0",
+		"yocto-queue": "1.2.2"
+	},
+	"engines": {
+		"node": "24.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/EricSun0218/OpenGameAgent.git",
+		"directory": "packages/memory-bge-m3"
+	},
+	"bugs": {
+		"url": "https://github.com/EricSun0218/OpenGameAgent/issues"
+	}
+}

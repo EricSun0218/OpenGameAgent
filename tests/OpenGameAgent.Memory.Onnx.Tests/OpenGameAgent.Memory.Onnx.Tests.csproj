@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.Memory.Onnx\OpenGameAgent.Memory.Onnx.csproj" />
-    <ProjectReference Include="..\..\src\OpenGameAgent.Persistence\OpenGameAgent.Persistence.csproj" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="..\PublicApiSurface.cs" Link="PublicApiSurface.cs" />
-  </ItemGroup>
-</Project>

@@ -1,0 +1,12 @@
+{
+	"name": "com.opengameagent.client",
+	"version": "0.1.0",
+	"displayName": "OpenGameAgent Client",
+	"description": "Thin Runtime Protocol client and authoritative action adapter for Unity.",
+	"unity": "6000.0",
+	"license": "MIT",
+	"dependencies": {
+		"com.unity.nuget.newtonsoft-json": "3.2.2",
+		"com.unity.modules.unitywebrequest": "1.0.0"
+	}
+}

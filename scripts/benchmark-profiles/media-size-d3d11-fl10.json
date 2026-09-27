@@ -1,0 +1,82 @@
+{
+	"profile": "media-size-d3d11-fl10",
+	"purpose": "Verify an 8192-square decoded image and one 128 MiB streamed generated resource across normalization, immutable storage, durable metadata, and cold restart.",
+	"image": {
+		"width": 8192,
+		"height": 8192,
+		"channels": 4
+	},
+	"media": {
+		"resourceBytes": 134217728,
+		"chunkBytes": 65536
+	},
+	"progressTimeoutMs": 60000,
+	"maxMaterializedBytes": 268435456,
+	"attachmentLimits": {
+		"maxInputBytes": 134217728,
+		"maxInputPixels": 67108864,
+		"maxInputDimension": 8192,
+		"maxStoredBytes": 134217728,
+		"maxStoredPixels": 67108864,
+		"maxStoredDimension": 8192,
+		"maxReadBytes": 134217728,
+		"maxNameBytes": 20,
+		"maxImagesPerBatch": 1,
+		"maxBatchInputBytes": 134217728,
+		"maxBatchStoredBytes": 134217728
+	},
+	"mediaLimits": {
+		"maxIdentifierBytes": 64,
+		"maxAdapterIdBytes": 64,
+		"maxAdapters": 1,
+		"maxRequestBytes": 256,
+		"maxJsonDepth": 4,
+		"maxProviderHandleBytes": 256,
+		"maxAttemptsPerJob": 1,
+		"maxOutputsPerAttempt": 1,
+		"maxResourceBytes": 134217728,
+		"maxBundleBytes": 134217728,
+		"maxManifestBytes": 16384,
+		"maxMediaTypeBytes": 64
+	},
+	"sqlite": {
+		"busyTimeoutMs": 5000,
+		"verifyOnOpen": "full",
+		"ownership": "exclusive",
+		"maxStoredJobBytes": 65536
+	},
+	"evidence": {
+		"image.width": "Acceptance workload for the verified target-engine feature-level floor; not a framework default.",
+		"image.height": "Acceptance workload for the verified target-engine feature-level floor; not a framework default.",
+		"image.channels": "RGBA decode cardinality required by this exact workload.",
+		"media.resourceBytes": "Acceptance workload aligned to the verified target-engine resource floor; not a framework default.",
+		"media.chunkBytes": "Explicit acceptance-host stream quantum that divides the resource exactly; not a framework default.",
+		"progressTimeoutMs": "Explicit acceptance-run progress budget; observations are reported and this is not an SLA.",
+		"maxMaterializedBytes": "Exact larger value of the 256 MiB decoded-image buffer and 128 MiB generated-resource buffer required by this workload.",
+		"attachmentLimits.maxInputBytes": "Explicit acceptance-host byte budget equal to the 128 MiB workload envelope.",
+		"attachmentLimits.maxInputPixels": "Exact product of the configured image width and height.",
+		"attachmentLimits.maxInputDimension": "Exact configured image edge; resizing would invalidate this workload.",
+		"attachmentLimits.maxStoredBytes": "Explicit acceptance-host byte budget equal to the 128 MiB workload envelope.",
+		"attachmentLimits.maxStoredPixels": "Exact product of the configured image width and height.",
+		"attachmentLimits.maxStoredDimension": "Exact configured image edge; resizing would invalidate this workload.",
+		"attachmentLimits.maxReadBytes": "Explicit acceptance-host byte budget equal to the stored-byte envelope.",
+		"attachmentLimits.maxNameBytes": "Exact UTF-8 byte length of benchmark-source.png.",
+		"attachmentLimits.maxImagesPerBatch": "Exact single-image workload cardinality.",
+		"attachmentLimits.maxBatchInputBytes": "Single-image batch budget equal to maxInputBytes.",
+		"attachmentLimits.maxBatchStoredBytes": "Single-image batch budget equal to maxStoredBytes.",
+		"mediaLimits.maxIdentifierBytes": "Explicit acceptance-host identifier budget covering every deterministic workload identifier.",
+		"mediaLimits.maxAdapterIdBytes": "Explicit acceptance-host adapter identifier budget covering benchmark-adapter.",
+		"mediaLimits.maxAdapters": "Exact single-adapter workload cardinality.",
+		"mediaLimits.maxRequestBytes": "Explicit acceptance-host request budget for the deterministic profile request.",
+		"mediaLimits.maxJsonDepth": "Explicit acceptance-host JSON depth budget above the deterministic request depth.",
+		"mediaLimits.maxProviderHandleBytes": "Explicit acceptance-host budget retained for the complete MediaJobLimits contract; this synchronous workload emits no handle.",
+		"mediaLimits.maxAttemptsPerJob": "Exact one-attempt workload cardinality.",
+		"mediaLimits.maxOutputsPerAttempt": "Exact one-output workload cardinality.",
+		"mediaLimits.maxResourceBytes": "Exact configured generated-resource byte length.",
+		"mediaLimits.maxBundleBytes": "Exact one-resource bundle byte length.",
+		"mediaLimits.maxManifestBytes": "Explicit acceptance-host durable manifest budget for one output and one attempt.",
+		"mediaLimits.maxMediaTypeBytes": "Explicit acceptance-host MIME-type budget covering application/octet-stream.",
+		"sqlite.busyTimeoutMs": "Explicit acceptance-host SQLite lock wait budget; not a service SLA.",
+		"sqlite.maxStoredJobBytes": "Explicit acceptance-host canonical media-job snapshot budget for one output and one attempt."
+	}
+}

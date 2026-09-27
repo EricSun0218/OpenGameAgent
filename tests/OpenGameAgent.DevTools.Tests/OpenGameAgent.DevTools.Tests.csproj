@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <RootNamespace>OpenGameAgent.DevTools.Tests</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\OpenGameAgent.DevTools\OpenGameAgent.DevTools.csproj" />
-    <ProjectReference Include="..\..\tools\OpenGameAgent.DevTools.Cli\OpenGameAgent.DevTools.Cli.csproj" />
-  </ItemGroup>
-</Project>
