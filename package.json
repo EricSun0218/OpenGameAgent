@@ -43,7 +43,7 @@
 		"example:local": "node examples/local-runtime.mjs"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.5.11",
+		"@biomejs/biome": "2.5.14",
 		"@earendil-works/pi-ai": "0.85.1",
 		"@types/better-sqlite3": "9.6.0",
 		"@types/node": "26.4.0",
